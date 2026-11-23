@@ -1,16 +1,12 @@
 import type { Vec3 } from '../model/spec';
-import { MAX_ZOOM, MIN_ZOOM, type CameraPose } from '../model/state';
 import {
   add3,
-  buildCameraSnapshot,
   dot3,
   normalize3,
   scale3,
   sub3,
   transformVec4,
-  type AABB,
   type CameraSnapshot,
-  type ViewportMetrics,
 } from './camera';
 
 export interface Ray {
@@ -37,8 +33,8 @@ const PARALLEL_EPS = 1e-8;
 const TIE_EPS = 1e-6;
 
 /**
- * Cast an orthographic world ray from client CSS coordinates per §4:
- * Subtract host origin and overlay top inset, map to NDC, unproject z=-1 and z=+1 via invViewProj.
+ * Unproject client CSS coordinates through invViewProj at NDC z = -1 and z = +1.
+ * Identical formula works seamlessly for both perspective and orthographic cameras.
  */
 export function clientPointToRay(
   clientX: number,
@@ -62,9 +58,8 @@ export function clientPointToRay(
 }
 
 /**
- * Axis-aligned slab intersection per §4.
- * A parallel axis (|dir| < 1e-8) misses only if origin lies outside [min, max].
- * Accepts when exit >= max(enter, 0); returns smallest nonnegative entry t or null.
+ * Axis-aligned slab intersection.
+ * Returns smallest nonnegative ray distance t, or null on miss.
  */
 export function intersectRayAabb(ray: Ray, min: Vec3, max: Vec3): number | null {
   let enter = -Infinity;
@@ -101,19 +96,7 @@ export function intersectRayAabb(ray: Ray, min: Vec3, max: Vec3): number | null 
   return entry;
 }
 
-/** Intersect ray with plane passing through `planePoint` with unit normal `planeNormal`. */
-export function intersectRayPlane(
-  ray: Ray,
-  planePoint: Vec3,
-  planeNormal: Vec3,
-): Vec3 | null {
-  const denom = dot3(ray.direction, planeNormal);
-  if (Math.abs(denom) < PARALLEL_EPS) return null;
-  const t = dot3(sub3(planePoint, ray.origin), planeNormal) / denom;
-  return add3(ray.origin, scale3(ray.direction, t));
-}
-
-/** Shortest Euclidean distance from world point `p` to the infinite line / ray. */
+/** Shortest Euclidean distance from world point `p` to ray. */
 export function pointToRayDistance(point: Vec3, ray: Ray): number {
   const toPoint = sub3(point, ray.origin);
   const proj = Math.max(0, dot3(toPoint, ray.direction));
@@ -149,10 +132,7 @@ function findNearestBoxHit(ray: Ray, boxes: readonly PickBox[], isFascia: boolea
   };
 }
 
-/**
- * Pick macro bay: test actual solids first (including rails & slices);
- * apply thin picking fascia only if real geometry misses (§4).
- */
+/** Test real solid AABBs first; fall back to fascia boxes only if solids miss. */
 export function pickMacroBay(
   ray: Ray,
   solidBoxes: readonly PickBox[],
@@ -161,42 +141,4 @@ export function pickMacroBay(
   const solidHit = findNearestBoxHit(ray, solidBoxes, false);
   if (solidHit) return solidHit;
   return findNearestBoxHit(ray, fasciaBoxes, true);
-}
-
-/**
- * Anchor zoom at a cursor or pinch midpoint (§4):
- * Intersect ray with plane through target normal to e before & after scaling,
- * translate target by oldHit - newHit.
- */
-export function zoomCameraAtClientPoint(
-  pose: CameraPose,
-  bounds: AABB,
-  metrics: ViewportMetrics,
-  oldClientX: number,
-  oldClientY: number,
-  newZoomRaw: number,
-  newClientX = oldClientX,
-  newClientY = oldClientY,
-): CameraPose {
-  const clampedZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoomRaw));
-  const beforeSnap = buildCameraSnapshot(pose, bounds, metrics);
-  const oldRay = clientPointToRay(oldClientX, oldClientY, beforeSnap);
-  const oldHit = intersectRayPlane(oldRay, pose.target, beforeSnap.basis.eyeDir);
-
-  const scaledPose: CameraPose = {
-    ...pose,
-    zoom: clampedZoom,
-  };
-  if (!oldHit) return scaledPose;
-
-  const afterSnap = buildCameraSnapshot(scaledPose, bounds, metrics);
-  const newRay = clientPointToRay(newClientX, newClientY, afterSnap);
-  const newHit = intersectRayPlane(newRay, scaledPose.target, afterSnap.basis.eyeDir);
-  if (!newHit) return scaledPose;
-
-  const shift = sub3(oldHit, newHit);
-  return {
-    ...scaledPose,
-    target: add3(scaledPose.target, shift),
-  };
 }

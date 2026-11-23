@@ -55,7 +55,7 @@ describe('Fixture 1: Pattern and roles', () => {
     }
   });
 
-  it('encodes component-level FP8 flags and Patch 1 flush geometry cleanly in macro spine', () => {
+  it('encodes component-level FP8 flags and M1.5 vertical tower geometry cleanly in macro spine', () => {
     const scene = buildMacroSpine({
       spec: NEMOTRON_SPEC,
       tokens: 8,
@@ -64,29 +64,34 @@ describe('Fixture 1: Pattern and roles', () => {
       hoveredBay: null,
     });
 
-    // Residual strip (first solid) sits at y = -0.15, extent y = 0.30 -> y in [-0.30, 0.00]
-    expect(scene.solidData[1]).toBeCloseTo(-0.15, 6);
-    expect(scene.solidData[4]).toBeCloseTo(0.30, 6);
+    // Translucent 3D residual spine & directional block arrows are emitted
+    expect(scene.ribbonCount).toBeGreaterThan(50);
 
-    // Count Conv1D strips (cz = 0.36, ey = 0.25) and verify fp8Flag === 0 on all 23
+    // Count Conv1D bands (ex = 0.56, ey = 0.96, ez = 0.94) and verify fp8Flag === 0 on all 23
+    // Count KV slices (ex = 0.36, ey = 0.52, ez = 0.30) and verify all 6*4*8 = 192 have fp8Flag === 1
     let conv1dCount = 0;
     let kvSliceCount = 0;
     let fp8KvSliceCount = 0;
 
     for (let i = 0; i < scene.solidCount; i++) {
       const o = i * SOLID_INSTANCE_FLOATS;
-      const cy = scene.solidData[o + 1];
+      const cx = scene.solidData[o + 0];
       const cz = scene.solidData[o + 2];
       const ex = scene.solidData[o + 3];
       const ey = scene.solidData[o + 4];
       const ez = scene.solidData[o + 5];
       const fp8 = scene.solidData[o + 7];
 
-      if (Math.abs(cz - 0.36) < 1e-4 && Math.abs(ey - 0.25) < 1e-4) {
+      if (
+        Math.abs(cx - 0.45) < 1e-4 &&
+        Math.abs(cz - 0.08) < 1e-4 &&
+        Math.abs(ex - 0.56) < 1e-4 &&
+        Math.abs(ey - 0.96) < 1e-4
+      ) {
         conv1dCount++;
         expect(fp8).toBe(0);
       }
-      if (Math.abs(cy - 4.64) < 1e-4 && Math.abs(ex - 0.12) < 1e-4 && Math.abs(ez - 0.48) < 1e-4) {
+      if (Math.abs(ex - 0.36) < 1e-4 && Math.abs(ey - 0.52) < 1e-4 && Math.abs(ez - 0.30) < 1e-4) {
         kvSliceCount++;
         if (fp8 === 1) fp8KvSliceCount++;
       }

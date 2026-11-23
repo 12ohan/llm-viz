@@ -1,16 +1,25 @@
 import type { ViewportMetrics } from './camera';
 
-/** Display-space sRGB palette (§2). */
+/** Crisp studio white + llm-viz charcoal-slate & tensor cell palette. */
 export const PALETTE = {
-  paper: [246 / 255, 243 / 255, 235 / 255] as const,     // #F6F3EB
-  topFace: [237 / 255, 233 / 255, 223 / 255] as const,   // #EDE9DF
-  frontFace: [221 / 255, 216 / 255, 203 / 255] as const, // #DDD8CB
-  rightFace: [203 / 255, 197 / 255, 184 / 255] as const, // #CBC5B8
-  ink: [64 / 255, 61 / 255, 56 / 255] as const,          // #403D38
-  hairline: [69 / 255, 65 / 255, 58 / 255] as const,     // #45413A
-  oxide: [160 / 255, 71 / 255, 50 / 255] as const,       // #A04732
-  fp8Stone: [191 / 255, 183 / 255, 168 / 255] as const,  // #BFB7A8
-  guideTint: [198 / 255, 192 / 255, 180 / 255] as const, // subtle matte guide rails/residual
+  studioWhite: [248 / 255, 249 / 255, 251 / 255] as const, // #F8F9FB
+  slabTop: [75 / 255, 82 / 255, 98 / 255] as const,        // #4B5262
+  slabFront: [65 / 255, 71 / 255, 86 / 255] as const,      // #414756
+  slabSide: [54 / 255, 60 / 255, 73 / 255] as const,       // #363C49
+  cellDark: [30 / 255, 34 / 255, 43 / 255] as const,       // #1E222B
+  cellBlue: [99 / 255, 123 / 255, 245 / 255] as const,     // #637BF5 periwinkle weights
+  cellGreen: [74 / 255, 222 / 255, 128 / 255] as const,    // #4ADE80 emerald activations
+  cellCyan: [56 / 255, 189 / 255, 248 / 255] as const,     // #38BDF8 Mamba SSM cyan
+  cellAmber: [245 / 255, 158 / 255, 11 / 255] as const,    // #F59E0B MoE/norm amber
+  fp8Frosted: [203 / 255, 210 / 255, 222 / 255] as const,  // #CBD2DE pale frosted slate
+  hairline: [32 / 255, 37 / 255, 48 / 255] as const,       // #202530 crisp dark edge
+  guideLine: [148 / 255, 163 / 255, 184 / 255] as const,   // #94A3B8 subtle structural guide
+  activeStroke: [224 / 255, 79 / 255, 51 / 255] as const,  // #E04F33 vivid active selection
+  bf16Gold: [245 / 255, 158 / 255, 11 / 255] as const,     // #F59E0B BF16 preserved border
+  ribbonEmerald: [74 / 255, 222 / 255, 128 / 255] as const,
+  ribbonPeriwinkle: [129 / 255, 140 / 255, 248 / 255] as const,
+  ribbonCyan: [56 / 255, 189 / 255, 248 / 255] as const,
+  ribbonAmber: [245 / 255, 158 / 255, 11 / 255] as const,
 } as const;
 
 export interface FramebufferViewport {
@@ -84,8 +93,8 @@ export function computeFramebufferViewport(metrics: ViewportMetrics): Framebuffe
 }
 
 /**
- * Manages the WebGL2 context, RGBA8 + DEPTH_COMPONENT24 multisampled scene FBO,
- * canvas blit, and context loss / restoration lifecycle (§3).
+ * WebGL2 device managing 4x MSAA offscreen RGBA8 + DEPTH_COMPONENT24 FBO,
+ * single-sample resolve FBO, and crisp blit to default canvas backbuffer.
  */
 export class RenderDevice {
   readonly canvas: HTMLCanvasElement;
@@ -102,8 +111,6 @@ export class RenderDevice {
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
-    // Default backbuffer must be single-sample (antialias: false) so WebGL2 allows
-    // glBlitFramebuffer into it; 4x MSAA is performed in our offscreen scene FBO (§3).
     const gl = canvas.getContext('webgl2', {
       alpha: false,
       depth: true,
@@ -169,7 +176,6 @@ export class RenderDevice {
     }
   }
 
-  /** Ensure backing canvas and offscreen RGBA8 + DEPTH_COMPONENT24 FBO match metrics. */
   ensureSize(metrics: ViewportMetrics): FramebufferViewport {
     const fb = computeFramebufferViewport(metrics);
     if (this.canvas.width !== fb.backingWidth || this.canvas.height !== fb.backingHeight) {
@@ -235,8 +241,6 @@ export class RenderDevice {
       return;
     }
 
-    // When MSAA is active, allocate a single-sample RGBA8 resolve target so blitting
-    // to a multisampled default canvas backbuffer is always valid in WebGL2 (§3).
     if (this.samples > 1) {
       const resolveFbo = gl.createFramebuffer();
       const resolveColorRb = gl.createRenderbuffer();
@@ -270,7 +274,6 @@ export class RenderDevice {
     this.height = height;
   }
 
-  /** Bind scene FBO (or default canvas fallback), clear to warm paper and depth=1, and scissor to inner viewport. */
   beginFrame(fb: FramebufferViewport): void {
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
@@ -278,17 +281,20 @@ export class RenderDevice {
     gl.viewport(0, 0, fb.backingWidth, fb.backingHeight);
     gl.depthMask(true);
     gl.colorMask(true, true, true, true);
-    gl.clearColor(PALETTE.paper[0], PALETTE.paper[1], PALETTE.paper[2], 1.0);
+    gl.clearColor(
+      PALETTE.studioWhite[0],
+      PALETTE.studioWhite[1],
+      PALETTE.studioWhite[2],
+      1.0,
+    );
     gl.clearDepth(1.0);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    // Constrain scene passes cleanly to the inner drawing viewport.
     gl.viewport(fb.vpX, fb.vpY, fb.vpWidth, fb.vpHeight);
     gl.enable(gl.SCISSOR_TEST);
     gl.scissor(fb.vpX, fb.vpY, fb.vpWidth, fb.vpHeight);
   }
 
-  /** Restore GL state, resolve multisampled color to single-sample if needed, and blit to canvas. */
   endFrame(fb: FramebufferViewport): void {
     const gl = this.gl;
     gl.disable(gl.SCISSOR_TEST);
@@ -298,7 +304,6 @@ export class RenderDevice {
 
     if (this.fbo) {
       if (this.resolveFbo) {
-        // Step 1: resolve MSAA scene FBO -> single-sample RGBA8 FBO
         gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.fbo);
         gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.resolveFbo);
         gl.blitFramebuffer(
@@ -307,7 +312,6 @@ export class RenderDevice {
           gl.COLOR_BUFFER_BIT,
           gl.NEAREST,
         );
-        // Step 2: blit single-sample RGBA8 FBO -> default canvas backbuffer
         gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.resolveFbo);
         gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
         gl.blitFramebuffer(

@@ -1,5 +1,4 @@
 import {
-  bayCenterX,
   bodyPrecision,
   kvCachePrecision,
   type BayDescriptor,
@@ -10,13 +9,17 @@ import {
 import type { AABB } from '../render/camera';
 import type { PickBox } from '../render/pick';
 
-/** Solid instance layout: 12 floats = 48 bytes per instance (§3). */
+/** Solid instance layout: 12 floats = 48 bytes per instance. */
 export const SOLID_INSTANCE_FLOATS = 12;
 export const SOLID_INSTANCE_BYTES = SOLID_INSTANCE_FLOATS * 4;
 
-/** Line instance layout: 18 floats = 72 bytes per instance (§3). */
+/** Line instance layout: 18 floats = 72 bytes per instance. */
 export const LINE_INSTANCE_FLOATS = 18;
 export const LINE_INSTANCE_BYTES = LINE_INSTANCE_FLOATS * 4;
+
+/** Translucent ribbon / arrow instance layout: 12 floats = 48 bytes per instance. */
+export const RIBBON_INSTANCE_FLOATS = 12;
+export const RIBBON_INSTANCE_BYTES = RIBBON_INSTANCE_FLOATS * 4;
 
 export const FACE_POS_X = 0;
 export const FACE_NEG_X = 1;
@@ -25,61 +28,112 @@ export const FACE_NEG_Y = 3;
 export const FACE_POS_Z = 4;
 export const FACE_NEG_Z = 5;
 
-export const MASK_POS_Y = 1 << FACE_POS_Y;
-export const MASK_POS_Z = 1 << FACE_POS_Z;
-
-export const PATTERN_NONE = 0;
-export const PATTERN_REGISTER = 1;
-export const PATTERN_CABINET = 2;
-
-export const TONE_MATTE = 0;
-export const TONE_BOOKEND = 1;
-export const TONE_GUIDE = 2;
+/** Procedural matrix-cell color families (llm-viz visual language). */
+export const CELL_NEUTRAL = 0;
+export const CELL_WEIGHT_BLUE = 1;    // Periwinkle-blue #637BF5
+export const CELL_ACTIVATION_GREEN = 2; // Emerald-green #4ADE80
+export const CELL_SSM_CYAN = 3;       // Cyan/teal #38BDF8
+export const CELL_MOE_AMBER = 4;      // Warm amber/gold #F59E0B
+export const CELL_EMBED_SLATE = 5;    // Charcoal-slate + periwinkle accent
 
 export const LINE_STYLE_NEUTRAL = 0;
 export const LINE_STYLE_ACTIVE = 1;
-export const LINE_STYLE_RULER = 2;
+export const LINE_STYLE_GUIDE = 2;
+export const LINE_STYLE_BF16_GOLD = 3;
 
-export const RULER_X = 28.5;
-export const RULER_Y = 4.5;
-export const RAIL_START_Z = -0.30;
-export const RAIL_LENGTH = 9.60;
-export const RAIL_END_Z = RAIL_START_Z - RAIL_LENGTH; // -9.90
-export const SLICE_PITCH = 0.60;
-export const SLICE_DEPTH = 0.48;
-export const KV_RAIL_OFFSETS: readonly number[] = [-0.33, -0.15, 0.15, 0.33];
+export const RIBBON_KIND_BOX = 0;
+export const RIBBON_KIND_ARROW_NEG_X = 1; // Arrow pointing -X
+export const RIBBON_KIND_ARROW_POS_X = 2; // Arrow pointing +X
+export const RIBBON_KIND_ARROW_NEG_Y = 3; // Arrow pointing -Y (downward flow)
 
-/** Fixed macro fit AABB spanning embedding plate through depth ruler and full 16-token capacity. */
-export const MACRO_FIT_BOUNDS: AABB = {
-  min: [-28.0, -0.30, -9.90],
-  max: [29.1, 6.80, 0.60],
+export const RIBBON_COLOR_EMERALD = 0;    // rgba(74, 222, 128, 0.34)
+export const RIBBON_COLOR_PERIWINKLE = 1; // rgba(129, 140, 248, 0.45)
+export const RIBBON_COLOR_CYAN = 2;       // rgba(56, 189, 248, 0.36)
+export const RIBBON_COLOR_AMBER = 3;      // rgba(245, 158, 11, 0.40)
+
+// Vertical tower geometry constants (top-to-bottom along -Y)
+export const RESIDUAL_X = 4.60;
+export const BAY_PITCH_Y = 1.65;
+export const CYCLE_GAP_Y = 0.35;
+export const SECTION_GAP_Y = 1.45;
+
+export const EMBED_Y = 4.60;
+export const KV_TRACK_START_Z = 0.90;
+export const KV_SLICE_PITCH = 0.42;
+export const KV_SLICE_DEPTH = 0.30;
+export const KV_TRACK_LENGTH = 16 * KV_SLICE_PITCH; // 6.72
+export const KV_RAIL_OFFSETS_X: readonly number[] = [-1.05, -0.45, 0.45, 1.05]; // K1, V1, K2, V2
+
+/**
+ * Compute world center Y for 1-based bay `id` (1..52), descending along -Y,
+ * with clean Figure-2 section gaps after bays 35, 41, and 44 and subtle cycle gaps after 7, 14, 21, 28.
+ */
+export function bayCenterY(id: number): number {
+  const idx = id - 1;
+  let y = -idx * BAY_PITCH_Y;
+
+  // Subtle visual breathing between the five [M·E·M·E·M·*·E] cycles (after 7, 14, 21, 28)
+  const completedCycles = Math.min(4, Math.floor(idx / 7));
+  y -= completedCycles * CYCLE_GAP_Y;
+
+  // Distinct Figure-2 phase gaps after bays 35, 41, 44
+  if (id > 35) y -= SECTION_GAP_Y;
+  if (id > 41) y -= SECTION_GAP_Y;
+  if (id > 44) y -= SECTION_GAP_Y;
+  return y;
+}
+
+export const BAY_52_Y = bayCenterY(52);
+export const FINAL_NORM_Y = BAY_52_Y - 3.30;
+export const LM_HEAD_Y = BAY_52_Y - 6.10;
+export const OUTPUT_LOGITS_Y = BAY_52_Y - 8.90;
+
+/** Center of Mamba-2 SSM state register front face for 1-based M bay (used by picking round-trip test). */
+export function mambaRegisterFrontWorld(bayId: number): Vec3 {
+  // Register center: (-1.35, bayCenterY(bayId), 0), extent (1.50, 1.10, 1.10) -> front face z = +0.55
+  return [-1.35, bayCenterY(bayId), 0.55];
+}
+
+export function kvSliceCenterZ(tokenIndex1Based: number): number {
+  return KV_TRACK_START_Z + KV_SLICE_PITCH * (tokenIndex1Based - 1) + KV_SLICE_DEPTH * 0.5;
+}
+
+export function kvSliceFrontZ(tokenIndex1Based: number): number {
+  return KV_TRACK_START_Z + KV_SLICE_PITCH * (tokenIndex1Based - 1) + KV_SLICE_DEPTH;
+}
+
+export const TOWER_FIT_BOUNDS: AABB = {
+  min: [-7.2, OUTPUT_LOGITS_Y - 1.5, -1.6],
+  max: [5.8, EMBED_Y + 2.4, KV_TRACK_START_Z + KV_TRACK_LENGTH + 0.6],
 };
 
 export interface BayAnchor {
   readonly id: number;
   readonly kind: BayDescriptor['kind'];
-  readonly topWorld: Vec3;
-  readonly frontWorld: Vec3;
+  readonly pillWorld: Vec3; // Landmark pill anchor beside the bay
+  readonly centerWorld: Vec3;
+  readonly bounds: AABB;
 }
 
-export interface BracketAnchor {
+export interface PhaseSectionAnchor {
   readonly index: 0 | 1 | 2 | 3;
   readonly first: number;
   readonly last: number;
-  readonly leftWorld: Vec3;
-  readonly rightWorld: Vec3;
+  readonly topY: number;
+  readonly bottomY: number;
   readonly midWorld: Vec3;
 }
 
-export interface RulerTickAnchor {
-  readonly token: number;
-  readonly tickWorld: Vec3;
-  readonly labelWorld: Vec3;
+export interface LandmarkAnchor {
+  readonly id: string;
+  readonly label: string;
+  readonly sublabel?: string;
+  readonly world: Vec3;
+  readonly bayId?: number;
 }
 
-export interface BookendAnchor {
-  readonly id: 'embed' | 'norm' | 'output';
-  readonly label: string;
+export interface KvDepthTickAnchor {
+  readonly token: number;
   readonly world: Vec3;
 }
 
@@ -88,13 +142,13 @@ export interface MacroSceneGeometry {
   readonly solidCount: number;
   readonly lineData: Float32Array;
   readonly lineCount: number;
-  readonly neutralLineCount: number;
-  readonly activeLineCount: number;
+  readonly ribbonData: Float32Array;
+  readonly ribbonCount: number;
   readonly fitBounds: AABB;
   readonly bayAnchors: readonly BayAnchor[];
-  readonly bracketAnchors: readonly BracketAnchor[];
-  readonly rulerTicks: readonly RulerTickAnchor[];
-  readonly bookendAnchors: readonly BookendAnchor[];
+  readonly phaseSections: readonly PhaseSectionAnchor[];
+  readonly landmarks: readonly LandmarkAnchor[];
+  readonly kvDepthTicks: readonly KvDepthTickAnchor[];
   readonly solidPickBoxes: readonly PickBox[];
   readonly fasciaPickBoxes: readonly PickBox[];
 }
@@ -106,17 +160,16 @@ interface SolidSpec {
   ex: number;
   ey: number;
   ez: number;
-  familyPattern: number;
+  cellFamily: number;
   fp8Flag: number;
   phase: number;
   bayId: number;
-  faceMask: number;
-  toneSelector: number;
+  cellScale: number; // density of procedural matrix cells
+  highlightFlag: number; // 1 = selected/hovered, 2 = BF16 preserved in FP8 mode
   lineStyle: number;
   cssWidth: number;
   lineAlpha: number;
   pickPart?: string;
-  skipEdges?: boolean;
 }
 
 interface LineSpec {
@@ -140,24 +193,16 @@ interface LineSpec {
   oez: number;
 }
 
-/** Back Z coordinate of slice j (1..16) along the K/V tracks and depth ruler. */
-export function sliceCenterZ(sliceIndex1Based: number): number {
-  return RAIL_START_Z - SLICE_PITCH * (sliceIndex1Based - 1) - SLICE_DEPTH * 0.5;
-}
-
-export function sliceBackZ(sliceIndex1Based: number): number {
-  return RAIL_START_Z - SLICE_PITCH * (sliceIndex1Based - 1) - SLICE_DEPTH;
-}
-
-export function bayTopY(kind: BayDescriptor['kind']): number {
-  switch (kind) {
-    case 'E':
-      return 3.05;
-    case 'M':
-      return 4.80;
-    case '*':
-      return 6.80;
-  }
+interface RibbonSpec {
+  cx: number;
+  cy: number;
+  cz: number;
+  ex: number;
+  ey: number;
+  ez: number;
+  kind: number;
+  colorId: number;
+  alpha: number;
 }
 
 function quant(v: number): number {
@@ -168,32 +213,13 @@ function segmentKey(ax: number, ay: number, az: number, bx: number, by: number, 
   const qax = quant(ax), qay = quant(ay), qaz = quant(az);
   const qbx = quant(bx), qby = quant(by), qbz = quant(bz);
   const aFirst =
-    qax < qbx ||
-    (qax === qbx && (qay < qby || (qay === qby && qaz <= qbz)));
+    qax < qbx || (qax === qbx && (qay < qby || (qay === qby && qaz <= qbz)));
   return aFirst
     ? `${qax},${qay},${qaz}|${qbx},${qby},${qbz}`
     : `${qbx},${qby},${qbz}|${qax},${qay},${qaz}`;
 }
 
-function areOppositeFaces(a: number, b: number): boolean {
-  return (a ^ 1) === b;
-}
-
-function mergeFaces(f0a: number, f1a: number, f0b: number, f1b: number): readonly [number, number] {
-  if (f0a < 0 || f1a < 0 || f0b < 0 || f1b < 0) return [-1, -1];
-  // If two coplanar adjacent faces share a visible face and have opposite mates, keep the shared face.
-  if (f0a === f0b && areOppositeFaces(f1a, f1b)) return [f0a, f0a];
-  if (f0a === f1b && areOppositeFaces(f1a, f0b)) return [f0a, f0a];
-  if (f1a === f0b && areOppositeFaces(f0a, f1b)) return [f1a, f1a];
-  if (f1a === f1b && areOppositeFaces(f0a, f0b)) return [f1a, f1a];
-  return [f0a, f1a];
-}
-
-function emitCuboidEdges(
-  s: SolidSpec,
-  dedupMap: Map<string, LineSpec>,
-): void {
-  if (s.skipEdges) return;
+function emitCuboidEdges(s: SolidSpec, dedupMap: Map<string, LineSpec>): void {
   const hx = s.ex * 0.5;
   const hy = s.ey * 0.5;
   const hz = s.ez * 0.5;
@@ -202,17 +228,14 @@ function emitCuboidEdges(
   const z0 = s.cz - hz, z1 = s.cz + hz;
 
   const rawEdges: readonly [number, number, number, number, number, number, number, number][] = [
-    // X edges
     [x0, y0, z0, x1, y0, z0, FACE_NEG_Y, FACE_NEG_Z],
     [x0, y1, z0, x1, y1, z0, FACE_POS_Y, FACE_NEG_Z],
     [x0, y0, z1, x1, y0, z1, FACE_NEG_Y, FACE_POS_Z],
     [x0, y1, z1, x1, y1, z1, FACE_POS_Y, FACE_POS_Z],
-    // Y edges
     [x0, y0, z0, x0, y1, z0, FACE_NEG_X, FACE_NEG_Z],
     [x1, y0, z0, x1, y1, z0, FACE_POS_X, FACE_NEG_Z],
     [x0, y0, z1, x0, y1, z1, FACE_NEG_X, FACE_POS_Z],
     [x1, y0, z1, x1, y1, z1, FACE_POS_X, FACE_POS_Z],
-    // Z edges
     [x0, y0, z0, x0, y0, z1, FACE_NEG_X, FACE_NEG_Y],
     [x1, y0, z0, x1, y0, z1, FACE_POS_X, FACE_NEG_Y],
     [x0, y1, z0, x0, y1, z1, FACE_NEG_X, FACE_POS_Y],
@@ -222,7 +245,7 @@ function emitCuboidEdges(
   for (const [ax, ay, az, bx, by, bz, face0, face1] of rawEdges) {
     const key = segmentKey(ax, ay, az, bx, by, bz);
     const existing = dedupMap.get(key);
-    const candidate: LineSpec = {
+    const cand: LineSpec = {
       ax, ay, az, bx, by, bz,
       cssWidth: s.cssWidth,
       style: s.lineStyle,
@@ -233,20 +256,20 @@ function emitCuboidEdges(
       ocx: s.cx, ocy: s.cy, ocz: s.cz,
       oex: s.ex, oey: s.ey, oez: s.ez,
     };
-
     if (!existing) {
-      dedupMap.set(key, candidate);
-    } else if (candidate.style === LINE_STYLE_ACTIVE && existing.style !== LINE_STYLE_ACTIVE) {
-      dedupMap.set(key, candidate);
-    } else if (existing.style === candidate.style && existing.ownerId === candidate.ownerId) {
-      const [mf0, mf1] = mergeFaces(existing.face0, existing.face1, candidate.face0, candidate.face1);
-      existing.face0 = mf0;
-      existing.face1 = mf1;
+      dedupMap.set(key, cand);
+    } else if (cand.style === LINE_STYLE_ACTIVE && existing.style !== LINE_STYLE_ACTIVE) {
+      dedupMap.set(key, cand);
+    } else if (
+      cand.style === LINE_STYLE_BF16_GOLD &&
+      existing.style === LINE_STYLE_NEUTRAL
+    ) {
+      dedupMap.set(key, cand);
     }
   }
 }
 
-export interface BuildSpineOptions {
+export interface BuildTowerOptions {
   readonly spec: NemotronSpec;
   readonly tokens: number;
   readonly precision: PrecisionMode;
@@ -255,22 +278,21 @@ export interface BuildSpineOptions {
 }
 
 /**
- * Build the complete Milestone 1 macro 52-bay spine geometry with Patch 1 applied:
- * - Residual strip centered at y = -0.15 (y in [-0.30, 0.00]) so all 52 bays & bookends sit flush on y = 0.
- * - M uprights height = 4.52, center y = 2.26 (flush beneath crossbar y = 4.52..4.80).
- * - M Conv1D band center z = 0.36 (z in [0.29, 0.43], flush in front of uprights).
- * - Attention crosspiece width = 0.42 (x in [-0.21, +0.21], cleanly between tines).
- * - KV slice center y = 4.64 (flush atop rails at y = 4.53).
+ * Build the vertical top-to-bottom 52-layer Nemotron 3 Nano 3D tower in llm-viz visual language.
  */
-export function buildMacroSpine(options: BuildSpineOptions): MacroSceneGeometry {
+export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry {
   const { spec, tokens, precision, selectedBay, hoveredBay } = options;
   const clampedTokens = Math.max(1, Math.min(16, Math.round(tokens)));
-  const registerPhase = (clampedTokens % 4) / 4;
+  const ssmPhase = clampedTokens; // deterministic per-token cell hash phase
+  const isFp8Mode = precision === 'fp8_selective';
 
   const solids: SolidSpec[] = [];
+  const ribbons: RibbonSpec[] = [];
+  const freeLines: LineSpec[] = [];
   const solidPickBoxes: PickBox[] = [];
   const fasciaPickBoxes: PickBox[] = [];
   const bayAnchors: BayAnchor[] = [];
+  const landmarks: LandmarkAnchor[] = [];
 
   const pushSolid = (s: SolidSpec, pickableBay: boolean) => {
     solids.push(s);
@@ -287,385 +309,6 @@ export function buildMacroSpine(options: BuildSpineOptions): MacroSceneGeometry 
     }
   };
 
-  // --- Residual strip & bookends (Patch 1: residual strip y in [-0.30, 0.00]) ---
-  pushSolid(
-    {
-      cx: 0, cy: -0.15, cz: 0,
-      ex: 56.0, ey: 0.30, ez: 0.78,
-      familyPattern: PATTERN_NONE,
-      fp8Flag: 0,
-      phase: 0,
-      bayId: 0,
-      faceMask: 0,
-      toneSelector: TONE_GUIDE,
-      lineStyle: LINE_STYLE_NEUTRAL,
-      cssWidth: 1.0,
-      lineAlpha: 0.60,
-    },
-    false,
-  );
-
-  // Embedding plate: 1.20 x 4.0 x 1.20 at (-27.4, 2.0, 0)
-  pushSolid(
-    {
-      cx: -27.4, cy: 2.0, cz: 0,
-      ex: 1.20, ey: 4.0, ez: 1.20,
-      familyPattern: PATTERN_NONE,
-      fp8Flag: 0,
-      phase: 0,
-      bayId: 0,
-      faceMask: 0,
-      toneSelector: TONE_BOOKEND,
-      lineStyle: LINE_STYLE_NEUTRAL,
-      cssWidth: 1.0,
-      lineAlpha: 0.60,
-    },
-    false,
-  );
-
-  // Final RMSNorm wafer: 0.24 x 2.6 x 1.0 at (26.45, 1.3, 0)
-  pushSolid(
-    {
-      cx: 26.45, cy: 1.3, cz: 0,
-      ex: 0.24, ey: 2.6, ez: 1.0,
-      familyPattern: PATTERN_NONE,
-      fp8Flag: 0,
-      phase: 0,
-      bayId: 0,
-      faceMask: 0,
-      toneSelector: TONE_BOOKEND,
-      lineStyle: LINE_STYLE_NEUTRAL,
-      cssWidth: 1.0,
-      lineAlpha: 0.60,
-    },
-    false,
-  );
-
-  // Output plate: 1.20 x 4.4 x 1.20 at (27.4, 2.2, 0)
-  pushSolid(
-    {
-      cx: 27.4, cy: 2.2, cz: 0,
-      ex: 1.20, ey: 4.4, ez: 1.20,
-      familyPattern: PATTERN_NONE,
-      fp8Flag: 0,
-      phase: 0,
-      bayId: 0,
-      faceMask: 0,
-      toneSelector: TONE_BOOKEND,
-      lineStyle: LINE_STYLE_NEUTRAL,
-      cssWidth: 1.0,
-      lineAlpha: 0.60,
-    },
-    false,
-  );
-
-  // --- 52 Bays ---
-  for (const bay of spec.bays) {
-    const cx = bayCenterX(bay.id);
-    const isSelected = selectedBay === bay.id;
-    const isHovered = hoveredBay === bay.id;
-    const isActive = isSelected || isHovered;
-    const lineStyle = isActive ? LINE_STYLE_ACTIVE : LINE_STYLE_NEUTRAL;
-    const cssWidth = isSelected ? 1.6 : isHovered ? 1.35 : 1.0;
-    const lineAlpha = isSelected ? 1.0 : isHovered ? 0.90 : 0.60;
-    const bodyFp8 = bodyPrecision(bay, precision) === 'fp8' ? 1 : 0;
-
-    bayAnchors.push({
-      id: bay.id,
-      kind: bay.kind,
-      topWorld: [cx, bayTopY(bay.kind), 0],
-      frontWorld: [cx, bay.kind === 'M' ? 1.55 : bay.kind === 'E' ? 1.35 : 3.60, 0.50],
-    });
-
-    // Picking fascia spanning full pitch in X, y in [-0.15, 6.8], z in [0.50, 0.52] (§4)
-    fasciaPickBoxes.push({
-      bayId: bay.id,
-      partId: 'fascia',
-      min: [cx - 0.50, -0.15, 0.50],
-      max: [cx + 0.50, 6.80, 0.52],
-    });
-
-    if (bay.kind === 'M') {
-      // Patch 1: uprights height = 4.52, center y = 2.26 (flush below crossbar y = 4.52..4.80)
-      pushSolid(
-        {
-          cx: cx - 0.31, cy: 2.26, cz: 0,
-          ex: 0.16, ey: 4.52, ez: 0.58,
-          familyPattern: PATTERN_NONE,
-          fp8Flag: bodyFp8,
-          phase: 0,
-          bayId: bay.id,
-          faceMask: 0,
-          toneSelector: TONE_MATTE,
-          lineStyle,
-          cssWidth,
-          lineAlpha,
-          pickPart: 'upright-left',
-        },
-        true,
-      );
-      pushSolid(
-        {
-          cx: cx + 0.31, cy: 2.26, cz: 0,
-          ex: 0.16, ey: 4.52, ez: 0.58,
-          familyPattern: PATTERN_NONE,
-          fp8Flag: bodyFp8,
-          phase: 0,
-          bayId: bay.id,
-          faceMask: 0,
-          toneSelector: TONE_MATTE,
-          lineStyle,
-          cssWidth,
-          lineAlpha,
-          pickPart: 'upright-right',
-        },
-        true,
-      );
-      // Crossbar: 0.78 x 0.28 x 0.58 at y = 4.66 (y in [4.52, 4.80])
-      pushSolid(
-        {
-          cx, cy: 4.66, cz: 0,
-          ex: 0.78, ey: 0.28, ez: 0.58,
-          familyPattern: PATTERN_NONE,
-          fp8Flag: bodyFp8,
-          phase: 0,
-          bayId: bay.id,
-          faceMask: 0,
-          toneSelector: TONE_MATTE,
-          lineStyle,
-          cssWidth,
-          lineAlpha,
-          pickPart: 'crossbar',
-        },
-        true,
-      );
-      // Hatched SSM register insert: 0.46 x 2.50 x 0.40 at (cx, 1.55, 0) -> front at z = +0.20
-      // Always FP32 storage (fp8Flag = 0)
-      pushSolid(
-        {
-          cx, cy: 1.55, cz: 0,
-          ex: 0.46, ey: 2.50, ez: 0.40,
-          familyPattern: PATTERN_REGISTER,
-          fp8Flag: 0,
-          phase: registerPhase,
-          bayId: bay.id,
-          faceMask: MASK_POS_Z | MASK_POS_Y,
-          toneSelector: TONE_MATTE,
-          lineStyle,
-          cssWidth,
-          lineAlpha,
-          pickPart: 'register',
-        },
-        true,
-      );
-      // Patch 1: Conv1D band 0.78 x 0.25 x 0.14 at (cx, 0.30, 0.36) -> z in [0.29, 0.43]
-      // Always BF16 in both precision modes (fp8Flag = 0)
-      pushSolid(
-        {
-          cx, cy: 0.30, cz: 0.36,
-          ex: 0.78, ey: 0.25, ez: 0.14,
-          familyPattern: PATTERN_NONE,
-          fp8Flag: 0,
-          phase: 0,
-          bayId: bay.id,
-          faceMask: 0,
-          toneSelector: TONE_MATTE,
-          lineStyle,
-          cssWidth,
-          lineAlpha,
-          pickPart: 'conv1d',
-        },
-        true,
-      );
-    } else if (bay.kind === 'E') {
-      // E body: 0.86 x 2.70 x 0.84 at (cx, 1.35, 0), grid pattern 2 on +Z front
-      pushSolid(
-        {
-          cx, cy: 1.35, cz: 0,
-          ex: 0.86, ey: 2.70, ez: 0.84,
-          familyPattern: PATTERN_CABINET,
-          fp8Flag: bodyFp8,
-          phase: 0,
-          bayId: bay.id,
-          faceMask: MASK_POS_Z,
-          toneSelector: TONE_MATTE,
-          lineStyle,
-          cssWidth,
-          lineAlpha,
-          pickPart: 'cabinet',
-        },
-        true,
-      );
-      // E cap: 0.64 x 0.35 x 0.60 at (cx, 2.875, 0) (y in [2.70, 3.05])
-      pushSolid(
-        {
-          cx, cy: 2.875, cz: 0,
-          ex: 0.64, ey: 0.35, ez: 0.60,
-          familyPattern: PATTERN_NONE,
-          fp8Flag: bodyFp8,
-          phase: 0,
-          bayId: bay.id,
-          faceMask: 0,
-          toneSelector: TONE_MATTE,
-          lineStyle,
-          cssWidth,
-          lineAlpha,
-          pickPart: 'cap',
-        },
-        true,
-      );
-    } else {
-      // Attention (*) tall fork — body always BF16 (fp8Flag = 0)
-      // Foot: 0.86 x 0.40 x 0.92 at (cx, 0.20, 0)
-      pushSolid(
-        {
-          cx, cy: 0.20, cz: 0,
-          ex: 0.86, ey: 0.40, ez: 0.92,
-          familyPattern: PATTERN_NONE,
-          fp8Flag: 0,
-          phase: 0,
-          bayId: bay.id,
-          faceMask: 0,
-          toneSelector: TONE_MATTE,
-          lineStyle,
-          cssWidth,
-          lineAlpha,
-          pickPart: 'foot',
-        },
-        true,
-      );
-      // Two tines: 0.20 x 6.40 x 0.58 at x = cx +- 0.31, y = 3.60, z = 0 (y in [0.40, 6.80])
-      pushSolid(
-        {
-          cx: cx - 0.31, cy: 3.60, cz: 0,
-          ex: 0.20, ey: 6.40, ez: 0.58,
-          familyPattern: PATTERN_NONE,
-          fp8Flag: 0,
-          phase: 0,
-          bayId: bay.id,
-          faceMask: 0,
-          toneSelector: TONE_MATTE,
-          lineStyle,
-          cssWidth,
-          lineAlpha,
-          pickPart: 'tine-left',
-        },
-        true,
-      );
-      pushSolid(
-        {
-          cx: cx + 0.31, cy: 3.60, cz: 0,
-          ex: 0.20, ey: 6.40, ez: 0.58,
-          familyPattern: PATTERN_NONE,
-          fp8Flag: 0,
-          phase: 0,
-          bayId: bay.id,
-          faceMask: 0,
-          toneSelector: TONE_MATTE,
-          lineStyle,
-          cssWidth,
-          lineAlpha,
-          pickPart: 'tine-right',
-        },
-        true,
-      );
-      // Patch 1: crosspiece width = 0.42 (x in [-0.21, +0.21], cleanly between tines)
-      pushSolid(
-        {
-          cx, cy: 4.50, cz: 0,
-          ex: 0.42, ey: 0.22, ez: 0.62,
-          familyPattern: PATTERN_NONE,
-          fp8Flag: 0,
-          phase: 0,
-          bayId: bay.id,
-          faceMask: 0,
-          toneSelector: TONE_MATTE,
-          lineStyle,
-          cssWidth,
-          lineAlpha,
-          pickPart: 'crosspiece',
-        },
-        true,
-      );
-
-      // Four fixed KV guide rails at local x = -0.33, -0.15, +0.15, +0.33, y = 4.50, z in [-9.90, -0.30]
-      const kvFp8 = kvCachePrecision(bay, precision) === 'fp8' ? 1 : 0;
-      const railCenterZ = RAIL_START_Z - RAIL_LENGTH * 0.5; // -5.10
-      for (let r = 0; r < KV_RAIL_OFFSETS.length; r++) {
-        const rx = cx + KV_RAIL_OFFSETS[r];
-        pushSolid(
-          {
-            cx: rx, cy: 4.50, cz: railCenterZ,
-            ex: 0.045, ey: 0.06, ez: RAIL_LENGTH,
-            familyPattern: PATTERN_NONE,
-            fp8Flag: 0,
-            phase: 0,
-            bayId: bay.id,
-            faceMask: 0,
-            toneSelector: TONE_GUIDE,
-            lineStyle: isActive ? LINE_STYLE_ACTIVE : LINE_STYLE_NEUTRAL,
-            cssWidth: isSelected ? 1.3 : 0.85,
-            lineAlpha: isSelected ? 0.95 : 0.45,
-            pickPart: `rail-${r}`,
-          },
-          true,
-        );
-
-        // Patch 1: KV slices j = 1..T at center y = 4.64 (flush atop rails at y = 4.53)
-        for (let j = 1; j <= clampedTokens; j++) {
-          const isFrontEdgeSlice = j === clampedTokens;
-          const sliceActive = isActive;
-          pushSolid(
-            {
-              cx: rx,
-              cy: 4.64,
-              cz: sliceCenterZ(j),
-              ex: 0.12,
-              ey: 0.22,
-              ez: SLICE_DEPTH,
-              familyPattern: PATTERN_NONE,
-              fp8Flag: kvFp8,
-              phase: 0,
-              bayId: bay.id,
-              faceMask: 0,
-              toneSelector: TONE_MATTE,
-              lineStyle: sliceActive || isFrontEdgeSlice ? (sliceActive ? LINE_STYLE_ACTIVE : LINE_STYLE_NEUTRAL) : LINE_STYLE_NEUTRAL,
-              cssWidth: sliceActive ? (isSelected ? 1.5 : 1.25) : 0.95,
-              lineAlpha: sliceActive ? 1.0 : 0.58,
-              pickPart: `kv-slice-${r}-${j}`,
-            },
-            true,
-          );
-        }
-      }
-    }
-  }
-
-  // --- Pack solid instances (48 bytes = 12 floats each) ---
-  const solidData = new Float32Array(solids.length * SOLID_INSTANCE_FLOATS);
-  const edgeDedup = new Map<string, LineSpec>();
-
-  for (let i = 0; i < solids.length; i++) {
-    const s = solids[i];
-    const o = i * SOLID_INSTANCE_FLOATS;
-    solidData[o + 0] = s.cx;
-    solidData[o + 1] = s.cy;
-    solidData[o + 2] = s.cz;
-    solidData[o + 3] = s.ex;
-    solidData[o + 4] = s.ey;
-    solidData[o + 5] = s.ez;
-    solidData[o + 6] = s.familyPattern;
-    solidData[o + 7] = s.fp8Flag;
-    solidData[o + 8] = s.phase;
-    solidData[o + 9] = s.bayId;
-    solidData[o + 10] = s.faceMask;
-    solidData[o + 11] = s.toneSelector;
-
-    emitCuboidEdges(s, edgeDedup);
-  }
-
-  // --- Depth ruler free wires at x = 28.5, y = 4.5 ---
-  const freeLines: LineSpec[] = [];
   const pushFreeLine = (
     ax: number, ay: number, az: number,
     bx: number, by: number, bz: number,
@@ -681,51 +324,699 @@ export function buildMacroSpine(options: BuildSpineOptions): MacroSceneGeometry 
     });
   };
 
-  // Full capacity ruler rail (neutral)
-  pushFreeLine(RULER_X, RULER_Y, RAIL_START_Z, RULER_X, RULER_Y, RAIL_END_Z, 1.0, LINE_STYLE_RULER, 0.55);
+  // --- 1. Translucent Emerald-Green Vertical Residual Spine (Right side of tower, x = +4.6) ---
+  const spineTopY = EMBED_Y;
+  const spineBottomY = OUTPUT_LOGITS_Y;
+  const spineHeight = spineTopY - spineBottomY;
+  ribbons.push({
+    cx: RESIDUAL_X,
+    cy: 0.5 * (spineTopY + spineBottomY),
+    cz: 0,
+    ex: 0.42,
+    ey: spineHeight,
+    ez: 0.42,
+    kind: RIBBON_KIND_BOX,
+    colorId: RIBBON_COLOR_EMERALD,
+    alpha: 0.34,
+  });
 
-  // Active depth span on ruler from front datum (-0.30) to back of slice T (oxide red)
-  const activeBackZ = sliceBackZ(clampedTokens);
-  pushFreeLine(RULER_X, RULER_Y, RAIL_START_Z, RULER_X, RULER_Y, activeBackZ, 1.6, LINE_STYLE_ACTIVE, 1.0);
+  // --- 2. Top Bookend: Embedding Matrix (131,072 × 2,688) ---
+  pushSolid(
+    {
+      cx: 1.2, cy: EMBED_Y, cz: 0,
+      ex: 4.6, ey: 1.9, ez: 1.1,
+      cellFamily: CELL_WEIGHT_BLUE,
+      fp8Flag: 0,
+      phase: 1,
+      bayId: 0,
+      cellScale: 0.24,
+      highlightFlag: 0,
+      lineStyle: LINE_STYLE_NEUTRAL,
+      cssWidth: 1.0,
+      lineAlpha: 0.55,
+    },
+    false,
+  );
+  // Embedded token activation vector entering residual spine
+  pushSolid(
+    {
+      cx: RESIDUAL_X, cy: EMBED_Y, cz: 0,
+      ex: 0.56, ey: 1.45, ez: 0.72,
+      cellFamily: CELL_ACTIVATION_GREEN,
+      fp8Flag: 0,
+      phase: clampedTokens,
+      bayId: 0,
+      cellScale: 0.20,
+      highlightFlag: 0,
+      lineStyle: LINE_STYLE_NEUTRAL,
+      cssWidth: 1.0,
+      lineAlpha: 0.55,
+    },
+    false,
+  );
+  ribbons.push({
+    cx: 3.92, cy: EMBED_Y, cz: 0,
+    ex: 0.84, ey: 0.42, ez: 0.38,
+    kind: RIBBON_KIND_ARROW_POS_X,
+    colorId: RIBBON_COLOR_EMERALD,
+    alpha: 0.44,
+  });
 
-  const rulerTicks: RulerTickAnchor[] = [];
-  for (let t = 1; t <= 16; t++) {
-    const z = sliceBackZ(t);
-    const isMajor = t === 1 || t === 8 || t === 16;
-    const isCurrent = t === clampedTokens;
-    const tickLen = isCurrent ? 0.55 : isMajor ? 0.42 : 0.24;
-    pushFreeLine(
-      RULER_X - tickLen * 0.4, RULER_Y, z,
-      RULER_X + tickLen, RULER_Y, z,
-      isCurrent ? 1.6 : 1.0,
-      isCurrent ? LINE_STYLE_ACTIVE : LINE_STYLE_RULER,
-      isCurrent ? 1.0 : isMajor ? 0.70 : 0.42,
+  landmarks.push({
+    id: 'embed',
+    label: 'Embedding · 131,072 × 2,688',
+    world: [RESIDUAL_X + 0.8, EMBED_Y + 0.2, 0],
+  });
+
+  // --- 3. 52 Descending Bays (01 -> 52) ---
+  for (const bay of spec.bays) {
+    const cy = bayCenterY(bay.id);
+    const isSelected = selectedBay === bay.id;
+    const isHovered = hoveredBay === bay.id;
+    const isActive = isSelected || isHovered;
+    const bodyIsFp8 = bodyPrecision(bay, precision) === 'fp8';
+    const isPreservedBf16 = isFp8Mode && bay.sensitive;
+
+    const lineStyle = isActive
+      ? LINE_STYLE_ACTIVE
+      : isPreservedBf16
+        ? LINE_STYLE_BF16_GOLD
+        : LINE_STYLE_NEUTRAL;
+    const cssWidth = isSelected ? 1.8 : isHovered ? 1.5 : isPreservedBf16 ? 1.35 : 0.9;
+    const lineAlpha = isActive ? 1.0 : isPreservedBf16 ? 0.92 : bodyIsFp8 ? 0.32 : 0.52;
+    const highlightFlag = isActive ? 1 : isPreservedBf16 ? 2 : 0;
+    const fp8Flag = bodyIsFp8 ? 1 : 0;
+
+    // Residual stream activation node on the right spine
+    pushSolid(
+      {
+        cx: RESIDUAL_X, cy, cz: 0,
+        ex: 0.46, ey: 0.92, ez: 0.58,
+        cellFamily: CELL_ACTIVATION_GREEN,
+        fp8Flag: 0,
+        phase: bay.id + clampedTokens * 0.3,
+        bayId: bay.id,
+        cellScale: 0.20,
+        highlightFlag: isActive ? 1 : 0,
+        lineStyle: isActive ? LINE_STYLE_ACTIVE : LINE_STYLE_NEUTRAL,
+        cssWidth: isActive ? 1.6 : 0.85,
+        lineAlpha: isActive ? 1.0 : 0.45,
+        pickPart: 'residual-node',
+      },
+      true,
     );
-    rulerTicks.push({
-      token: t,
-      tickWorld: [RULER_X, RULER_Y, z],
-      labelWorld: [RULER_X + 0.65, RULER_Y, z],
+
+    // Pre-RMSNorm amber wafer between residual spine and layer body
+    pushSolid(
+      {
+        cx: 3.25, cy, cz: 0,
+        ex: 0.24, ey: 0.86, ez: 0.68,
+        cellFamily: CELL_MOE_AMBER,
+        fp8Flag,
+        phase: bay.id,
+        bayId: bay.id,
+        cellScale: 0.18,
+        highlightFlag,
+        lineStyle,
+        cssWidth,
+        lineAlpha,
+        pickPart: 'rmsnorm',
+      },
+      true,
+    );
+
+    // Emerald tap ribbon connecting residual spine <-> pre-norm
+    ribbons.push({
+      cx: 3.88, cy, cz: 0,
+      ex: 0.98, ey: 0.28, ez: 0.26,
+      kind: RIBBON_KIND_BOX,
+      colorId: RIBBON_COLOR_EMERALD,
+      alpha: isActive ? 0.62 : bodyIsFp8 ? 0.18 : 0.36,
     });
+
+    if (bay.kind === 'M') {
+      // Mamba-2 (×23): Input Projection (blue) + Conv1D strip (always BF16!) + Square Cyan SSM State + Output Projection (blue)
+      pushSolid(
+        {
+          cx: 1.85, cy, cz: 0,
+          ex: 1.35, ey: 0.86, ez: 0.78,
+          cellFamily: CELL_WEIGHT_BLUE,
+          fp8Flag,
+          phase: bay.id * 1.1,
+          bayId: bay.id,
+          cellScale: 0.22,
+          highlightFlag,
+          lineStyle,
+          cssWidth,
+          lineAlpha,
+          pickPart: 'mamba-in-proj',
+        },
+        true,
+      );
+
+      // Conv1D causal band (6,144 × 4) — ALWAYS BF16 even in FP8 Selective!
+      const convGold = isFp8Mode && !isActive;
+      pushSolid(
+        {
+          cx: 0.45, cy, cz: 0.08,
+          ex: 0.56, ey: 0.96, ez: 0.94,
+          cellFamily: CELL_ACTIVATION_GREEN,
+          fp8Flag: 0,
+          phase: ssmPhase + bay.id * 0.2,
+          bayId: bay.id,
+          cellScale: 0.20,
+          highlightFlag: isActive ? 1 : convGold ? 2 : 0,
+          lineStyle: isActive ? LINE_STYLE_ACTIVE : convGold ? LINE_STYLE_BF16_GOLD : LINE_STYLE_NEUTRAL,
+          cssWidth: isActive ? 1.7 : convGold ? 1.2 : 0.95,
+          lineAlpha: isActive ? 1.0 : convGold ? 0.82 : 0.55,
+          pickPart: 'conv1d',
+        },
+        true,
+      );
+
+      // Square Cyan-Speckled SSM State Register (64 × 64 × 128, FP32 storage, phase steps with T!)
+      pushSolid(
+        {
+          cx: -1.35, cy, cz: 0,
+          ex: 1.50, ey: 1.10, ez: 1.10,
+          cellFamily: CELL_SSM_CYAN,
+          fp8Flag: 0, // SSM state is always FP32
+          phase: ssmPhase + bay.id * 0.37,
+          bayId: bay.id,
+          cellScale: 0.20,
+          highlightFlag,
+          lineStyle,
+          cssWidth: isActive ? 1.8 : isPreservedBf16 ? 1.45 : 1.0,
+          lineAlpha: isActive ? 1.0 : isPreservedBf16 ? 0.95 : 0.62,
+          pickPart: 'ssm-register',
+        },
+        true,
+      );
+
+      // Gated Output Projection (4,096 -> 2,688)
+      pushSolid(
+        {
+          cx: -3.45, cy, cz: 0,
+          ex: 1.35, ey: 0.86, ez: 0.78,
+          cellFamily: CELL_WEIGHT_BLUE,
+          fp8Flag,
+          phase: bay.id * 2.3,
+          bayId: bay.id,
+          cellScale: 0.22,
+          highlightFlag,
+          lineStyle,
+          cssWidth,
+          lineAlpha,
+          pickPart: 'mamba-out-proj',
+        },
+        true,
+      );
+
+      // Translucent periwinkle directional arrow from in-proj into Conv1D/SSM
+      ribbons.push({
+        cx: 2.80, cy, cz: 0,
+        ex: 0.55, ey: 0.32, ez: 0.28,
+        kind: RIBBON_KIND_ARROW_NEG_X,
+        colorId: RIBBON_COLOR_PERIWINKLE,
+        alpha: bodyIsFp8 ? 0.20 : 0.44,
+      });
+
+      bayAnchors.push({
+        id: bay.id,
+        kind: bay.kind,
+        pillWorld: [RESIDUAL_X + 0.95, cy, 0],
+        centerWorld: [-0.8, cy, 0],
+        bounds: {
+          min: [-4.4, cy - 0.8, -0.8],
+          max: [5.0, cy + 0.8, 0.9],
+        },
+      });
+
+      fasciaPickBoxes.push({
+        bayId: bay.id,
+        partId: 'fascia',
+        min: [-4.4, cy - BAY_PITCH_Y * 0.48, -0.7],
+        max: [5.0, cy + BAY_PITCH_Y * 0.48, 0.75],
+      });
+    } else if (bay.kind === 'E') {
+      // MoE (×23): Double-width Shared Expert (3,712) + Sigmoid Router (amber) + Tiled Bank of Routed Experts (6 active amber!)
+      // Double-width shared expert slab connected cleanly beside pre-norm
+      pushSolid(
+        {
+          cx: 1.55, cy, cz: 0.12,
+          ex: 1.95, ey: 0.84, ez: 0.96,
+          cellFamily: CELL_WEIGHT_BLUE,
+          fp8Flag,
+          phase: bay.id * 1.7,
+          bayId: bay.id,
+          cellScale: 0.22,
+          highlightFlag,
+          lineStyle,
+          cssWidth,
+          lineAlpha,
+          pickPart: 'shared-expert',
+        },
+        true,
+      );
+
+      // 128-score Sigmoid Router (warm amber)
+      pushSolid(
+        {
+          cx: -0.05, cy, cz: 0,
+          ex: 0.42, ey: 0.92, ez: 0.84,
+          cellFamily: CELL_MOE_AMBER,
+          fp8Flag,
+          phase: bay.id + clampedTokens,
+          bayId: bay.id,
+          cellScale: 0.18,
+          highlightFlag,
+          lineStyle,
+          cssWidth,
+          lineAlpha,
+          pickPart: 'router',
+        },
+        true,
+      );
+
+      // Tiled bank of 8 visible routed expert slabs (2 rows in Z x 4 columns in X)
+      // Highlight 6 active routed experts in warm amber (#F59E0B), alternating deterministically with T!
+      const activeOffset = (bay.id + clampedTokens) % 8;
+      for (let r = 0; r < 2; r++) {
+        for (let c = 0; c < 4; c++) {
+          const tileIdx = r * 4 + c;
+          const isRoutedActive = tileIdx !== activeOffset && tileIdx !== (activeOffset + 4) % 8;
+          const tx = -1.10 - c * 1.15;
+          const tz = r === 0 ? -0.44 : 0.44;
+          pushSolid(
+            {
+              cx: tx,
+              cy: cy + (isRoutedActive ? 0.08 : 0),
+              cz: tz,
+              ex: 0.92,
+              ey: isRoutedActive ? 0.88 : 0.72,
+              ez: 0.66,
+              cellFamily: isRoutedActive ? CELL_MOE_AMBER : CELL_WEIGHT_BLUE,
+              fp8Flag,
+              phase: bay.id * 3 + tileIdx + clampedTokens * 0.5,
+              bayId: bay.id,
+              cellScale: 0.21,
+              highlightFlag,
+              lineStyle,
+              cssWidth: isActive ? 1.6 : 0.85,
+              lineAlpha: isActive ? 1.0 : bodyIsFp8 ? 0.28 : 0.48,
+              pickPart: `expert-tile-${tileIdx}`,
+            },
+            true,
+          );
+        }
+      }
+
+      // Periwinkle block arrow from pre-norm into shared + router
+      ribbons.push({
+        cx: 2.82, cy, cz: 0.10,
+        ex: 0.52, ey: 0.30, ez: 0.28,
+        kind: RIBBON_KIND_ARROW_NEG_X,
+        colorId: RIBBON_COLOR_PERIWINKLE,
+        alpha: bodyIsFp8 ? 0.18 : 0.42,
+      });
+
+      bayAnchors.push({
+        id: bay.id,
+        kind: bay.kind,
+        pillWorld: [RESIDUAL_X + 0.95, cy, 0],
+        centerWorld: [-1.4, cy, 0],
+        bounds: {
+          min: [-5.6, cy - 0.8, -1.0],
+          max: [5.0, cy + 0.8, 1.0],
+        },
+      });
+
+      fasciaPickBoxes.push({
+        bayId: bay.id,
+        partId: 'fascia',
+        min: [-5.4, cy - BAY_PITCH_Y * 0.48, -0.9],
+        max: [5.0, cy + BAY_PITCH_Y * 0.48, 0.9],
+      });
+    } else {
+      // GQA Attention (*, ×6 — bays 06, 13, 20, 27, 34, 43):
+      // Multi-plate periwinkle-blue Q/K/V weight stack + O projection + TWO paired KV cache token tracks growing along +Z!
+      // Body always stays BF16 (fp8Flag = 0), highlighted in gold in FP8 Selective mode!
+
+      // Q projection stack (32 Q heads = 4,096) — tall dramatic periwinkle-blue plate
+      pushSolid(
+        {
+          cx: 1.15, cy, cz: -0.25,
+          ex: 2.35, ey: 1.24, ez: 0.88,
+          cellFamily: CELL_WEIGHT_BLUE,
+          fp8Flag: 0,
+          phase: bay.id * 1.3,
+          bayId: bay.id,
+          cellScale: 0.22,
+          highlightFlag,
+          lineStyle,
+          cssWidth: isActive ? 1.85 : isPreservedBf16 ? 1.45 : 1.05,
+          lineAlpha: isActive ? 1.0 : isPreservedBf16 ? 0.95 : 0.62,
+          pickPart: 'q-proj',
+        },
+        true,
+      );
+
+      // K & V projection plates (2 KV heads = 256 each)
+      pushSolid(
+        {
+          cx: -1.10, cy, cz: -0.42,
+          ex: 1.35, ey: 1.12, ez: 0.56,
+          cellFamily: CELL_WEIGHT_BLUE,
+          fp8Flag: 0,
+          phase: bay.id * 1.9,
+          bayId: bay.id,
+          cellScale: 0.21,
+          highlightFlag,
+          lineStyle,
+          cssWidth: isActive ? 1.8 : isPreservedBf16 ? 1.4 : 1.0,
+          lineAlpha: isActive ? 1.0 : isPreservedBf16 ? 0.95 : 0.60,
+          pickPart: 'k-proj',
+        },
+        true,
+      );
+      pushSolid(
+        {
+          cx: -1.10, cy, cz: 0.34,
+          ex: 1.35, ey: 1.12, ez: 0.56,
+          cellFamily: CELL_WEIGHT_BLUE,
+          fp8Flag: 0,
+          phase: bay.id * 2.1,
+          bayId: bay.id,
+          cellScale: 0.21,
+          highlightFlag,
+          lineStyle,
+          cssWidth: isActive ? 1.8 : isPreservedBf16 ? 1.4 : 1.0,
+          lineAlpha: isActive ? 1.0 : isPreservedBf16 ? 0.95 : 0.60,
+          pickPart: 'v-proj',
+        },
+        true,
+      );
+
+      // Output projection plate O (4,096 -> 2,688) extending prominently left
+      pushSolid(
+        {
+          cx: -4.25, cy, cz: -0.08,
+          ex: 2.35, ey: 1.24, ez: 0.88,
+          cellFamily: CELL_WEIGHT_BLUE,
+          fp8Flag: 0,
+          phase: bay.id * 2.7,
+          bayId: bay.id,
+          cellScale: 0.22,
+          highlightFlag,
+          lineStyle,
+          cssWidth: isActive ? 1.85 : isPreservedBf16 ? 1.45 : 1.05,
+          lineAlpha: isActive ? 1.0 : isPreservedBf16 ? 0.95 : 0.62,
+          pickPart: 'o-proj',
+        },
+        true,
+      );
+
+      // Translucent periwinkle directional arrows through Q/K/V -> O
+      ribbons.push({
+        cx: 2.74, cy, cz: -0.15,
+        ex: 0.64, ey: 0.36, ez: 0.32,
+        kind: RIBBON_KIND_ARROW_NEG_X,
+        colorId: RIBBON_COLOR_PERIWINKLE,
+        alpha: 0.48,
+      });
+      ribbons.push({
+        cx: -2.42, cy, cz: -0.08,
+        ex: 0.88, ey: 0.36, ez: 0.32,
+        kind: RIBBON_KIND_ARROW_NEG_X,
+        colorId: RIBBON_COLOR_PERIWINKLE,
+        alpha: 0.48,
+      });
+
+      // TWO paired KV-cache tracks (K1, V1 | K2, V2) growing outward along +Z (tokens 1..T)
+      const kvFp8 = kvCachePrecision(bay, precision) === 'fp8' ? 1 : 0;
+      const trackCenterZ = KV_TRACK_START_Z + KV_TRACK_LENGTH * 0.5;
+
+      for (let r = 0; r < KV_RAIL_OFFSETS_X.length; r++) {
+        const rx = -0.30 + KV_RAIL_OFFSETS_X[r];
+        const isKTrack = r % 2 === 0;
+
+        // Fixed 16-token capacity guide rail
+        pushSolid(
+          {
+            cx: rx, cy: cy - 0.32, cz: trackCenterZ,
+            ex: 0.09, ey: 0.08, ez: KV_TRACK_LENGTH,
+            cellFamily: CELL_NEUTRAL,
+            fp8Flag: 0,
+            phase: 0,
+            bayId: bay.id,
+            cellScale: 0.5,
+            highlightFlag: 0,
+            lineStyle: LINE_STYLE_GUIDE,
+            cssWidth: isActive ? 0.95 : 0.75,
+            lineAlpha: isActive ? 0.65 : 0.42,
+            pickPart: `kv-rail-${r}`,
+          },
+          true,
+        );
+
+        // Active token slices j = 1..T flush atop guide rail (rail top = cy - 0.28, slice halfH = 0.26 -> slice cy = cy - 0.02)
+        for (let j = 1; j <= clampedTokens; j++) {
+          const isNewest = j === clampedTokens;
+          const highlightSlice = isActive && isNewest;
+          pushSolid(
+            {
+              cx: rx,
+              cy: cy - 0.02,
+              cz: kvSliceCenterZ(j),
+              ex: 0.36,
+              ey: 0.52,
+              ez: KV_SLICE_DEPTH,
+              cellFamily: isKTrack ? CELL_ACTIVATION_GREEN : CELL_SSM_CYAN,
+              fp8Flag: kvFp8,
+              phase: j + bay.id * 0.13 + r * 0.5,
+              bayId: bay.id,
+              cellScale: 0.17,
+              highlightFlag: highlightSlice ? 1 : 0,
+              lineStyle: highlightSlice ? LINE_STYLE_ACTIVE : LINE_STYLE_NEUTRAL,
+              cssWidth: highlightSlice ? 1.45 : isNewest ? 1.05 : 0.85,
+              lineAlpha: highlightSlice ? 0.95 : kvFp8 ? 0.40 : 0.58,
+              pickPart: `kv-slice-${r}-${j}`,
+            },
+            true,
+          );
+        }
+      }
+
+      // Depth scale guide wire alongside the right of KV tracks (at x = +1.35)
+      const scaleX = 1.35;
+      const scaleY = cy - 0.32;
+      pushFreeLine(
+        scaleX, scaleY, KV_TRACK_START_Z,
+        scaleX, scaleY, KV_TRACK_START_Z + KV_TRACK_LENGTH,
+        0.9, LINE_STYLE_GUIDE, 0.55,
+      );
+      pushFreeLine(
+        scaleX, scaleY, KV_TRACK_START_Z,
+        scaleX, scaleY, kvSliceFrontZ(clampedTokens),
+        1.5, LINE_STYLE_ACTIVE, 0.90,
+      );
+      for (const tickT of [1, 8, 16, clampedTokens]) {
+        const tz = kvSliceFrontZ(tickT);
+        const isCur = tickT === clampedTokens;
+        pushFreeLine(
+          scaleX, scaleY, tz,
+          scaleX + (isCur ? 0.45 : 0.30), scaleY, tz,
+          isCur ? 1.5 : 0.9,
+          isCur ? LINE_STYLE_ACTIVE : LINE_STYLE_GUIDE,
+          isCur ? 0.95 : 0.65,
+        );
+      }
+
+      bayAnchors.push({
+        id: bay.id,
+        kind: bay.kind,
+        pillWorld: [RESIDUAL_X + 0.95, cy, 0],
+        centerWorld: [-1.1, cy, 2.0],
+        bounds: {
+          min: [-5.8, cy - 1.1, -1.0],
+          max: [5.2, cy + 1.1, KV_TRACK_START_Z + KV_TRACK_LENGTH + 0.5],
+        },
+      });
+
+      landmarks.push({
+        id: `gqa-${bay.id}`,
+        label: `${String(bay.id).padStart(2, '0')} · GQA`,
+        world: [RESIDUAL_X + 0.85, cy, 0],
+        bayId: bay.id,
+      });
+
+      fasciaPickBoxes.push({
+        bayId: bay.id,
+        partId: 'fascia',
+        min: [-5.8, cy - BAY_PITCH_Y * 0.48, -0.9],
+        max: [5.0, cy + BAY_PITCH_Y * 0.48, KV_TRACK_START_Z + KV_TRACK_LENGTH],
+      });
+    }
   }
 
-  // Subtle dashed-style transverse datum wire connecting current depth T across the 6 attention forks
-  const firstAttnX = bayCenterX(6) - 0.45;
-  pushFreeLine(firstAttnX, RULER_Y, activeBackZ, RULER_X, RULER_Y, activeBackZ, 0.9, LINE_STYLE_ACTIVE, 0.35);
+  // --- 4. Subtle Horizontal Figure-2 Phase Divider Lines ---
+  const dividerBays = [35, 41, 44];
+  for (const prevBay of dividerBays) {
+    const midY = 0.5 * (bayCenterY(prevBay) + bayCenterY(prevBay + 1));
+    pushFreeLine(-6.2, midY, 0, RESIDUAL_X + 0.6, midY, 0, 1.0, LINE_STYLE_GUIDE, 0.45);
+  }
 
-  // --- Separate neutral and active line runs (neutral first, active last per §3) ---
+  // --- 5. Bottom Bookends: Final RMSNorm -> Untied LM Head -> Output Logits (131,072) ---
+  pushSolid(
+    {
+      cx: 1.6, cy: FINAL_NORM_Y, cz: 0,
+      ex: 3.4, ey: 0.65, ez: 0.92,
+      cellFamily: CELL_MOE_AMBER,
+      fp8Flag: 0,
+      phase: 99,
+      bayId: 0,
+      cellScale: 0.19,
+      highlightFlag: 0,
+      lineStyle: LINE_STYLE_NEUTRAL,
+      cssWidth: 1.0,
+      lineAlpha: 0.55,
+    },
+    false,
+  );
+  ribbons.push({
+    cx: 3.85, cy: FINAL_NORM_Y, cz: 0,
+    ex: 1.0, ey: 0.34, ez: 0.32,
+    kind: RIBBON_KIND_ARROW_NEG_X,
+    colorId: RIBBON_COLOR_EMERALD,
+    alpha: 0.42,
+  });
+
+  // LM Head (Untied): 2,688 -> 131,072 periwinkle-blue weight slab
+  pushSolid(
+    {
+      cx: 0.4, cy: LM_HEAD_Y, cz: 0,
+      ex: 5.4, ey: 1.75, ez: 1.05,
+      cellFamily: CELL_WEIGHT_BLUE,
+      fp8Flag: 0,
+      phase: 101,
+      bayId: 0,
+      cellScale: 0.24,
+      highlightFlag: 0,
+      lineStyle: LINE_STYLE_NEUTRAL,
+      cssWidth: 1.0,
+      lineAlpha: 0.55,
+    },
+    false,
+  );
+  ribbons.push({
+    cx: 1.5, cy: 0.5 * (FINAL_NORM_Y + LM_HEAD_Y), cz: 0,
+    ex: 0.55, ey: 0.95, ez: 0.34,
+    kind: RIBBON_KIND_ARROW_NEG_Y,
+    colorId: RIBBON_COLOR_PERIWINKLE,
+    alpha: 0.48,
+  });
+
+  // Output Logits (131,072) emerald-green activation plate
+  pushSolid(
+    {
+      cx: 1.1, cy: OUTPUT_LOGITS_Y, cz: 0,
+      ex: 4.4, ey: 1.15, ez: 0.96,
+      cellFamily: CELL_ACTIVATION_GREEN,
+      fp8Flag: 0,
+      phase: clampedTokens + 7,
+      bayId: 0,
+      cellScale: 0.22,
+      highlightFlag: 0,
+      lineStyle: LINE_STYLE_NEUTRAL,
+      cssWidth: 1.0,
+      lineAlpha: 0.55,
+    },
+    false,
+  );
+  ribbons.push({
+    cx: 1.5, cy: 0.5 * (LM_HEAD_Y + OUTPUT_LOGITS_Y), cz: 0,
+    ex: 0.55, ey: 0.90, ez: 0.34,
+    kind: RIBBON_KIND_ARROW_NEG_Y,
+    colorId: RIBBON_COLOR_EMERALD,
+    alpha: 0.45,
+  });
+
+  landmarks.push(
+    {
+      id: 'final-norm',
+      label: 'Final RMSNorm',
+      world: [RESIDUAL_X + 0.85, FINAL_NORM_Y, 0],
+    },
+    {
+      id: 'output',
+      label: 'Output · 131,072',
+      world: [RESIDUAL_X + 0.85, OUTPUT_LOGITS_Y, 0],
+    },
+  );
+
+  // --- 6. Phase section anchors (4 NVIDIA Figure-2 spans) ---
+  const phaseSections: PhaseSectionAnchor[] = spec.brackets.map((b, idx) => {
+    const [first, last] = b;
+    const topY = bayCenterY(first) + 0.65;
+    const bottomY = bayCenterY(last) - 0.65;
+    return {
+      index: idx as 0 | 1 | 2 | 3,
+      first,
+      last,
+      topY,
+      bottomY,
+      midWorld: [-6.4, 0.5 * (topY + bottomY), 0],
+    };
+  });
+
+  // --- 7. Depth tick label anchors beside GQA Bay 06 (topmost attention layer) ---
+  const refGqaY = bayCenterY(6) - 0.32;
+  const kvDepthTicks: KvDepthTickAnchor[] = [1, 8, 16, clampedTokens]
+    .filter((v, i, arr) => arr.indexOf(v) === i)
+    .map((token) => ({
+      token,
+      world: [1.95, refGqaY, kvSliceFrontZ(token)],
+    }));
+
+  // --- 8. Pack GPU Instance Buffers ---
+  const solidData = new Float32Array(solids.length * SOLID_INSTANCE_FLOATS);
+  const edgeDedup = new Map<string, LineSpec>();
+
+  for (let i = 0; i < solids.length; i++) {
+    const s = solids[i];
+    const o = i * SOLID_INSTANCE_FLOATS;
+    solidData[o + 0] = s.cx;
+    solidData[o + 1] = s.cy;
+    solidData[o + 2] = s.cz;
+    solidData[o + 3] = s.ex;
+    solidData[o + 4] = s.ey;
+    solidData[o + 5] = s.ez;
+    solidData[o + 6] = s.cellFamily;
+    solidData[o + 7] = s.fp8Flag;
+    solidData[o + 8] = s.phase;
+    solidData[o + 9] = s.bayId;
+    solidData[o + 10] = s.cellScale;
+    solidData[o + 11] = s.highlightFlag;
+    emitCuboidEdges(s, edgeDedup);
+  }
+
+  // Order line runs: neutral/guide first, BF16 gold second, active selected/hovered last
   const neutralLines: LineSpec[] = [];
+  const goldLines: LineSpec[] = [];
   const activeLines: LineSpec[] = [];
 
   for (const l of edgeDedup.values()) {
     if (l.style === LINE_STYLE_ACTIVE) activeLines.push(l);
+    else if (l.style === LINE_STYLE_BF16_GOLD) goldLines.push(l);
     else neutralLines.push(l);
   }
   for (const l of freeLines) {
     if (l.style === LINE_STYLE_ACTIVE) activeLines.push(l);
+    else if (l.style === LINE_STYLE_BF16_GOLD) goldLines.push(l);
     else neutralLines.push(l);
   }
 
-  const orderedLines = [...neutralLines, ...activeLines];
+  const orderedLines = [...neutralLines, ...goldLines, ...activeLines];
   const lineData = new Float32Array(orderedLines.length * LINE_INSTANCE_FLOATS);
   for (let i = 0; i < orderedLines.length; i++) {
     const l = orderedLines[i];
@@ -750,41 +1041,95 @@ export function buildMacroSpine(options: BuildSpineOptions): MacroSceneGeometry 
     lineData[o + 17] = l.oez;
   }
 
-  // --- Figure 2 bracket anchors along residual baseline y = -0.30, z = 0.55 (§1) ---
-  const bracketAnchors: BracketAnchor[] = spec.brackets.map((b, idx) => {
-    const [first, last] = b;
-    const leftX = bayCenterX(first) - 0.50;
-    const rightX = bayCenterX(last) + 0.50;
-    const midX = 0.5 * (leftX + rightX);
-    return {
-      index: idx as 0 | 1 | 2 | 3,
-      first,
-      last,
-      leftWorld: [leftX, -0.30, 0.55],
-      rightWorld: [rightX, -0.30, 0.55],
-      midWorld: [midX, -0.30, 0.55],
-    };
-  });
-
-  const bookendAnchors: BookendAnchor[] = [
-    { id: 'embed', label: 'Embed', world: [-27.4, 4.0, 0] },
-    { id: 'norm', label: 'RMSNorm', world: [26.45, 2.6, 0] },
-    { id: 'output', label: 'Output', world: [27.4, 4.4, 0] },
-  ];
+  const ribbonData = new Float32Array(ribbons.length * RIBBON_INSTANCE_FLOATS);
+  for (let i = 0; i < ribbons.length; i++) {
+    const r = ribbons[i];
+    const o = i * RIBBON_INSTANCE_FLOATS;
+    ribbonData[o + 0] = r.cx;
+    ribbonData[o + 1] = r.cy;
+    ribbonData[o + 2] = r.cz;
+    ribbonData[o + 3] = r.ex;
+    ribbonData[o + 4] = r.ey;
+    ribbonData[o + 5] = r.ez;
+    ribbonData[o + 6] = r.kind;
+    ribbonData[o + 7] = r.colorId;
+    ribbonData[o + 8] = r.alpha;
+    ribbonData[o + 9] = 0;
+    ribbonData[o + 10] = 0;
+    ribbonData[o + 11] = 0;
+  }
 
   return {
     solidData,
     solidCount: solids.length,
     lineData,
     lineCount: orderedLines.length,
-    neutralLineCount: neutralLines.length,
-    activeLineCount: activeLines.length,
-    fitBounds: MACRO_FIT_BOUNDS,
+    ribbonData,
+    ribbonCount: ribbons.length,
+    fitBounds: TOWER_FIT_BOUNDS,
     bayAnchors,
-    bracketAnchors,
-    rulerTicks,
-    bookendAnchors,
+    phaseSections,
+    landmarks,
+    kvDepthTicks,
     solidPickBoxes,
     fasciaPickBoxes,
+  };
+}
+
+/** Named bounds for camera presets / TOC fly-to targets. */
+export function boundsForSection(
+  section: 'overview' | 'embedding' | 'mamba' | 'moe' | 'gqa' | 'kv_fp8' | 'output',
+): AABB {
+  switch (section) {
+    case 'overview':
+      return TOWER_FIT_BOUNDS;
+    case 'embedding':
+      return {
+        min: [-3.5, bayCenterY(3) - 1.0, -1.6],
+        max: [6.0, EMBED_Y + 2.0, 2.0],
+      };
+    case 'mamba': {
+      const y = bayCenterY(1);
+      return {
+        min: [-5.0, y - 2.6, -1.6],
+        max: [5.6, y + 2.6, 2.0],
+      };
+    }
+    case 'moe': {
+      const y = bayCenterY(2);
+      return {
+        min: [-6.0, y - 2.6, -1.6],
+        max: [5.6, y + 2.6, 2.0],
+      };
+    }
+    case 'gqa': {
+      const y = bayCenterY(6);
+      return {
+        min: [-6.4, y - 3.0, -1.4],
+        max: [5.6, y + 3.0, KV_TRACK_START_Z + KV_TRACK_LENGTH + 1.0],
+      };
+    }
+    case 'kv_fp8': {
+      // Frame Feeder Bay 42 + Attention Bay 43 + KV tracks together
+      const yTop = bayCenterY(41);
+      const yBot = bayCenterY(44);
+      return {
+        min: [-6.4, yBot - 1.5, -1.4],
+        max: [5.6, yTop + 1.5, KV_TRACK_START_Z + KV_TRACK_LENGTH + 0.8],
+      };
+    }
+    case 'output':
+      return {
+        min: [-4.5, OUTPUT_LOGITS_Y - 1.8, -1.6],
+        max: [5.8, BAY_52_Y + 2.2, 2.0],
+      };
+  }
+}
+
+export function boundsForBay(bayId: number): AABB {
+  const y = bayCenterY(bayId);
+  return {
+    min: [-6.0, y - 2.6, -1.4],
+    max: [5.6, y + 2.6, 6.2],
   };
 }

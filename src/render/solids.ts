@@ -11,23 +11,25 @@ layout(location = 2) in float aFaceId;
 // Per-instance (48 bytes stride)
 layout(location = 3) in vec3 iCenter;
 layout(location = 4) in vec3 iExtent;
-layout(location = 5) in float iPattern;
+layout(location = 5) in float iCellFamily;
 layout(location = 6) in float iFp8;
 layout(location = 7) in float iPhase;
 layout(location = 8) in float iBayId;
-layout(location = 9) in float iFaceMask;
-layout(location = 10) in float iTone;
+layout(location = 9) in float iCellScale;
+layout(location = 10) in float iHighlight;
 
 uniform mat4 uViewProj;
 
 out vec3 vLocalWorld;
+flat out vec3 vExtent;
 flat out vec3 vNormal;
 flat out int vFaceId;
-flat out int vPattern;
+flat out int vCellFamily;
 flat out float vFp8;
 flat out float vPhase;
-flat out int vFaceMask;
-flat out int vTone;
+flat out float vBayId;
+flat out float vCellScale;
+flat out int vHighlight;
 
 void main() {
   vec3 localWorld = aPos * iExtent;
@@ -35,13 +37,15 @@ void main() {
   gl_Position = uViewProj * vec4(worldPos, 1.0);
 
   vLocalWorld = localWorld;
+  vExtent = iExtent;
   vNormal = aNormal;
   vFaceId = int(floor(aFaceId + 0.5));
-  vPattern = int(floor(iPattern + 0.5));
+  vCellFamily = int(floor(iCellFamily + 0.5));
   vFp8 = iFp8;
   vPhase = iPhase;
-  vFaceMask = int(floor(iFaceMask + 0.5));
-  vTone = int(floor(iTone + 0.5));
+  vBayId = iBayId;
+  vCellScale = iCellScale;
+  vHighlight = int(floor(iHighlight + 0.5));
 }
 `;
 
@@ -49,103 +53,136 @@ const SOLIDS_FS = `#version 300 es
 precision highp float;
 
 in vec3 vLocalWorld;
+flat in vec3 vExtent;
 flat in vec3 vNormal;
 flat in int vFaceId;
-flat in int vPattern;
+flat in int vCellFamily;
 flat in float vFp8;
 flat in float vPhase;
-flat in int vFaceMask;
-flat in int vTone;
+flat in float vBayId;
+flat in float vCellScale;
+flat in int vHighlight;
 
-uniform vec3 uTopColor;
-uniform vec3 uFrontColor;
-uniform vec3 uRightColor;
-uniform vec3 uGuideColor;
-uniform vec3 uFp8Stone;
-uniform vec3 uInkColor;
+uniform vec3 uSlabTop;
+uniform vec3 uSlabFront;
+uniform vec3 uSlabSide;
+uniform vec3 uCellDark;
+uniform vec3 uCellBlue;
+uniform vec3 uCellGreen;
+uniform vec3 uCellCyan;
+uniform vec3 uCellAmber;
+uniform vec3 uFp8Frosted;
+uniform vec3 uBf16Gold;
 
 out vec4 fragColor;
 
-float stripeCoverage(float q, float h) {
-  float d = abs(fract(q + 0.5) - 0.5);
-  float a = max(fwidth(q), 0.0001);
-  float line = 1.0 - smoothstep(max(0.0, h - 0.5 * a), h + 0.5 * a, d);
-  float fade = 1.0 - smoothstep(0.25, 0.50, a);
-  return line * fade;
+float hash21(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
 }
 
 void main() {
-  vec3 baseColor;
+  // Base dark charcoal-slate directional face shading (#4B5262 top / #414756 front / #363C49 side)
+  vec3 slabBase;
+  float shadeMult;
   if (abs(vNormal.y) > 0.5) {
-    baseColor = uTopColor;
+    slabBase = uSlabTop;
+    shadeMult = 1.08;
   } else if (abs(vNormal.z) > 0.5) {
-    baseColor = uFrontColor;
+    slabBase = uSlabFront;
+    shadeMult = 1.00;
   } else {
-    baseColor = uRightColor;
+    slabBase = uSlabSide;
+    shadeMult = 0.88;
   }
 
-  // Subtle neutral shift for residual strip / guide rails / bookends
-  if (vTone == 2) {
-    baseColor = mix(baseColor, uGuideColor, 0.45);
-  } else if (vTone == 1) {
-    baseColor = mix(baseColor, uTopColor, 0.20);
-  }
-
-  // FP8 stone tint mixed 35% into base face (§2)
-  if (vFp8 > 0.5) {
-    baseColor = mix(baseColor, uFp8Stone, 0.35);
-  }
-
-  // Face-local world coordinates (u, v) per §2:
-  // Front/back (+Z/-Z): +u -> +X, +v -> +Y
-  // Top/bottom (+Y/-Y): +u -> +X, +v -> -Z
-  // Right/left (+X/-X): +u -> -Z, +v -> +Y
+  // Face-local coordinates (u, v) in world units, shifted to start at 0 on each face corner
   float u;
   float v;
+  float spanU;
+  float spanV;
   if (vFaceId == 4 || vFaceId == 5) {
-    u = vLocalWorld.x;
-    v = vLocalWorld.y;
+    u = vLocalWorld.x + vExtent.x * 0.5;
+    v = vLocalWorld.y + vExtent.y * 0.5;
+    spanU = vExtent.x;
+    spanV = vExtent.y;
   } else if (vFaceId == 2 || vFaceId == 3) {
-    u = vLocalWorld.x;
-    v = -vLocalWorld.z;
+    u = vLocalWorld.x + vExtent.x * 0.5;
+    v = -vLocalWorld.z + vExtent.z * 0.5;
+    spanU = vExtent.x;
+    spanV = vExtent.z;
   } else {
-    u = -vLocalWorld.z;
-    v = vLocalWorld.y;
+    u = -vLocalWorld.z + vExtent.z * 0.5;
+    v = vLocalWorld.y + vExtent.y * 0.5;
+    spanU = vExtent.z;
+    spanV = vExtent.y;
   }
 
-  vec3 color = baseColor;
+  vec3 color = slabBase;
 
-  // Family pattern (applied when this face bit is set in faceMask)
-  bool hasFacePattern = (vFaceMask & (1 << vFaceId)) != 0;
-  if (hasFacePattern) {
-    if (vPattern == 1) {
-      // Register front/top diagonal hatch
-      float q = (u + v) / (1.41421356 * 0.32) + vPhase;
-      float cov = stripeCoverage(q, 0.09);
-      color = mix(color, uInkColor, 0.30 * cov);
-    } else if (vPattern == 2) {
-      // MoE cabinet front grid
-      float cu = stripeCoverage(u / 0.24, 0.055);
-      float cv = stripeCoverage(v / 0.24, 0.055);
-      float cov = max(cu, cv);
-      color = mix(color, uInkColor, 0.24 * cov);
-    }
+  if (vCellFamily > 0) {
+    vec3 accentColor = uCellBlue;
+    if (vCellFamily == 2) accentColor = uCellGreen;
+    else if (vCellFamily == 3) accentColor = uCellCyan;
+    else if (vCellFamily == 4) accentColor = uCellAmber;
+
+    float cellSize = max(0.08, vCellScale);
+    vec2 gridCoord = vec2(u, v) / cellSize;
+    vec2 cellId = floor(gridCoord);
+    vec2 cellUv = fract(gridCoord);
+
+    // Margin inside outer edge of slab so a crisp charcoal frame surrounds the matrix cells
+    float border = cellSize * 0.22;
+    float inFrame =
+      step(border, u) * step(u, spanU - border) *
+      step(border, v) * step(v, spanV - border);
+
+    // fwidth()-antialiased square cell interior vs slate mortar gap
+    vec2 fw = max(fwidth(gridCoord), vec2(0.0005));
+    float maxFw = max(fw.x, fw.y);
+
+    // Deterministic per-cell value hash (updates cleanly with phase for SSM registers / tokens)
+    float h = hash21(cellId + vec2(vBayId * 7.13 + float(vFaceId) * 3.17, vPhase * 11.41));
+    // Bi-modal activation/weight distribution: dark near-black cells vs bright accent cells
+    float val = smoothstep(0.18, 0.88, h);
+    vec3 cellCol = mix(uCellDark, accentColor, val) * shadeMult;
+
+    // Crisp individual cell square with mortar inset = 0.14
+    float m = 0.14;
+    vec2 edgeLo = smoothstep(vec2(m) - fw * 0.6, vec2(m) + fw * 0.6, cellUv);
+    vec2 edgeHi = 1.0 - smoothstep(vec2(1.0 - m) - fw * 0.6, vec2(1.0 - m) + fw * 0.6, cellUv);
+    float cellMask = edgeLo.x * edgeLo.y * edgeHi.x * edgeHi.y * inFrame;
+
+    // Macro average tint when cells shrink below Nyquist sampling resolution (zero moire!)
+    float detailFade = 1.0 - smoothstep(0.32, 0.72, maxFw);
+    vec3 macroAvg = mix(slabBase, mix(uCellDark, accentColor, 0.56) * shadeMult, 0.68);
+    vec3 detailed = mix(slabBase, cellCol, cellMask);
+
+    color = mix(macroAvg, detailed, detailFade);
   }
 
-  // Pattern 3: FP8 overlay applied after family pattern so precision & block identity stay independent (§2)
+  // Unmistakable FP8 Selective visual contrast (§4.2):
+  // Quantized 40 layers fade into cool pale frosted slate so 12 BF16-preserved layers pop!
   if (vFp8 > 0.5) {
-    float q3 = (u - 2.0 * v) / (2.23606798 * 0.55);
-    float cov3 = stripeCoverage(q3, 0.07);
-    color = mix(color, uInkColor, 0.18 * cov3);
+    float luma = dot(color, vec3(0.299, 0.587, 0.114));
+    vec3 desat = mix(color, vec3(luma), 0.72);
+    color = mix(desat, uFp8Frosted * shadeMult, 0.56);
+  } else if (vHighlight == 2) {
+    // Subtle warm gold luminance lift for BF16-preserved layers in FP8 Selective mode
+    color = mix(color, color + uBf16Gold * 0.12, 0.55);
+  }
+
+  // Subtle brightness lift on actively selected / hovered bay
+  if (vHighlight == 1) {
+    color = min(vec3(1.0), color * 1.12 + vec3(0.03));
   }
 
   fragColor = vec4(color, 1.0);
 }
 `;
 
-/** Build static 24-vertex unit cube [-0.5, +0.5]^3 with CCW faces, outward normals, and face IDs 0..5. */
 function buildUnitCubeGeometry(): { vertices: Float32Array; indices: Uint16Array } {
-  // Each vertex: pos.xyz, normal.xyz, faceId (7 floats)
   const verts: number[] = [];
   const indices: number[] = [];
 
@@ -154,71 +191,29 @@ function buildUnitCubeGeometry(): { vertices: Float32Array; indices: Uint16Array
     n: readonly [number, number, number];
     corners: readonly (readonly [number, number, number])[];
   }[] = [
-    // 0: +X
     {
-      id: 0,
-      n: [1, 0, 0],
-      corners: [
-        [0.5, -0.5, 0.5],
-        [0.5, -0.5, -0.5],
-        [0.5, 0.5, -0.5],
-        [0.5, 0.5, 0.5],
-      ],
+      id: 0, n: [1, 0, 0],
+      corners: [[0.5, -0.5, 0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [0.5, 0.5, 0.5]],
     },
-    // 1: -X
     {
-      id: 1,
-      n: [-1, 0, 0],
-      corners: [
-        [-0.5, -0.5, -0.5],
-        [-0.5, -0.5, 0.5],
-        [-0.5, 0.5, 0.5],
-        [-0.5, 0.5, -0.5],
-      ],
+      id: 1, n: [-1, 0, 0],
+      corners: [[-0.5, -0.5, -0.5], [-0.5, -0.5, 0.5], [-0.5, 0.5, 0.5], [-0.5, 0.5, -0.5]],
     },
-    // 2: +Y
     {
-      id: 2,
-      n: [0, 1, 0],
-      corners: [
-        [-0.5, 0.5, 0.5],
-        [0.5, 0.5, 0.5],
-        [0.5, 0.5, -0.5],
-        [-0.5, 0.5, -0.5],
-      ],
+      id: 2, n: [0, 1, 0],
+      corners: [[-0.5, 0.5, 0.5], [0.5, 0.5, 0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5]],
     },
-    // 3: -Y
     {
-      id: 3,
-      n: [0, -1, 0],
-      corners: [
-        [-0.5, -0.5, -0.5],
-        [0.5, -0.5, -0.5],
-        [0.5, -0.5, 0.5],
-        [-0.5, -0.5, 0.5],
-      ],
+      id: 3, n: [0, -1, 0],
+      corners: [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, -0.5, 0.5], [-0.5, -0.5, 0.5]],
     },
-    // 4: +Z
     {
-      id: 4,
-      n: [0, 0, 1],
-      corners: [
-        [-0.5, -0.5, 0.5],
-        [0.5, -0.5, 0.5],
-        [0.5, 0.5, 0.5],
-        [-0.5, 0.5, 0.5],
-      ],
+      id: 4, n: [0, 0, 1],
+      corners: [[-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5]],
     },
-    // 5: -Z
     {
-      id: 5,
-      n: [0, 0, -1],
-      corners: [
-        [0.5, -0.5, -0.5],
-        [-0.5, -0.5, -0.5],
-        [-0.5, 0.5, -0.5],
-        [0.5, 0.5, -0.5],
-      ],
+      id: 5, n: [0, 0, -1],
+      corners: [[0.5, -0.5, -0.5], [-0.5, -0.5, -0.5], [-0.5, 0.5, -0.5], [0.5, 0.5, -0.5]],
     },
   ];
 
@@ -238,7 +233,7 @@ function buildUnitCubeGeometry(): { vertices: Float32Array; indices: Uint16Array
 }
 
 /**
- * Pass 1: Opaque instanced unit cuboids with slope-scaled polygonOffset(1.0, 1.0) (Patch 2).
+ * Pass 1: Opaque instanced tensor slabs with procedural fwidth()-antialiased matrix cells.
  */
 export class SolidsPass {
   private readonly gl: WebGL2RenderingContext;
@@ -248,12 +243,16 @@ export class SolidsPass {
   private cubeIbo!: WebGLBuffer;
   private instanceVbo!: WebGLBuffer;
   private uViewProj!: WebGLUniformLocation | null;
-  private uTopColor!: WebGLUniformLocation | null;
-  private uFrontColor!: WebGLUniformLocation | null;
-  private uRightColor!: WebGLUniformLocation | null;
-  private uGuideColor!: WebGLUniformLocation | null;
-  private uFp8Stone!: WebGLUniformLocation | null;
-  private uInkColor!: WebGLUniformLocation | null;
+  private uSlabTop!: WebGLUniformLocation | null;
+  private uSlabFront!: WebGLUniformLocation | null;
+  private uSlabSide!: WebGLUniformLocation | null;
+  private uCellDark!: WebGLUniformLocation | null;
+  private uCellBlue!: WebGLUniformLocation | null;
+  private uCellGreen!: WebGLUniformLocation | null;
+  private uCellCyan!: WebGLUniformLocation | null;
+  private uCellAmber!: WebGLUniformLocation | null;
+  private uFp8Frosted!: WebGLUniformLocation | null;
+  private uBf16Gold!: WebGLUniformLocation | null;
   private instanceCount = 0;
 
   constructor(gl: WebGL2RenderingContext) {
@@ -265,12 +264,16 @@ export class SolidsPass {
     const gl = this.gl;
     this.program = linkProgram(gl, SOLIDS_VS, SOLIDS_FS);
     this.uViewProj = gl.getUniformLocation(this.program, 'uViewProj');
-    this.uTopColor = gl.getUniformLocation(this.program, 'uTopColor');
-    this.uFrontColor = gl.getUniformLocation(this.program, 'uFrontColor');
-    this.uRightColor = gl.getUniformLocation(this.program, 'uRightColor');
-    this.uGuideColor = gl.getUniformLocation(this.program, 'uGuideColor');
-    this.uFp8Stone = gl.getUniformLocation(this.program, 'uFp8Stone');
-    this.uInkColor = gl.getUniformLocation(this.program, 'uInkColor');
+    this.uSlabTop = gl.getUniformLocation(this.program, 'uSlabTop');
+    this.uSlabFront = gl.getUniformLocation(this.program, 'uSlabFront');
+    this.uSlabSide = gl.getUniformLocation(this.program, 'uSlabSide');
+    this.uCellDark = gl.getUniformLocation(this.program, 'uCellDark');
+    this.uCellBlue = gl.getUniformLocation(this.program, 'uCellBlue');
+    this.uCellGreen = gl.getUniformLocation(this.program, 'uCellGreen');
+    this.uCellCyan = gl.getUniformLocation(this.program, 'uCellCyan');
+    this.uCellAmber = gl.getUniformLocation(this.program, 'uCellAmber');
+    this.uFp8Frosted = gl.getUniformLocation(this.program, 'uFp8Frosted');
+    this.uBf16Gold = gl.getUniformLocation(this.program, 'uBf16Gold');
 
     const { vertices, indices } = buildUnitCubeGeometry();
     const vao = gl.createVertexArray();
@@ -287,7 +290,6 @@ export class SolidsPass {
 
     gl.bindVertexArray(this.vao);
 
-    // Static unit cube buffer: 7 floats (28 bytes) per vertex
     gl.bindBuffer(gl.ARRAY_BUFFER, this.cubeVbo);
     gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
 
@@ -302,7 +304,6 @@ export class SolidsPass {
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.cubeIbo);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
 
-    // Instance buffer: 48 bytes stride
     gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceVbo);
     const bindInst = (loc: number, size: number, offset: number) => {
       gl.enableVertexAttribArray(loc);
@@ -311,12 +312,12 @@ export class SolidsPass {
     };
     bindInst(3, 3, 0);   // iCenter
     bindInst(4, 3, 12);  // iExtent
-    bindInst(5, 1, 24);  // iPattern
+    bindInst(5, 1, 24);  // iCellFamily
     bindInst(6, 1, 28);  // iFp8
     bindInst(7, 1, 32);  // iPhase
     bindInst(8, 1, 36);  // iBayId
-    bindInst(9, 1, 40);  // iFaceMask
-    bindInst(10, 1, 44); // iTone
+    bindInst(9, 1, 40);  // iCellScale
+    bindInst(10, 1, 44); // iHighlight
 
     gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
@@ -336,12 +337,16 @@ export class SolidsPass {
 
     gl.useProgram(this.program);
     gl.uniformMatrix4fv(this.uViewProj, false, viewProj);
-    gl.uniform3fv(this.uTopColor, PALETTE.topFace);
-    gl.uniform3fv(this.uFrontColor, PALETTE.frontFace);
-    gl.uniform3fv(this.uRightColor, PALETTE.rightFace);
-    gl.uniform3fv(this.uGuideColor, PALETTE.guideTint);
-    gl.uniform3fv(this.uFp8Stone, PALETTE.fp8Stone);
-    gl.uniform3fv(this.uInkColor, PALETTE.ink);
+    gl.uniform3fv(this.uSlabTop, PALETTE.slabTop);
+    gl.uniform3fv(this.uSlabFront, PALETTE.slabFront);
+    gl.uniform3fv(this.uSlabSide, PALETTE.slabSide);
+    gl.uniform3fv(this.uCellDark, PALETTE.cellDark);
+    gl.uniform3fv(this.uCellBlue, PALETTE.cellBlue);
+    gl.uniform3fv(this.uCellGreen, PALETTE.cellGreen);
+    gl.uniform3fv(this.uCellCyan, PALETTE.cellCyan);
+    gl.uniform3fv(this.uCellAmber, PALETTE.cellAmber);
+    gl.uniform3fv(this.uFp8Frosted, PALETTE.fp8Frosted);
+    gl.uniform3fv(this.uBf16Gold, PALETTE.bf16Gold);
 
     gl.frontFace(gl.CCW);
     gl.enable(gl.CULL_FACE);
@@ -351,7 +356,6 @@ export class SolidsPass {
     gl.depthMask(true);
     gl.disable(gl.BLEND);
 
-    // Patch 2: slope-scaled polygon offset (1.0, 1.0)
     gl.enable(gl.POLYGON_OFFSET_FILL);
     gl.polygonOffset(1.0, 1.0);
 

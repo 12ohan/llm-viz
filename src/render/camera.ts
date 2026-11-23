@@ -1,5 +1,12 @@
 import type { Vec3 } from '../model/spec';
-import { MAX_ZOOM, MIN_ZOOM, type CameraPose } from '../model/state';
+import {
+  DEFAULT_FOV_DEG,
+  MAX_CAMERA_DISTANCE,
+  MAX_ELEVATION_DEG,
+  MIN_CAMERA_DISTANCE,
+  MIN_ELEVATION_DEG,
+  type CameraPose,
+} from '../model/state';
 
 export interface AABB {
   readonly min: Vec3;
@@ -24,21 +31,10 @@ export interface CameraBasis {
   readonly up: Vec3;     // unit screen-up vector U
 }
 
-export interface CameraFit {
-  readonly target: Vec3;
-  readonly baseHalfHeight: number;
-  readonly near: number;
-  readonly far: number;
-  readonly basis: CameraBasis;
-}
-
 export interface CameraSnapshot {
   readonly pose: CameraPose;
   readonly basis: CameraBasis;
   readonly eye: Vec3;
-  readonly baseHalfHeight: number;
-  readonly halfHeight: number;
-  readonly halfWidth: number;
   readonly near: number;
   readonly far: number;
   readonly view: Float32Array;
@@ -52,11 +48,8 @@ export interface ProjectedPoint {
   readonly x: number;
   readonly y: number;
   readonly ndcZ: number;
+  readonly visible: boolean;
 }
-
-export const OVERLAY_INSET_TOP = 56;
-export const OVERLAY_INSET_BOTTOM = 72;
-export const EYE_DISTANCE = 80;
 
 const DEG_TO_RAD = Math.PI / 180;
 
@@ -66,8 +59,8 @@ export function makeViewportMetrics(
   hostWidth: number,
   hostHeight: number,
   devicePixelRatio = 1,
-  insetTop = OVERLAY_INSET_TOP,
-  insetBottom = OVERLAY_INSET_BOTTOM,
+  insetTop = 0,
+  insetBottom = 0,
 ): ViewportMetrics {
   const safeW = Math.max(1, hostWidth);
   const safeH = Math.max(1, hostHeight);
@@ -119,14 +112,9 @@ export function scale3(v: Vec3, s: number): Vec3 {
   return [v[0] * s, v[1] * s, v[2] * s];
 }
 
-/**
- * Orthonormal camera basis from azimuth a and elevation b (degrees).
- * Eye direction from target: e = (sin a cos b, sin b, cos a cos b).
- * R = normalize(up × e), U = e × R.
- */
 export function computeCameraBasis(azimuthDeg: number, elevationDeg: number): CameraBasis {
   const a = azimuthDeg * DEG_TO_RAD;
-  const b = elevationDeg * DEG_TO_RAD;
+  const b = Math.max(MIN_ELEVATION_DEG, Math.min(MAX_ELEVATION_DEG, elevationDeg)) * DEG_TO_RAD;
   const cosB = Math.cos(b);
   const eyeDir: Vec3 = normalize3([Math.sin(a) * cosB, Math.sin(b), Math.cos(a) * cosB]);
   const upRef: Vec3 = [0, 1, 0];
@@ -151,25 +139,23 @@ export function aabbCorners(bounds: AABB): Vec3[] {
 }
 
 /**
- * Fit orthographic camera to world AABB per §3:
- * H0 = max(rangeU / (2 * 0.76), rangeR / (2 * 0.88 * A)).
+ * Compute a perspective orbit pose that cleanly frames `bounds` inside the viewport.
  */
-export function fitCameraToBounds(
+export function fitPerspectiveToBounds(
   bounds: AABB,
   azimuthDeg: number,
   elevationDeg: number,
   innerWidth: number,
   innerHeight: number,
-): CameraFit {
+  fovDeg = DEFAULT_FOV_DEG,
+  fillFraction = 0.86,
+): CameraPose {
   const basis = computeCameraBasis(azimuthDeg, elevationDeg);
   const corners = aabbCorners(bounds);
 
-  let minR = Infinity;
-  let maxR = -Infinity;
-  let minU = Infinity;
-  let maxU = -Infinity;
-  let minE = Infinity;
-  let maxE = -Infinity;
+  let minR = Infinity, maxR = -Infinity;
+  let minU = Infinity, maxU = -Infinity;
+  let minE = Infinity, maxE = -Infinity;
 
   for (const p of corners) {
     const r = dot3(p, basis.right);
@@ -193,43 +179,36 @@ export function fitCameraToBounds(
     midR * basis.right[2] + midU * basis.up[2] + midE * basis.eyeDir[2],
   ];
 
-  const rangeR = maxR - minR;
-  const rangeU = maxU - minU;
-  const aspect = Math.max(1e-4, innerWidth / Math.max(1, innerHeight));
-  const baseHalfHeight = Math.max(
-    rangeU / (2 * 0.76),
-    rangeR / (2 * 0.88 * aspect),
+  const halfR = 0.5 * (maxR - minR);
+  const halfU = 0.5 * (maxU - minU);
+  const halfE = 0.5 * (maxE - minE);
+
+  const aspect = Math.max(0.25, innerWidth / Math.max(1, innerHeight));
+  const tanHalfFovY = Math.tan((fovDeg * 0.5) * DEG_TO_RAD);
+  const tanHalfFovX = tanHalfFovY * aspect;
+
+  const distY = halfU / (tanHalfFovY * fillFraction);
+  const distX = halfR / (tanHalfFovX * fillFraction);
+  const distance = Math.max(
+    MIN_CAMERA_DISTANCE,
+    Math.min(MAX_CAMERA_DISTANCE, Math.max(distY, distX) + halfE),
   );
 
-  const eye = add3(target, scale3(basis.eyeDir, EYE_DISTANCE));
-  const { near, far } = computeNearFar(bounds, eye, basis.eyeDir);
-
-  return { target, baseHalfHeight, near, far, basis };
+  return {
+    target,
+    azimuthDeg,
+    elevationDeg: Math.max(MIN_ELEVATION_DEG, Math.min(MAX_ELEVATION_DEG, elevationDeg)),
+    distance,
+    fovDeg,
+  };
 }
 
-function computeNearFar(bounds: AABB, eye: Vec3, eyeDir: Vec3): { near: number; far: number } {
-  const corners = aabbCorners(bounds);
-  let minDist = Infinity;
-  let maxDist = -Infinity;
-  for (const p of corners) {
-    // Forward direction is -eyeDir, so positive distance from eye along forward axis is dot(eye - p, eyeDir).
-    const dist = dot3(sub3(eye, p), eyeDir);
-    if (dist < minDist) minDist = dist;
-    if (dist > maxDist) maxDist = dist;
-  }
-  const near = Math.max(0.01, minDist - 2);
-  const far = Math.max(near + 1, maxDist + 2);
-  return { near, far };
-}
-
-/** Column-major 4x4 look-at view matrix from eye, right (R), up (U), eyeDir (e). */
 function makeViewMatrix(eye: Vec3, basis: CameraBasis): Float32Array {
   const { right: R, up: U, eyeDir: E } = basis;
   const tx = -dot3(R, eye);
   const ty = -dot3(U, eye);
   const tz = -dot3(E, eye);
 
-  // Column-major layout: m[col * 4 + row]
   return new Float32Array([
     R[0], U[0], E[0], 0,
     R[1], U[1], E[1], 0,
@@ -238,27 +217,24 @@ function makeViewMatrix(eye: Vec3, basis: CameraBasis): Float32Array {
   ]);
 }
 
-/** Column-major 4x4 WebGL orthographic matrix (NDC z in [-1, +1]). */
-function makeOrthoMatrix(
-  halfWidth: number,
-  halfHeight: number,
+/** Column-major WebGL perspective projection matrix (NDC z in [-1, +1]). */
+function makePerspectiveMatrix(
+  fovDeg: number,
+  aspect: number,
   near: number,
   far: number,
 ): Float32Array {
-  const sx = 1 / halfWidth;
-  const sy = 1 / halfHeight;
-  const sz = -2 / (far - near);
-  const tz = -(far + near) / (far - near);
+  const f = 1 / Math.tan((fovDeg * 0.5) * DEG_TO_RAD);
+  const nf = 1 / (near - far);
 
   return new Float32Array([
-    sx, 0,  0,  0,
-    0,  sy, 0,  0,
-    0,  0,  sz, 0,
-    0,  0,  tz, 1,
+    f / aspect, 0, 0, 0,
+    0, f, 0, 0,
+    0, 0, (far + near) * nf, -1,
+    0, 0, 2 * far * near * nf, 0,
   ]);
 }
 
-/** Multiply two column-major 4x4 matrices: out = a * b. */
 export function multiplyMat4(a: Float32Array, b: Float32Array): Float32Array {
   const out = new Float32Array(16);
   for (let col = 0; col < 4; col++) {
@@ -277,7 +253,6 @@ export function multiplyMat4(a: Float32Array, b: Float32Array): Float32Array {
   return out;
 }
 
-/** General 4x4 matrix inversion (column-major). */
 export function invertMat4(m: Float32Array): Float32Array {
   const out = new Float32Array(16);
   const a00 = m[0], a01 = m[1], a02 = m[2], a03 = m[3];
@@ -323,7 +298,6 @@ export function invertMat4(m: Float32Array): Float32Array {
   return out;
 }
 
-/** Transform vec4 (x, y, z, w) by column-major 4x4 matrix, returning [x, y, z, w]. */
 export function transformVec4(
   m: Float32Array,
   x: number,
@@ -341,25 +315,29 @@ export function transformVec4(
 
 export function buildCameraSnapshot(
   pose: CameraPose,
-  bounds: AABB,
+  sceneBounds: AABB,
   metrics: ViewportMetrics,
 ): CameraSnapshot {
-  const fit = fitCameraToBounds(
-    bounds,
-    pose.azimuthDeg,
-    pose.elevationDeg,
-    metrics.innerWidth,
-    metrics.innerHeight,
-  );
-  const clampedZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, pose.zoom));
-  const aspect = Math.max(1e-4, metrics.innerWidth / Math.max(1, metrics.innerHeight));
-  const halfHeight = fit.baseHalfHeight / clampedZoom;
-  const halfWidth = aspect * halfHeight;
-  const eye = add3(pose.target, scale3(fit.basis.eyeDir, EYE_DISTANCE));
-  const { near, far } = computeNearFar(bounds, eye, fit.basis.eyeDir);
+  const clampedElev = Math.max(MIN_ELEVATION_DEG, Math.min(MAX_ELEVATION_DEG, pose.elevationDeg));
+  const clampedDist = Math.max(MIN_CAMERA_DISTANCE, Math.min(MAX_CAMERA_DISTANCE, pose.distance));
+  const basis = computeCameraBasis(pose.azimuthDeg, clampedElev);
+  const eye = add3(pose.target, scale3(basis.eyeDir, clampedDist));
 
-  const view = makeViewMatrix(eye, fit.basis);
-  const proj = makeOrthoMatrix(halfWidth, halfHeight, near, far);
+  // Tight near/far envelope around the scene bounds for high 24-bit depth precision
+  const corners = aabbCorners(sceneBounds);
+  let minDepth = Infinity;
+  let maxDepth = -Infinity;
+  for (const c of corners) {
+    const d = dot3(sub3(eye, c), basis.eyeDir);
+    if (d < minDepth) minDepth = d;
+    if (d > maxDepth) maxDepth = d;
+  }
+  const near = Math.max(0.25, Math.min(clampedDist * 0.08, minDepth - 2));
+  const far = Math.max(near + 20, maxDepth + 40, clampedDist + 160);
+
+  const aspect = Math.max(0.1, metrics.innerWidth / Math.max(1, metrics.innerHeight));
+  const view = makeViewMatrix(eye, basis);
+  const proj = makePerspectiveMatrix(pose.fovDeg, aspect, near, far);
   const viewProj = multiplyMat4(proj, view);
   const invViewProj = invertMat4(viewProj);
 
@@ -367,14 +345,12 @@ export function buildCameraSnapshot(
     pose: {
       target: [pose.target[0], pose.target[1], pose.target[2]],
       azimuthDeg: pose.azimuthDeg,
-      elevationDeg: pose.elevationDeg,
-      zoom: clampedZoom,
+      elevationDeg: clampedElev,
+      distance: clampedDist,
+      fovDeg: pose.fovDeg,
     },
-    basis: fit.basis,
+    basis,
     eye,
-    baseHalfHeight: fit.baseHalfHeight,
-    halfHeight,
-    halfWidth,
     near,
     far,
     view,
@@ -385,49 +361,70 @@ export function buildCameraSnapshot(
   };
 }
 
-export function projectWorldToNdc(p: Vec3, snapshot: CameraSnapshot): Vec3 {
-  const [cx, cy, cz, cw] = transformVec4(snapshot.viewProj, p[0], p[1], p[2], 1);
-  return [cx / cw, cy / cw, cz / cw];
-}
-
-/** Project world point into inner-viewport CSS pixels (origin top-left of inner drawing viewport). */
 export function projectWorldToInnerCss(p: Vec3, snapshot: CameraSnapshot): ProjectedPoint {
-  const [ndcX, ndcY, ndcZ] = projectWorldToNdc(p, snapshot);
+  const [cx, cy, cz, cw] = transformVec4(snapshot.viewProj, p[0], p[1], p[2], 1);
+  if (cw <= 1e-5) {
+    return { x: -9999, y: -9999, ndcZ: 2, visible: false };
+  }
+  const ndcX = cx / cw;
+  const ndcY = cy / cw;
+  const ndcZ = cz / cw;
+  const visible = ndcZ >= -1 && ndcZ <= 1;
   return {
     x: (ndcX + 1) * 0.5 * snapshot.metrics.innerWidth,
     y: (1 - ndcY) * 0.5 * snapshot.metrics.innerHeight,
     ndcZ,
+    visible,
   };
 }
 
-/** Project world point into host-relative CSS pixels (origin top-left of stage host, including top inset). */
 export function projectWorldToHostCss(p: Vec3, snapshot: CameraSnapshot): ProjectedPoint {
   const inner = projectWorldToInnerCss(p, snapshot);
   return {
     x: inner.x,
     y: snapshot.metrics.insetTop + inner.y,
     ndcZ: inner.ndcZ,
+    visible: inner.visible,
   };
 }
 
-/** Project world point into client CSS coordinates (including host origin and overlay inset). */
 export function projectWorldToClientCss(p: Vec3, snapshot: CameraSnapshot): ProjectedPoint {
   const host = projectWorldToHostCss(p, snapshot);
   return {
     x: snapshot.metrics.hostOriginX + host.x,
     y: snapshot.metrics.hostOriginY + host.y,
     ndcZ: host.ndcZ,
+    visible: host.visible,
   };
 }
 
-/** Pan camera in the R,U plane by CSS pixel drag delta. */
+/** Orbit camera around active target (left-drag). */
+export function orbitCameraByCssDelta(
+  pose: CameraPose,
+  deltaCssX: number,
+  deltaCssY: number,
+): CameraPose {
+  const sensitivity = 0.34;
+  return {
+    ...pose,
+    azimuthDeg: pose.azimuthDeg - deltaCssX * sensitivity,
+    elevationDeg: Math.max(
+      MIN_ELEVATION_DEG,
+      Math.min(MAX_ELEVATION_DEG, pose.elevationDeg + deltaCssY * sensitivity),
+    ),
+  };
+}
+
+/** Pan camera smoothly in the camera view plane (right-drag or Shift+left-drag). */
 export function panCameraByCssDelta(
   pose: CameraPose,
   snapshot: CameraSnapshot,
   deltaCssX: number,
   deltaCssY: number,
 ): CameraPose {
-  const scale = (2 * snapshot.halfHeight) / snapshot.metrics.innerHeight;
+  const worldHeightAtTarget =
+    2 * snapshot.pose.distance * Math.tan((snapshot.pose.fovDeg * 0.5) * DEG_TO_RAD);
+  const scale = worldHeightAtTarget / Math.max(1, snapshot.metrics.innerHeight);
   const shiftR = -deltaCssX * scale;
   const shiftU = deltaCssY * scale;
   const newTarget = add3(
@@ -440,44 +437,36 @@ export function panCameraByCssDelta(
   };
 }
 
-/**
- * Refit camera on host resize while preserving zoom and projected pan offset in units of H (§3).
- */
-export function refitCameraOnResize(
-  pose: CameraPose,
-  bounds: AABB,
-  oldMetrics: ViewportMetrics,
-  newMetrics: ViewportMetrics,
-): CameraPose {
-  const oldFit = fitCameraToBounds(
-    bounds,
-    pose.azimuthDeg,
-    pose.elevationDeg,
-    oldMetrics.innerWidth,
-    oldMetrics.innerHeight,
-  );
-  const newFit = fitCameraToBounds(
-    bounds,
-    pose.azimuthDeg,
-    pose.elevationDeg,
-    newMetrics.innerWidth,
-    newMetrics.innerHeight,
-  );
-  const oldH = oldFit.baseHalfHeight / pose.zoom;
-  const newH = newFit.baseHalfHeight / pose.zoom;
-  const delta = sub3(pose.target, oldFit.target);
-  const panRInH = dot3(delta, oldFit.basis.right) / oldH;
-  const panUInH = dot3(delta, oldFit.basis.up) / oldH;
-
-  const newTarget = add3(
-    newFit.target,
-    add3(
-      scale3(newFit.basis.right, panRInH * newH),
-      scale3(newFit.basis.up, panUInH * newH),
-    ),
+/** Smoothly zoom camera distance (scroll / pinch). */
+export function zoomPerspectiveDistance(pose: CameraPose, scaleFactor: number): CameraPose {
+  const nextDist = Math.max(
+    MIN_CAMERA_DISTANCE,
+    Math.min(MAX_CAMERA_DISTANCE, pose.distance * scaleFactor),
   );
   return {
     ...pose,
-    target: newTarget,
+    distance: nextDist,
+  };
+}
+
+/** Smoothstep ease t^2 * (3 - 2t) between two perspective camera poses. */
+export function interpolateCameraPose(from: CameraPose, to: CameraPose, rawT: number): CameraPose {
+  const t = Math.max(0, Math.min(1, rawT));
+  const e = t * t * (3 - 2 * t);
+
+  // Shortest angular arc for azimuth
+  let dAz = ((to.azimuthDeg - from.azimuthDeg + 180) % 360 + 360) % 360 - 180;
+  if (dAz < -180) dAz += 360;
+
+  return {
+    target: [
+      from.target[0] + (to.target[0] - from.target[0]) * e,
+      from.target[1] + (to.target[1] - from.target[1]) * e,
+      from.target[2] + (to.target[2] - from.target[2]) * e,
+    ],
+    azimuthDeg: from.azimuthDeg + dAz * e,
+    elevationDeg: from.elevationDeg + (to.elevationDeg - from.elevationDeg) * e,
+    distance: from.distance + (to.distance - from.distance) * e,
+    fovDeg: from.fovDeg + (to.fovDeg - from.fovDeg) * e,
   };
 }

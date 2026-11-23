@@ -2,28 +2,42 @@ import './ui/theme.css';
 
 import { NEMOTRON_SPEC, type PrecisionMode } from './model/spec';
 import {
+  CAMERA_FLY_DURATION_MS,
   cloneCameraPose,
   createInitialState,
-  createMacroCameraPose,
+  DEFAULT_FOV_DEG,
   DEFAULT_TOKENS,
+  MACRO_DEFAULT_AZIMUTH_DEG,
+  MACRO_DEFAULT_ELEVATION_DEG,
   MAX_TOKENS,
   MIN_TOKENS,
+  type CameraPose,
   type SceneState,
+  type TocSectionId,
 } from './model/state';
 import {
   buildCameraSnapshot,
-  fitCameraToBounds,
+  fitPerspectiveToBounds,
+  interpolateCameraPose,
   makeViewportMetrics,
+  orbitCameraByCssDelta,
   panCameraByCssDelta,
-  refitCameraOnResize,
+  zoomPerspectiveDistance,
   type CameraSnapshot,
   type ViewportMetrics,
 } from './render/camera';
 import { RenderDevice } from './render/device';
 import { LinesPass } from './render/lines';
-import { clientPointToRay, pickMacroBay, zoomCameraAtClientPoint } from './render/pick';
+import { clientPointToRay, pickMacroBay } from './render/pick';
+import { RibbonsPass } from './render/ribbons';
 import { SolidsPass } from './render/solids';
-import { buildMacroSpine, MACRO_FIT_BOUNDS, type MacroSceneGeometry } from './scene/spine';
+import {
+  boundsForBay,
+  boundsForSection,
+  buildMacroSpine,
+  TOWER_FIT_BOUNDS,
+  type MacroSceneGeometry,
+} from './scene/spine';
 import { MacroControls, queryControlsElements } from './ui/controls';
 import { MacroOverlay } from './ui/overlay';
 
@@ -50,6 +64,56 @@ function hideFallbackMessage(el: HTMLElement): void {
   el.hidden = true;
 }
 
+function cameraPoseForSection(
+  section: TocSectionId,
+  metrics: ViewportMetrics,
+): CameraPose {
+  const bounds = boundsForSection(section);
+  switch (section) {
+    case 'overview':
+      return fitPerspectiveToBounds(
+        bounds,
+        MACRO_DEFAULT_AZIMUTH_DEG,
+        MACRO_DEFAULT_ELEVATION_DEG,
+        metrics.innerWidth,
+        metrics.innerHeight,
+        DEFAULT_FOV_DEG,
+        0.84,
+      );
+    case 'embedding':
+      return fitPerspectiveToBounds(
+        bounds, 26, 18, metrics.innerWidth, metrics.innerHeight, DEFAULT_FOV_DEG, 0.78,
+      );
+    case 'mamba':
+      return fitPerspectiveToBounds(
+        bounds, 22, 16, metrics.innerWidth, metrics.innerHeight, DEFAULT_FOV_DEG, 0.76,
+      );
+    case 'moe':
+      return fitPerspectiveToBounds(
+        bounds, 24, 24, metrics.innerWidth, metrics.innerHeight, DEFAULT_FOV_DEG, 0.78,
+      );
+    case 'gqa':
+      return fitPerspectiveToBounds(
+        bounds, 36, 20, metrics.innerWidth, metrics.innerHeight, DEFAULT_FOV_DEG, 0.80,
+      );
+    case 'kv_fp8':
+      return fitPerspectiveToBounds(
+        bounds, 34, 18, metrics.innerWidth, metrics.innerHeight, DEFAULT_FOV_DEG, 0.80,
+      );
+    case 'output':
+      return fitPerspectiveToBounds(
+        bounds, 26, 16, metrics.innerWidth, metrics.innerHeight, DEFAULT_FOV_DEG, 0.78,
+      );
+  }
+}
+
+interface FlyAnimation {
+  readonly from: CameraPose;
+  readonly to: CameraPose;
+  readonly startMs: number;
+  readonly durationMs: number;
+}
+
 function boot(): void {
   const host = document.getElementById('stage-host');
   const canvas = document.getElementById('gl-canvas') as HTMLCanvasElement | null;
@@ -62,42 +126,58 @@ function boot(): void {
   }
 
   const initialMetrics =
-    measureHostMetrics(host) ?? makeViewportMetrics(0, 0, 768, 600, window.devicePixelRatio || 1);
-  const initialFit = fitCameraToBounds(
-    MACRO_FIT_BOUNDS,
-    24,
-    27,
-    initialMetrics.innerWidth,
-    initialMetrics.innerHeight,
-  );
+    measureHostMetrics(host) ?? makeViewportMetrics(0, 0, 960, 700, window.devicePixelRatio || 1);
+  const initialPose = cameraPoseForSection('overview', initialMetrics);
   const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
-  const state: SceneState = createInitialState(initialFit.target, reducedMotion);
+  const state: SceneState = createInitialState(initialPose, reducedMotion);
 
   let currentMetrics: ViewportMetrics = initialMetrics;
   let currentScene: MacroSceneGeometry | null = null;
   let currentSnapshot: CameraSnapshot | null = null;
   let geometryDirty = true;
   let pendingRafId: number | null = null;
+  let flyAnim: FlyAnimation | null = null;
 
-  // WebGL2 initialization with graceful fallback (§3)
   let device: RenderDevice | null = null;
   let solidsPass: SolidsPass | null = null;
   let linesPass: LinesPass | null = null;
+  let ribbonsPass: RibbonsPass | null = null;
 
   try {
     device = new RenderDevice(canvas);
     solidsPass = new SolidsPass(device.gl);
     linesPass = new LinesPass(device.gl);
+    ribbonsPass = new RibbonsPass(device.gl);
   } catch (err) {
     const detail = err instanceof Error ? err.message : 'WebGL2 unavailable';
     showFallbackMessage(
       fallbackEl,
-      `3D canvas unavailable (${detail}). Use the token scrubber, precision toggle, and ← / → bay controls below to inspect all 52 layers.`,
+      `3D canvas unavailable (${detail}). Use the left sidebar contents, token scrubber, and precision toggle to inspect all 52 layers.`,
     );
   }
 
   const overlay = new MacroOverlay(overlaySvg, overlayLabels);
   const controlEls = queryControlsElements();
+
+  const cancelFly = () => {
+    flyAnim = null;
+  };
+
+  const flyToPose = (targetPose: CameraPose) => {
+    if (state.reducedMotion) {
+      flyAnim = null;
+      state.camera = cloneCameraPose(targetPose);
+      scheduleDraw();
+      return;
+    }
+    flyAnim = {
+      from: cloneCameraPose(state.camera),
+      to: cloneCameraPose(targetPose),
+      startMs: performance.now(),
+      durationMs: CAMERA_FLY_DURATION_MS,
+    };
+    scheduleDraw();
+  };
 
   const markDirtyAndSchedule = (rebuildGeometry: boolean) => {
     if (rebuildGeometry) geometryDirty = true;
@@ -105,21 +185,45 @@ function boot(): void {
     scheduleDraw();
   };
 
-  const resetAll = () => {
-    const fit = fitCameraToBounds(
-      MACRO_FIT_BOUNDS,
-      24,
-      27,
+  const selectSection = (section: TocSectionId) => {
+    state.section = section;
+    if (section === 'mamba') state.selectedBay = 1;
+    else if (section === 'moe') state.selectedBay = 2;
+    else if (section === 'gqa') state.selectedBay = 6;
+    else if (section === 'kv_fp8') state.selectedBay = 42;
+    else if (section === 'overview' || section === 'embedding' || section === 'output') {
+      state.selectedBay = null;
+    }
+    state.hoveredBay = null;
+    flyToPose(cameraPoseForSection(section, currentMetrics));
+    markDirtyAndSchedule(true);
+  };
+
+  const zoomToBay = (bayId: number) => {
+    const bayBounds = boundsForBay(bayId);
+    const bay = NEMOTRON_SPEC.bays[bayId - 1];
+    const az = bay?.kind === '*' ? 36 : 26;
+    const el = bay?.kind === 'E' ? 24 : 18;
+    const targetPose = fitPerspectiveToBounds(
+      bayBounds,
+      az,
+      el,
       currentMetrics.innerWidth,
       currentMetrics.innerHeight,
+      DEFAULT_FOV_DEG,
+      0.78,
     );
+    flyToPose(targetPose);
+  };
+
+  const resetAll = () => {
+    state.section = 'overview';
     state.tokens = DEFAULT_TOKENS;
     state.precision = 'bf16';
     state.selectedBay = null;
     state.hoveredBay = null;
     state.selectedPart = null;
-    state.camera = createMacroCameraPose(fit.target);
-    state.savedMacroCamera = cloneCameraPose(state.camera);
+    flyToPose(cameraPoseForSection('overview', currentMetrics));
     markDirtyAndSchedule(true);
   };
 
@@ -127,14 +231,14 @@ function boot(): void {
     if (state.selectedBay === null) {
       state.selectedBay = delta > 0 ? 1 : 52;
     } else {
-      const next = state.selectedBay + delta;
-      state.selectedBay = Math.max(1, Math.min(52, next));
+      state.selectedBay = Math.max(1, Math.min(52, state.selectedBay + delta));
     }
     state.hoveredBay = null;
     markDirtyAndSchedule(true);
   };
 
   const controls = new MacroControls(NEMOTRON_SPEC, controlEls, {
+    onSelectSection: selectSection,
     onTokensChange: (nextTokens) => {
       const clamped = Math.max(MIN_TOKENS, Math.min(MAX_TOKENS, nextTokens));
       if (clamped === state.tokens) return;
@@ -144,8 +248,17 @@ function boot(): void {
     onPrecisionChange: (mode: PrecisionMode) => {
       if (mode === state.precision) return;
       state.precision = mode;
-      // Preserve T, selection, camera (§5)
       markDirtyAndSchedule(true);
+    },
+    onFitAll: () => {
+      state.section = 'overview';
+      flyToPose(cameraPoseForSection('overview', currentMetrics));
+      controls.sync(state);
+    },
+    onZoomSelectedBay: () => {
+      if (state.selectedBay !== null) {
+        zoomToBay(state.selectedBay);
+      }
     },
     onReset: resetAll,
     onStepBay: stepBay,
@@ -156,13 +269,24 @@ function boot(): void {
     },
   });
 
-  /** Single synchronous draw function (§3 Frame lifecycle). */
-  const drawFrame = () => {
+  const drawFrame = (nowMs: number) => {
     pendingRafId = null;
 
     const measured = measureHostMetrics(host);
     if (!measured) return;
     currentMetrics = measured;
+
+    let continueAnimating = false;
+    if (flyAnim) {
+      const elapsed = nowMs - flyAnim.startMs;
+      const t = Math.max(0, Math.min(1, elapsed / flyAnim.durationMs));
+      state.camera = interpolateCameraPose(flyAnim.from, flyAnim.to, t);
+      if (t >= 1) {
+        flyAnim = null;
+      } else {
+        continueAnimating = true;
+      }
+    }
 
     if (geometryDirty || !currentScene) {
       currentScene = buildMacroSpine({
@@ -172,16 +296,17 @@ function boot(): void {
         selectedBay: state.selectedBay,
         hoveredBay: state.hoveredBay,
       });
-      if (device && !device.isLost && solidsPass && linesPass) {
+      if (device && !device.isLost && solidsPass && linesPass && ribbonsPass) {
         solidsPass.upload(currentScene.solidData, currentScene.solidCount);
         linesPass.upload(currentScene.lineData, currentScene.lineCount);
+        ribbonsPass.upload(currentScene.ribbonData, currentScene.ribbonCount);
       }
       geometryDirty = false;
     }
 
     currentSnapshot = buildCameraSnapshot(state.camera, currentScene.fitBounds, currentMetrics);
 
-    if (device && !device.isLost && solidsPass && linesPass) {
+    if (device && !device.isLost && solidsPass && linesPass && ribbonsPass) {
       const fb = device.ensureSize(currentMetrics);
       device.beginFrame(fb);
       solidsPass.draw(currentSnapshot.viewProj);
@@ -190,12 +315,13 @@ function boot(): void {
         fb.vpWidth,
         fb.vpHeight,
         currentMetrics.dpr,
-        currentSnapshot.basis.eyeDir,
+        currentSnapshot.eye,
       );
+      ribbonsPass.draw(currentSnapshot.viewProj);
       device.endFrame(fb);
     }
 
-    // Project and update SVG/DOM overlay synchronously in the same draw call (§4)
+    // Synchronous black-pill DOM/SVG overlay projection in the same animation frame
     overlay.update({
       spec: NEMOTRON_SPEC,
       scene: currentScene,
@@ -204,6 +330,10 @@ function boot(): void {
       selectedBay: state.selectedBay,
       hoveredBay: state.hoveredBay,
     });
+
+    if (continueAnimating) {
+      scheduleDraw();
+    }
   };
 
   const scheduleDraw = () => {
@@ -216,10 +346,10 @@ function boot(): void {
       window.cancelAnimationFrame(pendingRafId);
       pendingRafId = null;
     }
-    drawFrame();
+    drawFrame(performance.now());
   };
 
-  // --- ResizeObserver + DPR media query (§3) ---
+  // --- ResizeObserver & DPR watcher ---
   let lastHostW = currentMetrics.hostWidth;
   let lastHostH = currentMetrics.hostHeight;
   let lastDpr = currentMetrics.dpr;
@@ -234,24 +364,23 @@ function boot(): void {
     ) {
       return;
     }
-    state.camera = refitCameraOnResize(state.camera, MACRO_FIT_BOUNDS, currentMetrics, next);
     currentMetrics = next;
     lastHostW = next.hostWidth;
     lastHostH = next.hostHeight;
     lastDpr = next.dpr;
+    // Refit cleanly if still on full overview and not manually panned/zoomed
+    if (state.section === 'overview' && !flyAnim && state.selectedBay === null) {
+      state.camera = cameraPoseForSection('overview', next);
+    }
     drawNow();
   };
 
-  const resizeObserver = new ResizeObserver(() => {
-    handleResizeOrDpr();
-  });
+  const resizeObserver = new ResizeObserver(() => handleResizeOrDpr());
   resizeObserver.observe(host);
 
   let dprMediaQuery: MediaQueryList | null = null;
   const watchDpr = () => {
-    if (dprMediaQuery) {
-      dprMediaQuery.removeEventListener('change', onDprChange);
-    }
+    if (dprMediaQuery) dprMediaQuery.removeEventListener('change', onDprChange);
     dprMediaQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
     dprMediaQuery.addEventListener('change', onDprChange);
   };
@@ -261,7 +390,6 @@ function boot(): void {
   };
   watchDpr();
 
-  // Refresh metric cache after web fonts settle (§4)
   if (document.fonts && document.fonts.ready) {
     document.fonts.ready.then(() => {
       overlay.clearMetricCache();
@@ -269,9 +397,10 @@ function boot(): void {
     });
   }
 
-  // --- WebGL context lost / restored (§3) ---
+  // --- WebGL Context Lost / Restored ---
   canvas.addEventListener('webglcontextlost', (ev) => {
     ev.preventDefault();
+    cancelFly();
     if (pendingRafId !== null) {
       window.cancelAnimationFrame(pendingRafId);
       pendingRafId = null;
@@ -279,7 +408,7 @@ function boot(): void {
     if (device) device.markLost(true);
     showFallbackMessage(
       fallbackEl,
-      'WebGL2 context lost. Waiting for restoration; controls and readout remain active.',
+      'WebGL2 context lost. Waiting for restoration; sidebar controls remain active.',
     );
   });
 
@@ -289,36 +418,36 @@ function boot(): void {
       device.markLost(false);
       solidsPass = new SolidsPass(device.gl);
       linesPass = new LinesPass(device.gl);
+      ribbonsPass = new RibbonsPass(device.gl);
       hideFallbackMessage(fallbackEl);
       geometryDirty = true;
       drawNow();
     } catch {
       showFallbackMessage(
         fallbackEl,
-        'WebGL2 context could not be restored. Controls and layer inspector remain active below.',
+        'WebGL2 context could not be restored. Sidebar controls and inspector remain active.',
       );
     }
   });
 
-  // --- Pointer gestures, picking, drag pan, wheel & pinch zoom (§4) ---
+  // --- Free 3D Perspective Orbit, Pan, Zoom & Ray Picking ---
+  canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
+
   const activePointers = new Map<number, { x: number; y: number }>();
   let primaryPointerId: number | null = null;
+  let dragMode: 'orbit' | 'pan' = 'orbit';
   let downX = 0;
   let downY = 0;
-  let lastPanX = 0;
-  let lastPanY = 0;
+  let lastX = 0;
+  let lastY = 0;
   let isDragging = false;
   let pendingSelectionCancelled = false;
 
-  // Pinch state
   let pinchStartDist = 0;
-  let pinchStartZoom = 1;
-  let pinchLastMidX = 0;
-  let pinchLastMidY = 0;
+  let pinchStartCamDist = initialPose.distance;
 
   const pickAtClient = (clientX: number, clientY: number): number | null => {
-    if (!currentScene || !currentSnapshot) return null;
-    // Refresh host origin from live rect in case page scrolled
+    if (!currentScene) return null;
     const rect = host.getBoundingClientRect();
     const liveMetrics = makeViewportMetrics(
       rect.left,
@@ -334,27 +463,26 @@ function boot(): void {
   };
 
   canvas.addEventListener('pointerdown', (ev) => {
-    if (ev.button !== 0 && ev.pointerType === 'mouse') return;
     canvas.setPointerCapture(ev.pointerId);
     activePointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
 
     if (activePointers.size === 1) {
       primaryPointerId = ev.pointerId;
+      // Right-drag, middle-drag, or Shift+left-drag pans; plain left-drag orbits!
+      dragMode = ev.button === 2 || ev.button === 1 || ev.shiftKey ? 'pan' : 'orbit';
       downX = ev.clientX;
       downY = ev.clientY;
-      lastPanX = ev.clientX;
-      lastPanY = ev.clientY;
+      lastX = ev.clientX;
+      lastY = ev.clientY;
       isDragging = false;
-      pendingSelectionCancelled = false;
+      pendingSelectionCancelled = ev.button !== 0;
     } else if (activePointers.size === 2) {
-      // Two-finger pinch cancels any pending selection (§4)
+      cancelFly();
       pendingSelectionCancelled = true;
       isDragging = true;
       const pts = Array.from(activePointers.values());
       pinchStartDist = Math.max(1, Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y));
-      pinchStartZoom = state.camera.zoom;
-      pinchLastMidX = 0.5 * (pts[0].x + pts[1].x);
-      pinchLastMidY = 0.5 * (pts[0].y + pts[1].y);
+      pinchStartCamDist = state.camera.distance;
     }
   });
 
@@ -363,32 +491,14 @@ function boot(): void {
       activePointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
     }
 
-    if (activePointers.size === 2 && currentScene) {
+    if (activePointers.size === 2) {
       const pts = Array.from(activePointers.values());
       const dist = Math.max(1, Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y));
-      const midX = 0.5 * (pts[0].x + pts[1].x);
-      const midY = 0.5 * (pts[0].y + pts[1].y);
-      const rect = host.getBoundingClientRect();
-      const liveMetrics = makeViewportMetrics(
-        rect.left,
-        rect.top,
-        rect.width,
-        rect.height,
-        window.devicePixelRatio || 1,
+      const scale = pinchStartDist / dist;
+      state.camera = zoomPerspectiveDistance(
+        { ...state.camera, distance: pinchStartCamDist },
+        scale,
       );
-      const nextZoom = pinchStartZoom * (dist / pinchStartDist);
-      state.camera = zoomCameraAtClientPoint(
-        state.camera,
-        currentScene.fitBounds,
-        liveMetrics,
-        pinchLastMidX,
-        pinchLastMidY,
-        nextZoom,
-        midX,
-        midY,
-      );
-      pinchLastMidX = midX;
-      pinchLastMidY = midY;
       scheduleDraw();
       return;
     }
@@ -397,19 +507,23 @@ function boot(): void {
       const totalDist = Math.hypot(ev.clientX - downX, ev.clientY - downY);
       if (!isDragging && totalDist >= DRAG_THRESHOLD_PX) {
         isDragging = true;
+        cancelFly();
       }
       if (isDragging && currentSnapshot) {
-        const dx = ev.clientX - lastPanX;
-        const dy = ev.clientY - lastPanY;
-        lastPanX = ev.clientX;
-        lastPanY = ev.clientY;
-        state.camera = panCameraByCssDelta(state.camera, currentSnapshot, dx, dy);
+        const dx = ev.clientX - lastX;
+        const dy = ev.clientY - lastY;
+        lastX = ev.clientX;
+        lastY = ev.clientY;
+        if (dragMode === 'pan' || ev.shiftKey) {
+          state.camera = panCameraByCssDelta(state.camera, currentSnapshot, dx, dy);
+        } else {
+          state.camera = orbitCameraByCssDelta(state.camera, dx, dy);
+        }
         scheduleDraw();
       }
       return;
     }
 
-    // Hover picking when no drag is active
     if (activePointers.size === 0 && ev.pointerType !== 'touch') {
       const hitBay = pickAtClient(ev.clientX, ev.clientY);
       if (hitBay !== state.hoveredBay) {
@@ -443,6 +557,16 @@ function boot(): void {
   canvas.addEventListener('pointerup', (ev) => endPointer(ev, false));
   canvas.addEventListener('pointercancel', (ev) => endPointer(ev, true));
 
+  canvas.addEventListener('dblclick', (ev) => {
+    const hitBay = pickAtClient(ev.clientX, ev.clientY);
+    if (hitBay !== null) {
+      state.selectedBay = hitBay;
+      state.hoveredBay = hitBay;
+      zoomToBay(hitBay);
+      markDirtyAndSchedule(true);
+    }
+  });
+
   canvas.addEventListener('pointerleave', () => {
     if (state.hoveredBay !== null) {
       state.hoveredBay = null;
@@ -450,42 +574,22 @@ function boot(): void {
     }
   });
 
-  // Wheel zoom anchored at cursor (§4)
   canvas.addEventListener(
     'wheel',
     (ev) => {
-      if (!currentScene) return;
       ev.preventDefault();
-      const rect = host.getBoundingClientRect();
-      const liveMetrics = makeViewportMetrics(
-        rect.left,
-        rect.top,
-        rect.width,
-        rect.height,
-        window.devicePixelRatio || 1,
-      );
+      cancelFly();
       let deltaPx = ev.deltaY;
-      if (ev.deltaMode === WheelEvent.DOM_DELTA_LINE) {
-        deltaPx *= 16;
-      } else if (ev.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
-        deltaPx *= liveMetrics.innerHeight;
-      }
-      const factor = Math.exp(-0.0015 * deltaPx);
-      const nextZoom = state.camera.zoom * factor;
-      state.camera = zoomCameraAtClientPoint(
-        state.camera,
-        currentScene.fitBounds,
-        liveMetrics,
-        ev.clientX,
-        ev.clientY,
-        nextZoom,
-      );
+      if (ev.deltaMode === WheelEvent.DOM_DELTA_LINE) deltaPx *= 16;
+      else if (ev.deltaMode === WheelEvent.DOM_DELTA_PAGE) deltaPx *= currentMetrics.innerHeight;
+      const scale = Math.exp(0.0012 * deltaPx);
+      state.camera = zoomPerspectiveDistance(state.camera, scale);
       scheduleDraw();
     },
     { passive: false },
   );
 
-  // Keyboard shortcuts: Left/Right step 01–52, Esc clears selection/hover (§4)
+  // Keyboard shortcuts
   window.addEventListener('keydown', (ev) => {
     const target = ev.target as HTMLElement | null;
     if (
@@ -498,12 +602,15 @@ function boot(): void {
       return;
     }
 
-    if (ev.key === 'ArrowRight') {
+    if (ev.key === 'ArrowRight' || ev.key === 'ArrowDown') {
       ev.preventDefault();
       stepBay(1);
-    } else if (ev.key === 'ArrowLeft') {
+    } else if (ev.key === 'ArrowLeft' || ev.key === 'ArrowUp') {
       ev.preventDefault();
       stepBay(-1);
+    } else if (ev.key === 'Enter' && state.selectedBay !== null) {
+      ev.preventDefault();
+      zoomToBay(state.selectedBay);
     } else if (ev.key === 'Escape') {
       if (state.selectedBay !== null || state.hoveredBay !== null) {
         ev.preventDefault();
@@ -514,7 +621,9 @@ function boot(): void {
     }
   });
 
-  // Initial sync and synchronous first paint
+  // Expose subtle bounds reference for tests / diagnostics (unused in UI)
+  void TOWER_FIT_BOUNDS;
+
   controls.sync(state);
   drawNow();
 }

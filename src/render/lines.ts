@@ -3,14 +3,12 @@ import { LINE_INSTANCE_BYTES } from '../scene/spine';
 import { linkProgram, PALETTE } from './device';
 
 /**
- * Pass 2: Visible hairlines (Patch 2: NO gl_FragDepth hack, NO per-fragment ray-plane intersection).
- * Keeps pixel-space normal expansion, front-face edge culling, clip-volume segment clipping,
- * 1-step depth24 clip-z pull, depthMask(false), and smoothstep AA.
+ * Pass 2: Crisp depth-tested screen-space hairlines for perspective camera (no gl_FragDepth).
+ * Supports charcoal edges, subtle guides, warm gold BF16-preserved highlights, and vivid active strokes.
  */
 const LINES_VS = `#version 300 es
 precision highp float;
 
-// Static quad vertex: aEnd in {0, 1}, aSide in {-1, +1}
 layout(location = 0) in float aEnd;
 layout(location = 1) in float aSide;
 
@@ -29,7 +27,7 @@ layout(location = 11) in vec3 iOwnerExtent;
 uniform mat4 uViewProj;
 uniform vec2 uViewportSize;
 uniform float uDpr;
-uniform vec3 uEyeDir;
+uniform vec3 uCameraPos;
 
 out float vTransverse;
 flat out float vHalfWidth;
@@ -45,7 +43,7 @@ vec3 faceNormal(int faceId) {
   return vec3(0.0, 0.0, -1.0);
 }
 
-// Liang-Barsky clip of segment (a, b) against NDC [-1, 1]^3 in clip space (w > 0 for ortho).
+// Homogeneous Liang-Barsky clip against perspective/ortho frustum (-w <= x,y,z <= w)
 bool clipSegmentToFrustum(inout vec4 ca, inout vec4 cb) {
   float t0 = 0.0;
   float t1 = 1.0;
@@ -63,11 +61,8 @@ bool clipSegmentToFrustum(inout vec4 ca, inout vec4 cb) {
     if (da < 0.0 && db < 0.0) return false;
     if (da < 0.0 || db < 0.0) {
       float t = da / (da - db);
-      if (da < 0.0) {
-        t0 = max(t0, t);
-      } else {
-        t1 = min(t1, t);
-      }
+      if (da < 0.0) t0 = max(t0, t);
+      else t1 = min(t1, t);
       if (t0 > t1) return false;
     }
   }
@@ -80,16 +75,17 @@ bool clipSegmentToFrustum(inout vec4 ca, inout vec4 cb) {
 }
 
 void main() {
-  // Reference unused attributes cleanly for strict drivers
   float _unused = iOwnerId * 0.0 + (iOwnerCenter.x + iOwnerExtent.x) * 0.0;
 
-  // Front-face edge culling: suppress when both adjacent owner faces face away (§3)
+  // Perspective front-face edge culling using view vector from edge midpoint to camera position
   int f0 = int(floor(iFace0 + 0.5));
   int f1 = int(floor(iFace1 + 0.5));
   if (f0 >= 0 && f1 >= 0) {
-    float d0 = dot(faceNormal(f0), uEyeDir);
-    float d1 = dot(faceNormal(f1), uEyeDir);
-    if (d0 <= 1e-5 && d1 <= 1e-5) {
+    vec3 mid = 0.5 * (iPointA + iPointB);
+    vec3 toCam = normalize(uCameraPos - mid);
+    float d0 = dot(faceNormal(f0), toCam);
+    float d1 = dot(faceNormal(f1), toCam);
+    if (d0 <= 1e-4 && d1 <= 1e-4) {
       gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
       vTransverse = 0.0;
       vHalfWidth = 0.0;
@@ -102,7 +98,7 @@ void main() {
   vec4 ca = uViewProj * vec4(iPointA, 1.0);
   vec4 cb = uViewProj * vec4(iPointB, 1.0);
 
-  if (!clipSegmentToFrustum(ca, cb)) {
+  if (!clipSegmentToFrustum(ca, cb) || ca.w <= 1e-5 || cb.w <= 1e-5) {
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     vTransverse = 0.0;
     vHalfWidth = 0.0;
@@ -116,7 +112,6 @@ void main() {
   vec2 dp = pb - pa;
   float segLen = length(dp);
 
-  // Skip projected lengths < 0.25 framebuffer pixels (§3)
   if (segLen < 0.25) {
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     vTransverse = 0.0;
@@ -137,8 +132,8 @@ void main() {
 
   vec4 outClip = c;
   outClip.xy = (2.0 * pOffset / uViewportSize - 1.0) * c.w;
-  // 1-step depth24 clip-z pull (§3 + Patch 2)
-  outClip.z -= (2.0 * c.w) / 16777215.0 + _unused;
+  // Subtle clip-z pull without gl_FragDepth
+  outClip.z -= (4.0 * c.w) / 16777215.0 + _unused;
 
   gl_Position = outClip;
   vTransverse = aSide * expand;
@@ -157,7 +152,9 @@ flat in float vAlpha;
 flat in int vStyle;
 
 uniform vec3 uHairlineColor;
-uniform vec3 uOxideColor;
+uniform vec3 uActiveColor;
+uniform vec3 uGuideColor;
+uniform vec3 uGoldColor;
 
 out vec4 fragColor;
 
@@ -168,7 +165,11 @@ void main() {
     discard;
   }
 
-  vec3 col = (vStyle == 1) ? uOxideColor : uHairlineColor;
+  vec3 col = uHairlineColor;
+  if (vStyle == 1) col = uActiveColor;
+  else if (vStyle == 2) col = uGuideColor;
+  else if (vStyle == 3) col = uGoldColor;
+
   fragColor = vec4(col, vAlpha * cov);
 }
 `;
@@ -183,9 +184,11 @@ export class LinesPass {
   private uViewProj!: WebGLUniformLocation | null;
   private uViewportSize!: WebGLUniformLocation | null;
   private uDpr!: WebGLUniformLocation | null;
-  private uEyeDir!: WebGLUniformLocation | null;
+  private uCameraPos!: WebGLUniformLocation | null;
   private uHairlineColor!: WebGLUniformLocation | null;
-  private uOxideColor!: WebGLUniformLocation | null;
+  private uActiveColor!: WebGLUniformLocation | null;
+  private uGuideColor!: WebGLUniformLocation | null;
+  private uGoldColor!: WebGLUniformLocation | null;
   private instanceCount = 0;
 
   constructor(gl: WebGL2RenderingContext) {
@@ -199,11 +202,12 @@ export class LinesPass {
     this.uViewProj = gl.getUniformLocation(this.program, 'uViewProj');
     this.uViewportSize = gl.getUniformLocation(this.program, 'uViewportSize');
     this.uDpr = gl.getUniformLocation(this.program, 'uDpr');
-    this.uEyeDir = gl.getUniformLocation(this.program, 'uEyeDir');
+    this.uCameraPos = gl.getUniformLocation(this.program, 'uCameraPos');
     this.uHairlineColor = gl.getUniformLocation(this.program, 'uHairlineColor');
-    this.uOxideColor = gl.getUniformLocation(this.program, 'uOxideColor');
+    this.uActiveColor = gl.getUniformLocation(this.program, 'uActiveColor');
+    this.uGuideColor = gl.getUniformLocation(this.program, 'uGuideColor');
+    this.uGoldColor = gl.getUniformLocation(this.program, 'uGoldColor');
 
-    // Four quad corners: (end 0/1, side -1/+1)
     const quadVerts = new Float32Array([
       0, -1,
       0,  1,
@@ -236,23 +240,22 @@ export class LinesPass {
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.quadIbo);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, quadIndices, gl.STATIC_DRAW);
 
-    // Instance buffer: 72 bytes stride
     gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceVbo);
     const bindInst = (loc: number, size: number, offset: number) => {
       gl.enableVertexAttribArray(loc);
       gl.vertexAttribPointer(loc, size, gl.FLOAT, false, LINE_INSTANCE_BYTES, offset);
       gl.vertexAttribDivisor(loc, 1);
     };
-    bindInst(2, 3, 0);   // iPointA
-    bindInst(3, 3, 12);  // iPointB
-    bindInst(4, 1, 24);  // iCssWidth
-    bindInst(5, 1, 28);  // iStyle
-    bindInst(6, 1, 32);  // iAlpha
-    bindInst(7, 1, 36);  // iOwnerId
-    bindInst(8, 1, 40);  // iFace0
-    bindInst(9, 1, 44);  // iFace1
-    bindInst(10, 3, 48); // iOwnerCenter
-    bindInst(11, 3, 60); // iOwnerExtent
+    bindInst(2, 3, 0);
+    bindInst(3, 3, 12);
+    bindInst(4, 1, 24);
+    bindInst(5, 1, 28);
+    bindInst(6, 1, 32);
+    bindInst(7, 1, 36);
+    bindInst(8, 1, 40);
+    bindInst(9, 1, 44);
+    bindInst(10, 3, 48);
+    bindInst(11, 3, 60);
 
     gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
@@ -271,7 +274,7 @@ export class LinesPass {
     vpWidth: number,
     vpHeight: number,
     dpr: number,
-    eyeDir: Vec3,
+    cameraPos: Vec3,
   ): void {
     if (this.instanceCount <= 0) return;
     const gl = this.gl;
@@ -280,9 +283,11 @@ export class LinesPass {
     gl.uniformMatrix4fv(this.uViewProj, false, viewProj);
     gl.uniform2f(this.uViewportSize, vpWidth, vpHeight);
     gl.uniform1f(this.uDpr, dpr);
-    gl.uniform3f(this.uEyeDir, eyeDir[0], eyeDir[1], eyeDir[2]);
+    gl.uniform3f(this.uCameraPos, cameraPos[0], cameraPos[1], cameraPos[2]);
     gl.uniform3fv(this.uHairlineColor, PALETTE.hairline);
-    gl.uniform3fv(this.uOxideColor, PALETTE.oxide);
+    gl.uniform3fv(this.uActiveColor, PALETTE.activeStroke);
+    gl.uniform3fv(this.uGuideColor, PALETTE.guideLine);
+    gl.uniform3fv(this.uGoldColor, PALETTE.bf16Gold);
 
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);

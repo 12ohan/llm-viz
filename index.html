@@ -3,81 +3,120 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>NVIDIA Nemotron 3 Nano 30B-A3B — Architectural Explainer</title>
+    <title>Nemotron 3 Nano 30B-A3B · Architecture Visualization</title>
     <meta
       name="description"
-      content="Interactive 3D orthographic architectural section of NVIDIA Nemotron 3 Nano 30B-A3B: 52-layer hybrid Mamba-2, MoE, and GQA spine with live KV cache memory accounting."
+      content="Interactive 3D architectural visualization of NVIDIA Nemotron 3 Nano 30B-A3B: 52-layer vertical hybrid Mamba-2, MoE, and GQA tower with live KV cache memory and FP8 Selective quantization."
     />
-    <meta property="og:title" content="NVIDIA Nemotron 3 Nano 30B-A3B — Architectural Explainer" />
+    <meta property="og:title" content="Nemotron 3 Nano 30B-A3B · Architecture Visualization" />
     <meta
       property="og:description"
-      content="Interactive 3D orthographic architectural section of NVIDIA Nemotron 3 Nano 30B-A3B: 52-layer hybrid Mamba-2, MoE, and GQA spine."
+      content="Interactive 3D architectural visualization of NVIDIA Nemotron 3 Nano 30B-A3B."
     />
   </head>
   <body>
     <div id="app" class="app-shell">
-      <header class="app-header">
-        <div class="header-primary">
-          <h1 class="app-title">NVIDIA Nemotron 3 Nano 30B-A3B</h1>
-          <p class="app-subtitle">
-            31.6B total · 3.2B active per token excluding embeddings · 3.6B active including embeddings.
-          </p>
+      <header class="top-bar">
+        <div class="top-bar-left">
+          <h1 class="top-title">Nemotron 3 Nano 30B-A3B · Architecture Visualization</h1>
         </div>
-        <div class="header-meta" aria-label="Layer composition">
-          <span class="mono-stat">52 layers</span>
-          <span class="meta-sep" aria-hidden="true">·</span>
-          <span class="mono-stat">23 Mamba-2</span>
-          <span class="meta-sep" aria-hidden="true">·</span>
-          <span class="mono-stat">23 MoE</span>
-          <span class="meta-sep" aria-hidden="true">·</span>
-          <span class="mono-stat">6 attention</span>
+        <div class="top-bar-right" aria-label="Architecture summary">
+          <span class="top-stat">52 layers</span>
+          <span class="top-sep" aria-hidden="true">·</span>
+          <span class="top-stat">23 Mamba-2</span>
+          <span class="top-sep" aria-hidden="true">·</span>
+          <span class="top-stat">23 MoE</span>
+          <span class="top-sep" aria-hidden="true">·</span>
+          <span class="top-stat">6 GQA</span>
+          <span class="top-sep" aria-hidden="true">·</span>
+          <span class="top-stat top-stat-accent">3.2B active / 31.6B total</span>
         </div>
       </header>
 
-      <main class="app-main">
-        <section class="stage-section" aria-label="52-layer architectural section">
-          <div id="stage-host" class="stage-host" data-testid="stage-host">
-            <canvas
-              id="gl-canvas"
-              class="gl-canvas"
-              data-testid="gl-canvas"
-              tabindex="0"
-              role="application"
-              aria-label="Interactive 52-layer Nemotron 3 Nano architectural diagram. Click a bay or use Left and Right arrow keys to inspect layers 01 through 52."
-            ></canvas>
-            <svg
-              id="overlay-svg"
-              class="overlay-svg"
-              aria-hidden="true"
-            ></svg>
-            <div
-              id="overlay-labels"
-              class="overlay-labels"
-              aria-hidden="true"
-            ></div>
-            <div
-              id="webgl-fallback"
-              class="webgl-fallback"
-              role="status"
-              aria-live="polite"
-              hidden
-            ></div>
-          </div>
-        </section>
+      <div class="workspace-split">
+        <aside class="sidebar" aria-label="Architecture guide and controls">
+          <!-- Top panel: 2D SVG mini-diagram + clickable Table of Contents -->
+          <section class="sidebar-top" aria-label="Hybrid cycle overview and contents">
+            <div class="mini-diagram-wrap" aria-hidden="true">
+              <svg
+                id="mini-diagram"
+                class="mini-diagram"
+                viewBox="0 0 112 204"
+                width="112"
+                height="204"
+              >
+                <!-- Residual stream spine -->
+                <line x1="94" y1="14" x2="94" y2="190" stroke="#4ADE80" stroke-width="4" stroke-opacity="0.55" />
+                <!-- Embed -->
+                <g data-mini-section="embedding" class="mini-node">
+                  <rect x="14" y="8" width="66" height="18" rx="3" fill="#414756" stroke="#637BF5" stroke-width="1.5" />
+                  <text x="47" y="20" text-anchor="middle" fill="#FFFFFF" font-size="8.5" font-weight="600">Embed</text>
+                  <line x1="80" y1="17" x2="92" y2="17" stroke="#4ADE80" stroke-width="2" />
+                </g>
+                <!-- Hybrid Cycle Bracket -->
+                <rect x="6" y="34" width="80" height="114" rx="4" fill="#F1F4F9" stroke="#CBD5E1" stroke-dasharray="3 2" />
+                <text x="12" y="45" fill="#475569" font-size="7.5" font-weight="600">52-LAYER HYBRID</text>
+                <!-- Mamba-2 -->
+                <g data-mini-section="mamba" class="mini-node">
+                  <rect x="14" y="52" width="64" height="24" rx="3" fill="#363C49" stroke="#38BDF8" stroke-width="1.6" />
+                  <text x="46" y="63" text-anchor="middle" fill="#FFFFFF" font-size="8.5" font-weight="600">Mamba-2</text>
+                  <text x="46" y="72" text-anchor="middle" fill="#7DD3FC" font-size="7">×23 · fixed SSM</text>
+                  <line x1="78" y1="64" x2="92" y2="64" stroke="#4ADE80" stroke-width="2" />
+                </g>
+                <!-- MoE -->
+                <g data-mini-section="moe" class="mini-node">
+                  <rect x="14" y="84" width="64" height="24" rx="3" fill="#363C49" stroke="#F59E0B" stroke-width="1.6" />
+                  <text x="46" y="95" text-anchor="middle" fill="#FFFFFF" font-size="8.5" font-weight="600">MoE 128+1</text>
+                  <text x="46" y="104" text-anchor="middle" fill="#FCD34D" font-size="7">×23 · 6 active</text>
+                  <line x1="78" y1="96" x2="92" y2="96" stroke="#4ADE80" stroke-width="2" />
+                </g>
+                <!-- GQA Attention -->
+                <g data-mini-section="gqa" class="mini-node">
+                  <rect x="14" y="116" width="64" height="24" rx="3" fill="#363C49" stroke="#637BF5" stroke-width="1.6" />
+                  <text x="46" y="127" text-anchor="middle" fill="#FFFFFF" font-size="8.5" font-weight="600">GQA Attn</text>
+                  <text x="46" y="136" text-anchor="middle" fill="#A5B4FC" font-size="7">×6 · 32Q / 2KV</text>
+                  <line x1="78" y1="128" x2="92" y2="128" stroke="#4ADE80" stroke-width="2" />
+                </g>
+                <!-- KV / FP8 callout -->
+                <g data-mini-section="kv_fp8" class="mini-node">
+                  <rect x="14" y="155" width="64" height="16" rx="3" fill="#1E293B" stroke="#F59E0B" stroke-width="1.2" />
+                  <text x="46" y="166" text-anchor="middle" fill="#FDE68A" font-size="7.5" font-weight="600">KV Cache &amp; FP8</text>
+                </g>
+                <!-- Output -->
+                <g data-mini-section="output" class="mini-node">
+                  <rect x="14" y="178" width="66" height="18" rx="3" fill="#414756" stroke="#4ADE80" stroke-width="1.5" />
+                  <text x="47" y="190" text-anchor="middle" fill="#FFFFFF" font-size="8.5" font-weight="600">Output 131K</text>
+                  <line x1="80" y1="187" x2="92" y2="187" stroke="#4ADE80" stroke-width="2" />
+                </g>
+              </svg>
+            </div>
 
-        <section class="controls-band" aria-label="Memory depth and precision controls">
-          <div class="controls-row">
-            <div class="scrubber-group">
-              <label for="token-slider" class="control-label">
-                Cached tokens <span class="unit-note">(per token depth)</span>
-              </label>
-              <div class="scrubber-controls">
-                <button
-                  type="button"
-                  id="token-dec"
-                  class="icon-btn"
-                  aria-label="Decrease cached tokens"
-                >−</button>
+            <nav class="toc-nav" aria-label="Architecture sections">
+              <div class="toc-heading">Contents</div>
+              <button type="button" class="toc-btn is-active" data-section="overview">Overview</button>
+              <button type="button" class="toc-btn" data-section="embedding">Embedding</button>
+              <button type="button" class="toc-btn" data-section="mamba">Mamba-2 (×23)</button>
+              <button type="button" class="toc-btn" data-section="moe">MoE 128+1 (×23)</button>
+              <button type="button" class="toc-btn" data-section="gqa">GQA Attention (×6)</button>
+              <button type="button" class="toc-btn" data-section="kv_fp8">KV Cache &amp; FP8</button>
+              <button type="button" class="toc-btn" data-section="output">Output</button>
+            </nav>
+          </section>
+
+          <!-- Middle panel: Serif editorial explanation & bay inspector -->
+          <section class="sidebar-middle" aria-label="Section explanation and bay inspector">
+            <div id="editorial-panel" class="editorial-panel" data-testid="bay-inspector" aria-live="polite"></div>
+          </section>
+
+          <!-- Bottom panel: Token scrubber, BF16/FP8 toggle, memory readout, bay stepping -->
+          <section class="sidebar-bottom" aria-label="Memory depth, precision, and bay stepping">
+            <div class="control-block">
+              <div class="control-header">
+                <label for="token-slider" class="control-label">Cached tokens <span class="unit-note">(per token)</span></label>
+                <output id="token-value" for="token-slider" class="token-output">8 / 16</output>
+              </div>
+              <div class="scrubber-row">
+                <button type="button" id="token-dec" class="icon-btn" aria-label="Decrease cached tokens">−</button>
                 <input
                   id="token-slider"
                   class="token-slider"
@@ -88,18 +127,14 @@
                   value="8"
                   aria-label="Cached token count from 1 to 16"
                 />
-                <button
-                  type="button"
-                  id="token-inc"
-                  class="icon-btn"
-                  aria-label="Increase cached tokens"
-                >+</button>
-                <output id="token-value" for="token-slider" class="token-output">8 / 16</output>
+                <button type="button" id="token-inc" class="icon-btn" aria-label="Increase cached tokens">+</button>
               </div>
             </div>
 
-            <div class="precision-group" role="group" aria-label="Precision mode">
-              <span class="control-label">Precision</span>
+            <div class="control-block">
+              <div class="control-header">
+                <span class="control-label">Precision mode</span>
+              </div>
               <div class="segmented-control" role="radiogroup" aria-label="Precision mode">
                 <button
                   type="button"
@@ -120,33 +155,87 @@
               </div>
             </div>
 
-            <div class="action-group">
-              <button
-                type="button"
-                id="reset-btn"
-                class="action-btn"
-                aria-label="Reset camera, token count to 8, and precision to BF16"
-              >Reset</button>
+            <div
+              id="memory-readout"
+              class="memory-readout"
+              data-testid="memory-readout"
+              aria-live="polite"
+            ></div>
+
+            <div class="bay-step-row" aria-label="Bay stepping controls">
+              <button type="button" id="bay-prev" class="step-btn" aria-label="Select previous bay">← Prev bay</button>
+              <button type="button" id="bay-next" class="step-btn" aria-label="Select next bay">Next bay →</button>
+              <button type="button" id="bay-clear" class="step-btn step-btn-muted" aria-label="Clear bay selection" hidden>Clear</button>
             </div>
-          </div>
+          </section>
+        </aside>
 
-          <div
-            id="memory-readout"
-            class="memory-readout"
-            data-testid="memory-readout"
-            aria-live="polite"
-          ></div>
-        </section>
+        <main class="canvas-pane" aria-label="Interactive 3D 52-layer tower">
+          <div id="stage-host" class="stage-host" data-testid="stage-host">
+            <canvas
+              id="gl-canvas"
+              class="gl-canvas"
+              data-testid="gl-canvas"
+              tabindex="0"
+              role="application"
+              aria-label="Interactive 3D Nemotron 3 Nano 52-layer vertical tower. Left-drag to orbit, right-drag or Shift-drag to pan, scroll to zoom, click any bay to inspect."
+            ></canvas>
+            <svg id="overlay-svg" class="overlay-svg" aria-hidden="true"></svg>
+            <div id="overlay-labels" class="overlay-labels" aria-hidden="true"></div>
 
-        <section class="inspector-band" aria-label="Bay inspector and legend">
-          <div id="bay-inspector" class="bay-inspector" data-testid="bay-inspector" aria-live="polite"></div>
-          <div class="inspector-nav" aria-label="Bay navigation">
-            <button type="button" id="bay-prev" class="nav-btn" aria-label="Select previous bay">← Prev bay</button>
-            <button type="button" id="bay-next" class="nav-btn" aria-label="Select next bay">Next bay →</button>
-            <button type="button" id="bay-clear" class="nav-btn" aria-label="Clear bay selection" hidden>Clear</button>
+            <!-- Floating top toolbar (llm-viz style) -->
+            <div class="floating-toolbar" role="toolbar" aria-label="Camera presets">
+              <div class="preset-pills">
+                <button type="button" class="pill-btn is-active" data-preset="overview">Full 52-Layer Tower</button>
+                <button type="button" class="pill-btn" data-preset="mamba">Zoom: Mamba (01)</button>
+                <button type="button" class="pill-btn" data-preset="moe">Zoom: MoE (02)</button>
+                <button type="button" class="pill-btn" data-preset="gqa">Zoom: GQA (06)</button>
+                <button type="button" class="pill-btn" data-preset="kv_fp8">Zoom: Feeder+Attn (42–43)</button>
+              </div>
+              <div class="camera-actions">
+                <button
+                  type="button"
+                  id="zoom-bay-btn"
+                  class="cam-btn"
+                  title="Zoom to selected bay"
+                  aria-label="Zoom to selected bay"
+                  disabled
+                >Zoom Bay</button>
+                <button
+                  type="button"
+                  id="fit-btn"
+                  class="cam-btn"
+                  title="Fit full 52-layer tower"
+                  aria-label="Fit all 52 layers"
+                >Fit</button>
+                <button
+                  type="button"
+                  id="reset-btn"
+                  class="cam-btn"
+                  title="Reset view, T=8, and BF16"
+                  aria-label="Reset camera, token count to 8, and precision to BF16"
+                >Reset</button>
+              </div>
+            </div>
+
+            <div class="floating-badge" aria-hidden="true">
+              Nemotron 3 Nano 30B-A3B · 3.2B active
+            </div>
+
+            <div class="orbit-hint" aria-hidden="true">
+              Left-drag: Orbit · Right/Shift-drag: Pan · Scroll: Zoom · Click: Pin bay
+            </div>
+
+            <div
+              id="webgl-fallback"
+              class="webgl-fallback"
+              role="status"
+              aria-live="polite"
+              hidden
+            ></div>
           </div>
-        </section>
-      </main>
+        </main>
+      </div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>
