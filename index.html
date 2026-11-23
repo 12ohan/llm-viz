@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NVIDIA Nemotron 3 Nano 30B-A3B — Architectural Explainer</title>
+    <meta
+      name="description"
+      content="Interactive 3D orthographic architectural section of NVIDIA Nemotron 3 Nano 30B-A3B: 52-layer hybrid Mamba-2, MoE, and GQA spine with live KV cache memory accounting."
+    />
+    <meta property="og:title" content="NVIDIA Nemotron 3 Nano 30B-A3B — Architectural Explainer" />
+    <meta
+      property="og:description"
+      content="Interactive 3D orthographic architectural section of NVIDIA Nemotron 3 Nano 30B-A3B: 52-layer hybrid Mamba-2, MoE, and GQA spine."
+    />
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <header class="app-header">
+        <div class="header-primary">
+          <h1 class="app-title">NVIDIA Nemotron 3 Nano 30B-A3B</h1>
+          <p class="app-subtitle">
+            31.6B total · 3.2B active per token excluding embeddings · 3.6B active including embeddings.
+          </p>
+        </div>
+        <div class="header-meta" aria-label="Layer composition">
+          <span class="mono-stat">52 layers</span>
+          <span class="meta-sep" aria-hidden="true">·</span>
+          <span class="mono-stat">23 Mamba-2</span>
+          <span class="meta-sep" aria-hidden="true">·</span>
+          <span class="mono-stat">23 MoE</span>
+          <span class="meta-sep" aria-hidden="true">·</span>
+          <span class="mono-stat">6 attention</span>
+        </div>
+      </header>
+
+      <main class="app-main">
+        <section class="stage-section" aria-label="52-layer architectural section">
+          <div id="stage-host" class="stage-host" data-testid="stage-host">
+            <canvas
+              id="gl-canvas"
+              class="gl-canvas"
+              data-testid="gl-canvas"
+              tabindex="0"
+              role="application"
+              aria-label="Interactive 52-layer Nemotron 3 Nano architectural diagram. Click a bay or use Left and Right arrow keys to inspect layers 01 through 52."
+            ></canvas>
+            <svg
+              id="overlay-svg"
+              class="overlay-svg"
+              aria-hidden="true"
+            ></svg>
+            <div
+              id="overlay-labels"
+              class="overlay-labels"
+              aria-hidden="true"
+            ></div>
+            <div
+              id="webgl-fallback"
+              class="webgl-fallback"
+              role="status"
+              aria-live="polite"
+              hidden
+            ></div>
+          </div>
+        </section>
+
+        <section class="controls-band" aria-label="Memory depth and precision controls">
+          <div class="controls-row">
+            <div class="scrubber-group">
+              <label for="token-slider" class="control-label">
+                Cached tokens <span class="unit-note">(per token depth)</span>
+              </label>
+              <div class="scrubber-controls">
+                <button
+                  type="button"
+                  id="token-dec"
+                  class="icon-btn"
+                  aria-label="Decrease cached tokens"
+                >−</button>
+                <input
+                  id="token-slider"
+                  class="token-slider"
+                  type="range"
+                  min="1"
+                  max="16"
+                  step="1"
+                  value="8"
+                  aria-label="Cached token count from 1 to 16"
+                />
+                <button
+                  type="button"
+                  id="token-inc"
+                  class="icon-btn"
+                  aria-label="Increase cached tokens"
+                >+</button>
+                <output id="token-value" for="token-slider" class="token-output">8 / 16</output>
+              </div>
+            </div>
+
+            <div class="precision-group" role="group" aria-label="Precision mode">
+              <span class="control-label">Precision</span>
+              <div class="segmented-control" role="radiogroup" aria-label="Precision mode">
+                <button
+                  type="button"
+                  id="precision-bf16"
+                  class="seg-btn is-active"
+                  role="radio"
+                  aria-checked="true"
+                  data-precision="bf16"
+                >BF16</button>
+                <button
+                  type="button"
+                  id="precision-fp8"
+                  class="seg-btn"
+                  role="radio"
+                  aria-checked="false"
+                  data-precision="fp8_selective"
+                >FP8 Selective</button>
+              </div>
+            </div>
+
+            <div class="action-group">
+              <button
+                type="button"
+                id="reset-btn"
+                class="action-btn"
+                aria-label="Reset camera, token count to 8, and precision to BF16"
+              >Reset</button>
+            </div>
+          </div>
+
+          <div
+            id="memory-readout"
+            class="memory-readout"
+            data-testid="memory-readout"
+            aria-live="polite"
+          ></div>
+        </section>
+
+        <section class="inspector-band" aria-label="Bay inspector and legend">
+          <div id="bay-inspector" class="bay-inspector" data-testid="bay-inspector" aria-live="polite"></div>
+          <div class="inspector-nav" aria-label="Bay navigation">
+            <button type="button" id="bay-prev" class="nav-btn" aria-label="Select previous bay">← Prev bay</button>
+            <button type="button" id="bay-next" class="nav-btn" aria-label="Select next bay">Next bay →</button>
+            <button type="button" id="bay-clear" class="nav-btn" aria-label="Clear bay selection" hidden>Clear</button>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
