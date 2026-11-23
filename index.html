@@ -13,6 +13,11 @@
       property="og:description"
       content="Interactive 3D architectural visualization of NVIDIA Nemotron 3 Nano 30B-A3B."
     />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231B2340'/%3E%3Crect x='23' y='5' width='3.5' height='22' rx='1.5' fill='%234ADE80'/%3E%3Crect x='6' y='6' width='14' height='4.5' rx='1.2' fill='%2338BDF8'/%3E%3Crect x='6' y='13.5' width='14' height='4.5' rx='1.2' fill='%23F59E0B'/%3E%3Crect x='6' y='21' width='14' height='5' rx='1.2' fill='%23637BF5'/%3E%3C/svg%3E"
+    />
   </head>
   <body>
     <div id="app" class="app-shell">
@@ -92,7 +97,15 @@
             </div>
 
             <nav class="toc-nav" aria-label="Architecture sections">
-              <div class="toc-heading">Contents</div>
+              <div class="toc-header-row">
+                <div class="toc-heading">Contents</div>
+                <button
+                  type="button"
+                  id="tour-toggle-btn"
+                  class="toc-tour-btn is-active"
+                  title="Toggle 7-chapter guided walkthrough"
+                >Tour 1/7</button>
+              </div>
               <button type="button" class="toc-btn is-active" data-section="overview">Overview</button>
               <button type="button" class="toc-btn" data-section="embedding">Embedding</button>
               <button type="button" class="toc-btn" data-section="mamba">Mamba-2 (×23)</button>
@@ -103,8 +116,8 @@
             </nav>
           </section>
 
-          <!-- Middle panel: Smoothly scrollable serif editorial explanation & bay/slab inspector -->
-          <section class="sidebar-middle" aria-label="Section explanation and bay inspector">
+          <!-- Middle panel: Guided Walkthrough / Smoothly scrollable serif editorial explanation -->
+          <section class="sidebar-middle" aria-label="Guided walkthrough and bay inspector">
             <div id="editorial-panel" class="editorial-panel" data-testid="bay-inspector" aria-live="polite"></div>
           </section>
 
@@ -160,7 +173,16 @@
               class="memory-readout"
               data-testid="memory-readout"
               aria-live="polite"
-            ></div>
+            >
+              <div id="memory-readout-lines" class="memory-readout-lines"></div>
+              <button
+                type="button"
+                id="memory-chart-btn"
+                class="memory-chart-trigger"
+                aria-expanded="false"
+                aria-controls="memory-chart-drawer"
+              >Memory Scaling 1 → 1M ↗</button>
+            </div>
 
             <div id="bay-step-row" class="bay-step-row" aria-label="Bay stepping controls">
               <button type="button" id="bay-prev" class="step-btn" aria-label="Select previous bay">← Prev bay</button>
@@ -171,6 +193,86 @@
         </aside>
 
         <main class="canvas-pane" aria-label="Interactive 3D 52-layer tower and layer cutaways">
+          <!-- Floating top toolbar (desktop overlay; stacks cleanly above canvas on mobile) -->
+          <div class="floating-toolbar" role="toolbar" aria-label="View modes and camera controls">
+            <div class="toolbar-row toolbar-row-modes">
+              <div class="mode-pills" role="tablist" aria-label="Architecture views">
+                <button type="button" class="mode-btn is-active" role="tab" aria-selected="true" data-mode="tower">52-Layer Tower</button>
+                <button type="button" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_mamba">Cutaway: Mamba-2</button>
+                <button type="button" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_moe">Cutaway: MoE 128+1</button>
+                <button type="button" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_gqa">Cutaway: GQA Attention</button>
+              </div>
+
+              <div class="camera-actions">
+                <button
+                  type="button"
+                  id="zoom-bay-btn"
+                  class="cam-btn"
+                  title="Zoom to selected bay"
+                  aria-label="Zoom to selected bay"
+                  disabled
+                >Zoom Bay</button>
+                <button
+                  type="button"
+                  id="fit-btn"
+                  class="cam-btn"
+                  title="Fit active view"
+                  aria-label="Fit active 3D view"
+                >Fit</button>
+                <button
+                  type="button"
+                  id="reset-btn"
+                  class="cam-btn"
+                  title="Reset view, T=8, and BF16 (R)"
+                  aria-label="Reset camera, token count to 8, and precision to BF16"
+                >Reset</button>
+                <button
+                  type="button"
+                  id="shortcuts-btn"
+                  class="cam-btn cam-btn-icon"
+                  title="Keyboard shortcuts (?)"
+                  aria-label="Keyboard shortcuts"
+                  aria-expanded="false"
+                  aria-controls="shortcuts-popover"
+                >?</button>
+              </div>
+            </div>
+
+            <!-- Contextual sub-row: Tower Zoom Presets (when mode === tower) -->
+            <div id="tower-subbar" class="toolbar-row toolbar-row-sub">
+              <div class="preset-pills">
+                <button type="button" class="pill-btn is-active" data-preset="overview">Full 52-Layer Tower</button>
+                <button type="button" class="pill-btn" data-preset="mamba">Zoom: Mamba (01)</button>
+                <button type="button" class="pill-btn" data-preset="moe">Zoom: MoE (02)</button>
+                <button type="button" class="pill-btn" data-preset="gqa">Zoom: GQA (06)</button>
+                <button type="button" class="pill-btn" data-preset="kv_fp8">Zoom: Feeder+Attn (42–43)</button>
+              </div>
+            </div>
+
+            <!-- Contextual sub-row: Mamba-2 Bay Switcher (when mode === cutaway_mamba) -->
+            <div id="mamba-subbar" class="toolbar-row toolbar-row-sub" hidden>
+              <span class="subbar-label">Representative bay:</span>
+              <div class="preset-pills">
+                <button type="button" class="sub-toggle-btn is-active" data-mamba-bay="1">Bay 01 · Ordinary Mamba-2 (FP8 eligible)</button>
+                <button type="button" class="sub-toggle-btn" data-mamba-bay="42">Bay 42 · Feeder before Bay 43 GQA (BF16 §4.2)</button>
+              </div>
+            </div>
+
+            <!-- Contextual sub-row: MoE Context (when mode === cutaway_moe) -->
+            <div id="moe-subbar" class="toolbar-row toolbar-row-sub" hidden>
+              <span class="subbar-chip">Bay 02 · Parallel 128 Routed (6 Active, ReLU²) + Shared Expert (3,712 = 2×1,856) · Click any slab</span>
+            </div>
+
+            <!-- Contextual sub-row: GQA Bay Switcher (when mode === cutaway_gqa) -->
+            <div id="gqa-subbar" class="toolbar-row toolbar-row-sub" hidden>
+              <span class="subbar-label">Representative bay:</span>
+              <div class="preset-pills">
+                <button type="button" class="sub-toggle-btn is-active" data-gqa-bay="6">Bay 06 · GQA (32Q / 2KV, NoPE)</button>
+                <button type="button" class="sub-toggle-btn" data-gqa-bay="43">Bay 43 · Final GQA (after Bay 42 Feeder)</button>
+              </div>
+            </div>
+          </div>
+
           <div id="stage-host" class="stage-host" data-testid="stage-host">
             <canvas
               id="gl-canvas"
@@ -183,83 +285,51 @@
             <svg id="overlay-svg" class="overlay-svg" aria-hidden="true"></svg>
             <div id="overlay-labels" class="overlay-labels" aria-hidden="true"></div>
 
-            <!-- Floating top toolbar: Mode Switcher + Contextual Presets / Bay Toggles -->
-            <div class="floating-toolbar" role="toolbar" aria-label="View modes and camera controls">
-              <div class="toolbar-row toolbar-row-modes">
-                <div class="mode-pills" role="tablist" aria-label="Architecture views">
-                  <button type="button" class="mode-btn is-active" role="tab" aria-selected="true" data-mode="tower">52-Layer Tower</button>
-                  <button type="button" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_mamba">Cutaway: Mamba-2</button>
-                  <button type="button" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_moe">Cutaway: MoE 128+1</button>
-                  <button type="button" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_gqa">Cutaway: GQA Attention</button>
-                </div>
-
-                <div class="camera-actions">
-                  <button
-                    type="button"
-                    id="zoom-bay-btn"
-                    class="cam-btn"
-                    title="Zoom to selected bay"
-                    aria-label="Zoom to selected bay"
-                    disabled
-                  >Zoom Bay</button>
-                  <button
-                    type="button"
-                    id="fit-btn"
-                    class="cam-btn"
-                    title="Fit active view"
-                    aria-label="Fit active 3D view"
-                  >Fit</button>
-                  <button
-                    type="button"
-                    id="reset-btn"
-                    class="cam-btn"
-                    title="Reset view, T=8, and BF16"
-                    aria-label="Reset camera, token count to 8, and precision to BF16"
-                  >Reset</button>
-                </div>
+            <!-- Keyboard Shortcuts Help Popover -->
+            <div
+              id="shortcuts-popover"
+              class="shortcuts-popover"
+              role="dialog"
+              aria-label="Keyboard shortcuts"
+              hidden
+            >
+              <div class="shortcuts-header">
+                <span class="shortcuts-title">Keyboard Shortcuts</span>
+                <button
+                  type="button"
+                  id="shortcuts-close"
+                  class="shortcuts-close"
+                  aria-label="Close keyboard shortcuts"
+                >×</button>
               </div>
-
-              <!-- Contextual sub-row: Tower Zoom Presets (when mode === tower) -->
-              <div id="tower-subbar" class="toolbar-row toolbar-row-sub">
-                <div class="preset-pills">
-                  <button type="button" class="pill-btn is-active" data-preset="overview">Full 52-Layer Tower</button>
-                  <button type="button" class="pill-btn" data-preset="mamba">Zoom: Mamba (01)</button>
-                  <button type="button" class="pill-btn" data-preset="moe">Zoom: MoE (02)</button>
-                  <button type="button" class="pill-btn" data-preset="gqa">Zoom: GQA (06)</button>
-                  <button type="button" class="pill-btn" data-preset="kv_fp8">Zoom: Feeder+Attn (42–43)</button>
-                </div>
-              </div>
-
-              <!-- Contextual sub-row: Mamba-2 Bay Switcher (when mode === cutaway_mamba) -->
-              <div id="mamba-subbar" class="toolbar-row toolbar-row-sub" hidden>
-                <span class="subbar-label">Representative bay:</span>
-                <div class="preset-pills">
-                  <button type="button" class="sub-toggle-btn is-active" data-mamba-bay="1">Bay 01 · Ordinary Mamba-2 (FP8 eligible)</button>
-                  <button type="button" class="sub-toggle-btn" data-mamba-bay="42">Bay 42 · Feeder before Bay 43 GQA (BF16 §4.2)</button>
-                </div>
-              </div>
-
-              <!-- Contextual sub-row: MoE Context (when mode === cutaway_moe) -->
-              <div id="moe-subbar" class="toolbar-row toolbar-row-sub" hidden>
-                <span class="subbar-chip">Bay 02 · Parallel 128 Routed (6 Active, ReLU²) + Shared Expert (3,712 = 2×1,856) · Click any slab</span>
-              </div>
-
-              <!-- Contextual sub-row: GQA Bay Switcher (when mode === cutaway_gqa) -->
-              <div id="gqa-subbar" class="toolbar-row toolbar-row-sub" hidden>
-                <span class="subbar-label">Representative bay:</span>
-                <div class="preset-pills">
-                  <button type="button" class="sub-toggle-btn is-active" data-gqa-bay="6">Bay 06 · GQA (32Q / 2KV, NoPE)</button>
-                  <button type="button" class="sub-toggle-btn" data-gqa-bay="43">Bay 43 · Final GQA (after Bay 42 Feeder)</button>
-                </div>
-              </div>
+              <dl class="shortcuts-list">
+                <div class="shortcut-row"><dt><kbd>1</kbd></dt><dd>52-Layer Tower</dd></div>
+                <div class="shortcut-row"><dt><kbd>2</kbd></dt><dd>Cutaway: Mamba-2</dd></div>
+                <div class="shortcut-row"><dt><kbd>3</kbd></dt><dd>Cutaway: MoE 128+1</dd></div>
+                <div class="shortcut-row"><dt><kbd>4</kbd></dt><dd>Cutaway: GQA Attention</dd></div>
+                <div class="shortcut-row"><dt><kbd>P</kbd></dt><dd>Toggle BF16 / FP8 Selective</dd></div>
+                <div class="shortcut-row"><dt><kbd>M</kbd></dt><dd>Toggle Memory Scaling (1 → 1M)</dd></div>
+                <div class="shortcut-row"><dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Step chapter (tour) or bay</dd></div>
+                <div class="shortcut-row"><dt><kbd>R</kbd></dt><dd>Reset view, T=8 &amp; BF16</dd></div>
+                <div class="shortcut-row"><dt><kbd>?</kbd></dt><dd>Toggle this help popover</dd></div>
+                <div class="shortcut-row"><dt><kbd>Esc</kbd></dt><dd>Close overlay / Back to tower</dd></div>
+              </dl>
             </div>
+
+            <!-- Interactive 1 -> 1M Memory Scaling SVG Chart Drawer -->
+            <div
+              id="memory-chart-drawer"
+              class="mem-drawer"
+              data-testid="memory-chart-drawer"
+              hidden
+            ></div>
 
             <div id="floating-badge" class="floating-badge" aria-hidden="true">
               Nemotron 3 Nano 30B-A3B · 3.2B active
             </div>
 
             <div class="orbit-hint" aria-hidden="true">
-              Left-drag: Orbit · Right/Shift-drag: Pan · Scroll: Zoom · Click: Inspect
+              Left-drag: Orbit · Right/Shift-drag: Pan · Scroll: Zoom · Click: Inspect · ?: Keys
             </div>
 
             <div

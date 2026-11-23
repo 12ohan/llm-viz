@@ -48,7 +48,13 @@ import {
   type MacroSceneGeometry,
 } from './scene/spine';
 import { MacroControls, queryControlsElements } from './ui/controls';
+import { MemoryScalingDrawer } from './ui/memoryChart';
 import { MacroOverlay } from './ui/overlay';
+import {
+  getWalkthroughChapter,
+  nextChapterIndex,
+  prevChapterIndex,
+} from './story/walkthrough';
 
 const DRAG_THRESHOLD_PX = 5;
 
@@ -64,8 +70,52 @@ function measureHostMetrics(host: HTMLElement): ViewportMetrics | null {
   );
 }
 
-function showFallbackMessage(el: HTMLElement, message: string): void {
-  el.textContent = message;
+function showFallbackCard(
+  el: HTMLElement,
+  heading: string,
+  detail: string,
+  onOpenMemoryChart: () => void,
+  canRetry: boolean,
+): void {
+  el.innerHTML = '';
+
+  const card = document.createElement('div');
+  card.className = 'webgl-fallback-card';
+
+  const title = document.createElement('h2');
+  title.className = 'webgl-fallback-title';
+  title.textContent = heading;
+
+  const body = document.createElement('p');
+  body.className = 'webgl-fallback-body';
+  body.textContent = detail;
+
+  const summary = document.createElement('div');
+  summary.className = 'webgl-fallback-summary';
+  summary.textContent =
+    'Nemotron 3 Nano 30B-A3B · 52 layers (23 Mamba-2 · 23 MoE 128+1 · 6 GQA) · 3.2B active / 31.6B total · 47.1 MiB fixed SSM + 6 KiB/tok BF16 KV';
+
+  const actions = document.createElement('div');
+  actions.className = 'webgl-fallback-actions';
+
+  const chartBtn = document.createElement('button');
+  chartBtn.type = 'button';
+  chartBtn.className = 'ed-cta-btn';
+  chartBtn.textContent = 'Open Memory Scaling (1 → 1M) ↗';
+  chartBtn.addEventListener('click', onOpenMemoryChart);
+  actions.appendChild(chartBtn);
+
+  if (canRetry) {
+    const reloadBtn = document.createElement('button');
+    reloadBtn.type = 'button';
+    reloadBtn.className = 'ed-cta-btn ed-cta-secondary';
+    reloadBtn.textContent = 'Reload Page';
+    reloadBtn.addEventListener('click', () => window.location.reload());
+    actions.appendChild(reloadBtn);
+  }
+
+  card.append(title, body, summary, actions);
+  el.appendChild(card);
   el.hidden = false;
 }
 
@@ -151,8 +201,9 @@ function boot(): void {
   const overlaySvg = document.getElementById('overlay-svg') as SVGSVGElement | null;
   const overlayLabels = document.getElementById('overlay-labels') as HTMLDivElement | null;
   const fallbackEl = document.getElementById('webgl-fallback');
+  const memoryChartHost = document.getElementById('memory-chart-drawer');
 
-  if (!host || !canvas || !overlaySvg || !overlayLabels || !fallbackEl) {
+  if (!host || !canvas || !overlaySvg || !overlayLabels || !fallbackEl || !memoryChartHost) {
     throw new Error('Required stage DOM elements are missing');
   }
 
@@ -175,6 +226,12 @@ function boot(): void {
   let linesPass: LinesPass | null = null;
   let ribbonsPass: RibbonsPass | null = null;
 
+  const openMemoryChartFromFallback = () => {
+    state.memoryChartOpen = true;
+    state.shortcutsOpen = false;
+    syncUi();
+  };
+
   try {
     device = new RenderDevice(canvas);
     solidsPass = new SolidsPass(device.gl);
@@ -182,9 +239,12 @@ function boot(): void {
     ribbonsPass = new RibbonsPass(device.gl);
   } catch (err) {
     const detail = err instanceof Error ? err.message : 'WebGL2 unavailable';
-    showFallbackMessage(
+    showFallbackCard(
       fallbackEl,
-      `3D canvas unavailable (${detail}). Use the left sidebar contents, token scrubber, and precision toggle to inspect all 52 layers.`,
+      '3D WebGL2 Canvas Unavailable',
+      `Your browser could not initialize a WebGL2 context (${detail}). The 7-chapter architectural walkthrough, token scrubber, precision toggle, and interactive 1 → 1M memory scaling chart remain fully available.`,
+      openMemoryChartFromFallback,
+      true,
     );
   }
 
@@ -270,16 +330,59 @@ function boot(): void {
     geometryDirty = false;
   };
 
+  const syncUi = () => {
+    controls.sync(state, currentCutawayScene);
+    memoryDrawer.sync(state.memoryChartOpen, state.precision, state.memoryProbeTokens);
+  };
+
   const markDirtyAndSchedule = (rebuildGeometry: boolean) => {
     if (rebuildGeometry) {
       geometryDirty = true;
       rebuildSceneIfNeeded();
     }
-    controls.sync(state, currentCutawayScene);
+    syncUi();
     scheduleDraw();
   };
 
-  const selectMode = (nextMode: ViewMode, customPose?: CameraPose) => {
+  const applyTourChapter = (chapterIdx: number) => {
+    const ch = getWalkthroughChapter(chapterIdx);
+    if (state.mode === 'tower' && ch.mode !== 'tower') {
+      state.savedMacroCamera = cloneCameraPose(state.camera);
+    }
+    state.tourActive = true;
+    state.tourChapter = ch.index;
+    state.precision = ch.precision;
+    state.tokens = ch.tokens;
+    state.section = ch.section;
+    state.selectedBay = ch.selectedBay;
+    state.hoveredBay = null;
+    state.selectedPart = null;
+    state.hoveredPart = null;
+    if (ch.mambaBayId) state.mambaBayId = ch.mambaBayId;
+    if (ch.gqaBayId) state.gqaBayId = ch.gqaBayId;
+    state.mode = ch.mode;
+
+    geometryDirty = true;
+    rebuildSceneIfNeeded();
+
+    if (ch.mode === 'tower') {
+      flyToPose(cameraPoseForSection(ch.section, currentMetrics));
+    } else if (currentCutawayScene) {
+      flyToPose(cameraPoseForCutaway(ch.mode, currentCutawayScene.fitBounds, currentMetrics));
+    }
+
+    syncUi();
+    scheduleDraw();
+  };
+
+  const exitTourToFreeExplore = () => {
+    if (!state.tourActive) return;
+    state.tourActive = false;
+    syncUi();
+  };
+
+  const selectMode = (nextMode: ViewMode, customPose?: CameraPose, keepTour = false) => {
+    if (!keepTour) state.tourActive = false;
     if (state.mode === 'tower' && nextMode !== 'tower') {
       state.savedMacroCamera = cloneCameraPose(state.camera);
     }
@@ -305,11 +408,12 @@ function boot(): void {
       flyToPose(cameraPoseForCutaway(nextMode, currentCutawayScene.fitBounds, currentMetrics));
     }
 
-    controls.sync(state, currentCutawayScene);
+    syncUi();
     scheduleDraw();
   };
 
   const selectSection = (section: TocSectionId) => {
+    state.tourActive = false;
     // If already in a cutaway and user clicks Mamba/MoE/GQA in TOC, switch cutaways cleanly!
     if (state.mode !== 'tower') {
       if (section === 'mamba') {
@@ -381,7 +485,7 @@ function boot(): void {
     if (state.mode === 'tower') {
       state.section = 'overview';
       flyToPose(cameraPoseForSection('overview', currentMetrics));
-      controls.sync(state, currentCutawayScene);
+      syncUi();
     } else if (currentCutawayScene) {
       flyToPose(cameraPoseForCutaway(state.mode, currentCutawayScene.fitBounds, currentMetrics));
     }
@@ -405,13 +509,14 @@ function boot(): void {
       if (currentCutawayScene) {
         flyToPose(cameraPoseForCutaway(state.mode, currentCutawayScene.fitBounds, currentMetrics));
       }
-      controls.sync(state, currentCutawayScene);
+      syncUi();
       scheduleDraw();
     }
   };
 
   const stepBay = (delta: -1 | 1) => {
     if (state.mode !== 'tower') return;
+    state.tourActive = false;
     if (state.selectedBay === null) {
       state.selectedBay = delta > 0 ? 1 : 52;
     } else {
@@ -421,10 +526,27 @@ function boot(): void {
     markDirtyAndSchedule(true);
   };
 
+  const memoryDrawer = new MemoryScalingDrawer(NEMOTRON_SPEC, memoryChartHost, {
+    onClose: () => {
+      state.memoryChartOpen = false;
+      syncUi();
+    },
+    onPrecisionChange: (mode: PrecisionMode) => {
+      if (mode === state.precision) return;
+      state.precision = mode;
+      markDirtyAndSchedule(true);
+    },
+    onProbeTokensChange: (tokens: number) => {
+      state.memoryProbeTokens = tokens;
+      syncUi();
+    },
+  });
+
   const controls = new MacroControls(NEMOTRON_SPEC, controlEls, {
     onSelectMode: (mode) => selectMode(mode),
     onSelectSection: selectSection,
     onSelectMambaBay: (bayId) => {
+      state.tourActive = false;
       if (state.mambaBayId === bayId && state.mode === 'cutaway_mamba') return;
       state.mambaBayId = bayId;
       state.selectedPart = null;
@@ -432,6 +554,7 @@ function boot(): void {
       markDirtyAndSchedule(true);
     },
     onSelectGqaBay: (bayId) => {
+      state.tourActive = false;
       if (state.gqaBayId === bayId && state.mode === 'cutaway_gqa') return;
       state.gqaBayId = bayId;
       state.selectedPart = null;
@@ -464,6 +587,37 @@ function boot(): void {
       state.selectedPart = null;
       state.hoveredPart = null;
       markDirtyAndSchedule(true);
+    },
+    onTourToggle: () => {
+      if (state.tourActive) {
+        exitTourToFreeExplore();
+      } else {
+        applyTourChapter(state.tourChapter);
+      }
+    },
+    onTourPrev: () => {
+      const prev = prevChapterIndex(state.tourChapter);
+      if (prev !== null) applyTourChapter(prev);
+    },
+    onTourNext: () => {
+      const next = nextChapterIndex(state.tourChapter);
+      if (next !== null) applyTourChapter(next);
+    },
+    onTourRestart: () => applyTourChapter(0),
+    onTourExit: exitTourToFreeExplore,
+    onToggleMemoryChart: () => {
+      state.memoryChartOpen = !state.memoryChartOpen;
+      if (state.memoryChartOpen) state.shortcutsOpen = false;
+      syncUi();
+    },
+    onToggleShortcuts: () => {
+      state.shortcutsOpen = !state.shortcutsOpen;
+      syncUi();
+    },
+    onCloseShortcuts: () => {
+      if (!state.shortcutsOpen) return;
+      state.shortcutsOpen = false;
+      syncUi();
     },
   });
 
@@ -607,9 +761,12 @@ function boot(): void {
       pendingRafId = null;
     }
     if (device) device.markLost(true);
-    showFallbackMessage(
+    showFallbackCard(
       fallbackEl,
-      'WebGL2 context lost. Waiting for restoration; sidebar controls remain active.',
+      'WebGL2 Context Lost',
+      'Waiting for the browser to restore the graphics context. The guided walkthrough, sidebar controls, and interactive 1 → 1M memory chart remain active.',
+      openMemoryChartFromFallback,
+      true,
     );
   });
 
@@ -624,9 +781,12 @@ function boot(): void {
       geometryDirty = true;
       drawNow();
     } catch {
-      showFallbackMessage(
+      showFallbackCard(
         fallbackEl,
-        'WebGL2 context could not be restored. Sidebar controls and inspector remain active.',
+        'WebGL2 Context Recovery Failed',
+        'The 3D graphics context could not be restored. Sidebar controls, guided tour text, and the 1 → 1M memory chart remain active.',
+        openMemoryChartFromFallback,
+        true,
       );
     }
   });
@@ -758,10 +918,12 @@ function boot(): void {
       const hit = pickAtClient(ev.clientX, ev.clientY);
       if (state.mode === 'tower') {
         const hitBay = hit ? hit.bayId : null;
+        if (hitBay !== null) state.tourActive = false;
         state.selectedBay = hitBay;
         state.hoveredBay = hitBay;
       } else {
         const hitPart = hit?.partId ?? null;
+        if (hitPart !== null) state.tourActive = false;
         state.selectedPart = hitPart;
         state.hoveredPart = hitPart;
       }
@@ -812,7 +974,7 @@ function boot(): void {
     { passive: false },
   );
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts (ignored when focus is inside an input/textarea/select)
   window.addEventListener('keydown', (ev) => {
     const target = ev.target as HTMLElement | null;
     if (
@@ -824,22 +986,27 @@ function boot(): void {
     ) {
       return;
     }
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
 
-    if (state.mode === 'tower') {
-      if (ev.key === 'ArrowRight' || ev.key === 'ArrowDown') {
-        ev.preventDefault();
-        stepBay(1);
-      } else if (ev.key === 'ArrowLeft' || ev.key === 'ArrowUp') {
-        ev.preventDefault();
-        stepBay(-1);
-      } else if (ev.key === 'Enter' && state.selectedBay !== null) {
-        ev.preventDefault();
-        zoomToBay(state.selectedBay);
-      }
+    const key = ev.key;
+
+    if (key === '?') {
+      ev.preventDefault();
+      state.shortcutsOpen = !state.shortcutsOpen;
+      syncUi();
+      return;
     }
 
-    if (ev.key === 'Escape') {
-      if (state.selectedPart !== null || state.hoveredPart !== null) {
+    if (key === 'Escape') {
+      if (state.shortcutsOpen) {
+        ev.preventDefault();
+        state.shortcutsOpen = false;
+        syncUi();
+      } else if (state.memoryChartOpen) {
+        ev.preventDefault();
+        state.memoryChartOpen = false;
+        syncUi();
+      } else if (state.selectedPart !== null || state.hoveredPart !== null) {
         ev.preventDefault();
         state.selectedPart = null;
         state.hoveredPart = null;
@@ -853,13 +1020,90 @@ function boot(): void {
         state.hoveredBay = null;
         markDirtyAndSchedule(true);
       }
+      return;
+    }
+
+    if (key === '1') {
+      ev.preventDefault();
+      selectMode('tower');
+      return;
+    }
+    if (key === '2') {
+      ev.preventDefault();
+      selectMode('cutaway_mamba');
+      return;
+    }
+    if (key === '3') {
+      ev.preventDefault();
+      selectMode('cutaway_moe');
+      return;
+    }
+    if (key === '4') {
+      ev.preventDefault();
+      selectMode('cutaway_gqa');
+      return;
+    }
+    if (key === 'p' || key === 'P') {
+      ev.preventDefault();
+      state.precision = state.precision === 'bf16' ? 'fp8_selective' : 'bf16';
+      markDirtyAndSchedule(true);
+      return;
+    }
+    if (key === 'm' || key === 'M') {
+      ev.preventDefault();
+      state.memoryChartOpen = !state.memoryChartOpen;
+      if (state.memoryChartOpen) state.shortcutsOpen = false;
+      syncUi();
+      return;
+    }
+    if (key === 'r' || key === 'R') {
+      ev.preventDefault();
+      resetAll();
+      return;
+    }
+
+    if (key === 'ArrowRight') {
+      if (state.tourActive) {
+        ev.preventDefault();
+        const next = nextChapterIndex(state.tourChapter);
+        if (next !== null) applyTourChapter(next);
+      } else if (state.mode === 'tower') {
+        ev.preventDefault();
+        stepBay(1);
+      }
+      return;
+    }
+
+    if (key === 'ArrowLeft') {
+      if (state.tourActive) {
+        ev.preventDefault();
+        const prev = prevChapterIndex(state.tourChapter);
+        if (prev !== null) applyTourChapter(prev);
+      } else if (state.mode === 'tower') {
+        ev.preventDefault();
+        stepBay(-1);
+      }
+      return;
+    }
+
+    if (state.mode === 'tower' && !state.tourActive) {
+      if (key === 'ArrowDown') {
+        ev.preventDefault();
+        stepBay(1);
+      } else if (key === 'ArrowUp') {
+        ev.preventDefault();
+        stepBay(-1);
+      } else if (key === 'Enter' && state.selectedBay !== null) {
+        ev.preventDefault();
+        zoomToBay(state.selectedBay);
+      }
     }
   });
 
   void TOWER_FIT_BOUNDS;
 
   rebuildSceneIfNeeded();
-  controls.sync(state, currentCutawayScene);
+  syncUi();
   drawNow();
 }
 

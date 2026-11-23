@@ -22,6 +22,7 @@ import {
   type ViewMode,
 } from '../model/state';
 import type { CutawayPartInfo, CutawaySceneGeometry } from '../scene/cutaways';
+import { getWalkthroughChapter, WALKTHROUGH_COUNT } from '../story/walkthrough';
 
 export interface ControlsCallbacks {
   onSelectMode: (mode: ViewMode) => void;
@@ -36,6 +37,14 @@ export interface ControlsCallbacks {
   onReset: () => void;
   onStepBay: (delta: -1 | 1) => void;
   onClearSelection: () => void;
+  onTourToggle: () => void;
+  onTourPrev: () => void;
+  onTourNext: () => void;
+  onTourRestart: () => void;
+  onTourExit: () => void;
+  onToggleMemoryChart: () => void;
+  onToggleShortcuts: () => void;
+  onCloseShortcuts: () => void;
 }
 
 interface SectionCopy {
@@ -139,6 +148,7 @@ export interface ControlsElements {
   mambaBayButtons: HTMLButtonElement[];
   gqaBayButtons: HTMLButtonElement[];
   miniNodes: SVGGElement[];
+  tourToggleBtn: HTMLButtonElement;
   towerSubbar: HTMLDivElement;
   mambaSubbar: HTMLDivElement;
   moeSubbar: HTMLDivElement;
@@ -152,6 +162,8 @@ export interface ControlsElements {
   precisionBf16: HTMLButtonElement;
   precisionFp8: HTMLButtonElement;
   memoryReadout: HTMLDivElement;
+  memoryReadoutLines: HTMLDivElement;
+  memoryChartBtn: HTMLButtonElement;
   bayStepRow: HTMLDivElement;
   bayPrev: HTMLButtonElement;
   bayNext: HTMLButtonElement;
@@ -159,6 +171,9 @@ export interface ControlsElements {
   zoomBayBtn: HTMLButtonElement;
   fitBtn: HTMLButtonElement;
   resetBtn: HTMLButtonElement;
+  shortcutsBtn: HTMLButtonElement;
+  shortcutsPopover: HTMLDivElement;
+  shortcutsCloseBtn: HTMLButtonElement;
 }
 
 export function queryControlsElements(): ControlsElements {
@@ -174,6 +189,7 @@ export function queryControlsElements(): ControlsElements {
     mambaBayButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-mamba-bay]')),
     gqaBayButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-gqa-bay]')),
     miniNodes: Array.from(document.querySelectorAll<SVGGElement>('.mini-node[data-mini-section]')),
+    tourToggleBtn: get<HTMLButtonElement>('tour-toggle-btn'),
     towerSubbar: get<HTMLDivElement>('tower-subbar'),
     mambaSubbar: get<HTMLDivElement>('mamba-subbar'),
     moeSubbar: get<HTMLDivElement>('moe-subbar'),
@@ -187,6 +203,8 @@ export function queryControlsElements(): ControlsElements {
     precisionBf16: get<HTMLButtonElement>('precision-bf16'),
     precisionFp8: get<HTMLButtonElement>('precision-fp8'),
     memoryReadout: get<HTMLDivElement>('memory-readout'),
+    memoryReadoutLines: get<HTMLDivElement>('memory-readout-lines'),
+    memoryChartBtn: get<HTMLButtonElement>('memory-chart-btn'),
     bayStepRow: get<HTMLDivElement>('bay-step-row'),
     bayPrev: get<HTMLButtonElement>('bay-prev'),
     bayNext: get<HTMLButtonElement>('bay-next'),
@@ -194,6 +212,9 @@ export function queryControlsElements(): ControlsElements {
     zoomBayBtn: get<HTMLButtonElement>('zoom-bay-btn'),
     fitBtn: get<HTMLButtonElement>('fit-btn'),
     resetBtn: get<HTMLButtonElement>('reset-btn'),
+    shortcutsBtn: get<HTMLButtonElement>('shortcuts-btn'),
+    shortcutsPopover: get<HTMLDivElement>('shortcuts-popover'),
+    shortcutsCloseBtn: get<HTMLButtonElement>('shortcuts-close'),
   };
 }
 
@@ -292,6 +313,11 @@ export class MacroControls {
     this.on(this.els.bayPrev, 'click', () => this.cb.onStepBay(-1));
     this.on(this.els.bayNext, 'click', () => this.cb.onStepBay(1));
     this.on(this.els.bayClear, 'click', () => this.cb.onClearSelection());
+
+    this.on(this.els.tourToggleBtn, 'click', () => this.cb.onTourToggle());
+    this.on(this.els.memoryChartBtn, 'click', () => this.cb.onToggleMemoryChart());
+    this.on(this.els.shortcutsBtn, 'click', () => this.cb.onToggleShortcuts());
+    this.on(this.els.shortcutsCloseBtn, 'click', () => this.cb.onCloseShortcuts());
   }
 
   sync(state: SceneState, activeCutaway: CutawaySceneGeometry | null = null): void {
@@ -383,6 +409,25 @@ export class MacroControls {
     this.els.bayClear.textContent = hasPinnedPart ? 'Clear slab' : 'Clear';
     this.els.bayStepRow.hidden = !isTower && !hasPinnedPart;
 
+    // Guided Tour header toggle button
+    const activeChapter = getWalkthroughChapter(state.tourChapter);
+    this.els.tourToggleBtn.classList.toggle('is-active', state.tourActive);
+    this.els.tourToggleBtn.textContent = state.tourActive
+      ? `Tour ${activeChapter.number}/${WALKTHROUGH_COUNT}`
+      : 'Guided Tour';
+
+    // Memory Scaling chart trigger highlight (Chapter 7 + active open state)
+    const highlightChartBtn =
+      state.tourActive && Boolean(activeChapter.highlightMemoryChart) && !state.memoryChartOpen;
+    this.els.memoryChartBtn.classList.toggle('is-open', state.memoryChartOpen);
+    this.els.memoryChartBtn.classList.toggle('is-highlighted', highlightChartBtn);
+    this.els.memoryChartBtn.setAttribute('aria-expanded', String(state.memoryChartOpen));
+
+    // Shortcuts popover
+    this.els.shortcutsBtn.classList.toggle('is-active', state.shortcutsOpen);
+    this.els.shortcutsBtn.setAttribute('aria-expanded', String(state.shortcutsOpen));
+    this.els.shortcutsPopover.hidden = !state.shortcutsOpen;
+
     // Memory readout (with Part A #4 static weights vs dynamic sequence cache clarification!)
     const readoutKey = `${state.tokens}:${state.precision}`;
     if (readoutKey !== this.lastReadoutKey) {
@@ -390,7 +435,7 @@ export class MacroControls {
       const mem = memoryFor(this.spec, state.tokens, state.precision);
       const fmt = formatMemoryReadout(mem);
 
-      this.els.memoryReadout.innerHTML = '';
+      this.els.memoryReadoutLines.innerHTML = '';
       const rows = [
         { text: fmt.mambaText, cls: 'readout-line readout-fixed' },
         { text: fmt.kvText, cls: 'readout-line readout-kv' },
@@ -401,18 +446,20 @@ export class MacroControls {
         const div = document.createElement('div');
         div.className = r.cls;
         div.textContent = r.text;
-        this.els.memoryReadout.appendChild(div);
+        this.els.memoryReadoutLines.appendChild(div);
       }
     }
 
     // Middle editorial panel
     const activeBayId = isTower ? state.hoveredBay ?? state.selectedBay : null;
     const activePart = !isTower ? state.hoveredPart ?? state.selectedPart : null;
-    const editorialKey = `${state.mode}:${state.mambaBayId}:${state.gqaBayId}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
+    const editorialKey = `${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${state.mode}:${state.mambaBayId}:${state.gqaBayId}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
 
     if (editorialKey !== this.lastEditorialKey) {
       this.lastEditorialKey = editorialKey;
-      if (isTower) {
+      if (state.tourActive) {
+        this.renderTourEditorial(state);
+      } else if (isTower) {
         this.renderTowerEditorial(
           state.section,
           activeBayId,
@@ -426,6 +473,122 @@ export class MacroControls {
     }
   }
 
+  private renderTourEditorial(state: SceneState): void {
+    const ch = getWalkthroughChapter(state.tourChapter);
+    const panel = this.els.editorialPanel;
+    panel.classList.add('is-tour-mode');
+    panel.innerHTML = '';
+
+    // Top bbycroft/llm-viz style < Chapter N / 7 > bar + subtle progress track
+    const navBar = document.createElement('div');
+    navBar.className = 'tour-nav-bar';
+
+    const prevBtn = document.createElement('button');
+    prevBtn.type = 'button';
+    prevBtn.className = 'tour-arrow-btn';
+    prevBtn.setAttribute('aria-label', 'Previous chapter');
+    prevBtn.textContent = '‹';
+    prevBtn.disabled = ch.index <= 0;
+    prevBtn.addEventListener('click', () => this.cb.onTourPrev());
+
+    const counter = document.createElement('span');
+    counter.className = 'tour-counter';
+    counter.setAttribute('data-testid', 'tour-chapter-counter');
+    counter.textContent = `Chapter ${ch.number} / ${WALKTHROUGH_COUNT}`;
+
+    const nextBtn = document.createElement('button');
+    nextBtn.type = 'button';
+    nextBtn.className = 'tour-arrow-btn';
+    nextBtn.setAttribute('aria-label', 'Next chapter');
+    nextBtn.textContent = '›';
+    nextBtn.disabled = ch.index >= WALKTHROUGH_COUNT - 1;
+    nextBtn.addEventListener('click', () => this.cb.onTourNext());
+
+    navBar.append(prevBtn, counter, nextBtn);
+
+    const progressTrack = document.createElement('div');
+    progressTrack.className = 'tour-progress-track';
+    progressTrack.setAttribute('aria-hidden', 'true');
+    const progressFill = document.createElement('div');
+    progressFill.className = 'tour-progress-fill';
+    progressFill.style.width = `${(ch.number / WALKTHROUGH_COUNT) * 100}%`;
+    progressTrack.appendChild(progressFill);
+
+    const scrollBody = document.createElement('div');
+    scrollBody.className = 'tour-scroll-body';
+
+    const header = document.createElement('div');
+    header.className = 'ed-header tour-ed-header';
+
+    const title = document.createElement('h2');
+    title.className = 'ed-title';
+    title.textContent = `${ch.number}. ${ch.title}`;
+
+    const badge = document.createElement('span');
+    badge.className = 'ed-badge';
+    if (ch.precision === 'fp8_selective') badge.classList.add('ed-badge-gold');
+    badge.textContent = ch.badge;
+
+    header.append(title, badge);
+    scrollBody.appendChild(header);
+
+    for (const para of ch.paragraphs) {
+      const p = document.createElement('p');
+      p.className = 'ed-body';
+      p.textContent = para;
+      scrollBody.appendChild(p);
+    }
+
+    const list = document.createElement('ul');
+    list.className = 'ed-specs';
+    for (const item of ch.takeaways) {
+      const li = document.createElement('li');
+      li.textContent = item;
+      list.appendChild(li);
+    }
+    scrollBody.appendChild(list);
+
+    // Bottom Continue -> / Exit Tour bar (always pinned visible!)
+    const actions = document.createElement('div');
+    actions.className = 'ed-actions tour-actions';
+
+    const isLast = ch.index >= WALKTHROUGH_COUNT - 1;
+    if (!isLast) {
+      const contBtn = document.createElement('button');
+      contBtn.type = 'button';
+      contBtn.id = 'tour-continue-btn';
+      contBtn.className = 'ed-cta-btn tour-continue-btn';
+      contBtn.textContent = 'Continue →';
+      contBtn.addEventListener('click', () => this.cb.onTourNext());
+      actions.appendChild(contBtn);
+    } else {
+      const chartBtn = document.createElement('button');
+      chartBtn.type = 'button';
+      chartBtn.id = 'tour-chart-btn';
+      chartBtn.className = 'ed-cta-btn tour-continue-btn';
+      chartBtn.textContent = 'Memory Scaling 1 → 1M ↗';
+      chartBtn.addEventListener('click', () => this.cb.onToggleMemoryChart());
+      actions.appendChild(chartBtn);
+
+      const restartBtn = document.createElement('button');
+      restartBtn.type = 'button';
+      restartBtn.className = 'ed-cta-btn ed-cta-secondary';
+      restartBtn.textContent = 'Restart';
+      restartBtn.addEventListener('click', () => this.cb.onTourRestart());
+      actions.appendChild(restartBtn);
+    }
+
+    const exitBtn = document.createElement('button');
+    exitBtn.type = 'button';
+    exitBtn.id = 'tour-exit-btn';
+    exitBtn.className = 'ed-cta-btn ed-cta-secondary';
+    exitBtn.textContent = isLast ? 'Free Explore' : 'Exit Tour';
+    exitBtn.addEventListener('click', () => this.cb.onTourExit());
+    actions.appendChild(exitBtn);
+
+    panel.append(navBar, progressTrack, scrollBody, actions);
+  }
+
   private renderTowerEditorial(
     section: TocSectionId,
     bayId: number | null,
@@ -434,6 +597,7 @@ export class MacroControls {
     tokens: number,
   ): void {
     const panel = this.els.editorialPanel;
+    panel.classList.remove('is-tour-mode');
     panel.innerHTML = '';
 
     if (bayId !== null) {
@@ -566,6 +730,7 @@ export class MacroControls {
     cutaway: CutawaySceneGeometry | null,
   ): void {
     const panel = this.els.editorialPanel;
+    panel.classList.remove('is-tour-mode');
     panel.innerHTML = '';
 
     // 1. If user clicked/hovered a specific tensor slab inside the cutaway, show its details!

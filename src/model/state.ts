@@ -37,6 +37,11 @@ export interface SceneState {
   camera: CameraPose;
   savedMacroCamera: CameraPose;
   reducedMotion: boolean;
+  tourActive: boolean;
+  tourChapter: number;
+  memoryChartOpen: boolean;
+  memoryProbeTokens: number;
+  shortcutsOpen: boolean;
   beat: number | null;
   elapsedMs: number;
   playing: boolean;
@@ -96,6 +101,11 @@ export function createInitialState(defaultPose: CameraPose, reducedMotion = fals
     camera: cloneCameraPose(defaultPose),
     savedMacroCamera: cloneCameraPose(defaultPose),
     reducedMotion,
+    tourActive: true,
+    tourChapter: 0,
+    memoryChartOpen: false,
+    memoryProbeTokens: 1_048_576,
+    shortcutsOpen: false,
     beat: null,
     elapsedMs: 0,
     playing: false,
