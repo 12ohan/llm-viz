@@ -13,6 +13,7 @@ import {
   MAX_TOKENS,
   MIN_TOKENS,
   type CameraPose,
+  type GqaViewAngle,
   type SceneState,
   type TocSectionId,
   type ViewMode,
@@ -32,7 +33,8 @@ import {
 import { RenderDevice } from './render/device';
 import { LinesPass } from './render/lines';
 import { clientPointToRay, pickMacroBay, type PickHit } from './render/pick';
-import { RibbonsPass } from './render/ribbons';
+import { FlatFlowRibbonsPass, RibbonsPass } from './render/ribbons';
+import { SheetsPass } from './render/sheets';
 import { SolidsPass } from './render/solids';
 import {
   buildGqaCutaway,
@@ -171,6 +173,7 @@ function cameraPoseForCutaway(
   mode: Exclude<ViewMode, 'tower'>,
   bounds: AABB,
   metrics: ViewportMetrics,
+  gqaViewAngle: GqaViewAngle = 'three_quarter',
 ): CameraPose {
   if (mode === 'cutaway_mamba') {
     return fitPerspectiveToBounds(
@@ -182,9 +185,14 @@ function cameraPoseForCutaway(
       bounds, 26, 28, metrics.innerWidth, metrics.innerHeight, DEFAULT_FOV_DEG, 0.88,
     );
   }
-  // cutaway_gqa: 3/4 front-left perspective revealing 32 stacked Q plates, 16x thinner K/V, and twin +Z KV stacks
+  // cutaway_gqa: XZ drafting-table sheet schematic with consistent top-to-bottom orientation
+  if (gqaViewAngle === 'near_plan') {
+    return fitPerspectiveToBounds(
+      bounds, 1.5, 78, metrics.innerWidth, metrics.innerHeight, DEFAULT_FOV_DEG, 0.85,
+    );
+  }
   return fitPerspectiveToBounds(
-    bounds, 30, 22, metrics.innerWidth, metrics.innerHeight, DEFAULT_FOV_DEG, 0.88,
+    bounds, 9, 50, metrics.innerWidth, metrics.innerHeight, DEFAULT_FOV_DEG, 0.98,
   );
 }
 
@@ -223,8 +231,10 @@ function boot(): void {
 
   let device: RenderDevice | null = null;
   let solidsPass: SolidsPass | null = null;
+  let sheetsPass: SheetsPass | null = null;
   let linesPass: LinesPass | null = null;
   let ribbonsPass: RibbonsPass | null = null;
+  let flatFlowPass: FlatFlowRibbonsPass | null = null;
 
   const openMemoryChartFromFallback = () => {
     state.memoryChartOpen = true;
@@ -235,8 +245,10 @@ function boot(): void {
   try {
     device = new RenderDevice(canvas);
     solidsPass = new SolidsPass(device.gl);
+    sheetsPass = new SheetsPass(device.gl);
     linesPass = new LinesPass(device.gl);
     ribbonsPass = new RibbonsPass(device.gl);
+    flatFlowPass = new FlatFlowRibbonsPass(device.gl);
   } catch (err) {
     const detail = err instanceof Error ? err.message : 'WebGL2 unavailable';
     showFallbackCard(
@@ -321,10 +333,28 @@ function boot(): void {
       }
     } else {
       currentCutawayScene = buildActiveCutaway();
-      if (currentCutawayScene && device && !device.isLost && solidsPass && linesPass && ribbonsPass) {
-        solidsPass.upload(currentCutawayScene.solidData, currentCutawayScene.solidCount);
-        linesPass.upload(currentCutawayScene.lineData, currentCutawayScene.lineCount);
-        ribbonsPass.upload(currentCutawayScene.ribbonData, currentCutawayScene.ribbonCount);
+      if (
+        currentCutawayScene &&
+        device &&
+        !device.isLost &&
+        solidsPass &&
+        sheetsPass &&
+        linesPass &&
+        ribbonsPass &&
+        flatFlowPass
+      ) {
+        if (currentCutawayScene.sheetData && currentCutawayScene.sheetCount && currentCutawayScene.sheetCount > 0) {
+          sheetsPass.upload(currentCutawayScene.sheetData, currentCutawayScene.sheetCount);
+          linesPass.upload(currentCutawayScene.lineData, currentCutawayScene.lineCount);
+          flatFlowPass.upload(
+            currentCutawayScene.flowVertices ?? new Float32Array(0),
+            currentCutawayScene.flowIndices ?? new Uint32Array(0),
+          );
+        } else {
+          solidsPass.upload(currentCutawayScene.solidData, currentCutawayScene.solidCount);
+          linesPass.upload(currentCutawayScene.lineData, currentCutawayScene.lineCount);
+          ribbonsPass.upload(currentCutawayScene.ribbonData, currentCutawayScene.ribbonCount);
+        }
       }
     }
     geometryDirty = false;
@@ -368,7 +398,9 @@ function boot(): void {
     if (ch.mode === 'tower') {
       flyToPose(cameraPoseForSection(ch.section, currentMetrics));
     } else if (currentCutawayScene) {
-      flyToPose(cameraPoseForCutaway(ch.mode, currentCutawayScene.fitBounds, currentMetrics));
+      flyToPose(
+        cameraPoseForCutaway(ch.mode, currentCutawayScene.fitBounds, currentMetrics, state.gqaViewAngle),
+      );
     }
 
     syncUi();
@@ -405,7 +437,9 @@ function boot(): void {
     } else if (nextMode === 'tower') {
       flyToPose(state.savedMacroCamera);
     } else if (currentCutawayScene) {
-      flyToPose(cameraPoseForCutaway(nextMode, currentCutawayScene.fitBounds, currentMetrics));
+      flyToPose(
+        cameraPoseForCutaway(nextMode, currentCutawayScene.fitBounds, currentMetrics, state.gqaViewAngle),
+      );
     }
 
     syncUi();
@@ -487,7 +521,9 @@ function boot(): void {
       flyToPose(cameraPoseForSection('overview', currentMetrics));
       syncUi();
     } else if (currentCutawayScene) {
-      flyToPose(cameraPoseForCutaway(state.mode, currentCutawayScene.fitBounds, currentMetrics));
+      flyToPose(
+        cameraPoseForCutaway(state.mode, currentCutawayScene.fitBounds, currentMetrics, state.gqaViewAngle),
+      );
     }
   };
 
@@ -507,7 +543,9 @@ function boot(): void {
       geometryDirty = true;
       rebuildSceneIfNeeded();
       if (currentCutawayScene) {
-        flyToPose(cameraPoseForCutaway(state.mode, currentCutawayScene.fitBounds, currentMetrics));
+        flyToPose(
+          cameraPoseForCutaway(state.mode, currentCutawayScene.fitBounds, currentMetrics, state.gqaViewAngle),
+        );
       }
       syncUi();
       scheduleDraw();
@@ -558,6 +596,22 @@ function boot(): void {
       if (state.gqaBayId === bayId && state.mode === 'cutaway_gqa') return;
       state.gqaBayId = bayId;
       state.selectedPart = null;
+      state.hoveredPart = null;
+      markDirtyAndSchedule(true);
+    },
+    onSelectGqaView: (view: GqaViewAngle) => {
+      if (state.gqaViewAngle === view && state.mode === 'cutaway_gqa') return;
+      state.gqaViewAngle = view;
+      if (state.mode === 'cutaway_gqa' && currentCutawayScene) {
+        flyToPose(
+          cameraPoseForCutaway('cutaway_gqa', currentCutawayScene.fitBounds, currentMetrics, view),
+        );
+      }
+      syncUi();
+    },
+    onSelectPart: (partId: string | null) => {
+      state.tourActive = false;
+      state.selectedPart = partId;
       state.hoveredPart = null;
       markDirtyAndSchedule(true);
     },
@@ -649,18 +703,43 @@ function boot(): void {
 
     currentSnapshot = buildCameraSnapshot(state.camera, activeBounds, currentMetrics);
 
-    if (device && !device.isLost && solidsPass && linesPass && ribbonsPass) {
+    if (
+      device &&
+      !device.isLost &&
+      solidsPass &&
+      sheetsPass &&
+      linesPass &&
+      ribbonsPass &&
+      flatFlowPass
+    ) {
       const fb = device.ensureSize(currentMetrics);
       device.beginFrame(fb);
-      solidsPass.draw(currentSnapshot.viewProj);
-      linesPass.draw(
-        currentSnapshot.viewProj,
-        fb.vpWidth,
-        fb.vpHeight,
-        currentMetrics.dpr,
-        currentSnapshot.eye,
-      );
-      ribbonsPass.draw(currentSnapshot.viewProj);
+      const useSheetPipeline =
+        state.mode !== 'tower' &&
+        currentCutawayScene !== null &&
+        Boolean(currentCutawayScene.sheetCount && currentCutawayScene.sheetCount > 0);
+
+      if (useSheetPipeline) {
+        sheetsPass.draw(currentSnapshot.viewProj);
+        linesPass.draw(
+          currentSnapshot.viewProj,
+          fb.vpWidth,
+          fb.vpHeight,
+          currentMetrics.dpr,
+          currentSnapshot.eye,
+        );
+        flatFlowPass.draw(currentSnapshot.viewProj);
+      } else {
+        solidsPass.draw(currentSnapshot.viewProj);
+        linesPass.draw(
+          currentSnapshot.viewProj,
+          fb.vpWidth,
+          fb.vpHeight,
+          currentMetrics.dpr,
+          currentSnapshot.eye,
+        );
+        ribbonsPass.draw(currentSnapshot.viewProj);
+      }
       device.endFrame(fb);
     }
 
@@ -725,7 +804,12 @@ function boot(): void {
     if (state.mode === 'tower' && state.section === 'overview' && !flyAnim && state.selectedBay === null) {
       state.camera = cameraPoseForSection('overview', next);
     } else if (state.mode !== 'tower' && !flyAnim && currentCutawayScene) {
-      state.camera = cameraPoseForCutaway(state.mode, currentCutawayScene.fitBounds, next);
+      state.camera = cameraPoseForCutaway(
+        state.mode,
+        currentCutawayScene.fitBounds,
+        next,
+        state.gqaViewAngle,
+      );
     }
     drawNow();
   };
@@ -775,8 +859,10 @@ function boot(): void {
     try {
       device.markLost(false);
       solidsPass = new SolidsPass(device.gl);
+      sheetsPass = new SheetsPass(device.gl);
       linesPass = new LinesPass(device.gl);
       ribbonsPass = new RibbonsPass(device.gl);
+      flatFlowPass = new FlatFlowRibbonsPass(device.gl);
       hideFallbackMessage(fallbackEl);
       geometryDirty = true;
       drawNow();
@@ -898,7 +984,8 @@ function boot(): void {
           markDirtyAndSchedule(true);
         }
       } else {
-        const hitPart = hit?.partId ?? null;
+        const hitPart =
+          hit?.headIndex !== undefined ? `q-head-${hit.headIndex}` : hit?.partId ?? null;
         if (hitPart !== state.hoveredPart) {
           state.hoveredPart = hitPart;
           markDirtyAndSchedule(true);
@@ -922,7 +1009,8 @@ function boot(): void {
         state.selectedBay = hitBay;
         state.hoveredBay = hitBay;
       } else {
-        const hitPart = hit?.partId ?? null;
+        const hitPart =
+          hit?.headIndex !== undefined ? `q-head-${hit.headIndex}` : hit?.partId ?? null;
         if (hitPart !== null) state.tourActive = false;
         state.selectedPart = hitPart;
         state.hoveredPart = hitPart;

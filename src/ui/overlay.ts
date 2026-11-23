@@ -60,9 +60,11 @@ export class MacroOverlay {
   private readonly labelLayer: HTMLDivElement;
   private readonly leaderPath: SVGPathElement;
   private readonly phaseBracketPath: SVGPathElement;
+  private readonly caliperPath: SVGPathElement;
 
   private readonly landmarkNodes = new Map<string, HTMLDivElement>();
   private readonly cutawayNodes = new Map<string, HTMLDivElement>();
+  private readonly caliperNodes = new Map<string, HTMLDivElement>();
   private readonly phaseNodes: HTMLDivElement[] = [];
   private readonly bayMiniNodes = new Map<number, HTMLDivElement>();
   private readonly kvTickNodes = new Map<number, HTMLDivElement>();
@@ -81,8 +83,9 @@ export class MacroOverlay {
     this.measureCtx = scratch.getContext('2d');
 
     this.phaseBracketPath = this.createSvgPath('overlay-phase-bracket');
+    this.caliperPath = this.createSvgPath('overlay-caliper');
     this.leaderPath = this.createSvgPath('overlay-leader');
-    this.svg.append(this.phaseBracketPath, this.leaderPath);
+    this.svg.append(this.phaseBracketPath, this.caliperPath, this.leaderPath);
 
     // Pre-allocate dark landmark pills for tower
     const landmarkIds = [
@@ -156,13 +159,27 @@ export class MacroOverlay {
     return el;
   }
 
+  private getOrCreateCaliperNode(id: string): HTMLDivElement {
+    let el = this.caliperNodes.get(id);
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'ov-caliper-label';
+      el.style.display = 'none';
+      this.labelLayer.appendChild(el);
+      this.caliperNodes.set(id, el);
+    }
+    return el;
+  }
+
   private hideAll(): void {
     for (const el of this.landmarkNodes.values()) el.style.display = 'none';
     for (const el of this.cutawayNodes.values()) el.style.display = 'none';
+    for (const el of this.caliperNodes.values()) el.style.display = 'none';
     for (const el of this.phaseNodes) el.style.display = 'none';
     for (const el of this.bayMiniNodes.values()) el.style.display = 'none';
     for (const el of this.kvTickNodes.values()) el.style.display = 'none';
     this.activePill.style.display = 'none';
+    this.caliperPath.setAttribute('d', '');
   }
 
   clearMetricCache(): void {
@@ -396,6 +413,13 @@ export class MacroOverlay {
     const monoFont = '500 10.5px ui-monospace, SFMono-Regular, Menlo, monospace';
     const activePart = hoveredPart ?? selectedPart;
 
+    // Thin-sheet drafting-table cutaways (GQA Increment 1+): exterior edge-aligned labels,
+    // zero matrix-face occlusion, progressive detail reveal, and subtle SVG dimension calipers.
+    if (scene.sheetCount && scene.sheetCount > 0) {
+      this.updateSheetCutawayOverlay(scene, snapshot, tokens, activePart, occupied, leaderSegs, minY, maxY);
+      return;
+    }
+
     // Prioritize active part pill, gold callouts, and NoPE callout so they never get crowded out
     const orderedLandmarks: LandmarkAnchor[] = [...scene.landmarks].sort((a, b) => {
       const pa = a.partId === activePart ? 3 : a.tone === 'gold' || a.id === 'g-nope' ? 2 : 1;
@@ -489,6 +513,182 @@ export class MacroOverlay {
     }
 
     this.leaderPath.setAttribute('d', leaderSegs.join(''));
+    this.phaseBracketPath.setAttribute('d', '');
+  }
+
+  /** Exterior, zero-occlusion label & dimension-caliper pass for thin-sheet cutaways (GQA). */
+  private updateSheetCutawayOverlay(
+    scene: CutawaySceneGeometry,
+    snapshot: CameraSnapshot,
+    tokens: number,
+    activePart: string | null,
+    occupied: PlacedRect[],
+    leaderSegs: string[],
+    minY: number,
+    maxY: number,
+  ): void {
+    const { hostWidth } = snapshot.metrics;
+    const sheetFont = '600 10.5px system-ui, -apple-system, sans-serif';
+    const monoFont = '600 9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+    const caliperSegs: string[] = [];
+
+    // Estimate zoom level from screen-space width of a 1-unit horizontal span at origin
+    const pOrigin = projectWorldToHostCss([0, 0.05, 0], snapshot);
+    const pUnit = projectWorldToHostCss([1, 0.05, 0], snapshot);
+    const pxPerWorldUnit =
+      pOrigin.visible && pUnit.visible ? Math.hypot(pUnit.x - pOrigin.x, pUnit.y - pOrigin.y) : 50;
+    const isCloseZoom = pxPerWorldUnit >= 82;
+
+    const isHeadSelected = activePart !== null && activePart.startsWith('q-head-');
+
+    const ordered = [...scene.landmarks].sort((a, b) => {
+      const aAct = a.partId !== undefined && a.partId === activePart ? 3 : a.tier === 'detail' ? 0 : 1;
+      const bAct = b.partId !== undefined && b.partId === activePart ? 3 : b.tier === 'detail' ? 0 : 1;
+      return bAct - aAct;
+    });
+
+    for (const lm of ordered) {
+      const isAct = lm.partId !== undefined && lm.partId === activePart;
+      if (lm.tier === 'detail' && !isAct && !isCloseZoom) {
+        continue;
+      }
+
+      const pt = projectWorldToHostCss(lm.world, snapshot);
+      if (!pt.visible || pt.x < -12 || pt.x > hostWidth + 12 || pt.y < minY - 12 || pt.y > maxY + 12) {
+        continue;
+      }
+
+      const isDetail = lm.tier === 'detail';
+      const w = this.measureText(lm.label, isDetail ? monoFont : sheetFont) + (isDetail ? 10 : 12);
+      const h = isDetail ? 17 : 18;
+      const gap = 4;
+
+      // Strictly respect exterior alignment hint so labels stay OUTSIDE matrix faces
+      let lx = pt.x - w * 0.5;
+      let ly = pt.y - h * 0.5;
+      if (lm.align === 'left') {
+        lx = pt.x - w - gap;
+        ly = pt.y - h * 0.5;
+      } else if (lm.align === 'right') {
+        lx = pt.x + gap;
+        ly = pt.y - h * 0.5;
+      } else if (lm.align === 'top') {
+        lx = pt.x - w * 0.5;
+        ly = pt.y - h - gap;
+      } else if (lm.align === 'bottom') {
+        lx = pt.x - w * 0.5;
+        ly = pt.y + gap;
+      }
+
+      lx = clamp(lx, 8, hostWidth - w - 8);
+      ly = clamp(ly, minY, maxY - h);
+
+      if (overlapsAny(occupied, lx, ly, lx + w, ly + h)) {
+        const nudges: readonly [number, number][] = [
+          [lx, clamp(ly - (h + 3), minY, maxY - h)],
+          [lx, clamp(ly + (h + 3), minY, maxY - h)],
+          [clamp(lx - 14, 8, hostWidth - w - 8), ly],
+          [clamp(lx + 14, 8, hostWidth - w - 8), ly],
+        ];
+        let placed = false;
+        for (const [cx, cy] of nudges) {
+          if (!overlapsAny(occupied, cx, cy, cx + w, cy + h)) {
+            lx = cx;
+            ly = cy;
+            placed = true;
+            break;
+          }
+        }
+        if (!placed && !isAct) continue;
+      }
+
+      const el = this.getOrCreateCutawayNode(lm.id);
+      el.className = isDetail ? 'ov-sheet-label ov-sheet-detail' : 'ov-sheet-label';
+      if (isAct) el.classList.add('is-active');
+      else if (lm.tone === 'gold') el.classList.add('is-gold');
+      else if (lm.tone === 'cyan') el.classList.add('is-cyan');
+      else if (lm.tone === 'muted') el.classList.add('is-muted');
+
+      el.textContent = lm.label;
+      el.style.display = 'inline-flex';
+      el.style.transform = `translate3d(${lx.toFixed(1)}px, ${ly.toFixed(1)}px, 0)`;
+      occupied.push({ x0: lx, y0: ly, x1: lx + w, y1: ly + h });
+    }
+
+    // Subtle KV depth ticks along right side of KV1
+    if (scene.kvDepthTicks.length > 0 && pxPerWorldUnit >= 36) {
+      const orderedTicks = [...scene.kvDepthTicks].sort((a, b) =>
+        a.token === tokens ? -1 : b.token === tokens ? 1 : a.token - b.token,
+      );
+      for (const tick of orderedTicks) {
+        const pt = projectWorldToHostCss(tick.world, snapshot);
+        if (!pt.visible || pt.x < 8 || pt.x > hostWidth - 28 || pt.y < minY || pt.y > maxY) {
+          continue;
+        }
+        const isCur = tick.token === tokens;
+        const text = isCur ? `T=${tick.token}` : `${tick.token}`;
+        const w = this.measureText(text, monoFont) + 8;
+        const h = 15;
+        const lx = clamp(pt.x + 2, 8, hostWidth - w - 8);
+        const ly = clamp(pt.y - h * 0.5, minY, maxY - h);
+        if (!isCur && overlapsAny(occupied, lx, ly, lx + w, ly + h)) {
+          continue;
+        }
+        const el = this.kvTickNodes.get(tick.token);
+        if (!el) continue;
+        el.textContent = text;
+        el.classList.toggle('is-current', isCur);
+        el.style.display = 'inline-flex';
+        el.style.transform = `translate3d(${lx.toFixed(1)}px, ${ly.toFixed(1)}px, 0)`;
+        occupied.push({ x0: lx, y0: ly, x1: lx + w, y1: ly + h });
+      }
+    }
+
+    // Subtle SVG dimension calipers (revealed on related hover/selection or close zoom)
+    if (scene.calipers && scene.calipers.length > 0) {
+      for (const cal of scene.calipers) {
+        const relatedActive =
+          activePart !== null &&
+          ((cal.partIds && cal.partIds.includes(activePart)) ||
+            (isHeadSelected && cal.partIds?.includes('q-proj')));
+        if (!relatedActive && !isCloseZoom) continue;
+
+        const pa = projectWorldToHostCss(cal.aWorld, snapshot);
+        const pb = projectWorldToHostCss(cal.bWorld, snapshot);
+        if (!pa.visible || !pb.visible) continue;
+
+        const spanPx = Math.hypot(pb.x - pa.x, pb.y - pa.y);
+        if (spanPx < (cal.minPixels ?? 64)) continue;
+
+        const off = cal.offsetPx ?? 8;
+        const ay = clamp(pa.y + off, minY, maxY);
+        const by = clamp(pb.y + off, minY, maxY);
+        const ax = clamp(pa.x, 8, hostWidth - 8);
+        const bx = clamp(pb.x, 8, hostWidth - 8);
+
+        // Caliper bracket line with crisp 4px end ticks
+        caliperSegs.push(
+          `M${ax.toFixed(1)},${(ay - 3).toFixed(1)}L${ax.toFixed(1)},${(ay + 3).toFixed(1)}` +
+          `M${ax.toFixed(1)},${ay.toFixed(1)}L${bx.toFixed(1)},${by.toFixed(1)}` +
+          `M${bx.toFixed(1)},${(by - 3).toFixed(1)}L${bx.toFixed(1)},${(by + 3).toFixed(1)}`,
+        );
+
+        const w = this.measureText(cal.label, monoFont) + 8;
+        const h = 15;
+        const mx = clamp((ax + bx) * 0.5 - w * 0.5, 8, hostWidth - w - 8);
+        const my = clamp((ay + by) * 0.5 + 4, minY, maxY - h);
+        if (!overlapsAny(occupied, mx, my, mx + w, my + h)) {
+          const el = this.getOrCreateCaliperNode(cal.id);
+          el.textContent = cal.label;
+          el.style.display = 'inline-flex';
+          el.style.transform = `translate3d(${mx.toFixed(1)}px, ${my.toFixed(1)}px, 0)`;
+          occupied.push({ x0: mx, y0: my, x1: mx + w, y1: my + h });
+        }
+      }
+    }
+
+    this.leaderPath.setAttribute('d', leaderSegs.join(''));
+    this.caliperPath.setAttribute('d', caliperSegs.join(''));
     this.phaseBracketPath.setAttribute('d', '');
   }
 }

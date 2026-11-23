@@ -14,6 +14,8 @@ export type ViewMode =
   | 'cutaway_moe'
   | 'cutaway_gqa';
 
+export type GqaViewAngle = 'three_quarter' | 'near_plan';
+
 export type TocSectionId =
   | 'overview'
   | 'embedding'
@@ -34,6 +36,7 @@ export interface SceneState {
   selectedPart: string | null;
   mambaBayId: 1 | 42;
   gqaBayId: 6 | 43;
+  gqaViewAngle: GqaViewAngle;
   camera: CameraPose;
   savedMacroCamera: CameraPose;
   reducedMotion: boolean;
@@ -98,6 +101,7 @@ export function createInitialState(defaultPose: CameraPose, reducedMotion = fals
     selectedPart: null,
     mambaBayId: 1,
     gqaBayId: 6,
+    gqaViewAngle: 'three_quarter',
     camera: cloneCameraPose(defaultPose),
     savedMacroCamera: cloneCameraPose(defaultPose),
     reducedMotion,

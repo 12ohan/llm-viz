@@ -17,6 +17,8 @@ export interface Ray {
 export interface PickBox {
   readonly bayId: number;
   readonly partId?: string;
+  readonly headIndex?: number;
+  readonly kvHeadIndex?: 0 | 1;
   readonly min: Vec3;
   readonly max: Vec3;
 }
@@ -24,6 +26,8 @@ export interface PickBox {
 export interface PickHit {
   readonly bayId: number;
   readonly partId?: string;
+  readonly headIndex?: number;
+  readonly kvHeadIndex?: 0 | 1;
   readonly t: number;
   readonly point: Vec3;
   readonly isFascia: boolean;
@@ -126,6 +130,8 @@ function findNearestBoxHit(ray: Ray, boxes: readonly PickBox[], isFascia: boolea
   return {
     bayId: bestBox.bayId,
     partId: bestBox.partId,
+    headIndex: bestBox.headIndex,
+    kvHeadIndex: bestBox.kvHeadIndex,
     t: bestT,
     point: add3(ray.origin, scale3(ray.direction, bestT)),
     isFascia,

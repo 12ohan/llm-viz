@@ -17,11 +17,17 @@ type BayKind = BayDescriptor['kind'];
 import {
   MAX_TOKENS,
   MIN_TOKENS,
+  type GqaViewAngle,
   type SceneState,
   type TocSectionId,
   type ViewMode,
 } from '../model/state';
-import type { CutawayPartInfo, CutawaySceneGeometry } from '../scene/cutaways';
+import {
+  formatQueryHeadId,
+  parseQueryHeadPartId,
+  type CutawayPartInfo,
+  type CutawaySceneGeometry,
+} from '../scene/cutaways';
 import { getWalkthroughChapter, WALKTHROUGH_COUNT } from '../story/walkthrough';
 
 export interface ControlsCallbacks {
@@ -29,6 +35,8 @@ export interface ControlsCallbacks {
   onSelectSection: (section: TocSectionId) => void;
   onSelectMambaBay: (bayId: 1 | 42) => void;
   onSelectGqaBay: (bayId: 6 | 43) => void;
+  onSelectGqaView: (view: GqaViewAngle) => void;
+  onSelectPart: (partId: string | null) => void;
   onInspectInternals: (kind: BayKind, bayId?: number) => void;
   onTokensChange: (tokens: number) => void;
   onPrecisionChange: (mode: PrecisionMode) => void;
@@ -147,6 +155,7 @@ export interface ControlsElements {
   presetButtons: HTMLButtonElement[];
   mambaBayButtons: HTMLButtonElement[];
   gqaBayButtons: HTMLButtonElement[];
+  gqaViewButtons: HTMLButtonElement[];
   miniNodes: SVGGElement[];
   tourToggleBtn: HTMLButtonElement;
   towerSubbar: HTMLDivElement;
@@ -188,6 +197,7 @@ export function queryControlsElements(): ControlsElements {
     presetButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('.pill-btn[data-preset]')),
     mambaBayButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-mamba-bay]')),
     gqaBayButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-gqa-bay]')),
+    gqaViewButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-gqa-view]')),
     miniNodes: Array.from(document.querySelectorAll<SVGGElement>('.mini-node[data-mini-section]')),
     tourToggleBtn: get<HTMLButtonElement>('tour-toggle-btn'),
     towerSubbar: get<HTMLDivElement>('tower-subbar'),
@@ -279,6 +289,15 @@ export class MacroControls {
       });
     }
 
+    for (const btn of this.els.gqaViewButtons) {
+      this.on(btn, 'click', () => {
+        const view = btn.dataset.gqaView as GqaViewAngle | undefined;
+        if (view === 'three_quarter' || view === 'near_plan') {
+          this.cb.onSelectGqaView(view);
+        }
+      });
+    }
+
     for (const node of this.els.miniNodes) {
       this.on(node, 'click', () => {
         const sec = node.dataset.miniSection as TocSectionId | undefined;
@@ -340,6 +359,9 @@ export class MacroControls {
     }
     for (const btn of this.els.gqaBayButtons) {
       btn.classList.toggle('is-active', Number(btn.dataset.gqaBay) === state.gqaBayId);
+    }
+    for (const btn of this.els.gqaViewButtons) {
+      btn.classList.toggle('is-active', btn.dataset.gqaView === state.gqaViewAngle);
     }
 
     // Floating corner badge reflects current mode clearly
@@ -779,7 +801,11 @@ export class MacroControls {
       backBtn.addEventListener('click', () => this.cb.onSelectMode('tower'));
       actions.appendChild(backBtn);
 
-      panel.append(header, p, list, actions);
+      panel.append(header, p, list);
+      if (state.mode === 'cutaway_gqa') {
+        panel.appendChild(this.buildGqaHeadSelector(state.selectedPart, state.hoveredPart));
+      }
+      panel.appendChild(actions);
       return;
     }
 
@@ -837,14 +863,14 @@ export class MacroControls {
       if (isFp8) badge.classList.add('ed-badge-gold');
 
       bodyText =
-        'Thirty-two query heads (2 groups × 16) attend across two 16× thinner KV heads with NoPE (No Positional Embeddings — token order arrives from preceding Mamba-2 layers). Scrubbing T physically grows both KV stacks and widens Attn Scores (32 × T).';
+        'Thirty-two individually selectable query heads (Group 0: Q00–Q15 → KV₀; Group 1: Q16–Q31 → KV₁) share two 16× narrower KV tracks with NoPE. Scrubbing T grows both KV tracks and the square T×T causal Scores & Softmax sheets.';
 
       specs = [
-        `Live KV stacks: 2 KV heads × ${state.tokens} tokens = ${perBayKiB} KiB (${isFp8 ? '+0.5 KiB/tok FP8' : '+1 KiB/tok BF16'})`,
+        `Shared KV cache: 2 KV heads × ${state.tokens} tokens = ${perBayKiB} KiB (${isFp8 ? '+0.5 KiB/tok FP8 storage' : '+1 KiB/tok BF16 storage'})`,
         isFp8
-          ? 'FP8 Selective: Q/K/V/O compute stays BF16 (gold rim); ONLY KV-cache slices switch to FP8'
-          : 'Toggle FP8 Selective to halve the KV slices while keeping Q/K/V/O compute in BF16',
-        'Click Q Proj, K/V Proj, KV Head 0/1, Attn Scores, or O Proj to inspect.',
+          ? 'Production precision metadata (§4.2): Q/K/V/O compute stays BF16; KV-cache storage uses FP8'
+          : 'Toggle FP8 Selective to inspect NVIDIA §4.2 production precision (BF16 compute, FP8 KV storage)',
+        'Click any query head (Q00–Q31) in 3D or below to trace its exact 16:1 KV pathway.',
       ];
     }
 
@@ -871,7 +897,79 @@ export class MacroControls {
     backBtn.addEventListener('click', () => this.cb.onSelectMode('tower'));
     actions.appendChild(backBtn);
 
-    panel.append(header, p, list, actions);
+    panel.append(header, p, list);
+    if (state.mode === 'cutaway_gqa') {
+      panel.appendChild(this.buildGqaHeadSelector(state.selectedPart, state.hoveredPart));
+    }
+    panel.appendChild(actions);
+  }
+
+  /** Interactive Q00..Q31 head selector grouped into 16:1 KV banks inside GQA inspector. */
+  private buildGqaHeadSelector(selectedPart: string | null, hoveredPart: string | null): HTMLDivElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'qhead-selector';
+    wrap.setAttribute('data-testid', 'gqa-head-selector');
+
+    const activeHead = parseQueryHeadPartId(hoveredPart ?? selectedPart);
+    const pinnedHead = parseQueryHeadPartId(selectedPart);
+
+    const topRow = document.createElement('div');
+    topRow.className = 'qhead-top-row';
+    const label = document.createElement('span');
+    label.className = 'qhead-heading';
+    label.textContent =
+      activeHead !== null
+        ? `Query Head ${formatQueryHeadId(activeHead)} → KV${activeHead < 16 ? 0 : 1}`
+        : 'Select Query Head (Q00–Q31)';
+    topRow.appendChild(label);
+
+    if (pinnedHead !== null) {
+      const resetHead = document.createElement('button');
+      resetHead.type = 'button';
+      resetHead.className = 'qhead-clear-btn';
+      resetHead.textContent = 'All 32';
+      resetHead.addEventListener('click', () => this.cb.onSelectPart(null));
+      topRow.appendChild(resetHead);
+    }
+    wrap.appendChild(topRow);
+
+    const groups: readonly { title: string; start: number; end: number }[] = [
+      { title: 'Group 0 → KV₀ (Q00–Q15)', start: 0, end: 15 },
+      { title: 'Group 1 → KV₁ (Q16–Q31)', start: 16, end: 31 },
+    ];
+
+    for (const grp of groups) {
+      const grpEl = document.createElement('div');
+      grpEl.className = 'qhead-group';
+
+      const grpTitle = document.createElement('div');
+      grpTitle.className = 'qhead-group-label';
+      grpTitle.textContent = grp.title;
+      grpEl.appendChild(grpTitle);
+
+      const grid = document.createElement('div');
+      grid.className = 'qhead-grid';
+      for (let i = grp.start; i <= grp.end; i++) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'qhead-btn';
+        btn.dataset.qhead = String(i);
+        btn.textContent = formatQueryHeadId(i);
+        const isSel = pinnedHead === i;
+        const isActive = activeHead === i;
+        btn.classList.toggle('is-selected', isSel);
+        btn.classList.toggle('is-active', isActive);
+        btn.setAttribute('aria-pressed', String(isSel));
+        btn.addEventListener('click', () => {
+          this.cb.onSelectPart(isSel ? null : `q-head-${i}`);
+        });
+        grid.appendChild(btn);
+      }
+      grpEl.appendChild(grid);
+      wrap.appendChild(grpEl);
+    }
+
+    return wrap;
   }
 
   dispose(): void {

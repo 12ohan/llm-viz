@@ -135,6 +135,18 @@ export interface LandmarkAnchor {
   readonly bayId?: number;
   readonly partId?: string;
   readonly tone?: 'default' | 'gold' | 'cyan' | 'muted';
+  readonly align?: 'left' | 'right' | 'top' | 'bottom' | 'center';
+  readonly tier?: 'primary' | 'detail';
+}
+
+export interface DimensionCaliper {
+  readonly id: string;
+  readonly aWorld: Vec3;
+  readonly bWorld: Vec3;
+  readonly label: string;
+  readonly partIds?: readonly string[];
+  readonly minPixels?: number;
+  readonly offsetPx?: number;
 }
 
 export interface KvDepthTickAnchor {

@@ -263,12 +263,17 @@
               <span class="subbar-chip">Bay 02 · Parallel 128 Routed (6 Active, ReLU²) + Shared Expert (3,712 = 2×1,856) · Click any slab</span>
             </div>
 
-            <!-- Contextual sub-row: GQA Bay Switcher (when mode === cutaway_gqa) -->
+            <!-- Contextual sub-row: GQA Bay Switcher & View Toggle (when mode === cutaway_gqa) -->
             <div id="gqa-subbar" class="toolbar-row toolbar-row-sub" hidden>
-              <span class="subbar-label">Representative bay:</span>
+              <span class="subbar-label">Bay:</span>
               <div class="preset-pills">
-                <button type="button" class="sub-toggle-btn is-active" data-gqa-bay="6">Bay 06 · GQA (32Q / 2KV, NoPE)</button>
-                <button type="button" class="sub-toggle-btn" data-gqa-bay="43">Bay 43 · Final GQA (after Bay 42 Feeder)</button>
+                <button type="button" class="sub-toggle-btn is-active" data-gqa-bay="6">Bay 06 · GQA (32Q / 2KV)</button>
+                <button type="button" class="sub-toggle-btn" data-gqa-bay="43">Bay 43 · Final GQA</button>
+              </div>
+              <span class="subbar-sep" aria-hidden="true">|</span>
+              <div class="preset-pills gqa-view-group" role="group" aria-label="GQA camera view">
+                <button type="button" class="sub-toggle-btn is-active" data-gqa-view="three_quarter">3/4 View</button>
+                <button type="button" class="sub-toggle-btn" data-gqa-view="near_plan">Near-Plan View</button>
               </div>
             </div>
           </div>
