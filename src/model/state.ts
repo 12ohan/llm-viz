@@ -8,6 +8,12 @@ export interface CameraPose {
   fovDeg: number;
 }
 
+export type ViewMode =
+  | 'tower'
+  | 'cutaway_mamba'
+  | 'cutaway_moe'
+  | 'cutaway_gqa';
+
 export type TocSectionId =
   | 'overview'
   | 'embedding'
@@ -18,13 +24,16 @@ export type TocSectionId =
   | 'output';
 
 export interface SceneState {
-  view: 'macro' | 'detail';
+  mode: ViewMode;
   section: TocSectionId;
   precision: PrecisionMode;
   tokens: number;
   hoveredBay: number | null;
   selectedBay: number | null;
+  hoveredPart: string | null;
   selectedPart: string | null;
+  mambaBayId: 1 | 42;
+  gqaBayId: 6 | 43;
   camera: CameraPose;
   savedMacroCamera: CameraPose;
   reducedMotion: boolean;
@@ -74,13 +83,16 @@ export function createPerspectivePose(
 
 export function createInitialState(defaultPose: CameraPose, reducedMotion = false): SceneState {
   return {
-    view: 'macro',
+    mode: 'tower',
     section: 'overview',
     precision: 'bf16',
     tokens: DEFAULT_TOKENS,
     hoveredBay: null,
     selectedBay: null,
+    hoveredPart: null,
     selectedPart: null,
+    mambaBayId: 1,
+    gqaBayId: 6,
     camera: cloneCameraPose(defaultPose),
     savedMacroCamera: cloneCameraPose(defaultPose),
     reducedMotion,

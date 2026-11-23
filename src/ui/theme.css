@@ -100,14 +100,14 @@ body {
 
 /* Left Sidebar (~360px on desktop) */
 .sidebar {
-  flex: 0 0 362px;
-  width: 362px;
+  flex: 0 0 364px;
+  width: 364px;
   background-color: var(--sidebar-bg);
   border-right: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
   z-index: 10;
 }
 
@@ -194,13 +194,15 @@ body {
   font-weight: 600;
 }
 
-/* Sidebar Middle: Serif Editorial Explanation */
+/* Sidebar Middle: Smoothly Scrollable Serif Editorial Explanation */
 .sidebar-middle {
   flex: 1 1 auto;
-  padding: 11px 14px;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--border-subtle);
   overflow-y: auto;
-  min-height: 160px;
+  min-height: 0;
+  scrollbar-width: thin;
+  scrollbar-color: #CBD5E1 transparent;
 }
 
 .ed-header {
@@ -208,14 +210,14 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 5px;
+  margin-bottom: 4px;
 }
 
 .ed-title {
   margin: 0;
   font-family: var(--font-sans);
-  font-size: 14px;
-  line-height: 19px;
+  font-size: 13.5px;
+  line-height: 18px;
   font-weight: 700;
   color: var(--text-primary);
 }
@@ -223,7 +225,7 @@ body {
 .ed-badge {
   flex-shrink: 0;
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 600;
   padding: 2px 6px;
   border-radius: 4px;
@@ -238,18 +240,24 @@ body {
   border-color: #14181F;
 }
 
+.ed-badge-gold {
+  background-color: #FEF3C7;
+  color: #92400E;
+  border-color: #F59E0B;
+}
+
 .ed-sub {
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: #64748B;
-  margin-bottom: 6px;
+  margin-bottom: 5px;
 }
 
 .ed-body {
-  margin: 0 0 8px;
+  margin: 0 0 7px;
   font-family: var(--font-serif);
-  font-size: 13px;
-  line-height: 1.46;
+  font-size: 12.8px;
+  line-height: 1.44;
   color: #27303F;
 }
 
@@ -258,11 +266,45 @@ body {
   padding-left: 15px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3.5px;
+  font-family: var(--font-sans);
+  font-size: 11.4px;
+  line-height: 15px;
+  color: var(--text-secondary);
+}
+
+.ed-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ed-cta-btn {
+  appearance: none;
+  border: 1px solid var(--navy-bar);
+  background-color: var(--navy-bar);
+  color: #FFFFFF;
+  border-radius: 5px;
+  padding: 4px 10px;
   font-family: var(--font-sans);
   font-size: 11.5px;
-  line-height: 15.5px;
-  color: var(--text-secondary);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ed-cta-btn:hover {
+  background-color: #27325B;
+}
+
+.ed-cta-secondary {
+  border-color: var(--border-strong);
+  background-color: #FFFFFF;
+  color: var(--text-primary);
+}
+
+.ed-cta-secondary:hover {
+  background-color: #EEF2F8;
 }
 
 /* Sidebar Bottom: Scrubber, Precision, Memory Readout, Bay Nav */
@@ -406,6 +448,15 @@ body {
   color: #64748B;
 }
 
+.readout-weights {
+  margin-top: 2px;
+  padding-top: 3px;
+  border-top: 1px solid #EEF2F7;
+  color: #64748B;
+  font-size: 10.2px;
+  line-height: 14px;
+}
+
 .bay-step-row {
   display: flex;
   align-items: center;
@@ -481,13 +532,15 @@ body {
   overflow: visible;
 }
 
-.ov-leader-path {
+.ov-leader-path,
+.overlay-leader {
   fill: none;
-  stroke: rgba(20, 24, 31, 0.42);
+  stroke: rgba(20, 24, 31, 0.44);
   stroke-width: 1;
 }
 
-.ov-phase-bracket-path {
+.ov-phase-bracket-path,
+.overlay-phase-bracket {
   fill: none;
   stroke: rgba(71, 85, 105, 0.45);
   stroke-width: 1;
@@ -529,6 +582,22 @@ body {
 
 .ov-pill-bookend {
   border-left: 3px solid #4ADE80;
+}
+
+.ov-pill-gold {
+  border-left: 3px solid #F59E0B;
+  color: #FEF3C7;
+}
+
+.ov-pill-cyan {
+  border-left: 3px solid #38BDF8;
+  color: #E0F2FE;
+}
+
+.ov-pill-muted {
+  background-color: rgba(30, 38, 52, 0.86);
+  color: #CBD5E1;
+  font-weight: 500;
 }
 
 .ov-pill-active {
@@ -605,21 +674,36 @@ body {
   color: #38BDF8;
 }
 
-/* Floating Top Pill Bar on 3D Canvas */
+/* Floating Top Mode Switcher & Contextual Sub-bar on 3D Canvas */
 .floating-toolbar {
   position: absolute;
   top: 10px;
   left: 12px;
   right: 12px;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   pointer-events: none;
   z-index: 8;
 }
 
+.toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.toolbar-row-sub {
+  justify-content: flex-start;
+}
+
+.toolbar-row[hidden] {
+  display: none;
+}
+
+.mode-pills,
 .preset-pills,
 .camera-actions {
   display: flex;
@@ -629,30 +713,86 @@ body {
   pointer-events: auto;
 }
 
+.mode-pills {
+  background-color: rgba(255, 255, 255, 0.94);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 2px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+}
+
+.mode-btn {
+  appearance: none;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  padding: 4px 10px;
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  line-height: 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mode-btn:hover {
+  background-color: #EEF2F8;
+}
+
+.mode-btn.is-active {
+  background-color: var(--navy-bar);
+  color: #FFFFFF;
+}
+
+.subbar-label {
+  pointer-events: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: #475569;
+  background-color: rgba(248, 249, 251, 0.92);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.subbar-chip {
+  pointer-events: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  color: #334155;
+  background-color: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  padding: 3px 8px;
+}
+
 .pill-btn,
+.sub-toggle-btn,
 .cam-btn {
   appearance: none;
   border: 1px solid var(--border-strong);
   border-radius: 5px;
   background-color: rgba(255, 255, 255, 0.94);
   color: var(--text-primary);
-  padding: 4px 9px;
+  padding: 3.5px 8px;
   font-family: var(--font-sans);
-  font-size: 11.5px;
-  line-height: 16px;
+  font-size: 11px;
+  line-height: 15px;
   font-weight: 600;
   cursor: pointer;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
 }
 
 .pill-btn:hover,
+.sub-toggle-btn:hover,
 .cam-btn:hover:not(:disabled) {
   background-color: #EEF2F8;
 }
 
-.pill-btn.is-active {
-  background-color: var(--navy-bar);
-  border-color: var(--navy-bar);
+.pill-btn.is-active,
+.sub-toggle-btn.is-active {
+  background-color: #14181F;
+  border-color: #14181F;
   color: #FFFFFF;
 }
 

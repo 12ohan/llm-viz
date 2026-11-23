@@ -45,6 +45,9 @@ export const RIBBON_KIND_BOX = 0;
 export const RIBBON_KIND_ARROW_NEG_X = 1; // Arrow pointing -X
 export const RIBBON_KIND_ARROW_POS_X = 2; // Arrow pointing +X
 export const RIBBON_KIND_ARROW_NEG_Y = 3; // Arrow pointing -Y (downward flow)
+export const RIBBON_KIND_ARROW_POS_Y = 4; // Arrow pointing +Y (upward feedback return)
+export const RIBBON_KIND_ARROW_POS_Z = 5; // Arrow pointing +Z (outward toward KV cache)
+export const RIBBON_KIND_ARROW_NEG_Z = 6; // Arrow pointing -Z (inward from KV cache)
 
 export const RIBBON_COLOR_EMERALD = 0;    // rgba(74, 222, 128, 0.34)
 export const RIBBON_COLOR_PERIWINKLE = 1; // rgba(129, 140, 248, 0.45)
@@ -130,6 +133,8 @@ export interface LandmarkAnchor {
   readonly sublabel?: string;
   readonly world: Vec3;
   readonly bayId?: number;
+  readonly partId?: string;
+  readonly tone?: 'default' | 'gold' | 'cyan' | 'muted';
 }
 
 export interface KvDepthTickAnchor {
@@ -1105,8 +1110,8 @@ export function boundsForSection(
     case 'gqa': {
       const y = bayCenterY(6);
       return {
-        min: [-6.4, y - 3.0, -1.4],
-        max: [5.6, y + 3.0, KV_TRACK_START_Z + KV_TRACK_LENGTH + 1.0],
+        min: [-6.4, y - 2.3, -1.2],
+        max: [5.6, y + 2.3, KV_TRACK_START_Z + KV_TRACK_LENGTH + 0.8],
       };
     }
     case 'kv_fp8': {

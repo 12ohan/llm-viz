@@ -8,18 +8,27 @@ import {
   kvCachePrecision,
   PARAMETER_CAPTION,
   ssmStateDtype,
+  type BayDescriptor,
   type NemotronSpec,
   type PrecisionMode,
 } from '../model/spec';
+
+type BayKind = BayDescriptor['kind'];
 import {
   MAX_TOKENS,
   MIN_TOKENS,
   type SceneState,
   type TocSectionId,
+  type ViewMode,
 } from '../model/state';
+import type { CutawayPartInfo, CutawaySceneGeometry } from '../scene/cutaways';
 
 export interface ControlsCallbacks {
+  onSelectMode: (mode: ViewMode) => void;
   onSelectSection: (section: TocSectionId) => void;
+  onSelectMambaBay: (bayId: 1 | 42) => void;
+  onSelectGqaBay: (bayId: 6 | 43) => void;
+  onInspectInternals: (kind: BayKind, bayId?: number) => void;
   onTokensChange: (tokens: number) => void;
   onPrecisionChange: (mode: PrecisionMode) => void;
   onFitAll: () => void;
@@ -34,7 +43,12 @@ interface SectionCopy {
   readonly badge: string;
   readonly body: string;
   readonly specs: readonly string[];
+  readonly inspectKind?: BayKind;
 }
+
+const WEIGHTS_SUMMARY_LINE = 'Weights: 31.6B (~63 GB BF16, ~94% MoE) · Active: 3.2B/tok';
+const SHARED_EXPERT_NOTE =
+  'Shared expert width 3,712 (= 2 × 1,856 in NVIDIA paper, fused in checkpoint)';
 
 const SECTION_COPY: Record<TocSectionId, SectionCopy> = {
   overview: {
@@ -68,28 +82,31 @@ const SECTION_COPY: Record<TocSectionId, SectionCopy> = {
       'Conv1D state: 6,144 channels × 4 slots (always BF16 even in FP8 Selective)',
       'Output projection: 4,096 → 2,688 after gated RMSNorm',
     ],
+    inspectKind: 'M',
   },
   moe: {
     title: 'Mixture of Experts (128 + 1)',
     badge: '23 bays · 6 routed + 1 shared',
     body:
-      'A 128-score sigmoid router activates exactly six routed experts per token (amber-lit tiles), each with width 1,856 and squared ReLU. Beside the tray sits one always-active double-width shared expert (3,712) wired directly into the residual return.',
+      'A 128-score sigmoid router activates exactly six routed experts per token in parallel (amber-lit tiles, width 1,856, non-gated ReLU²), leaving 122 experts idle (95.3% skipped). Beside the bank sits one always-active parallel shared expert.',
     specs: [
-      'Routed experts: 6 active of 128 · width 2,688 → 1,856 → 2,688 (ReLU²)',
-      'Shared expert: 1 double-width branch · 2,688 → 3,712 → 2,688 (checkpoint spec)',
-      'Token history storage: 0 B (stateless feed-forward bank)',
+      'Routed experts: 6 active of 128 · width 2,688 → 1,856 → 2,688 (non-gated ReLU²)',
+      SHARED_EXPERT_NOTE,
+      '1.30B params/layer × 23 = 29.8B (~94% of 31.6B weights) · 0 B token cache',
     ],
+    inspectKind: 'E',
   },
   gqa: {
     title: 'Grouped-Query Attention',
     badge: '6 bays · 06, 13, 20, 27, 34, 43',
     body:
-      'Only six layers use full attention, standing out along the tower with periwinkle Q/K/V projection plates and two paired emerald/cyan KV-cache tracks extending forward. Thirty-two query heads share just two KV heads (16 query heads per KV pair).',
+      'Only six layers use full attention, standing out along the tower with periwinkle Q/K/V projection plates and two paired emerald/cyan KV-cache tracks extending forward. Thirty-two query heads share just two KV heads (16 query heads per KV pair) with NoPE.',
     specs: [
       'Q projection: 32 heads × 128 = 4,096 · K & V projections: 2 heads × 128 = 256 each',
       'Logical KV payload: +6 KiB/token in BF16 · +3 KiB/token in FP8 Selective',
       '52-layer pure GQA reference would cost +52 KiB/token (BF16) or +26 KiB/token (FP8)',
     ],
+    inspectKind: '*',
   },
   kv_fp8: {
     title: 'KV Cache & FP8 Selective Mode',
@@ -101,6 +118,7 @@ const SECTION_COPY: Record<TocSectionId, SectionCopy> = {
       'All 6 GQA KV caches switch to FP8 even beside BF16 attention bodies (+3 KiB/token)',
       'Crossover vs 52-layer GQA reference: 1,048 tokens (BF16) · 2,096 tokens (FP8)',
     ],
+    inspectKind: '*',
   },
   output: {
     title: 'Final RMSNorm & Untied LM Head',
@@ -115,9 +133,17 @@ const SECTION_COPY: Record<TocSectionId, SectionCopy> = {
 };
 
 export interface ControlsElements {
+  modeButtons: HTMLButtonElement[];
   tocButtons: HTMLButtonElement[];
   presetButtons: HTMLButtonElement[];
+  mambaBayButtons: HTMLButtonElement[];
+  gqaBayButtons: HTMLButtonElement[];
   miniNodes: SVGGElement[];
+  towerSubbar: HTMLDivElement;
+  mambaSubbar: HTMLDivElement;
+  moeSubbar: HTMLDivElement;
+  gqaSubbar: HTMLDivElement;
+  floatingBadge: HTMLDivElement;
   editorialPanel: HTMLDivElement;
   tokenSlider: HTMLInputElement;
   tokenDec: HTMLButtonElement;
@@ -126,6 +152,7 @@ export interface ControlsElements {
   precisionBf16: HTMLButtonElement;
   precisionFp8: HTMLButtonElement;
   memoryReadout: HTMLDivElement;
+  bayStepRow: HTMLDivElement;
   bayPrev: HTMLButtonElement;
   bayNext: HTMLButtonElement;
   bayClear: HTMLButtonElement;
@@ -141,9 +168,17 @@ export function queryControlsElements(): ControlsElements {
     return el as T;
   };
   return {
+    modeButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('.mode-btn[data-mode]')),
     tocButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('.toc-btn[data-section]')),
     presetButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('.pill-btn[data-preset]')),
+    mambaBayButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-mamba-bay]')),
+    gqaBayButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-gqa-bay]')),
     miniNodes: Array.from(document.querySelectorAll<SVGGElement>('.mini-node[data-mini-section]')),
+    towerSubbar: get<HTMLDivElement>('tower-subbar'),
+    mambaSubbar: get<HTMLDivElement>('mamba-subbar'),
+    moeSubbar: get<HTMLDivElement>('moe-subbar'),
+    gqaSubbar: get<HTMLDivElement>('gqa-subbar'),
+    floatingBadge: get<HTMLDivElement>('floating-badge'),
     editorialPanel: get<HTMLDivElement>('editorial-panel'),
     tokenSlider: get<HTMLInputElement>('token-slider'),
     tokenDec: get<HTMLButtonElement>('token-dec'),
@@ -152,6 +187,7 @@ export function queryControlsElements(): ControlsElements {
     precisionBf16: get<HTMLButtonElement>('precision-bf16'),
     precisionFp8: get<HTMLButtonElement>('precision-fp8'),
     memoryReadout: get<HTMLDivElement>('memory-readout'),
+    bayStepRow: get<HTMLDivElement>('bay-step-row'),
     bayPrev: get<HTMLButtonElement>('bay-prev'),
     bayNext: get<HTMLButtonElement>('bay-next'),
     bayClear: get<HTMLButtonElement>('bay-clear'),
@@ -187,6 +223,13 @@ export class MacroControls {
   }
 
   private bindEvents(): void {
+    for (const btn of this.els.modeButtons) {
+      this.on(btn, 'click', () => {
+        const mode = btn.dataset.mode as ViewMode | undefined;
+        if (mode) this.cb.onSelectMode(mode);
+      });
+    }
+
     for (const btn of this.els.tocButtons) {
       this.on(btn, 'click', () => {
         const sec = btn.dataset.section as TocSectionId | undefined;
@@ -198,6 +241,20 @@ export class MacroControls {
       this.on(btn, 'click', () => {
         const preset = btn.dataset.preset as TocSectionId | undefined;
         if (preset) this.cb.onSelectSection(preset);
+      });
+    }
+
+    for (const btn of this.els.mambaBayButtons) {
+      this.on(btn, 'click', () => {
+        const id = Number.parseInt(btn.dataset.mambaBay ?? '1', 10);
+        if (id === 1 || id === 42) this.cb.onSelectMambaBay(id);
+      });
+    }
+
+    for (const btn of this.els.gqaBayButtons) {
+      this.on(btn, 'click', () => {
+        const id = Number.parseInt(btn.dataset.gqaBay ?? '6', 10);
+        if (id === 6 || id === 43) this.cb.onSelectGqaBay(id);
       });
     }
 
@@ -237,16 +294,61 @@ export class MacroControls {
     this.on(this.els.bayClear, 'click', () => this.cb.onClearSelection());
   }
 
-  sync(state: SceneState): void {
-    // Active TOC & floating presets
+  sync(state: SceneState, activeCutaway: CutawaySceneGeometry | null = null): void {
+    // Active View Mode Switcher
+    for (const btn of this.els.modeButtons) {
+      const isAct = btn.dataset.mode === state.mode;
+      btn.classList.toggle('is-active', isAct);
+      btn.setAttribute('aria-selected', String(isAct));
+    }
+
+    // Contextual sub-bars
+    this.els.towerSubbar.hidden = state.mode !== 'tower';
+    this.els.mambaSubbar.hidden = state.mode !== 'cutaway_mamba';
+    this.els.moeSubbar.hidden = state.mode !== 'cutaway_moe';
+    this.els.gqaSubbar.hidden = state.mode !== 'cutaway_gqa';
+
+    // Mamba & GQA representative bay toggles
+    for (const btn of this.els.mambaBayButtons) {
+      btn.classList.toggle('is-active', Number(btn.dataset.mambaBay) === state.mambaBayId);
+    }
+    for (const btn of this.els.gqaBayButtons) {
+      btn.classList.toggle('is-active', Number(btn.dataset.gqaBay) === state.gqaBayId);
+    }
+
+    // Floating corner badge reflects current mode clearly
+    if (state.mode === 'tower') {
+      this.els.floatingBadge.textContent = 'Nemotron 3 Nano 30B-A3B · 3.2B active';
+    } else if (state.mode === 'cutaway_mamba') {
+      this.els.floatingBadge.textContent =
+        state.mambaBayId === 42
+          ? 'Cutaway: Mamba-2 · Bay 42 Feeder (BF16 §4.2)'
+          : 'Cutaway: Mamba-2 · Bay 01 (2.05 MiB fixed SSM)';
+    } else if (state.mode === 'cutaway_moe') {
+      this.els.floatingBadge.textContent =
+        'Cutaway: MoE 128+1 · Bay 02 (6 Active + Shared 3,712)';
+    } else {
+      this.els.floatingBadge.textContent = `Cutaway: GQA Attention · Bay ${formatBayId(state.gqaBayId)} (32Q / 2KV, NoPE)`;
+    }
+
+    // Sync active TOC & mini-diagram highlight
+    const effectiveSection: TocSectionId =
+      state.mode === 'cutaway_mamba'
+        ? 'mamba'
+        : state.mode === 'cutaway_moe'
+          ? 'moe'
+          : state.mode === 'cutaway_gqa'
+            ? 'gqa'
+            : state.section;
+
     for (const btn of this.els.tocButtons) {
-      btn.classList.toggle('is-active', btn.dataset.section === state.section);
+      btn.classList.toggle('is-active', btn.dataset.section === effectiveSection);
     }
     for (const btn of this.els.presetButtons) {
       btn.classList.toggle('is-active', btn.dataset.preset === state.section);
     }
     for (const node of this.els.miniNodes) {
-      node.classList.toggle('is-active', node.dataset.miniSection === state.section);
+      node.classList.toggle('is-active', node.dataset.miniSection === effectiveSection);
     }
 
     // Scrubber & precision
@@ -264,15 +366,24 @@ export class MacroControls {
     this.els.precisionFp8.classList.toggle('is-active', !isBf16);
     this.els.precisionFp8.setAttribute('aria-checked', String(!isBf16));
 
-    // Zoom bay button & Clear button
-    const hasPinned = state.selectedBay !== null;
-    this.els.bayClear.hidden = !hasPinned;
-    this.els.zoomBayBtn.disabled = !hasPinned;
-    this.els.zoomBayBtn.textContent = hasPinned
+    // Zoom bay button & bay stepping row (only shown in 52-Layer Tower mode)
+    const isTower = state.mode === 'tower';
+    const hasPinnedBay = isTower && state.selectedBay !== null;
+    const hasPinnedPart = !isTower && state.selectedPart !== null;
+
+    this.els.zoomBayBtn.hidden = !isTower;
+    this.els.zoomBayBtn.disabled = !hasPinnedBay;
+    this.els.zoomBayBtn.textContent = hasPinnedBay
       ? `Zoom Bay ${formatBayId(state.selectedBay!)}`
       : 'Zoom Bay';
 
-    // Memory readout
+    this.els.bayPrev.hidden = !isTower;
+    this.els.bayNext.hidden = !isTower;
+    this.els.bayClear.hidden = !(hasPinnedBay || hasPinnedPart);
+    this.els.bayClear.textContent = hasPinnedPart ? 'Clear slab' : 'Clear';
+    this.els.bayStepRow.hidden = !isTower && !hasPinnedPart;
+
+    // Memory readout (with Part A #4 static weights vs dynamic sequence cache clarification!)
     const readoutKey = `${state.tokens}:${state.precision}`;
     if (readoutKey !== this.lastReadoutKey) {
       this.lastReadoutKey = readoutKey;
@@ -284,6 +395,7 @@ export class MacroControls {
         { text: fmt.mambaText, cls: 'readout-line readout-fixed' },
         { text: fmt.kvText, cls: 'readout-line readout-kv' },
         { text: fmt.referenceText, cls: 'readout-line readout-ref' },
+        { text: WEIGHTS_SUMMARY_LINE, cls: 'readout-line readout-weights' },
       ];
       for (const r of rows) {
         const div = document.createElement('div');
@@ -293,16 +405,28 @@ export class MacroControls {
       }
     }
 
-    // Middle editorial panel (shows inspected bay when hovered/pinned, else active TOC section)
-    const activeBayId = state.hoveredBay ?? state.selectedBay;
-    const editorialKey = `${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${state.precision}:${state.tokens}`;
+    // Middle editorial panel
+    const activeBayId = isTower ? state.hoveredBay ?? state.selectedBay : null;
+    const activePart = !isTower ? state.hoveredPart ?? state.selectedPart : null;
+    const editorialKey = `${state.mode}:${state.mambaBayId}:${state.gqaBayId}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
+
     if (editorialKey !== this.lastEditorialKey) {
       this.lastEditorialKey = editorialKey;
-      this.renderEditorial(state.section, activeBayId, hasPinned, state.precision, state.tokens);
+      if (isTower) {
+        this.renderTowerEditorial(
+          state.section,
+          activeBayId,
+          state.selectedBay !== null,
+          state.precision,
+          state.tokens,
+        );
+      } else {
+        this.renderCutawayEditorial(state, activePart, activeCutaway);
+      }
     }
   }
 
-  private renderEditorial(
+  private renderTowerEditorial(
     section: TocSectionId,
     bayId: number | null,
     isPinned: boolean,
@@ -326,6 +450,8 @@ export class MacroControls {
 
         let storageLine: string;
         let narrative: string;
+        const extraSpecs: string[] = [];
+
         if (bay.kind === 'M') {
           const ssm = ssmStateDtype(bay)!.toUpperCase();
           const conv = conv1dPrecision(bay, precision)!.toUpperCase();
@@ -338,10 +464,11 @@ export class MacroControls {
           const perLayerTotalKiB = ((kvPrec === 'fp8' ? 512 : 1024) * tokens) / 1024;
           const perLayerSlope = kvPrec === 'fp8' ? '+0.5 KiB/token' : '+1 KiB/token';
           storageLine = `KV Cache: ${kvPrec.toUpperCase()} (${perLayerTotalKiB} KiB at T=${tokens}, ${perLayerSlope})`;
-          narrative = `Bay ${formatBayId(bay.id)} is one of six Grouped-Query Attention layers. Thirty-two query heads read from two paired emerald/cyan KV tracks extending outward along depth. In FP8 Selective mode, the attention body stays BF16 while its KV cache switches to FP8.`;
+          narrative = `Bay ${formatBayId(bay.id)} is one of six Grouped-Query Attention layers (32Q / 2KV, NoPE). In FP8 Selective mode, the attention body stays BF16 while its KV cache switches to FP8.`;
         } else {
           storageLine = 'Memory: 0 B token history (stateless MoE layer)';
-          narrative = `Bay ${formatBayId(bay.id)} routes each token through a 128-score sigmoid gate to activate six routed experts (width 1,856, ReLU²) in amber, summed alongside the always-active double-width shared expert (width 3,712).`;
+          narrative = `Bay ${formatBayId(bay.id)} routes each token through a 128-score sigmoid gate to activate six routed experts (width 1,856, non-gated ReLU²) in parallel alongside one always-active shared expert.`;
+          extraSpecs.push(SHARED_EXPERT_NOTE);
         }
 
         const header = document.createElement('div');
@@ -367,13 +494,25 @@ export class MacroControls {
 
         const list = document.createElement('ul');
         list.className = 'ed-specs';
-        for (const item of [computeLine, storageLine, PARAMETER_CAPTION]) {
+        for (const item of [computeLine, storageLine, ...extraSpecs, PARAMETER_CAPTION]) {
           const li = document.createElement('li');
           li.textContent = item;
           list.appendChild(li);
         }
 
-        panel.append(header, sub, p, list);
+        const actions = document.createElement('div');
+        actions.className = 'ed-actions';
+        const inspectBtn = document.createElement('button');
+        inspectBtn.type = 'button';
+        inspectBtn.className = 'ed-cta-btn';
+        inspectBtn.dataset.testid = 'inspect-internals-btn';
+        inspectBtn.textContent = 'Inspect Internals →';
+        inspectBtn.addEventListener('click', () => {
+          this.cb.onInspectInternals(bay.kind, bay.id);
+        });
+        actions.appendChild(inspectBtn);
+
+        panel.append(header, sub, p, list, actions);
         return;
       }
     }
@@ -405,6 +544,169 @@ export class MacroControls {
     }
 
     panel.append(header, p, list);
+
+    if (copy.inspectKind) {
+      const actions = document.createElement('div');
+      actions.className = 'ed-actions';
+      const inspectBtn = document.createElement('button');
+      inspectBtn.type = 'button';
+      inspectBtn.className = 'ed-cta-btn';
+      inspectBtn.textContent = 'Inspect Internals →';
+      inspectBtn.addEventListener('click', () => {
+        this.cb.onInspectInternals(copy.inspectKind!);
+      });
+      actions.appendChild(inspectBtn);
+      panel.appendChild(actions);
+    }
+  }
+
+  private renderCutawayEditorial(
+    state: SceneState,
+    activePart: string | null,
+    cutaway: CutawaySceneGeometry | null,
+  ): void {
+    const panel = this.els.editorialPanel;
+    panel.innerHTML = '';
+
+    // 1. If user clicked/hovered a specific tensor slab inside the cutaway, show its details!
+    const partInfo: CutawayPartInfo | undefined =
+      activePart && cutaway ? cutaway.partCatalog[activePart] : undefined;
+
+    if (partInfo) {
+      const header = document.createElement('div');
+      header.className = 'ed-header';
+
+      const title = document.createElement('h2');
+      title.className = 'ed-title';
+      title.textContent = partInfo.title;
+
+      const badge = document.createElement('span');
+      badge.className = 'ed-badge ed-badge-active';
+      badge.textContent = partInfo.badge;
+      header.append(title, badge);
+
+      const p = document.createElement('p');
+      p.className = 'ed-body';
+      p.textContent = partInfo.summary;
+
+      const list = document.createElement('ul');
+      list.className = 'ed-specs';
+      for (const item of partInfo.specs) {
+        const li = document.createElement('li');
+        li.textContent = item;
+        list.appendChild(li);
+      }
+
+      const actions = document.createElement('div');
+      actions.className = 'ed-actions';
+      if (state.selectedPart !== null) {
+        const clearBtn = document.createElement('button');
+        clearBtn.type = 'button';
+        clearBtn.className = 'ed-cta-btn ed-cta-secondary';
+        clearBtn.textContent = 'All Layer Internals';
+        clearBtn.addEventListener('click', () => this.cb.onClearSelection());
+        actions.appendChild(clearBtn);
+      }
+      const backBtn = document.createElement('button');
+      backBtn.type = 'button';
+      backBtn.className = 'ed-cta-btn ed-cta-secondary';
+      backBtn.textContent = '← 52-Layer Tower';
+      backBtn.addEventListener('click', () => this.cb.onSelectMode('tower'));
+      actions.appendChild(backBtn);
+
+      panel.append(header, p, list, actions);
+      return;
+    }
+
+    // 2. Otherwise show the rich Cutaway Overview card
+    const isFp8 = state.precision === 'fp8_selective';
+    const header = document.createElement('div');
+    header.className = 'ed-header';
+
+    const title = document.createElement('h2');
+    title.className = 'ed-title';
+
+    const badge = document.createElement('span');
+    badge.className = 'ed-badge';
+
+    let bodyText = '';
+    let specs: string[] = [];
+
+    if (state.mode === 'cutaway_mamba') {
+      const isFeeder = state.mambaBayId === 42;
+      title.textContent = isFeeder
+        ? 'Mamba-2 Cutaway · Bay 42 (Feeder)'
+        : 'Mamba-2 Cutaway · Bay 01';
+      badge.textContent = isFeeder && isFp8 ? 'BF16 Preserved §4.2' : '2.05 MiB Fixed';
+      if (isFeeder && isFp8) badge.classList.add('ed-badge-gold');
+
+      bodyText = isFeeder
+        ? 'Feeder preceding Bay 43 GQA — preserved in BF16 (NVIDIA §4.2). Every compute projection, 4-tap Causal Conv1D, and the 64-head FP32 SSM state stay vivid BF16/FP32 while scrubbing T updates the cyan state cells in place.'
+        : 'Input projection splits into three parallel paths: bypass gate z (4,096), Causal Conv1D (k=4, always BF16) → SiLU, and per-head decay Δt (64). Scrubbing T = 1 → 16 updates the 8×8 cyan SSM state array in place without growing physical memory.';
+
+      specs = [
+        isFeeder
+          ? 'Bay 42 Feeder: In-Proj, Out-Proj, Conv1D stay BF16 in FP8 Selective (gold rim)'
+          : `Bay 01 precision: In-Proj & Out-Proj ${isFp8 ? 'FP8 frosted' : 'BF16'} · Conv1D ALWAYS BF16 · SSM FP32`,
+        'Recurrence h_t = A·h_{t−1} + B·x_t · 2.05 MiB/layer (47.1 MiB across 23 bays)',
+        'Click any 3D tensor slab to inspect its exact dimensions and precision.',
+      ];
+    } else if (state.mode === 'cutaway_moe') {
+      const activeIds = cutaway?.moeStats?.activeExpertIds ?? [];
+      const activeList = activeIds.map((id) => `#${id}`).join(', ');
+      title.textContent = 'MoE 128+1 Cutaway · Bay 02';
+      badge.textContent = `6 / 128 Active · T=${state.tokens}`;
+
+      bodyText =
+        'Inside each MoE bay, experts execute in PARALLEL — never serialized. The sigmoid router activates 6 of 128 routed experts (2 non-gated ReLU² plates each: up_proj + down_proj, NO gate_proj) while 122 experts stay idle (95.3% skipped), running alongside the always-active double-width shared expert.';
+
+      specs = [
+        `Token T=${state.tokens} active routed experts: ${activeList || '6 of 128'}`,
+        SHARED_EXPERT_NOTE,
+        '1.30B params/layer × 23 = 29.8B (~94% of 31.6B weights) · 0 B token cache',
+      ];
+    } else {
+      const perBayKiB = ((isFp8 ? 512 : 1024) * state.tokens) / 1024;
+      title.textContent = `GQA Cutaway · Bay ${formatBayId(state.gqaBayId)}`;
+      badge.textContent = isFp8 ? 'BF16 Compute · FP8 KV' : '32Q / 2KV · NoPE';
+      if (isFp8) badge.classList.add('ed-badge-gold');
+
+      bodyText =
+        'Thirty-two query heads (2 groups × 16) attend across two 16× thinner KV heads with NoPE (No Positional Embeddings — token order arrives from preceding Mamba-2 layers). Scrubbing T physically grows both KV stacks and widens Attn Scores (32 × T).';
+
+      specs = [
+        `Live KV stacks: 2 KV heads × ${state.tokens} tokens = ${perBayKiB} KiB (${isFp8 ? '+0.5 KiB/tok FP8' : '+1 KiB/tok BF16'})`,
+        isFp8
+          ? 'FP8 Selective: Q/K/V/O compute stays BF16 (gold rim); ONLY KV-cache slices switch to FP8'
+          : 'Toggle FP8 Selective to halve the KV slices while keeping Q/K/V/O compute in BF16',
+        'Click Q Proj, K/V Proj, KV Head 0/1, Attn Scores, or O Proj to inspect.',
+      ];
+    }
+
+    header.append(title, badge);
+
+    const p = document.createElement('p');
+    p.className = 'ed-body';
+    p.textContent = bodyText;
+
+    const list = document.createElement('ul');
+    list.className = 'ed-specs';
+    for (const item of specs) {
+      const li = document.createElement('li');
+      li.textContent = item;
+      list.appendChild(li);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'ed-actions';
+    const backBtn = document.createElement('button');
+    backBtn.type = 'button';
+    backBtn.className = 'ed-cta-btn ed-cta-secondary';
+    backBtn.textContent = '← Back to 52-Layer Tower';
+    backBtn.addEventListener('click', () => this.cb.onSelectMode('tower'));
+    actions.appendChild(backBtn);
+
+    panel.append(header, p, list, actions);
   }
 
   dispose(): void {

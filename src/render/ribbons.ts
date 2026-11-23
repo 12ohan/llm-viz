@@ -10,7 +10,7 @@ layout(location = 1) in vec3 aNormal;
 // Per-instance (48 bytes stride)
 layout(location = 2) in vec3 iCenter;
 layout(location = 3) in vec3 iExtent;
-layout(location = 4) in float iKind;    // 0=box, 1=arrow -X, 2=arrow +X, 3=arrow -Y
+layout(location = 4) in float iKind;    // 0=box, 1=-X, 2=+X, 3=-Y, 4=+Y, 5=+Z, 6=-Z
 layout(location = 5) in float iColorId; // 0=emerald, 1=periwinkle, 2=cyan, 3=amber
 layout(location = 6) in float iAlpha;
 
@@ -27,7 +27,7 @@ void main() {
   // Taper leading half of box into a clean directional 3D block arrowhead
   if (kind == 1) {
     // Arrow pointing -X
-    float t = clamp((-pos.x + 0.5), 0.0, 1.0); // 0 at tail (+0.5), 1 at tip (-0.5)
+    float t = clamp((-pos.x + 0.5), 0.0, 1.0);
     if (t > 0.55) {
       float tip = (1.0 - t) / 0.45;
       pos.y *= tip * 1.45;
@@ -37,7 +37,7 @@ void main() {
     }
   } else if (kind == 2) {
     // Arrow pointing +X
-    float t = clamp((pos.x + 0.5), 0.0, 1.0); // 0 at tail (-0.5), 1 at tip (+0.5)
+    float t = clamp((pos.x + 0.5), 0.0, 1.0);
     if (t > 0.55) {
       float tip = (1.0 - t) / 0.45;
       pos.y *= tip * 1.45;
@@ -47,11 +47,41 @@ void main() {
     }
   } else if (kind == 3) {
     // Arrow pointing -Y (downward flow)
-    float t = clamp((-pos.y + 0.5), 0.0, 1.0); // 0 at top (+0.5), 1 at bottom (-0.5)
+    float t = clamp((-pos.y + 0.5), 0.0, 1.0);
     if (t > 0.55) {
       float tip = (1.0 - t) / 0.45;
       pos.x *= tip * 1.45;
       pos.z *= tip * 1.15;
+    } else {
+      pos.x *= 0.62;
+    }
+  } else if (kind == 4) {
+    // Arrow pointing +Y (upward feedback return)
+    float t = clamp((pos.y + 0.5), 0.0, 1.0);
+    if (t > 0.55) {
+      float tip = (1.0 - t) / 0.45;
+      pos.x *= tip * 1.45;
+      pos.z *= tip * 1.15;
+    } else {
+      pos.x *= 0.62;
+    }
+  } else if (kind == 5) {
+    // Arrow pointing +Z (outward toward KV cache / viewer)
+    float t = clamp((pos.z + 0.5), 0.0, 1.0);
+    if (t > 0.55) {
+      float tip = (1.0 - t) / 0.45;
+      pos.x *= tip * 1.45;
+      pos.y *= tip * 1.15;
+    } else {
+      pos.x *= 0.62;
+    }
+  } else if (kind == 6) {
+    // Arrow pointing -Z (inward from KV cache)
+    float t = clamp((-pos.z + 0.5), 0.0, 1.0);
+    if (t > 0.55) {
+      float tip = (1.0 - t) / 0.45;
+      pos.x *= tip * 1.45;
+      pos.y *= tip * 1.15;
     } else {
       pos.x *= 0.62;
     }

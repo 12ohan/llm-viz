@@ -4,70 +4,87 @@ import {
   formatBracketCaption,
   type NemotronSpec,
 } from '../model/spec';
+import type { TocSectionId } from '../model/state';
 import { projectWorldToHostCss, type CameraSnapshot } from '../render/camera';
-import type { MacroSceneGeometry } from '../scene/spine';
+import type { CutawaySceneGeometry } from '../scene/cutaways';
+import type { LandmarkAnchor, MacroSceneGeometry } from '../scene/spine';
+
+export interface OverlayUpdateInput {
+  readonly spec: NemotronSpec;
+  readonly scene: MacroSceneGeometry;
+  readonly snapshot: CameraSnapshot;
+  readonly section: TocSectionId;
+  readonly tokens: number;
+  readonly selectedBay: number | null;
+  readonly hoveredBay: number | null;
+}
+
+export interface CutawayOverlayUpdateInput {
+  readonly scene: CutawaySceneGeometry;
+  readonly snapshot: CameraSnapshot;
+  readonly tokens: number;
+  readonly selectedPart: string | null;
+  readonly hoveredPart: string | null;
+}
+
+interface PlacedRect {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
-interface PlacedRect {
-  readonly x0: number;
-  readonly y0: number;
-  readonly x1: number;
-  readonly y1: number;
-}
-
 function clamp(v: number, lo: number, hi: number): number {
-  return Math.max(lo, Math.min(hi, v));
+  return v < lo ? lo : v > hi ? hi : v;
 }
 
 function overlapsAny(rects: readonly PlacedRect[], x0: number, y0: number, x1: number, y1: number): boolean {
+  const pad = 3;
   for (const r of rects) {
-    if (x0 < r.x1 + 4 && x1 > r.x0 - 4 && y0 < r.y1 + 3 && y1 > r.y0 - 3) {
+    if (x0 < r.x1 + pad && x1 + pad > r.x0 && y0 < r.y1 + pad && y1 + pad > r.y0) {
       return true;
     }
   }
   return false;
 }
 
-export interface OverlayUpdateInput {
-  readonly spec: NemotronSpec;
-  readonly scene: MacroSceneGeometry;
-  readonly snapshot: CameraSnapshot;
-  readonly tokens: number;
-  readonly selectedBay: number | null;
-  readonly hoveredBay: number | null;
-}
-
 /**
- * Synchronous llm-viz-style dark charcoal/black pill overlay & Figure-2 phase brackets.
- * Updated directly inside WebGL's draw frame via DOM/SVG refs (zero framework state updates).
+ * Synchronous DOM + SVG overlay updated inside WebGL's requestAnimationFrame pass.
+ * Renders crisp llm-viz dark charcoal/black 3D pills (#14181F, white text) for both
+ * the 52-Layer Tower and the 3 exploded layer cutaways.
  */
 export class MacroOverlay {
   private readonly svg: SVGSVGElement;
   private readonly labelLayer: HTMLDivElement;
   private readonly leaderPath: SVGPathElement;
   private readonly phaseBracketPath: SVGPathElement;
-  private readonly measureCtx: CanvasRenderingContext2D | null;
-  private readonly widthCache = new Map<string, number>();
 
   private readonly landmarkNodes = new Map<string, HTMLDivElement>();
+  private readonly cutawayNodes = new Map<string, HTMLDivElement>();
   private readonly phaseNodes: HTMLDivElement[] = [];
   private readonly bayMiniNodes = new Map<number, HTMLDivElement>();
   private readonly kvTickNodes = new Map<number, HTMLDivElement>();
   private readonly activePill: HTMLDivElement;
 
+  private readonly measureCtx: CanvasRenderingContext2D | null;
+  private readonly widthCache = new Map<string, number>();
+
   constructor(svg: SVGSVGElement, labelLayer: HTMLDivElement) {
     this.svg = svg;
     this.labelLayer = labelLayer;
+    this.svg.innerHTML = '';
+    this.labelLayer.innerHTML = '';
 
-    const c = document.createElement('canvas');
-    this.measureCtx = c.getContext('2d');
+    const scratch = document.createElement('canvas');
+    this.measureCtx = scratch.getContext('2d');
 
-    this.phaseBracketPath = this.createSvgPath('ov-phase-bracket-path');
-    this.leaderPath = this.createSvgPath('ov-leader-path');
+    this.phaseBracketPath = this.createSvgPath('overlay-phase-bracket');
+    this.leaderPath = this.createSvgPath('overlay-leader');
     this.svg.append(this.phaseBracketPath, this.leaderPath);
 
-    // Pre-create landmark pills
+    // Pre-allocate dark landmark pills for tower
     const landmarkIds = [
       'embed',
       'gqa-6',
@@ -81,13 +98,13 @@ export class MacroOverlay {
     ];
     for (const id of landmarkIds) {
       const el = document.createElement('div');
-      el.className = id.startsWith('gqa-') ? 'ov-pill ov-pill-gqa' : 'ov-pill ov-pill-bookend';
+      el.className = 'ov-pill';
       el.style.display = 'none';
       this.labelLayer.appendChild(el);
       this.landmarkNodes.set(id, el);
     }
 
-    // Pre-create 4 Figure-2 phase tags
+    // Pre-allocate 4 Figure-2 phase section tags
     for (let i = 0; i < 4; i++) {
       const el = document.createElement('div');
       el.className = 'ov-phase-tag';
@@ -96,7 +113,7 @@ export class MacroOverlay {
       this.phaseNodes.push(el);
     }
 
-    // Pre-create zoom-revealed individual bay pills (1..52)
+    // Pre-allocate subtle progressive-zoom bay pills (1..52)
     for (let id = 1; id <= 52; id++) {
       const el = document.createElement('div');
       el.className = 'ov-bay-mini';
@@ -105,17 +122,16 @@ export class MacroOverlay {
       this.bayMiniNodes.set(id, el);
     }
 
-    // Pre-create KV depth tick badges (1..16)
+    // Pre-allocate KV depth ticks (1..16)
     for (let t = 1; t <= 16; t++) {
       const el = document.createElement('div');
       el.className = 'ov-kv-tick';
-      el.textContent = `T=${t}`;
       el.style.display = 'none';
       this.labelLayer.appendChild(el);
       this.kvTickNodes.set(t, el);
     }
 
-    // Active hovered/pinned bay black pill
+    // Active hovered / selected bay pill
     this.activePill = document.createElement('div');
     this.activePill.className = 'ov-pill ov-pill-active';
     this.activePill.style.display = 'none';
@@ -126,6 +142,27 @@ export class MacroOverlay {
     const p = document.createElementNS(SVG_NS, 'path');
     p.setAttribute('class', className);
     return p;
+  }
+
+  private getOrCreateCutawayNode(id: string): HTMLDivElement {
+    let el = this.cutawayNodes.get(id);
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'ov-pill';
+      el.style.display = 'none';
+      this.labelLayer.appendChild(el);
+      this.cutawayNodes.set(id, el);
+    }
+    return el;
+  }
+
+  private hideAll(): void {
+    for (const el of this.landmarkNodes.values()) el.style.display = 'none';
+    for (const el of this.cutawayNodes.values()) el.style.display = 'none';
+    for (const el of this.phaseNodes) el.style.display = 'none';
+    for (const el of this.bayMiniNodes.values()) el.style.display = 'none';
+    for (const el of this.kvTickNodes.values()) el.style.display = 'none';
+    this.activePill.style.display = 'none';
   }
 
   clearMetricCache(): void {
@@ -147,24 +184,20 @@ export class MacroOverlay {
     return w;
   }
 
+  /** Tower overlay update (52-Layer Macro Spine). */
   update(input: OverlayUpdateInput): void {
-    const { spec, scene, snapshot, tokens, selectedBay, hoveredBay } = input;
+    const { spec, scene, snapshot, section, tokens, selectedBay, hoveredBay } = input;
     const { hostWidth, hostHeight } = snapshot.metrics;
     this.svg.setAttribute('viewBox', `0 0 ${hostWidth} ${hostHeight}`);
-
-    for (const el of this.landmarkNodes.values()) el.style.display = 'none';
-    for (const el of this.phaseNodes) el.style.display = 'none';
-    for (const el of this.bayMiniNodes.values()) el.style.display = 'none';
-    for (const el of this.kvTickNodes.values()) el.style.display = 'none';
-    this.activePill.style.display = 'none';
+    this.hideAll();
 
     const occupied: PlacedRect[] = [];
     const leaderSegs: string[] = [];
     const phaseSegs: string[] = [];
 
-    // Safe drawing area avoiding floating top toolbar (~52px) and bottom hint (~28px)
-    const minY = 52;
-    const maxY = Math.max(minY + 40, hostHeight - 28);
+    // Safe drawing area avoiding floating two-row mode/preset toolbar (~84px) and bottom hint (~30px)
+    const minY = 84;
+    const maxY = Math.max(minY + 40, hostHeight - 30);
 
     const pillFont = '600 11px system-ui, -apple-system, sans-serif';
     const monoFont = '500 10.5px ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -200,7 +233,6 @@ export class MacroOverlay {
 
     // --- 2. Black-Pill Landmark Labels (Embedding, 6 GQA bays, Final RMSNorm, Output) ---
     for (const lm of scene.landmarks) {
-      // Skip GQA landmark pill if that exact bay already shows the active pill
       if (lm.bayId !== undefined && lm.bayId === activeBayId) continue;
 
       const el = this.landmarkNodes.get(lm.id);
@@ -215,7 +247,6 @@ export class MacroOverlay {
       const lx = clamp(pt.x + 12, 10, hostWidth - w - 10);
       let ly = clamp(pt.y - h * 0.5, minY, maxY - h);
 
-      // Gentle vertical stagger if two landmarks crowd on narrow screens
       if (overlapsAny(occupied, lx, ly, lx + w, ly + h)) {
         const up = ly - (h + 4);
         const down = ly + (h + 4);
@@ -239,7 +270,7 @@ export class MacroOverlay {
       );
     }
 
-    // --- 3. Progressive Zoom Bay Labels when zoomed close (bay vertical pitch >= 26 CSS px) ---
+    // --- 3. Progressive Zoom Bay Labels when zoomed close ---
     const p1 = projectWorldToHostCss(scene.bayAnchors[0].centerWorld, snapshot);
     const p2 = projectWorldToHostCss(scene.bayAnchors[1].centerWorld, snapshot);
     const screenBayPitch = p1.visible && p2.visible ? Math.hypot(p2.x - p1.x, p2.y - p1.y) : 0;
@@ -248,7 +279,7 @@ export class MacroOverlay {
       for (const anchor of scene.bayAnchors) {
         if (anchor.id === activeBayId) continue;
         const bay = spec.bays[anchor.id - 1];
-        if (!bay || bay.kind === '*') continue; // GQA bays already have landmark pills
+        if (!bay || bay.kind === '*') continue;
         const pt = projectWorldToHostCss(anchor.pillWorld, snapshot);
         if (!pt.visible || pt.x < 12 || pt.x > hostWidth - 60 || pt.y < minY || pt.y > maxY) {
           continue;
@@ -302,7 +333,6 @@ export class MacroOverlay {
       el.style.transform = `translate3d(${lx.toFixed(1)}px, ${ly.toFixed(1)}px, 0)`;
       occupied.push({ x0: lx, y0: ly, x1: lx + w, y1: ly + h });
 
-      // Subtle vertical phase bracket with top/bottom ticks
       if (topPt.visible && botPt.visible) {
         const ty = clamp(topPt.y, minY, maxY);
         const by = clamp(botPt.y, minY, maxY);
@@ -315,8 +345,9 @@ export class MacroOverlay {
       }
     }
 
-    // --- 5. KV Depth Scale Ticks (1, 8, 16, active T) beside GQA bay 06 when zoomed in ---
-    if (screenBayPitch >= 18) {
+    // --- 5. KV Depth Scale Ticks (1, 8, 16, active T) — hidden in Full Overview (Part A #2) ---
+    const showKvTicks = section !== 'overview' && screenBayPitch >= 20;
+    if (showKvTicks) {
       const orderedTicks = [...scene.kvDepthTicks].sort((a, b) =>
         a.token === tokens ? -1 : b.token === tokens ? 1 : a.token - b.token,
       );
@@ -329,8 +360,8 @@ export class MacroOverlay {
         const text = isCur ? `T=${tick.token}` : `${tick.token}`;
         const w = this.measureText(text, monoFont) + 8;
         const h = 15;
-        const lx = clamp(pt.x + 2, 8, hostWidth - w - 8);
-        const ly = clamp(pt.y + 4, minY, maxY - h);
+        const lx = clamp(pt.x + 6, 8, hostWidth - w - 8);
+        const ly = clamp(pt.y + 6, minY, maxY - h);
         if (!isCur && overlapsAny(occupied, lx, ly, lx + w, ly + h)) {
           continue;
         }
@@ -346,5 +377,118 @@ export class MacroOverlay {
 
     this.leaderPath.setAttribute('d', leaderSegs.join(''));
     this.phaseBracketPath.setAttribute('d', phaseSegs.join(''));
+  }
+
+  /** Exploded 3D Layer Cutaway overlay update (Mamba-2, MoE 128+1, GQA Attention). */
+  updateCutaway(input: CutawayOverlayUpdateInput): void {
+    const { scene, snapshot, tokens, selectedPart, hoveredPart } = input;
+    const { hostWidth, hostHeight } = snapshot.metrics;
+    this.svg.setAttribute('viewBox', `0 0 ${hostWidth} ${hostHeight}`);
+    this.hideAll();
+
+    const occupied: PlacedRect[] = [];
+    const leaderSegs: string[] = [];
+
+    const minY = 84;
+    const maxY = Math.max(minY + 40, hostHeight - 30);
+
+    const pillFont = '600 11px system-ui, -apple-system, sans-serif';
+    const monoFont = '500 10.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+    const activePart = hoveredPart ?? selectedPart;
+
+    // Prioritize active part pill, gold callouts, and NoPE callout so they never get crowded out
+    const orderedLandmarks: LandmarkAnchor[] = [...scene.landmarks].sort((a, b) => {
+      const pa = a.partId === activePart ? 3 : a.tone === 'gold' || a.id === 'g-nope' ? 2 : 1;
+      const pb = b.partId === activePart ? 3 : b.tone === 'gold' || b.id === 'g-nope' ? 2 : 1;
+      return pb - pa;
+    });
+
+    for (const lm of orderedLandmarks) {
+      const pt = projectWorldToHostCss(lm.world, snapshot);
+      if (!pt.visible || pt.x < -30 || pt.x > hostWidth + 30 || pt.y < minY - 24 || pt.y > maxY + 24) {
+        continue;
+      }
+
+      const w = this.measureText(lm.label, pillFont) + 16;
+      const h = 21;
+      let lx = clamp(pt.x - w * 0.5, 10, hostWidth - w - 10);
+      let ly = clamp(pt.y - h - 6, minY, maxY - h);
+
+      // Try subtle vertical / horizontal nudges if two slab pills collide
+      if (overlapsAny(occupied, lx, ly, lx + w, ly + h)) {
+        const candidates: readonly [number, number][] = [
+          [lx, clamp(pt.y + 8, minY, maxY - h)],
+          [lx, clamp(ly - (h + 5), minY, maxY - h)],
+          [clamp(pt.x + 14, 10, hostWidth - w - 10), clamp(pt.y - h * 0.5, minY, maxY - h)],
+          [clamp(pt.x - w - 14, 10, hostWidth - w - 10), clamp(pt.y - h * 0.5, minY, maxY - h)],
+        ];
+        let placed = false;
+        for (const [cx, cy] of candidates) {
+          if (!overlapsAny(occupied, cx, cy, cx + w, cy + h)) {
+            lx = cx;
+            ly = cy;
+            placed = true;
+            break;
+          }
+        }
+        if (!placed && lm.partId !== activePart && lm.tone !== 'gold' && lm.id !== 'g-nope') {
+          continue;
+        }
+      }
+
+      const el = this.getOrCreateCutawayNode(lm.id);
+      const isAct = lm.partId !== undefined && lm.partId === activePart;
+      el.className = 'ov-pill';
+      if (isAct) el.classList.add('ov-pill-active');
+      else if (lm.tone === 'gold') el.classList.add('ov-pill-gold');
+      else if (lm.tone === 'cyan') el.classList.add('ov-pill-cyan');
+      else if (lm.tone === 'muted') el.classList.add('ov-pill-muted');
+
+      el.textContent = lm.label;
+      el.style.display = 'inline-flex';
+      el.style.transform = `translate3d(${lx.toFixed(1)}px, ${ly.toFixed(1)}px, 0)`;
+      occupied.push({ x0: lx, y0: ly, x1: lx + w, y1: ly + h });
+
+      // Crisp short vertical/diagonal leader connecting pill edge to slab anchor
+      const anchorX = clamp(pt.x, 4, hostWidth - 4);
+      const anchorY = clamp(pt.y, minY, maxY);
+      const targetX = clamp(anchorX, lx + 8, lx + w - 8);
+      const targetY = anchorY < ly ? ly : anchorY > ly + h ? ly + h : ly + h * 0.5;
+      leaderSegs.push(
+        `M${anchorX.toFixed(1)},${anchorY.toFixed(1)}L${targetX.toFixed(1)},${targetY.toFixed(1)}`,
+      );
+    }
+
+    // KV depth ticks (1, 8, 16, T=N) in GQA Cutaway
+    if (scene.kvDepthTicks.length > 0) {
+      const orderedTicks = [...scene.kvDepthTicks].sort((a, b) =>
+        a.token === tokens ? -1 : b.token === tokens ? 1 : a.token - b.token,
+      );
+      for (const tick of orderedTicks) {
+        const pt = projectWorldToHostCss(tick.world, snapshot);
+        if (!pt.visible || pt.x < 10 || pt.x > hostWidth - 28 || pt.y < minY || pt.y > maxY) {
+          continue;
+        }
+        const isCur = tick.token === tokens;
+        const text = isCur ? `T=${tick.token}` : `${tick.token}`;
+        const w = this.measureText(text, monoFont) + 8;
+        const h = 15;
+        const lx = clamp(pt.x - w - 4, 8, hostWidth - w - 8);
+        const ly = clamp(pt.y - h * 0.5, minY, maxY - h);
+        if (!isCur && overlapsAny(occupied, lx, ly, lx + w, ly + h)) {
+          continue;
+        }
+        const el = this.kvTickNodes.get(tick.token);
+        if (!el) continue;
+        el.textContent = text;
+        el.classList.toggle('is-current', isCur);
+        el.style.display = 'inline-flex';
+        el.style.transform = `translate3d(${lx.toFixed(1)}px, ${ly.toFixed(1)}px, 0)`;
+        occupied.push({ x0: lx, y0: ly, x1: lx + w, y1: ly + h });
+      }
+    }
+
+    this.leaderPath.setAttribute('d', leaderSegs.join(''));
+    this.phaseBracketPath.setAttribute('d', '');
   }
 }
