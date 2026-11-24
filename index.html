@@ -40,80 +40,94 @@
 
       <div class="workspace-split">
         <aside class="sidebar" aria-label="Architecture guide and controls">
-          <!-- Top panel: 2D SVG mini-diagram + clickable Table of Contents -->
-          <section class="sidebar-top" aria-label="Hybrid cycle overview and contents">
-            <div class="mini-diagram-wrap" aria-hidden="true">
-              <svg
-                id="mini-diagram"
-                class="mini-diagram"
-                viewBox="0 0 112 204"
-                width="92"
-                height="168"
+          <!-- Top panel: Collapsible 2D SVG mini-diagram + clickable Table of Contents -->
+          <section id="sidebar-top" class="sidebar-top" aria-label="Hybrid cycle overview and contents">
+            <div class="sidebar-top-bar">
+              <button
+                type="button"
+                id="sidebar-toc-toggle"
+                class="toc-collapse-btn"
+                aria-expanded="true"
+                aria-controls="sidebar-top-body"
+                title="Toggle contents & diagram"
               >
-                <!-- Residual stream spine -->
-                <line x1="94" y1="14" x2="94" y2="190" stroke="#4ADE80" stroke-width="4" stroke-opacity="0.55" />
-                <!-- Embed -->
-                <g data-mini-section="embedding" class="mini-node">
-                  <rect x="14" y="8" width="66" height="18" rx="3" fill="#414756" stroke="#637BF5" stroke-width="1.5" />
-                  <text x="47" y="20" text-anchor="middle" fill="#FFFFFF" font-size="8.5" font-weight="600">Embed</text>
-                  <line x1="80" y1="17" x2="92" y2="17" stroke="#4ADE80" stroke-width="2" />
-                </g>
-                <!-- Hybrid Cycle Bracket -->
-                <rect x="6" y="34" width="80" height="114" rx="4" fill="#F1F4F9" stroke="#CBD5E1" stroke-dasharray="3 2" />
-                <text x="12" y="45" fill="#475569" font-size="7.5" font-weight="600">52-LAYER HYBRID</text>
-                <!-- Mamba-2 -->
-                <g data-mini-section="mamba" class="mini-node">
-                  <rect x="14" y="52" width="64" height="24" rx="3" fill="#363C49" stroke="#38BDF8" stroke-width="1.6" />
-                  <text x="46" y="63" text-anchor="middle" fill="#FFFFFF" font-size="8.5" font-weight="600">Mamba-2</text>
-                  <text x="46" y="72" text-anchor="middle" fill="#7DD3FC" font-size="7">×23 · fixed SSM</text>
-                  <line x1="78" y1="64" x2="92" y2="64" stroke="#4ADE80" stroke-width="2" />
-                </g>
-                <!-- MoE -->
-                <g data-mini-section="moe" class="mini-node">
-                  <rect x="14" y="84" width="64" height="24" rx="3" fill="#363C49" stroke="#F59E0B" stroke-width="1.6" />
-                  <text x="46" y="95" text-anchor="middle" fill="#FFFFFF" font-size="8.5" font-weight="600">MoE 128+1</text>
-                  <text x="46" y="104" text-anchor="middle" fill="#FCD34D" font-size="7">×23 · 6 active</text>
-                  <line x1="78" y1="96" x2="92" y2="96" stroke="#4ADE80" stroke-width="2" />
-                </g>
-                <!-- GQA Attention -->
-                <g data-mini-section="gqa" class="mini-node">
-                  <rect x="14" y="116" width="64" height="24" rx="3" fill="#363C49" stroke="#637BF5" stroke-width="1.6" />
-                  <text x="46" y="127" text-anchor="middle" fill="#FFFFFF" font-size="8.5" font-weight="600">GQA Attn</text>
-                  <text x="46" y="136" text-anchor="middle" fill="#A5B4FC" font-size="7">×6 · 32Q / 2KV</text>
-                  <line x1="78" y1="128" x2="92" y2="128" stroke="#4ADE80" stroke-width="2" />
-                </g>
-                <!-- KV / FP8 callout -->
-                <g data-mini-section="kv_fp8" class="mini-node">
-                  <rect x="14" y="155" width="64" height="16" rx="3" fill="#1E293B" stroke="#F59E0B" stroke-width="1.2" />
-                  <text x="46" y="166" text-anchor="middle" fill="#FDE68A" font-size="7.5" font-weight="600">KV Cache &amp; FP8</text>
-                </g>
-                <!-- Output -->
-                <g data-mini-section="output" class="mini-node">
-                  <rect x="14" y="178" width="66" height="18" rx="3" fill="#414756" stroke="#4ADE80" stroke-width="1.5" />
-                  <text x="47" y="190" text-anchor="middle" fill="#FFFFFF" font-size="8.5" font-weight="600">Output 131K</text>
-                  <line x1="80" y1="187" x2="92" y2="187" stroke="#4ADE80" stroke-width="2" />
-                </g>
-              </svg>
+                <span class="toc-collapse-heading">Contents</span>
+                <span id="sidebar-current-section" class="toc-current-pill">Overview</span>
+                <span class="toc-chevron" aria-hidden="true">▾</span>
+              </button>
+              <button
+                type="button"
+                id="tour-toggle-btn"
+                class="toc-tour-btn is-active"
+                title="Toggle 7-chapter guided walkthrough"
+              >Tour 1/7</button>
             </div>
 
-            <nav class="toc-nav" aria-label="Architecture sections">
-              <div class="toc-header-row">
-                <div class="toc-heading">Contents</div>
-                <button
-                  type="button"
-                  id="tour-toggle-btn"
-                  class="toc-tour-btn is-active"
-                  title="Toggle 7-chapter guided walkthrough"
-                >Tour 1/7</button>
+            <div id="sidebar-top-body" class="sidebar-top-body">
+              <div class="mini-diagram-wrap" aria-hidden="true">
+                <svg
+                  id="mini-diagram"
+                  class="mini-diagram"
+                  viewBox="0 0 112 204"
+                  width="92"
+                  height="168"
+                >
+                  <!-- Residual stream spine -->
+                  <line x1="94" y1="14" x2="94" y2="190" stroke="#4ADE80" stroke-width="4" stroke-opacity="0.55" />
+                  <!-- Embed -->
+                  <g data-mini-section="embedding" class="mini-node">
+                    <rect x="14" y="8" width="66" height="18" rx="3" fill="#414756" stroke="#637BF5" stroke-width="1.5" />
+                    <text x="47" y="20" text-anchor="middle" fill="#FFFFFF" font-size="8.5" font-weight="600">Embed</text>
+                    <line x1="80" y1="17" x2="92" y2="17" stroke="#4ADE80" stroke-width="2" />
+                  </g>
+                  <!-- Hybrid Cycle Bracket -->
+                  <rect x="6" y="34" width="80" height="114" rx="4" fill="#F1F4F9" stroke="#CBD5E1" stroke-dasharray="3 2" />
+                  <text x="12" y="45" fill="#475569" font-size="7.5" font-weight="600">52-LAYER HYBRID</text>
+                  <!-- Mamba-2 -->
+                  <g data-mini-section="mamba" class="mini-node">
+                    <rect x="14" y="52" width="64" height="24" rx="3" fill="#363C49" stroke="#38BDF8" stroke-width="1.6" />
+                    <text x="46" y="63" text-anchor="middle" fill="#FFFFFF" font-size="8.5" font-weight="600">Mamba-2</text>
+                    <text x="46" y="72" text-anchor="middle" fill="#7DD3FC" font-size="7">×23 · fixed SSM</text>
+                    <line x1="78" y1="64" x2="92" y2="64" stroke="#4ADE80" stroke-width="2" />
+                  </g>
+                  <!-- MoE -->
+                  <g data-mini-section="moe" class="mini-node">
+                    <rect x="14" y="84" width="64" height="24" rx="3" fill="#363C49" stroke="#F59E0B" stroke-width="1.6" />
+                    <text x="46" y="95" text-anchor="middle" fill="#FFFFFF" font-size="8.5" font-weight="600">MoE 128+1</text>
+                    <text x="46" y="104" text-anchor="middle" fill="#FCD34D" font-size="7">×23 · 6 active</text>
+                    <line x1="78" y1="96" x2="92" y2="96" stroke="#4ADE80" stroke-width="2" />
+                  </g>
+                  <!-- GQA Attention -->
+                  <g data-mini-section="gqa" class="mini-node">
+                    <rect x="14" y="116" width="64" height="24" rx="3" fill="#363C49" stroke="#637BF5" stroke-width="1.6" />
+                    <text x="46" y="127" text-anchor="middle" fill="#FFFFFF" font-size="8.5" font-weight="600">GQA Attn</text>
+                    <text x="46" y="136" text-anchor="middle" fill="#A5B4FC" font-size="7">×6 · 32Q / 2KV</text>
+                    <line x1="78" y1="128" x2="92" y2="128" stroke="#4ADE80" stroke-width="2" />
+                  </g>
+                  <!-- KV / FP8 callout -->
+                  <g data-mini-section="kv_fp8" class="mini-node">
+                    <rect x="14" y="155" width="64" height="16" rx="3" fill="#1E293B" stroke="#F59E0B" stroke-width="1.2" />
+                    <text x="46" y="166" text-anchor="middle" fill="#FDE68A" font-size="7.5" font-weight="600">KV Cache &amp; FP8</text>
+                  </g>
+                  <!-- Output -->
+                  <g data-mini-section="output" class="mini-node">
+                    <rect x="14" y="178" width="66" height="18" rx="3" fill="#414756" stroke="#4ADE80" stroke-width="1.5" />
+                    <text x="47" y="190" text-anchor="middle" fill="#FFFFFF" font-size="8.5" font-weight="600">Output 131K</text>
+                    <line x1="80" y1="187" x2="92" y2="187" stroke="#4ADE80" stroke-width="2" />
+                  </g>
+                </svg>
               </div>
-              <button type="button" class="toc-btn is-active" data-section="overview">Overview</button>
-              <button type="button" class="toc-btn" data-section="embedding">Embedding</button>
-              <button type="button" class="toc-btn" data-section="mamba">Mamba-2 (×23)</button>
-              <button type="button" class="toc-btn" data-section="moe">MoE 128+1 (×23)</button>
-              <button type="button" class="toc-btn" data-section="gqa">GQA Attention (×6)</button>
-              <button type="button" class="toc-btn" data-section="kv_fp8">KV Cache &amp; FP8</button>
-              <button type="button" class="toc-btn" data-section="output">Output</button>
-            </nav>
+
+              <nav class="toc-nav" aria-label="Architecture sections">
+                <button type="button" class="toc-btn is-active" data-section="overview">Overview</button>
+                <button type="button" class="toc-btn" data-section="embedding">Embedding</button>
+                <button type="button" class="toc-btn" data-section="mamba">Mamba-2 (×23)</button>
+                <button type="button" class="toc-btn" data-section="moe">MoE 128+1 (×23)</button>
+                <button type="button" class="toc-btn" data-section="gqa">GQA Attention (×6)</button>
+                <button type="button" class="toc-btn" data-section="kv_fp8">KV Cache &amp; FP8</button>
+                <button type="button" class="toc-btn" data-section="output">Output</button>
+              </nav>
+            </div>
           </section>
 
           <!-- Middle panel: Guided Walkthrough / Smoothly scrollable serif editorial explanation -->
@@ -170,27 +184,27 @@
               </div>
             </div>
 
-            <div class="control-block">
-              <div class="control-header">
-                <span class="control-label">Precision mode</span>
-              </div>
-              <div class="segmented-control" role="radiogroup" aria-label="Precision mode">
-                <button
-                  type="button"
-                  id="precision-bf16"
-                  class="seg-btn is-active"
-                  role="radio"
-                  aria-checked="true"
-                  data-precision="bf16"
-                >BF16</button>
-                <button
-                  type="button"
-                  id="precision-fp8"
-                  class="seg-btn"
-                  role="radio"
-                  aria-checked="false"
-                  data-precision="fp8_selective"
-                >FP8 Selective</button>
+            <div class="control-block precision-mode-block">
+              <div class="exec-mode-row">
+                <span class="control-label">Precision</span>
+                <div class="segmented-control exec-mode-seg" role="radiogroup" aria-label="Precision mode">
+                  <button
+                    type="button"
+                    id="precision-bf16"
+                    class="seg-btn is-active"
+                    role="radio"
+                    aria-checked="true"
+                    data-precision="bf16"
+                  >BF16</button>
+                  <button
+                    type="button"
+                    id="precision-fp8"
+                    class="seg-btn"
+                    role="radio"
+                    aria-checked="false"
+                    data-precision="fp8_selective"
+                  >FP8 Selective</button>
+                </div>
               </div>
             </div>
 
@@ -223,10 +237,12 @@
           <div id="floating-toolbar" class="floating-toolbar" role="toolbar" aria-label="View modes and camera controls">
             <div class="toolbar-row toolbar-row-modes">
               <div class="mode-pills" role="tablist" aria-label="Architecture views">
-                <button type="button" class="mode-btn is-active" role="tab" aria-selected="true" data-mode="tower">52-Layer Tower</button>
-                <button type="button" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_mamba">Cutaway: Mamba-2</button>
-                <button type="button" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_moe">Cutaway: MoE 128+1</button>
-                <button type="button" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_gqa">Cutaway: GQA Attention</button>
+                <button type="button" class="mode-btn is-active" role="tab" aria-selected="true" data-mode="tower" data-view="tower">52-Layer Tower</button>
+                <button type="button" id="tab-embed" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_embedding" data-view="cutaway_embedding">Embed</button>
+                <button type="button" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_mamba" data-view="cutaway_mamba">Mamba-2</button>
+                <button type="button" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_moe" data-view="cutaway_moe">MoE 128+1</button>
+                <button type="button" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_gqa" data-view="cutaway_gqa">GQA</button>
+                <button type="button" id="tab-output" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_output" data-view="cutaway_output">Output</button>
               </div>
 
               <div class="camera-actions">
@@ -237,6 +253,7 @@
                   title="Zoom to selected bay"
                   aria-label="Zoom to selected bay"
                   disabled
+                  hidden
                 >Zoom Bay</button>
                 <button
                   type="button"

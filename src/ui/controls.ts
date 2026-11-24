@@ -99,9 +99,21 @@ interface SectionCopy {
   readonly inspectKind?: BayKind;
 }
 
-const WEIGHTS_SUMMARY_LINE = 'Weights: 31.6B (~63 GB BF16, ~94% MoE) · Active: 3.2B/tok';
+const WEIGHTS_SUMMARY_LINE = 'Weights: 31.6B (~63 GB, ~94% MoE) · 3.2B active';
 const SHARED_EXPERT_NOTE =
   'Shared expert width 3,712 (= 2 × 1,856 in NVIDIA paper, fused in checkpoint)';
+
+const SECTION_SHORT_LABELS: Record<TocSectionId, string> = {
+  overview: 'Overview',
+  embedding: 'Embedding',
+  mamba: 'Mamba-2 (×23)',
+  moe: 'MoE 128+1 (×23)',
+  gqa: 'GQA Attention (×6)',
+  kv_fp8: 'KV Cache & FP8',
+  output: 'Output',
+};
+
+const COMPACT_VIEWPORT_HEIGHT_PX = 840;
 
 const SECTION_COPY: Record<TocSectionId, SectionCopy> = {
   overview: {
@@ -186,6 +198,10 @@ const SECTION_COPY: Record<TocSectionId, SectionCopy> = {
 };
 
 export interface ControlsElements {
+  sidebarTop: HTMLElement;
+  sidebarTopBody: HTMLDivElement;
+  sidebarTocToggle: HTMLButtonElement;
+  sidebarCurrentSection: HTMLSpanElement;
   modeButtons: HTMLButtonElement[];
   tocButtons: HTMLButtonElement[];
   presetButtons: HTMLButtonElement[];
@@ -251,6 +267,10 @@ export function queryControlsElements(): ControlsElements {
     return el as T;
   };
   return {
+    sidebarTop: get<HTMLElement>('sidebar-top'),
+    sidebarTopBody: get<HTMLDivElement>('sidebar-top-body'),
+    sidebarTocToggle: get<HTMLButtonElement>('sidebar-toc-toggle'),
+    sidebarCurrentSection: get<HTMLSpanElement>('sidebar-current-section'),
     modeButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('.mode-btn[data-mode]')),
     tocButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('.toc-btn[data-section]')),
     presetButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('.pill-btn[data-preset]')),
@@ -352,6 +372,8 @@ export class MacroControls {
   private boundaryInspectToken: number | null = null;
   private selectedCandidateTokenId: number | null = null;
   private lastDecodeStepId = '';
+  private tocCompactUserOverride: boolean | null = null;
+  private isSidebarTopCompact = false;
   private lastSyncedState: SceneState | null = null;
   private lastSyncedCutaway: CutawaySceneGeometry | null = null;
   private lastSyncedExecution: HybridExecutionResult | null = null;
@@ -362,6 +384,7 @@ export class MacroControls {
     this.els = els;
     this.cb = cb;
     this.bindEvents();
+    this.applySidebarCompactState('full_sequence');
   }
 
   private on<K extends keyof HTMLElementEventMap>(
@@ -373,11 +396,53 @@ export class MacroControls {
     this.cleanupFns.push(() => el.removeEventListener(type, handler as EventListener));
   }
 
+  private computeDesiredCompact(executionMode: ExecutionMode): boolean {
+    if (this.tocCompactUserOverride !== null) {
+      return this.tocCompactUserOverride;
+    }
+    const viewportH = typeof window !== 'undefined' ? window.innerHeight : 900;
+    return viewportH <= COMPACT_VIEWPORT_HEIGHT_PX || executionMode === 'ar_decode';
+  }
+
+  private applySidebarCompactState(executionMode: ExecutionMode): void {
+    const compact = this.computeDesiredCompact(executionMode);
+    this.isSidebarTopCompact = compact;
+    this.els.sidebarTop.classList.toggle('is-compact', compact);
+    this.els.sidebarTopBody.hidden = compact;
+    this.els.sidebarTocToggle.setAttribute('aria-expanded', String(!compact));
+  }
+
   private bindEvents(): void {
+    this.on(this.els.sidebarTocToggle, 'click', () => {
+      this.tocCompactUserOverride = !this.isSidebarTopCompact;
+      this.applySidebarCompactState(this.lastSyncedState?.executionMode ?? 'full_sequence');
+    });
+
+    if (typeof window !== 'undefined') {
+      const onResize = () => {
+        if (this.tocCompactUserOverride === null) {
+          this.applySidebarCompactState(this.lastSyncedState?.executionMode ?? 'full_sequence');
+        }
+      };
+      window.addEventListener('resize', onResize);
+      this.cleanupFns.push(() => window.removeEventListener('resize', onResize));
+    }
+
     for (const btn of this.els.modeButtons) {
       this.on(btn, 'click', () => {
-        const mode = btn.dataset.mode as ViewMode | undefined;
-        if (mode) this.cb.onSelectMode(mode);
+        const rawMode = btn.dataset.mode;
+        if (
+          rawMode === 'tower' ||
+          rawMode === 'cutaway_mamba' ||
+          rawMode === 'cutaway_moe' ||
+          rawMode === 'cutaway_gqa'
+        ) {
+          this.cb.onSelectMode(rawMode);
+        } else if (rawMode === 'cutaway_embedding') {
+          this.cb.onSelectSection('embedding');
+        } else if (rawMode === 'cutaway_output') {
+          this.cb.onSelectSection('output');
+        }
       });
     }
 
@@ -635,6 +700,8 @@ export class MacroControls {
     for (const btn of this.els.tocButtons) {
       btn.classList.toggle('is-active', btn.dataset.section === effectiveSection);
     }
+    this.els.sidebarCurrentSection.textContent = SECTION_SHORT_LABELS[effectiveSection];
+    this.applySidebarCompactState(state.executionMode);
     for (const btn of this.els.presetButtons) {
       btn.classList.toggle('is-active', btn.dataset.preset === state.section);
     }
@@ -667,12 +734,11 @@ export class MacroControls {
     this.els.precisionFp8.classList.toggle('is-active', !isBf16);
     this.els.precisionFp8.setAttribute('aria-checked', String(!isBf16));
 
-    // Zoom bay button & bay stepping row (only shown in 52-Layer Tower mode)
+    // Zoom bay button (hidden when disabled or no bay selected) & bay stepping row (Tower only)
     const isTower = state.mode === 'tower';
     const hasPinnedBay = isTower && state.selectedBay !== null;
-    const hasPinnedPart = !isTower && state.selectedPart !== null;
 
-    this.els.zoomBayBtn.hidden = !isTower;
+    this.els.zoomBayBtn.hidden = !hasPinnedBay;
     this.els.zoomBayBtn.disabled = !hasPinnedBay;
     this.els.zoomBayBtn.textContent = hasPinnedBay
       ? `Zoom Bay ${formatBayId(state.selectedBay!)}`
@@ -680,9 +746,9 @@ export class MacroControls {
 
     this.els.bayPrev.hidden = !isTower;
     this.els.bayNext.hidden = !isTower;
-    this.els.bayClear.hidden = !(hasPinnedBay || hasPinnedPart);
-    this.els.bayClear.textContent = hasPinnedPart ? 'Clear slab' : 'Clear';
-    this.els.bayStepRow.hidden = !isTower && !hasPinnedPart;
+    this.els.bayClear.hidden = !hasPinnedBay;
+    this.els.bayClear.textContent = 'Clear';
+    this.els.bayStepRow.hidden = !isTower;
 
     // Guided Tour header toggle button
     const activeChapter = getWalkthroughChapter(state.tourChapter);
@@ -1175,9 +1241,10 @@ export class MacroControls {
     cacheGrid.className = 'ar-cache-grid';
     cacheGrid.dataset.testid = 'ar-cache-grid';
 
-    const makeCacheCell = (label: string, val: string, sub: string, cls: string) => {
+    const makeCacheCell = (label: string, val: string, sub: string, cls: string, tooltip: string) => {
       const el = document.createElement('div');
       el.className = `ar-cache-cell ${cls}`;
+      el.title = tooltip;
       const l = document.createElement('span');
       l.className = 'ar-cache-k';
       l.textContent = label;
@@ -1195,16 +1262,24 @@ export class MacroControls {
       makeCacheCell(
         'GQA KV (×6)',
         `${step.totalTokens}/${session.maxTokens} · ${(acct.gqaPopulatedBytes / 1024).toFixed(2)} KiB`,
-        `grows +384 B/t · prod +${isFp8 ? '3' : '6'} KiB/t`,
+        `prod +${isFp8 ? '3' : '6'} KiB/t`,
         'is-gqa',
+        `Grows +${acct.bytesPerTokenGqaPopulated} B/token in mini sim · Production: +${isFp8 ? '3' : '6'} KiB/token (${isFp8 ? 'FP8' : 'BF16'})`,
       ),
       makeCacheCell(
         'Mamba (×23)',
         `FIXED ${(acct.mambaFixedBytes / 1024).toFixed(0)} KiB`,
-        'prod 47.1 MiB fixed',
+        'prod 47.1 MiB',
         'is-mamba',
+        'All 23 Mamba-2 bays update in place — 69 KiB miniature / 47.1 MiB production fixed from 1 to 1M tokens',
       ),
-      makeCacheCell('MoE (×23)', '0 B cache', 'stateless / token', 'is-moe'),
+      makeCacheCell(
+        'MoE (×23)',
+        '0 B cache',
+        'stateless',
+        'is-moe',
+        'All 23 MoE 128+1 bays are strictly per-token stateless (0 B dynamic sequence cache)',
+      ),
     );
     card.appendChild(cacheGrid);
 
