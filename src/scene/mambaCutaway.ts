@@ -16,6 +16,7 @@ import {
   describeMambaCellFormula,
   formatMambaHeadId,
   inferMambaCellHead,
+  inferMambaCellToken,
   MAMBA_SIM_CONFIG,
   mambaGroupForHead,
   runMambaSim,
@@ -116,6 +117,8 @@ interface MambaSheetSpec {
   groupIndex?: number;
   tensorKey?: MambaTensorKey;
   tokenIndex?: number;
+  tapIndex?: number;
+  stateTokenIndex?: number;
   atlasSlice?: AtlasSlice;
   registryKey?: string;
   cellFamily: number;
@@ -181,6 +184,8 @@ class MambaSheetBuilder {
       gridCols: s.tensorKey ? s.gridCols : undefined,
       gridRows: s.tensorKey ? s.gridRows : undefined,
       tokenIndex: s.tokenIndex,
+      tapIndex: s.tapIndex,
+      stateTokenIndex: s.stateTokenIndex,
       min: [s.cx - hx, s.cy - hy, s.cz - hz],
       max: [s.cx + hx, s.cy + hy, s.cz + hz],
     });
@@ -246,8 +251,12 @@ function resolveMambaSpanRect(
   registry: ReadonlyMap<string, SheetGeomRecord>,
   span: MambaSheetSpan,
   displayedHead: number,
+  displayedToken: number,
 ): WorldSpanRect | null {
   if (span.tensor === 'conv_buf') {
+    if (span.tokenIndex !== undefined && span.tokenIndex !== displayedToken) {
+      return null;
+    }
     const t0 = span.tapStart ?? 0;
     const t1 = span.tapEnd ?? t0;
     const first = registry.get(`conv_buf:${t0}`);
@@ -269,6 +278,9 @@ function resolveMambaSpanRect(
 
   if (span.tensor === 'h_prev' || span.tensor === 'h_curr') {
     if (span.headIndex !== undefined && span.headIndex !== displayedHead) {
+      return null;
+    }
+    if (span.tokenIndex !== undefined && span.tokenIndex !== displayedToken) {
       return null;
     }
     const sheet = registry.get(span.tensor);
@@ -310,10 +322,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   const explicitHeadSelected = cellHeadIdx !== null || partHeadIdx !== null;
 
   const sim = runMambaSim(clampedT);
-  const stateTokIdx =
-    opts.activeCell?.tokenIndex !== undefined
-      ? Math.max(0, Math.min(clampedT - 1, opts.activeCell.tokenIndex))
-      : clampedT - 1;
+  const stateTokIdx = inferMambaCellToken(opts.activeCell, clampedT) ?? clampedT - 1;
   const atlas = buildMambaValueAtlas(sim, activeHead, stateTokIdx);
   const activeFormula: MambaCellFormula | null = opts.activeCell
     ? describeMambaCellFormula(sim, opts.activeCell)
@@ -621,6 +630,8 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
       partId: 'conv1d',
       tensorKey: 'conv_buf',
       tokenIndex: slot,
+      tapIndex: slot,
+      stateTokenIndex: stateTokIdx,
       atlasSlice: atlas.convBufTaps[slot],
       registryKey: `conv_buf:${slot}`,
       cellFamily: CELL_ACTIVATION_GREEN,
@@ -1174,7 +1185,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   // 9. LIVE CELL-LEVEL HIGHLIGHTS & UPSTREAM DEPENDENCY THREADS
   // ==========================================================================
   if (activeFormula) {
-    const targetRect = resolveMambaSpanRect(b.sheetRegistry, activeFormula.targetSpan, activeHead);
+    const targetRect = resolveMambaSpanRect(b.sheetRegistry, activeFormula.targetSpan, activeHead, stateTokIdx);
     if (targetRect) {
       b.flow.addCellHighlightXZ(
         targetRect.cx,
@@ -1187,7 +1198,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
         0.026,
       );
       for (const upSpan of activeFormula.upstreamSpans) {
-        const upRect = resolveMambaSpanRect(b.sheetRegistry, upSpan, activeHead);
+        const upRect = resolveMambaSpanRect(b.sheetRegistry, upSpan, activeHead, stateTokIdx);
         if (!upRect) continue;
         drawOperandDependencyXZ(b.flow, upRect, targetRect, upSpan.role === 'operand_a');
       }
@@ -1198,6 +1209,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   // 10. EXTERIOR PROGRESSIVE LABELS (strictly outside sheet faces, zero clutter)
   // ==========================================================================
   const headTag = formatMambaHeadId(activeHead);
+  const histTokTag = stateTokIdx < clampedT - 1 ? ` · t${stateTokIdx}` : '';
   b.landmarks.push(
     { id: 'm-res-in', label: 'Input (2,688)', world: [resX, 0.08, zRow0 - 0.66], partId: 'residual-in', align: 'top', tier: 'primary' },
     { id: 'm-rmsnorm', label: 'RMSNorm', world: [rmsX, 0.08, zRow0 - 0.36], partId: 'rmsnorm', align: 'top', tier: 'primary', tone: feederPreservedBf16 ? 'gold' : 'default' },
@@ -1213,7 +1225,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     { id: 'm-gate', label: `Gate z (T=${clampedT})`, world: [gateX, 0.08, gateZ - gateD * 0.5 - 0.18], partId: 'gate-branch', align: 'top', tier: 'primary' },
     {
       id: 'm-conv1d',
-      label: isFp8Mode ? 'Conv1D (k=4) · BF16' : 'Conv1D (k=4)',
+      label: isFp8Mode ? `Conv1D (k=4) · BF16${histTokTag}` : `Conv1D (k=4)${histTokTag}`,
       world: [convX + convW * 0.5 + 0.14, 0.08, (zConvTop + zConvBottom) * 0.5],
       partId: 'conv1d',
       align: 'right',
@@ -1233,7 +1245,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     { id: 'm-c', label: 'C (8 grps)', world: [cX, 0.08, zSplit - splitDepth * 0.5 - 0.18], partId: 'c-proj', align: 'top', tier: 'primary' },
     {
       id: 'm-hprev',
-      label: `Hₜ₋₁ (${headTag})`,
+      label: `Hₜ₋₁ (${headTag}${histTokTag})`,
       world: [hPrevX, 0.08, zSsm - hSize * 0.5 - 0.18],
       partId: 'ssm-state-prev',
       align: 'top',
@@ -1242,7 +1254,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     },
     {
       id: 'm-hcurr',
-      label: `Hₜ (${headTag} · Fixed)`,
+      label: `Hₜ (${headTag}${histTokTag} · Fixed)`,
       world: [hCurrX, 0.08, zSsm - hSize * 0.5 - 0.18],
       partId: 'ssm-state-curr',
       align: 'top',
@@ -1542,6 +1554,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
       outProjFp8: computeIsFp8,
       activeHead,
       activeGroup,
+      stateTokenIndex: stateTokIdx,
       miniatureHeadCount: sim.nHeads,
       miniatureGroupCount: sim.nGroups,
       usesSmoothRibbons: true,

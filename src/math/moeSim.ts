@@ -673,9 +673,47 @@ export function activeRoutedExpertIndices(tokens: number): number[] {
   return out;
 }
 
+function findActiveExpertRank(sim: MoeSimResult, expertId: number, tokenIndex: number): number | null {
+  const base = tokenIndex * sim.topK;
+  for (let j = 0; j < sim.topK; j++) {
+    if (sim.topk_indices[base + j] === expertId) {
+      return j;
+    }
+  }
+  return null;
+}
+
+function resolveRoutedSumExpert(
+  sim: MoeSimResult,
+  tokenIndex: number,
+  explicitExpertId?: number,
+  fallbackFocusExpert?: number,
+): { expertId: number; activeRank: number } {
+  const t = Math.max(0, Math.min(sim.tokens - 1, tokenIndex));
+  if (explicitExpertId !== undefined) {
+    const clamped = Math.max(0, Math.min(sim.nRoutedExperts - 1, explicitExpertId));
+    const rank = findActiveExpertRank(sim, clamped, t);
+    if (rank !== null) return { expertId: clamped, activeRank: rank };
+  }
+  if (fallbackFocusExpert !== undefined) {
+    const clamped = Math.max(0, Math.min(sim.nRoutedExperts - 1, fallbackFocusExpert));
+    const rank = findActiveExpertRank(sim, clamped, t);
+    if (rank !== null) return { expertId: clamped, activeRank: rank };
+  }
+  return { expertId: sim.topk_indices[t * sim.topK], activeRank: 0 };
+}
+
 /** Infer the expert ID owned by a MoE cell if applicable, else null. */
-export function inferMoeCellExpert(cell: MoeCellRef | null, sim?: MoeSimResult): number | null {
+export function inferMoeCellExpert(
+  cell: MoeCellRef | null,
+  sim?: MoeSimResult,
+  fallbackFocusExpert?: number,
+): number | null {
   if (!cell) return null;
+  if (cell.tensor === 'routed_sum' && sim) {
+    const t = Math.max(0, Math.min(sim.tokens - 1, cell.tokenIndex ?? cell.row));
+    return resolveRoutedSumExpert(sim, t, cell.expertId, fallbackFocusExpert).expertId;
+  }
   if (cell.expertId !== undefined) {
     return Math.max(0, Math.min(MOE_SIM_CONFIG.nRoutedExperts - 1, cell.expertId));
   }
@@ -706,7 +744,7 @@ export function describeMoeCellFormula(
   const { d, dExp, dShared, topK, tokens: T } = sim;
   const tokIdx = Math.max(0, Math.min(T - 1, rawCell.tokenIndex ?? defaultFocusToken));
   const tokLabel = sim.tokenLabels[tokIdx] ?? `t${tokIdx}`;
-  const inferredExp = inferMoeCellExpert(rawCell, sim);
+  const inferredExp = inferMoeCellExpert(rawCell, sim, defaultFocusExpert);
   const expId = Math.max(0, Math.min(sim.nRoutedExperts - 1, inferredExp ?? defaultFocusExpert));
   const expTag = formatExpertId(expId);
 
@@ -971,6 +1009,14 @@ export function describeMoeCellFormula(
       const ch = Math.max(0, Math.min(d - 1, rawCell.col));
       const val = sim.y_routed[ch * T + t];
       const tl = sim.tokenLabels[t] ?? `t${t}`;
+      const { expertId: resolvedExp, activeRank } = resolveRoutedSumExpert(
+        sim,
+        t,
+        rawCell.expertId,
+        defaultFocusExpert,
+      );
+      const resolvedW = sim.topk_weights[t * topK + activeRank];
+      const resolvedY = sim.active_y[(t * topK + activeRank) * d + ch];
       const terms: string[] = [];
       for (let j = 0; j < 3; j++) {
         const eid = sim.topk_indices[t * topK + j];
@@ -979,7 +1025,7 @@ export function describeMoeCellFormula(
         terms.push(`${w.toFixed(2)}·${formatExpertId(eid)}(${fmtSigned(yv, 2)})`);
       }
       return {
-        cell: { tensor: 'routed_sum', row: t, col: ch, tokenIndex: t },
+        cell: { tensor: 'routed_sum', row: t, col: ch, tokenIndex: t, expertId: resolvedExp },
         tensorLabel: 'Routed Sum (Top-6)',
         coordLabel: `t${t} "${tl}" · ch ${ch}`,
         headBadge: 'Σ_{j=1..6} wⱼ·yⱼ (×2.5 scaled)',
@@ -987,12 +1033,12 @@ export function describeMoeCellFormula(
         isMasked: false,
         valueText: fmtSigned(val, 3),
         equation: `y_routed[${ch}, t${t}] = ${terms.join(' + ')} + … (6 active) = ${fmtSigned(val, 3)}`,
-        subEquation: `Parallel sum of 6 active routed experts (122 idle experts contribute exact 0).`,
+        subEquation: `Parallel sum of 6 active routed experts (122 idle = 0). Focused: ${formatExpertId(resolvedExp)} (Top-6 #${activeRank + 1}, ${resolvedW.toFixed(3)}×${fmtSigned(resolvedY, 3)}).`,
         upstreamSpans: [
           { tensor: 'topk_weights', rowStart: 0, rowEnd: 0, colStart: 0, colEnd: topK - 1, tokenIndex: t },
-          { tensor: 'routed_w_down', rowStart: ch, rowEnd: ch, colStart: 0, colEnd: dExp - 1, expertId: sim.topk_indices[t * topK], tokenIndex: t },
+          { tensor: 'routed_w_down', rowStart: ch, rowEnd: ch, colStart: 0, colEnd: dExp - 1, expertId: resolvedExp, tokenIndex: t },
         ],
-        activeExpertId: sim.topk_indices[t * topK],
+        activeExpertId: resolvedExp,
         isIdleExpert: false,
       };
     }

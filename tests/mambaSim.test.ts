@@ -467,4 +467,217 @@ describe('Stage A+1 Increment 3: Deterministic Miniature Mamba-2 Simulator & Cut
       expect(Number.isFinite(sf.value)).toBe(true);
     }
   });
+
+  it('7. maps every Mamba B and C sheet column across all 8 groups (G0..G7) and n=0..3 without clamping', () => {
+    const T = 16;
+    const t = 5;
+    const cutaway = buildMambaCutaway({
+      bayId: 1,
+      tokens: T,
+      precision: 'bf16',
+      selectedPart: null,
+      hoveredPart: null,
+      activeHead: 0,
+    });
+    const sim = cutaway.mambaSim!;
+    const { dInner, nGroups, dState } = sim;
+
+    for (const tensor of ['b', 'c'] as const) {
+      const box = cutaway.solidPickBoxes.find((b) => b.tensorKey === tensor)!;
+      expect(box).toBeDefined();
+      const wz = box.min[2] + ((t + 0.5) / T) * (box.max[2] - box.min[2]);
+
+      for (let g = 0; g < nGroups; g++) {
+        for (let n = 0; n < dState; n++) {
+          const flatCol = g * dState + n;
+          const wx = box.min[0] + ((flatCol + 0.5) / (nGroups * dState)) * (box.max[0] - box.min[0]);
+          const hit = pickMacroBay(
+            { origin: [wx, 4.0, wz], direction: [0, -1, 0] },
+            cutaway.solidPickBoxes,
+            [],
+          );
+          expect(hit).not.toBeNull();
+          const cell = pickHitToMambaCell(hit!, 0, T);
+          expect(cell).toMatchObject({
+            tensor,
+            row: t,
+            col: flatCol,
+            groupIndex: g,
+            tokenIndex: t,
+          });
+
+          const formula = describeMambaCellFormula(sim, cell!);
+          const expectedArr = tensor === 'b' ? sim.B : sim.C;
+          const expectedVal = expectedArr[flatCol * T + t];
+          expect(formula.value).toBeCloseTo(expectedVal, 6);
+          expect(formula.headBadge).toContain(`G${g}`);
+          expect(formula.coordLabel).toContain(`n=${n}`);
+          expect(formula.targetSpan).toMatchObject({
+            tensor,
+            rowStart: t,
+            rowEnd: t,
+            colStart: flatCol,
+            colEnd: flatCol,
+          });
+
+          const expectedConvCh =
+            tensor === 'b' ? dInner + flatCol : dInner + nGroups * dState + flatCol;
+          const xbcSpan = formula.upstreamSpans.find((s) => s.tensor === 'xbc_pre');
+          expect(xbcSpan).toMatchObject({
+            colStart: expectedConvCh,
+            colEnd: expectedConvCh,
+            rowStart: Math.max(0, t - 3),
+            rowEnd: t,
+          });
+          const convSpan = formula.upstreamSpans.find((s) => s.tensor === 'conv_buf');
+          expect(convSpan).toMatchObject({
+            colStart: expectedConvCh,
+            colEnd: expectedConvCh,
+            tokenIndex: t,
+          });
+        }
+      }
+    }
+
+    // Explicit local (groupIndex, col in 0..3) lookup also stays accurate
+    const localFormula = describeMambaCellFormula(sim, {
+      tensor: 'b',
+      row: t,
+      col: 1,
+      groupIndex: 5,
+    });
+    expect(localFormula.value).toBeCloseTo(sim.B[(5 * dState + 1) * T + t], 6);
+    expect(localFormula.targetSpan.colStart).toBe(5 * dState + 1);
+  });
+
+  it('8. synchronizes Mamba historical SSM state and Conv1D rolling buffer to inspected historical tokens and Step 5 scrubbing', () => {
+    const T = 10;
+    const sim = runMambaSim(T);
+    const { nHeads, dHead, dState, convDim } = sim;
+    const stateStride = nHeads * dHead * dState;
+    const targetHead = 5;
+    const targetTok = 1; // early historical token where Conv1D slots 0,1 are zero-padded!
+
+    // Helper to read raw RG32F value from atlas slice at (row, col)
+    const readAtlasVal = (
+      atlas: ReturnType<typeof buildMambaValueAtlas>,
+      slice: ReturnType<typeof buildMambaValueAtlas>['hCurr'],
+      row: number,
+      col: number,
+    ): number => {
+      const px = Math.round(slice.rect[0] * atlas.width) + col;
+      const py = Math.round(slice.rect[1] * atlas.height) + row;
+      return atlas.data[(py * atlas.width + px) * 2];
+    };
+
+    // (a) Inspecting historical y[t=1, head=5, p=2] synchronizes stateTokenIndex, H_prev/H_curr, and Conv1D buffer!
+    const yCell = {
+      tensor: 'y' as const,
+      row: targetTok,
+      col: targetHead * dHead + 2,
+    };
+    const histCutaway = buildMambaCutaway({
+      bayId: 1,
+      tokens: T,
+      precision: 'bf16',
+      selectedPart: null,
+      hoveredPart: null,
+      activeHead: 0,
+      activeCell: yCell,
+    });
+    expect(histCutaway.mambaStats?.stateTokenIndex).toBe(targetTok);
+    expect(histCutaway.mambaStats?.activeHead).toBe(targetHead);
+    expect(histCutaway.landmarks.find((l) => l.id === 'm-hprev')?.label).toContain(`t${targetTok}`);
+    expect(histCutaway.landmarks.find((l) => l.id === 'm-hcurr')?.label).toContain(`t${targetTok}`);
+    expect(histCutaway.landmarks.find((l) => l.id === 'm-conv1d')?.label).toContain(`t${targetTok}`);
+
+    // Verify atlas hPrev === H_history[targetTok - 1] and hCurr === H_history[targetTok] (NOT final token T-1)
+    const histAtlas = buildMambaValueAtlas(sim, targetHead, targetTok);
+    const finalAtlas = buildMambaValueAtlas(sim, targetHead, T - 1);
+    let differsFromFinal = 0;
+    for (let p = 0; p < dHead; p++) {
+      for (let n = 0; n < dState; n++) {
+        const localIdx = (targetHead * dHead + p) * dState + n;
+        const expectedPrev = sim.H_history[(targetTok - 1) * stateStride + localIdx];
+        const expectedCurr = sim.H_history[targetTok * stateStride + localIdx];
+        expect(readAtlasVal(histAtlas, histAtlas.hPrev, p, n)).toBeCloseTo(expectedPrev, 6);
+        expect(readAtlasVal(histAtlas, histAtlas.hCurr, p, n)).toBeCloseTo(expectedCurr, 6);
+        if (Math.abs(readAtlasVal(histAtlas, histAtlas.hCurr, p, n) - readAtlasVal(finalAtlas, finalAtlas.hCurr, p, n)) > 1e-4) {
+          differsFromFinal++;
+        }
+      }
+    }
+    expect(differsFromFinal).toBeGreaterThan(0);
+
+    // Verify Conv1D rolling buffer atlas at t=1: slots 0 & 1 are exact 0 left-pad; slots 2 & 3 match xBC_pre[:, 0] & xBC_pre[:, 1]
+    for (let c = 0; c < convDim; c += 7) {
+      expect(readAtlasVal(histAtlas, histAtlas.convBufTaps[0], 0, c)).toBe(0);
+      expect(readAtlasVal(histAtlas, histAtlas.convBufTaps[1], 0, c)).toBe(0);
+      expect(readAtlasVal(histAtlas, histAtlas.convBufTaps[2], 0, c)).toBeCloseTo(sim.xBC_pre[c * T + 0], 6);
+      expect(readAtlasVal(histAtlas, histAtlas.convBufTaps[3], 0, c)).toBeCloseTo(sim.xBC_pre[c * T + 1], 6);
+    }
+
+    // (b) Picking conv_buf from the t=1 synced cutaway preserves stateTokenIndex = 1 and reads causal t=1 values
+    const padTapBox = histCutaway.solidPickBoxes.find(
+      (b) => b.tensorKey === 'conv_buf' && b.tokenIndex === 0,
+    )!;
+    const validTapBox = histCutaway.solidPickBoxes.find(
+      (b) => b.tensorKey === 'conv_buf' && b.tokenIndex === 2,
+    )!;
+    expect(padTapBox.stateTokenIndex).toBe(targetTok);
+    expect(validTapBox.stateTokenIndex).toBe(targetTok);
+
+    const ch = 14;
+    const padHit = pickMacroBay(
+      {
+        origin: [
+          padTapBox.min[0] + ((ch + 0.5) / convDim) * (padTapBox.max[0] - padTapBox.min[0]),
+          4.0,
+          (padTapBox.min[2] + padTapBox.max[2]) * 0.5,
+        ],
+        direction: [0, -1, 0],
+      },
+      histCutaway.solidPickBoxes,
+      [],
+    );
+    const padCell = pickHitToMambaCell(padHit!, targetHead, T);
+    expect(padCell).toMatchObject({ tensor: 'conv_buf', tapIndex: 0, col: ch, tokenIndex: targetTok });
+    const padFormula = describeMambaCellFormula(sim, padCell!);
+    expect(padFormula.value).toBe(0);
+    expect(padFormula.equation).toContain('causal left-pad');
+    expect(padFormula.targetSpan.tokenIndex).toBe(targetTok);
+
+    const validHit = pickMacroBay(
+      {
+        origin: [
+          validTapBox.min[0] + ((ch + 0.5) / convDim) * (validTapBox.max[0] - validTapBox.min[0]),
+          4.0,
+          (validTapBox.min[2] + validTapBox.max[2]) * 0.5,
+        ],
+        direction: [0, -1, 0],
+      },
+      histCutaway.solidPickBoxes,
+      [],
+    );
+    const validCell = pickHitToMambaCell(validHit!, targetHead, T);
+    expect(validCell).toMatchObject({ tensor: 'conv_buf', tapIndex: 2, col: ch, tokenIndex: targetTok });
+    const validFormula = describeMambaCellFormula(sim, validCell!);
+    expect(validFormula.value).toBeCloseTo(sim.xBC_pre[ch * T + 0], 6);
+
+    // (c) Step 5 stepper scrubbing historical y keeps cutaway stateTokenIndex synchronized to scrubbed token
+    const step5Cell = mambaStepperCellForState(sim, targetHead, 4, 0.12);
+    expect(step5Cell.tensor).toBe('y');
+    expect(step5Cell.row).toBeLessThan(T - 1);
+    const step5Cutaway = buildMambaCutaway({
+      bayId: 1,
+      tokens: T,
+      precision: 'bf16',
+      selectedPart: null,
+      hoveredPart: null,
+      activeHead: targetHead,
+      activeCell: step5Cell,
+    });
+    expect(step5Cutaway.mambaStats?.stateTokenIndex).toBe(step5Cell.row);
+  });
 });
+

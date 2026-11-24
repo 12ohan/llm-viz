@@ -37,6 +37,8 @@ export interface PickBox {
   readonly gridCols?: number;
   readonly gridRows?: number;
   readonly tokenIndex?: number;
+  readonly tapIndex?: number;
+  readonly stateTokenIndex?: number;
   readonly min: Vec3;
   readonly max: Vec3;
 }
@@ -49,6 +51,8 @@ export interface PickHit {
   readonly groupIndex?: number;
   readonly tensorKey?: string;
   readonly tokenIndex?: number;
+  readonly tapIndex?: number;
+  readonly stateTokenIndex?: number;
   readonly hitRow?: number;
   readonly hitCol?: number;
   readonly t: number;
@@ -67,6 +71,10 @@ const GQA_TENSOR_KEYS = new Set<string>([
 const MAMBA_TENSOR_KEYS = new Set<string>([
   'input', 'rmsnorm', 'w_in', 'z', 'xbc_pre', 'conv_buf', 'x',
   'b', 'c', 'dt', 'h_prev', 'h_curr', 'y', 'y_norm', 'w_out', 'residual',
+]);
+
+const MAMBA_SEQUENCE_TENSOR_KEYS = new Set<string>([
+  'input', 'rmsnorm', 'z', 'xbc_pre', 'x', 'b', 'c', 'dt', 'y', 'y_norm', 'residual',
 ]);
 
 const MOE_TENSOR_KEYS = new Set<string>([
@@ -190,6 +198,8 @@ function findNearestBoxHit(ray: Ray, boxes: readonly PickBox[], isFascia: boolea
     groupIndex: bestBox.groupIndex,
     tensorKey: bestBox.tensorKey,
     tokenIndex: bestBox.tokenIndex,
+    tapIndex: bestBox.tapIndex,
+    stateTokenIndex: bestBox.stateTokenIndex,
     hitRow,
     hitCol,
     t: bestT,
@@ -269,12 +279,13 @@ export function pickHitToMambaCell(
   }
   const tensor = hit.tensorKey as MambaTensorKey;
   if (tensor === 'conv_buf') {
-    const slot = hit.tokenIndex ?? 0;
+    const slot = hit.tapIndex ?? hit.tokenIndex ?? 0;
     return {
       tensor,
       row: slot,
       col: hit.hitCol,
       tapIndex: slot,
+      tokenIndex: hit.stateTokenIndex ?? Math.max(0, tokens - 1),
     };
   }
   if (tensor === 'h_prev' || tensor === 'h_curr') {
@@ -295,6 +306,7 @@ export function pickHitToMambaCell(
       row: hit.hitRow,
       col: hit.hitCol,
       groupIndex: grp,
+      tokenIndex: hit.hitRow,
     };
   }
   const baseCell: MambaCellRef = {
@@ -303,6 +315,7 @@ export function pickHitToMambaCell(
     col: hit.hitCol,
     headIndex: hit.headIndex,
     groupIndex: hit.groupIndex,
+    tokenIndex: MAMBA_SEQUENCE_TENSOR_KEYS.has(tensor) ? hit.hitRow : undefined,
   };
   const inferredHead = inferMambaCellHead(baseCell);
   if (inferredHead !== null && baseCell.headIndex === undefined) {

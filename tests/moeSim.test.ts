@@ -10,6 +10,7 @@ import {
   relu2,
   runMoeSim,
   stableSigmoid,
+  type MoeCellFormula,
   type MoeCellRef,
 } from '../src/math/moeSim';
 import { pickHitToMoeCell, type PickHit } from '../src/render/pick';
@@ -398,4 +399,105 @@ describe('Stage A+1 Increment 4: Miniature NemotronH MoE (128+1) Simulator', () 
       expect(Number.isFinite(readout.value)).toBe(true);
     }
   });
+
+  it('7. synchronizes MoE routed_sum expert dependencies to an active Top-6 expert of the inspected token', () => {
+    const T = 8;
+    const sim = runMoeSim(T);
+    const t7 = 7;
+    const topk7 = Array.from(sim.topk_indices.subarray(t7 * 6, (t7 + 1) * 6));
+    const rank0Exp = topk7[0];
+    const rank3Exp = topk7[2]; // Active non-rank-0 expert
+    expect(rank3Exp).not.toBe(rank0Exp);
+
+    // (a) When an active non-rank-0 expert (Rank #3) is focused, inspecting routed_sum stays synced to Rank #3
+    const sumCellT7: MoeCellRef = { tensor: 'routed_sum', row: t7, col: 3, tokenIndex: t7 };
+    const activeSynced = buildMoECutaway({
+      bayId: 2,
+      tokens: T,
+      precision: 'bf16',
+      selectedPart: 'routed-sum',
+      hoveredPart: null,
+      focusToken: t7,
+      activeExpert: rank3Exp,
+      activeCell: sumCellT7,
+    });
+    expect(activeSynced.moeStats?.focusToken).toBe(t7);
+    expect(activeSynced.moeStats?.focusExpert).toBe(rank3Exp);
+    const activeFormulaA = activeSynced.activeFormula as MoeCellFormula;
+    expect(activeFormulaA.activeExpertId).toBe(rank3Exp);
+    const activeWDownSpan = activeFormulaA.upstreamSpans.find(
+      (s) => s.tensor === 'routed_w_down',
+    );
+    expect(activeWDownSpan).toMatchObject({
+      tensor: 'routed_w_down',
+      rowStart: 3,
+      rowEnd: 3,
+      expertId: rank3Exp,
+      tokenIndex: t7,
+    });
+    expect(activeFormulaA.subEquation).toContain(formatExpertId(rank3Exp));
+
+    // (b) When an IDLE expert is focused, inspecting routed_sum reconciles focusExpert & upstream span to an active Top-6 expert
+    const activeSet7 = new Set(topk7);
+    let idleExp = 0;
+    while (activeSet7.has(idleExp)) idleExp++;
+    const idleReconciled = buildMoECutaway({
+      bayId: 2,
+      tokens: T,
+      precision: 'bf16',
+      selectedPart: `moe-expert-${idleExp}`,
+      hoveredPart: 'routed-sum',
+      focusToken: t7,
+      activeExpert: idleExp,
+      activeCell: sumCellT7,
+    });
+    expect(idleReconciled.moeStats?.focusExpert).toBe(rank0Exp);
+    expect(activeSet7.has(idleReconciled.moeStats!.focusExpert!)).toBe(true);
+    const idleFormulaB = idleReconciled.activeFormula as MoeCellFormula;
+    expect(idleFormulaB.activeExpertId).toBe(rank0Exp);
+    const reconciledSpan = idleFormulaB.upstreamSpans.find(
+      (s) => s.tensor === 'routed_w_down',
+    );
+    expect(reconciledSpan).toMatchObject({
+      tensor: 'routed_w_down',
+      expertId: rank0Exp,
+      tokenIndex: t7,
+    });
+    expect(idleReconciled.landmarks.find((l) => l.id === 'moe-routed-up')?.label).toContain(
+      formatExpertId(rank0Exp),
+    );
+
+    // (c) Hovering routed_sum at an earlier token t=2 where t=7's active expert is idle reconciles to t=2's Top-6
+    const t2 = 2;
+    const topk2 = Array.from(sim.topk_indices.subarray(t2 * 6, (t2 + 1) * 6));
+    const activeSet2 = new Set(topk2);
+    const activeOnlyAt7 = topk7.find((e) => !activeSet2.has(e))!;
+    expect(activeOnlyAt7).toBeDefined();
+
+    const sumCellT2: MoeCellRef = { tensor: 'routed_sum', row: t2, col: 1, tokenIndex: t2 };
+    const crossTokCutaway = buildMoECutaway({
+      bayId: 2,
+      tokens: T,
+      precision: 'bf16',
+      selectedPart: null,
+      hoveredPart: 'routed-sum',
+      focusToken: t7,
+      activeExpert: activeOnlyAt7,
+      activeCell: sumCellT2,
+    });
+    expect(crossTokCutaway.moeStats?.focusToken).toBe(t2);
+    expect(crossTokCutaway.moeStats?.focusExpert).toBe(topk2[0]);
+    expect(activeSet2.has(crossTokCutaway.moeStats!.focusExpert!)).toBe(true);
+    const crossFormulaC = crossTokCutaway.activeFormula as MoeCellFormula;
+    expect(crossFormulaC.activeExpertId).toBe(topk2[0]);
+    const crossSpan = crossFormulaC.upstreamSpans.find(
+      (s) => s.tensor === 'routed_w_down',
+    );
+    expect(crossSpan).toMatchObject({
+      tensor: 'routed_w_down',
+      expertId: topk2[0],
+      tokenIndex: t2,
+    });
+  });
 });
+

@@ -310,14 +310,14 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   }
 
   // Synchronize focused expert ID from inspected cell > hovered/selected part > explicit activeExpert > rank-0 winner
-  const inspectedExpert = inferMoeCellExpert(opts.activeCell ?? null, sim);
   const partExpert = parseMoeExpertPartId(activePart);
-  const focusExpert =
-    inspectedExpert ??
+  const rawFallbackExpert =
     partExpert ??
     (opts.activeExpert !== undefined
       ? Math.max(0, Math.min(MOE_SIM_CONFIG.nRoutedExperts - 1, opts.activeExpert))
       : activeExpertIds[0]);
+  const inspectedExpert = inferMoeCellExpert(opts.activeCell ?? null, sim, rawFallbackExpert);
+  const focusExpert = inspectedExpert ?? rawFallbackExpert;
 
   const focusedEval = evaluateSingleRoutedExpert(sim, focusExpert, focusToken);
   const focusExpTag = formatExpertId(focusExpert);
@@ -1124,6 +1124,9 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   // ==========================================================================
   const resolveSpanRect = (span: MoeSheetSpan): WorldSpanRect | null => {
     if (span.tensor === 'router_bank') {
+      if (span.tokenIndex !== undefined && span.tokenIndex !== focusToken) {
+        return null;
+      }
       const eid =
         span.expertId ??
         Math.max(
@@ -1142,6 +1145,23 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
         ez: tile.ez,
         topY: tile.cy + tile.ey * 0.5,
       };
+    }
+    if (
+      span.tensor === 'routed_w_up' ||
+      span.tensor === 'routed_pre' ||
+      span.tensor === 'routed_act' ||
+      span.tensor === 'routed_w_down'
+    ) {
+      if (span.expertId !== undefined && span.expertId !== focusExpert) {
+        return null;
+      }
+      if (span.tokenIndex !== undefined && span.tokenIndex !== focusToken) {
+        return null;
+      }
+    } else if (span.tensor === 'topk_weights' || span.tensor === 'shared_act') {
+      if (span.tokenIndex !== undefined && span.tokenIndex !== focusToken) {
+        return null;
+      }
     }
     const geom = b.sheetRegistry.get(span.tensor);
     if (!geom) return null;

@@ -117,12 +117,16 @@ export function buildMambaValueAtlas(
     mode: 0,
   };
 
-  // 5. Rolling 4-tap Conv1D buffer [rows=4, cols=128] at (64, 8)
+  // 5. Rolling 4-tap Conv1D buffer [rows=4, cols=128] at (64, 8), synchronized to tokIdx
+  //    (bit-for-bit identical to sim.conv_buf when tokIdx === T - 1; causal zero-padded when srcT < 0)
   const convBufScale = 1 / computeMaxAbs(sim.xBC_pre, 0.35);
   const convBufTaps: AtlasSlice[] = [];
   for (let s = 0; s < convKernel; s++) {
+    const lag = convKernel - 1 - s;
+    const srcT = tokIdx - lag;
     for (let c = 0; c < convDim; c++) {
-      setTexel(64 + c, 8 + s, sim.conv_buf[c * convKernel + s]);
+      const val = srcT >= 0 ? sim.xBC_pre[c * T + srcT] : 0;
+      setTexel(64 + c, 8 + s, val);
     }
     convBufTaps.push({
       rect: makeRect(64, 8 + s, convDim, 1),

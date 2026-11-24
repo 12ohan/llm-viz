@@ -80,6 +80,7 @@ export interface MambaSheetSpan {
   readonly groupIndex?: number;
   readonly tapStart?: number;
   readonly tapEnd?: number;
+  readonly tokenIndex?: number;
   readonly role: 'target' | 'operand_a' | 'operand_b';
 }
 
@@ -731,6 +732,40 @@ export function inferMambaCellHead(cell: MambaCellRef | null | undefined): numbe
   }
 }
 
+const MAMBA_SEQUENCE_TENSORS = new Set<MambaTensorKey>([
+  'input',
+  'rmsnorm',
+  'z',
+  'xbc_pre',
+  'x',
+  'b',
+  'c',
+  'dt',
+  'y',
+  'y_norm',
+  'residual',
+]);
+
+/**
+ * Resolve the inspected token index (0..tokens-1) for any MambaCellRef so H_{t-1}, H_t,
+ * the 64-head bank, and the 4-tap Conv1D rolling buffer synchronize to historical rows t < T-1.
+ */
+export function inferMambaCellToken(
+  cell: MambaCellRef | null | undefined,
+  tokens: number,
+): number | null {
+  if (!cell) return null;
+  const maxT = Math.max(0, Math.round(tokens) - 1);
+  const clampT = (t: number) => Math.max(0, Math.min(maxT, t));
+  if (cell.tokenIndex !== undefined) {
+    return clampT(cell.tokenIndex);
+  }
+  if (MAMBA_SEQUENCE_TENSORS.has(cell.tensor)) {
+    return clampT(cell.row);
+  }
+  return null;
+}
+
 function tokTag(sim: MambaSimResult, t: number): string {
   const clamped = Math.max(0, Math.min(sim.tokens - 1, t));
   return `t${clamped}("${sim.tokenLabels[clamped]}")`;
@@ -879,23 +914,24 @@ export function describeMambaCellFormula(
     case 'conv_buf': {
       const slot = clampC(cell.tapIndex ?? cell.row, convKernel);
       const c = clampC(cell.col, convDim);
-      const lag = convKernel - 1 - slot; // slot 3 = lag 0 (T-1), slot 0 = lag 3 (T-4)
-      const srcT = lastT - lag;
-      const bufVal = sim.conv_buf[c * convKernel + slot];
+      const tok = clampT(cell.tokenIndex ?? lastT);
+      const lag = convKernel - 1 - slot; // slot 3 = lag 0 (tok), slot 0 = lag 3 (tok-3)
+      const srcT = tok - lag;
+      const bufVal = srcT >= 0 ? sim.xBC_pre[c * T + srcT] : 0;
       const wTap = sim.w_conv[c * convKernel + slot];
-      const coVal = sim.conv_out[c * T + lastT];
-      const siluVal = sim.xBC[c * T + lastT];
+      const coVal = sim.conv_out[c * T + tok];
+      const siluVal = sim.xBC[c * T + tok];
       const srcNote = srcT >= 0 ? tokTag(sim, srcT) : '0 (causal left-pad)';
       return {
-        cell,
+        cell: { ...cell, row: slot, col: c, tapIndex: slot, tokenIndex: tok },
         tensorLabel: 'Causal Conv1D Tap',
-        coordLabel: `slot ${slot} (t−${lag}) · ch=${c}`,
+        coordLabel: `slot ${slot} (t−${lag} @ t${tok}) · ch=${c}`,
         headBadge: 'Always BF16 (prod)',
         value: bufVal,
         isMasked: false,
         valueText: fmtSigned(bufVal),
         equation: `conv_buf[${c}, slot=${slot}] = ${fmtSigned(bufVal)} (${srcNote}) · w[${slot}]=${fmtSigned(wTap)}`,
-        subEquation: `Conv1D(t=${lastT}) = ${fmtSigned(coVal)} → SiLU = ${fmtSigned(siluVal)} · Fixed 4-tap buffer (~1.08 MiB BF16 / 23 bays)`,
+        subEquation: `Conv1D(t=${tok}) = ${fmtSigned(coVal)} → SiLU = ${fmtSigned(siluVal)} · Fixed 4-tap buffer (~1.08 MiB BF16 / 23 bays)`,
         targetSpan: {
           tensor: 'conv_buf',
           rowStart: 0,
@@ -904,6 +940,7 @@ export function describeMambaCellFormula(
           colEnd: c,
           tapStart: slot,
           tapEnd: slot,
+          tokenIndex: tok,
           role: 'target',
         },
         upstreamSpans:
@@ -918,14 +955,17 @@ export function describeMambaCellFormula(
       const h = cell.headIndex !== undefined
         ? clampC(cell.headIndex, sim.nHeads)
         : clampC(Math.floor(cell.col / dHead), sim.nHeads);
-      const p = cell.headIndex !== undefined ? clampC(cell.col, dHead) : cell.col % dHead;
+      const p =
+        cell.headIndex !== undefined && cell.col >= 0 && cell.col < dHead
+          ? cell.col
+          : clampC(cell.col % dHead, dHead);
       const c = h * dHead + p;
       const g = mambaGroupForHead(h);
       const val = sim.x[c * T + t];
       const co = sim.conv_out[c * T + t];
       const tapStart = Math.max(0, t - (convKernel - 1));
       return {
-        cell: { ...cell, headIndex: h, groupIndex: g },
+        cell: { ...cell, row: t, col: p, headIndex: h, groupIndex: g, tokenIndex: t },
         tensorLabel: `Post-SiLU x (${formatMambaHeadId(h)})`,
         coordLabel: `x[${formatMambaHeadId(h)}, p=${p}, ${tokTag(sim, t)}]`,
         headBadge: `${formatMambaHeadId(h)} · G${g}`,
@@ -960,6 +1000,7 @@ export function describeMambaCellFormula(
             colEnd: c,
             tapStart: 0,
             tapEnd: convKernel - 1,
+            tokenIndex: t,
             role: 'operand_b',
           },
         ],
@@ -971,16 +1012,25 @@ export function describeMambaCellFormula(
       const isB = cell.tensor === 'b';
       const t = clampT(cell.row);
       const flatCol = clampC(cell.col, sim.nGroups * dState);
-      const g = cell.groupIndex !== undefined ? clampC(cell.groupIndex, sim.nGroups) : Math.floor(flatCol / dState);
-      const n = cell.groupIndex !== undefined ? clampC(cell.col, dState) : flatCol % dState;
-      const convCh = dInner + (isB ? 0 : sim.nGroups * dState) + g * dState + n;
-      const val = isB ? sim.B[(g * dState + n) * T + t] : sim.C[(g * dState + n) * T + t];
+      // Support both flat sheet columns (0..31, with or without groupIndex) and explicit local coords (groupIndex > 0, col in 0..3)
+      const isLocalWithGroup =
+        cell.groupIndex !== undefined &&
+        cell.col >= 0 &&
+        cell.col < dState &&
+        clampC(cell.groupIndex, sim.nGroups) > 0;
+      const g = isLocalWithGroup
+        ? clampC(cell.groupIndex!, sim.nGroups)
+        : Math.floor(flatCol / dState);
+      const n = isLocalWithGroup ? cell.col : flatCol % dState;
+      const resolvedFlatCol = g * dState + n;
+      const convCh = dInner + (isB ? 0 : sim.nGroups * dState) + resolvedFlatCol;
+      const val = isB ? sim.B[resolvedFlatCol * T + t] : sim.C[resolvedFlatCol * T + t];
       const co = sim.conv_out[convCh * T + t];
       const tapStart = Math.max(0, t - (convKernel - 1));
       const h0 = g * sim.headsPerGroup;
       const h1 = h0 + sim.headsPerGroup - 1;
       return {
-        cell: { ...cell, groupIndex: g },
+        cell: { ...cell, row: t, col: resolvedFlatCol, groupIndex: g, tokenIndex: t },
         tensorLabel: isB ? `Input Proj B (G${g})` : `Readout Proj C (G${g})`,
         coordLabel: `${isB ? 'B' : 'C'}[G${g}, n=${n}, ${tokTag(sim, t)}]`,
         headBadge: `G${g} → ${formatMambaHeadId(h0)}–${formatMambaHeadId(h1)}`,
@@ -995,8 +1045,8 @@ export function describeMambaCellFormula(
           tensor: cell.tensor,
           rowStart: t,
           rowEnd: t,
-          colStart: g * dState + n,
-          colEnd: g * dState + n,
+          colStart: resolvedFlatCol,
+          colEnd: resolvedFlatCol,
           groupIndex: g,
           role: 'target',
         },
@@ -1008,6 +1058,17 @@ export function describeMambaCellFormula(
             colStart: convCh,
             colEnd: convCh,
             role: 'operand_a',
+          },
+          {
+            tensor: 'conv_buf',
+            rowStart: 0,
+            rowEnd: 0,
+            colStart: convCh,
+            colEnd: convCh,
+            tapStart: 0,
+            tapEnd: convKernel - 1,
+            tokenIndex: t,
+            role: 'operand_b',
           },
         ],
       };
@@ -1073,7 +1134,7 @@ export function describeMambaCellFormula(
               ? `H_{−1}[${formatMambaHeadId(h)}, p=${p}, n=${n}] = +0.000  (initial zero state at T=1)`
               : `H_{t−1}[${formatMambaHeadId(h)}, p=${p}, n=${n}] = ${fmtSigned(prevVal)}  (before ${tokTag(sim, t)})`,
           subEquation: `Decays by dA=${decay.toFixed(3)} in-place into H_t = ${fmtSigned(currVal)} (46.0 MiB FP32 / 23 bays fixed)`,
-          targetSpan: { tensor: 'h_prev', rowStart: p, rowEnd: p, colStart: n, colEnd: n, headIndex: h, role: 'target' },
+          targetSpan: { tensor: 'h_prev', rowStart: p, rowEnd: p, colStart: n, colEnd: n, headIndex: h, tokenIndex: t, role: 'target' },
           upstreamSpans: [],
         };
       }
@@ -1088,9 +1149,9 @@ export function describeMambaCellFormula(
         valueText: fmtSigned(currVal),
         equation: `H_t = ${decay.toFixed(3)}·(${fmtSigned(prevVal)}) + ${step.toFixed(3)}·(${fmtSigned(xVal)})·(${fmtSigned(bVal)}) = ${fmtSigned(currVal)}`,
         subEquation: `In-place FP32 recurrence H_t = dA·H_{t−1} + Δt·x·B (4×4 mini / 64×128 prod · fixed size T=1→1M)`,
-        targetSpan: { tensor: 'h_curr', rowStart: p, rowEnd: p, colStart: n, colEnd: n, headIndex: h, role: 'target' },
+        targetSpan: { tensor: 'h_curr', rowStart: p, rowEnd: p, colStart: n, colEnd: n, headIndex: h, tokenIndex: t, role: 'target' },
         upstreamSpans: [
-          { tensor: 'h_prev', rowStart: p, rowEnd: p, colStart: n, colEnd: n, headIndex: h, role: 'operand_a' },
+          { tensor: 'h_prev', rowStart: p, rowEnd: p, colStart: n, colEnd: n, headIndex: h, tokenIndex: t, role: 'operand_a' },
           { tensor: 'x', rowStart: t, rowEnd: t, colStart: p, colEnd: p, headIndex: h, role: 'operand_b' },
           { tensor: 'b', rowStart: t, rowEnd: t, colStart: g * dState + n, colEnd: g * dState + n, groupIndex: g, role: 'operand_b' },
           { tensor: 'dt', rowStart: t, rowEnd: t, colStart: h, colEnd: h, headIndex: h, role: 'operand_a' },
@@ -1109,7 +1170,7 @@ export function describeMambaCellFormula(
       const xVal = sim.x[c * T + t];
       const yVal = sim.y[c * T + t];
       return {
-        cell: { ...cell, headIndex: h, groupIndex: g },
+        cell: { ...cell, row: t, col: c, headIndex: h, groupIndex: g, tokenIndex: t },
         tensorLabel: 'SSM Readout y',
         coordLabel: `y[${formatMambaHeadId(h)}, p=${p}, ${tokTag(sim, t)}]`,
         headBadge: `${formatMambaHeadId(h)} · G${g}`,
@@ -1120,7 +1181,7 @@ export function describeMambaCellFormula(
         subEquation: `Readout contracts state dim n=0..3 with group C[G${g}] plus per-head skip D[${formatMambaHeadId(h)}]·x`,
         targetSpan: { tensor: 'y', rowStart: t, rowEnd: t, colStart: c, colEnd: c, headIndex: h, role: 'target' },
         upstreamSpans: [
-          { tensor: 'h_curr', rowStart: p, rowEnd: p, colStart: 0, colEnd: dState - 1, headIndex: h, role: 'operand_a' },
+          { tensor: 'h_curr', rowStart: p, rowEnd: p, colStart: 0, colEnd: dState - 1, headIndex: h, tokenIndex: t, role: 'operand_a' },
           { tensor: 'c', rowStart: t, rowEnd: t, colStart: g * dState, colEnd: (g + 1) * dState - 1, groupIndex: g, role: 'operand_b' },
           { tensor: 'x', rowStart: t, rowEnd: t, colStart: p, colEnd: p, headIndex: h, role: 'operand_b' },
         ],
@@ -1275,10 +1336,10 @@ export function mambaStepperCellForState(
       // Show causal Conv1D tap -> post-SiLU x across tokens
       if (p01 < 0.45) {
         const slot = Math.min(sim.convKernel - 1, Math.floor((p01 / 0.45) * sim.convKernel));
-        return { tensor: 'conv_buf', row: slot, col: h * sim.dHead, tapIndex: slot, headIndex: h };
+        return { tensor: 'conv_buf', row: slot, col: h * sim.dHead, tapIndex: slot, headIndex: h, tokenIndex: T - 1 };
       }
       const p = Math.min(sim.dHead - 1, Math.floor(((p01 - 0.45) / 0.55) * sim.dHead));
-      return { tensor: 'x', row: T - 1, col: p, headIndex: h, groupIndex: g };
+      return { tensor: 'x', row: T - 1, col: p, headIndex: h, groupIndex: g, tokenIndex: T - 1 };
     }
     case 3: {
       // Scrub across H_t cells (p, n) for the active head at the latest token T-1
@@ -1290,7 +1351,7 @@ export function mambaStepperCellForState(
     }
     case 4: {
       const p = Math.min(sim.dHead - 1, Math.floor(p01 * sim.dHead));
-      return { tensor: 'y', row: t, col: h * sim.dHead + p, headIndex: h, groupIndex: g };
+      return { tensor: 'y', row: t, col: h * sim.dHead + p, headIndex: h, groupIndex: g, tokenIndex: t };
     }
     default: {
       // Gate -> 8-Group RMSNorm -> Residual Output

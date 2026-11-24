@@ -32,6 +32,7 @@ export interface MambaCutawayStats {
   readonly outProjFp8: boolean;
   readonly activeHead?: number;
   readonly activeGroup?: number;
+  readonly stateTokenIndex?: number;
   readonly miniatureHeadCount?: number;
   readonly miniatureGroupCount?: number;
   readonly usesSmoothRibbons?: boolean;

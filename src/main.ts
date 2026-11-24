@@ -1652,7 +1652,11 @@ function boot(): void {
         const sim = currentCutawayScene?.moeSim ?? runMoeSim(state.tokens);
         const tok = activeMoeFocusToken();
         const exp = activeMoeFocusExpert(sim, tok);
-        const topkSlice = sim.topk_indices.subarray(tok * sim.topK, (tok + 1) * sim.topK);
+        const pickTok =
+          hit?.tokenIndex !== undefined
+            ? Math.max(0, Math.min(sim.tokens - 1, hit.tokenIndex))
+            : tok;
+        const topkSlice = sim.topk_indices.subarray(pickTok * sim.topK, (pickTok + 1) * sim.topK);
         const hitCell = hit ? pickHitToMoeCell(hit, tok, exp, topkSlice) : null;
         const hitPart =
           hit?.tensorKey === 'router_bank' && hit.headIndex !== undefined
@@ -1741,14 +1745,18 @@ function boot(): void {
         const sim = currentCutawayScene?.moeSim ?? runMoeSim(state.tokens);
         const tok = activeMoeFocusToken();
         const exp = activeMoeFocusExpert(sim, tok);
-        const topkSlice = sim.topk_indices.subarray(tok * sim.topK, (tok + 1) * sim.topK);
+        const pickTok =
+          hit?.tokenIndex !== undefined
+            ? Math.max(0, Math.min(sim.tokens - 1, hit.tokenIndex))
+            : tok;
+        const topkSlice = sim.topk_indices.subarray(pickTok * sim.topK, (pickTok + 1) * sim.topK);
         const hitCell = hit ? pickHitToMoeCell(hit, tok, exp, topkSlice) : null;
         const hitPart =
           hit?.tensorKey === 'router_bank' && hit.headIndex !== undefined
             ? `moe-expert-${hit.headIndex}`
             : hit?.partId ?? null;
         if (hitPart !== null) state.tourActive = false;
-        const cellExp = inferMoeCellExpert(hitCell, sim);
+        const cellExp = inferMoeCellExpert(hitCell, sim, exp);
         if (cellExp !== null) {
           state.moeActiveExpert = cellExp;
         } else if (hit?.headIndex !== undefined) {
