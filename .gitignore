@@ -22,6 +22,10 @@
 
 # production
 /build
+/dist
+
+# AI Studio local cache
+.aistudio/
 
 # misc
 .DS_Store
