@@ -68,6 +68,7 @@ import {
   buildGqaCutaway,
   buildMambaCutaway,
   buildMoECutaway,
+  fitSpatialGqaCamera,
   parseMambaHeadPartId,
   parseMoeExpertPartId,
   parseQueryHeadPartId,
@@ -241,15 +242,25 @@ function sameMoeCell(a: MoeCellRef | null, b: MoeCellRef | null): boolean {
 }
 
 function cameraPoseForCutaway(
-  _mode: Exclude<ViewMode, 'tower'>,
+  mode: Exclude<ViewMode, 'tower'>,
   bounds: AABB,
   metrics: ViewportMetrics,
   sheetViewAngle: GqaViewAngle = 'three_quarter',
+  insets?: { readonly topInsetPx: number; readonly bottomInsetPx: number },
 ): CameraPose {
-  // All three cutaways (GQA, Mamba-2, MoE 128+1) share the XZ drafting-table thin-sheet schematic
-  // with consistent orientation, safe narrow-viewport framing, and subtle +Z target lift so the
-  // bottom row clears the docked Math bar.
   const isStackedNarrow = window.innerWidth <= 900 || metrics.innerWidth < 760;
+
+  // Spatial Increment 1: GQA 3/4 view uses true 3D multi-plane tensor composition with
+  // exact projective framing centered in the unobstructed canvas band.
+  if (mode === 'cutaway_gqa' && sheetViewAngle === 'three_quarter') {
+    return fitSpatialGqaCamera(bounds, metrics, {
+      topInsetPx: insets?.topInsetPx ?? (isStackedNarrow ? 12 : 84),
+      bottomInsetPx: insets?.bottomInsetPx ?? (isStackedNarrow ? 12 : 118),
+      isNarrow: isStackedNarrow,
+    });
+  }
+
+  // Preserved Near-Plan View for GQA, and existing XZ drafting-table schematics for Mamba-2 & MoE.
   if (sheetViewAngle === 'near_plan') {
     const pose = fitPerspectiveToBounds(
       bounds,
@@ -314,6 +325,8 @@ function boot(): void {
   let flyAnim: FlyAnimation | null = null;
   let lastStepperTickMs: number | null = null;
   let lastStepperCellKey = '';
+  let savedGqaSpatialPose: CameraPose | null = null;
+  let savedGqaPlanPose: CameraPose | null = null;
 
   let device: RenderDevice | null = null;
   let solidsPass: SolidsPass | null = null;
@@ -348,6 +361,25 @@ function boot(): void {
 
   const overlay = new MacroOverlay(overlaySvg, overlayLabels);
   const controlEls = queryControlsElements();
+
+  const measureCutawayInsets = (mode: Exclude<ViewMode, 'tower'>) => {
+    const isMobileStack = window.innerWidth <= 900;
+    const topInsetPx = isMobileStack ? 12 : 84;
+    const usesMathDock =
+      mode === 'cutaway_gqa' ||
+      mode === 'cutaway_mamba' ||
+      mode === 'cutaway_moe';
+    const dockH =
+      usesMathDock && !controlEls.gqaMathDock.hidden
+        ? controlEls.gqaMathDock.offsetHeight || 104
+        : 0;
+    const bottomInsetPx = isMobileStack
+      ? 12
+      : usesMathDock
+        ? Math.max(106, dockH + 18)
+        : 30;
+    return { topInsetPx, bottomInsetPx };
+  };
 
   const cancelFly = () => {
     flyAnim = null;
@@ -498,6 +530,7 @@ function boot(): void {
         activeGroup0Head: state.gqaActiveGroup0Head,
         activeGroup1Head: state.gqaActiveGroup1Head,
         activeCell: resolveActiveGqaCell(),
+        viewAngle: state.gqaViewAngle,
       });
     }
     return null;
@@ -541,7 +574,11 @@ function boot(): void {
               currentCutawayScene.valueAtlas.data,
             );
           }
-          sheetsPass.upload(currentCutawayScene.sheetData, currentCutawayScene.sheetCount);
+          sheetsPass.upload(
+            currentCutawayScene.sheetData,
+            currentCutawayScene.sheetCount,
+            currentCutawayScene.sheetBasisData,
+          );
           linesPass.upload(currentCutawayScene.lineData, currentCutawayScene.lineCount);
           flatFlowPass.upload(
             currentCutawayScene.flowVertices ?? new Float32Array(0),
@@ -596,7 +633,13 @@ function boot(): void {
       flyToPose(cameraPoseForSection(ch.section, currentMetrics));
     } else if (currentCutawayScene) {
       flyToPose(
-        cameraPoseForCutaway(ch.mode, currentCutawayScene.fitBounds, currentMetrics, activeViewAngleForMode(ch.mode)),
+        cameraPoseForCutaway(
+          ch.mode,
+          currentCutawayScene.fitBounds,
+          currentMetrics,
+          activeViewAngleForMode(ch.mode),
+          measureCutawayInsets(ch.mode),
+        ),
       );
     }
 
@@ -651,7 +694,13 @@ function boot(): void {
       flyToPose(state.savedMacroCamera);
     } else if (currentCutawayScene) {
       flyToPose(
-        cameraPoseForCutaway(nextMode, currentCutawayScene.fitBounds, currentMetrics, activeViewAngleForMode(nextMode)),
+        cameraPoseForCutaway(
+          nextMode,
+          currentCutawayScene.fitBounds,
+          currentMetrics,
+          activeViewAngleForMode(nextMode),
+          measureCutawayInsets(nextMode),
+        ),
       );
     }
 
@@ -735,8 +784,18 @@ function boot(): void {
       flyToPose(cameraPoseForSection('overview', currentMetrics));
       syncUi();
     } else if (currentCutawayScene) {
+      if (state.mode === 'cutaway_gqa') {
+        if (state.gqaViewAngle === 'three_quarter') savedGqaSpatialPose = null;
+        else savedGqaPlanPose = null;
+      }
       flyToPose(
-        cameraPoseForCutaway(state.mode, currentCutawayScene.fitBounds, currentMetrics, activeViewAngleForMode(state.mode)),
+        cameraPoseForCutaway(
+          state.mode,
+          currentCutawayScene.fitBounds,
+          currentMetrics,
+          activeViewAngleForMode(state.mode),
+          measureCutawayInsets(state.mode),
+        ),
       );
     }
   };
@@ -772,6 +831,8 @@ function boot(): void {
     state.moeStepperStep = 0;
     state.moeStepperSubProgress = 0;
     lastStepperTickMs = null;
+    savedGqaSpatialPose = null;
+    savedGqaPlanPose = null;
 
     if (state.mode === 'tower') {
       state.section = 'overview';
@@ -782,7 +843,13 @@ function boot(): void {
       rebuildSceneIfNeeded();
       if (currentCutawayScene) {
         flyToPose(
-          cameraPoseForCutaway(state.mode, currentCutawayScene.fitBounds, currentMetrics, activeViewAngleForMode(state.mode)),
+          cameraPoseForCutaway(
+            state.mode,
+            currentCutawayScene.fitBounds,
+            currentMetrics,
+            activeViewAngleForMode(state.mode),
+            measureCutawayInsets(state.mode),
+          ),
         );
       }
       syncUi();
@@ -902,13 +969,35 @@ function boot(): void {
     },
     onSelectGqaView: (view: GqaViewAngle) => {
       if (state.gqaViewAngle === view && state.mode === 'cutaway_gqa') return;
+      if (state.mode === 'cutaway_gqa') {
+        if (state.gqaViewAngle === 'three_quarter') {
+          savedGqaSpatialPose = cloneCameraPose(state.camera);
+        } else {
+          savedGqaPlanPose = cloneCameraPose(state.camera);
+        }
+      }
       state.gqaViewAngle = view;
-      if (state.mode === 'cutaway_gqa' && currentCutawayScene) {
-        flyToPose(
-          cameraPoseForCutaway('cutaway_gqa', currentCutawayScene.fitBounds, currentMetrics, view),
-        );
+      // Preserve selected head, pinned cell, tokens, precision, and stepper state across mode switches!
+      if (state.mode === 'cutaway_gqa') {
+        geometryDirty = true;
+        rebuildSceneIfNeeded();
+        if (currentCutawayScene) {
+          const savedPose = view === 'three_quarter' ? savedGqaSpatialPose : savedGqaPlanPose;
+          const nextPose =
+            savedPose !== null
+              ? cloneCameraPose(savedPose)
+              : cameraPoseForCutaway(
+                  'cutaway_gqa',
+                  currentCutawayScene.fitBounds,
+                  currentMetrics,
+                  view,
+                  measureCutawayInsets('cutaway_gqa'),
+                );
+          flyToPose(nextPose);
+        }
       }
       syncUi();
+      scheduleDraw();
     },
     onSelectPart: (partId: string | null) => {
       state.tourActive = false;
@@ -1380,18 +1469,8 @@ function boot(): void {
         selectedBay: state.selectedBay,
         hoveredBay: state.hoveredBay,
       });
-    } else if (currentCutawayScene) {
-      const isMobileStack = window.innerWidth <= 900;
-      const topInsetPx = isMobileStack ? 12 : 84;
-      const usesMathDock =
-        state.mode === 'cutaway_gqa' ||
-        state.mode === 'cutaway_mamba' ||
-        state.mode === 'cutaway_moe';
-      const bottomInsetPx = isMobileStack
-        ? 12
-        : usesMathDock && !controlEls.gqaMathDock.hidden
-          ? Math.max(102, controlEls.gqaMathDock.offsetHeight + 18)
-          : 30;
+    } else if (state.mode !== 'tower' && currentCutawayScene) {
+      const { topInsetPx, bottomInsetPx } = measureCutawayInsets(state.mode);
       overlay.updateCutaway({
         scene: currentCutawayScene,
         snapshot: currentSnapshot,
@@ -1443,11 +1522,14 @@ function boot(): void {
     if (state.mode === 'tower' && state.section === 'overview' && !flyAnim && state.selectedBay === null) {
       state.camera = cameraPoseForSection('overview', next);
     } else if (state.mode !== 'tower' && !flyAnim && currentCutawayScene) {
+      savedGqaSpatialPose = null;
+      savedGqaPlanPose = null;
       state.camera = cameraPoseForCutaway(
         state.mode,
         currentCutawayScene.fitBounds,
         next,
         activeViewAngleForMode(state.mode),
+        measureCutawayInsets(state.mode),
       );
     }
     drawNow();

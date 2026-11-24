@@ -11,6 +11,7 @@ import {
   formatBayId,
   type PrecisionMode,
 } from '../model/spec';
+import type { GqaViewAngle } from '../model/state';
 import type { AABB } from '../render/camera';
 import type { PickBox } from '../render/pick';
 import {
@@ -39,6 +40,13 @@ import {
 } from '../render/sheets';
 import type { CutawayPartInfo, CutawaySceneGeometry } from './cutaways';
 import { buildGqaValueAtlas, type GqaAtlasSlice } from './gqaAtlas';
+import {
+  buildGqaSpatialScene,
+  fitSpatialGqaCamera,
+  GQA_SPATIAL_FIT_BOUNDS,
+} from './gqaSpatial';
+
+export { fitSpatialGqaCamera, GQA_SPATIAL_FIT_BOUNDS };
 import {
   CELL_ACTIVATION_GREEN,
   CELL_MOE_AMBER,
@@ -80,6 +88,8 @@ export interface GqaCutawayOptions {
   readonly activeGroup0Head?: number;
   readonly activeGroup1Head?: number;
   readonly activeCell?: GqaCellRef | null;
+  /** Layout mode: `'three_quarter'` builds the 3D Spatial GQA architecture; `'near_plan'` (default) keeps the coplanar XZ schematic. */
+  readonly viewAngle?: GqaViewAngle;
 }
 
 interface SheetSpec {
@@ -382,7 +392,6 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     ? describeCellFormula(sim, opts.activeCell)
     : null;
 
-  const b = new GqaSheetBuilder(bayId);
   const activeKvGroup: 0 | 1 | null =
     activeHeadIdx !== null
       ? kvHeadForQueryHead(activeHeadIdx)
@@ -394,6 +403,29 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
             ? 1
             : null;
 
+  const partCatalog = buildGqaPartCatalog(bayId, clampedT, isFp8Mode, kvCacheFp8, group0Head, group1Head);
+
+  if (opts.viewAngle === 'three_quarter') {
+    return buildGqaSpatialScene({
+      bayId,
+      clampedT,
+      isFp8Mode,
+      computeFp8,
+      kvCacheFp8,
+      activePart,
+      activeHeadIdx,
+      activeKvGroup,
+      group0Head,
+      group1Head,
+      activeCell: opts.activeCell ?? null,
+      activeFormula,
+      sim,
+      atlas,
+      partCatalog,
+    });
+  }
+
+  const b = new GqaSheetBuilder(bayId);
   const hasFocus = activePart !== null || activeFormula !== null;
   const hasCellTrace = activeFormula !== null;
 
@@ -1457,9 +1489,50 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     },
   );
 
-  // ==========================================================================
-  // 10. PART CATALOG (Honest Precision Metadata + Miniature Float32 Note)
-  // ==========================================================================
+  const packed = b.pack();
+
+  return {
+    kind: 'cutaway_gqa',
+    bayId,
+    ...packed,
+    fitBounds: GQA_FIT_BOUNDS,
+    landmarks: b.landmarks,
+    kvDepthTicks: b.kvDepthTicks,
+    calipers: b.calipers,
+    valueAtlas: atlas,
+    gqaSim: sim,
+    activeFormula,
+    solidPickBoxes: b.pickBoxes,
+    partCatalog,
+    gqaStats: {
+      bayId,
+      qHeadCount: 32,
+      qGroupCount: 2,
+      qHeadsPerGroup: 16,
+      kvHeadCount: 2,
+      gqaRatio: 16,
+      kvTokenSliceCount: 2 * clampedT,
+      computeFp8,
+      kvCacheFp8,
+      usesSmoothRibbons: true,
+      voxelArrowCount: 0,
+      selectedQueryHead: activeHeadIdx,
+      activeGroup0Head: group0Head,
+      activeGroup1Head: group1Head,
+    },
+  };
+}
+
+function buildGqaPartCatalog(
+  bayId: 6 | 43,
+  clampedT: number,
+  isFp8Mode: boolean,
+  kvCacheFp8: boolean,
+  group0Head: number,
+  group1Head: number,
+): Record<string, CutawayPartInfo> {
+  const g0Tag = formatQueryHeadId(group0Head);
+  const g1Tag = formatQueryHeadId(group1Head);
   const perBayKiB = ((kvCacheFp8 ? 512 : 1024) * clampedT) / 1024;
   const perBaySlope = kvCacheFp8 ? '+0.5 KiB/tok (FP8 KV)' : '+1 KiB/tok (BF16 KV)';
   const precisionMetaLine = isFp8Mode
@@ -1627,7 +1700,6 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     },
   };
 
-  // Dynamic individual entries for all 32 query heads (Q00..Q31)
   for (let i = 0; i < 32; i++) {
     const kv = kvHeadForQueryHead(i);
     const label = formatQueryHeadId(i);
@@ -1647,36 +1719,5 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     };
   }
 
-  const packed = b.pack();
-
-  return {
-    kind: 'cutaway_gqa',
-    bayId,
-    ...packed,
-    fitBounds: GQA_FIT_BOUNDS,
-    landmarks: b.landmarks,
-    kvDepthTicks: b.kvDepthTicks,
-    calipers: b.calipers,
-    valueAtlas: atlas,
-    gqaSim: sim,
-    activeFormula,
-    solidPickBoxes: b.pickBoxes,
-    partCatalog,
-    gqaStats: {
-      bayId,
-      qHeadCount: 32,
-      qGroupCount: 2,
-      qHeadsPerGroup: 16,
-      kvHeadCount: 2,
-      gqaRatio: 16,
-      kvTokenSliceCount: 2 * clampedT,
-      computeFp8,
-      kvCacheFp8,
-      usesSmoothRibbons: true,
-      voxelArrowCount: 0,
-      selectedQueryHead: activeHeadIdx,
-      activeGroup0Head: group0Head,
-      activeGroup1Head: group1Head,
-    },
-  };
+  return partCatalog;
 }

@@ -1,5 +1,8 @@
+import type { Vec3 } from '../model/spec';
 import { RIBBON_INSTANCE_BYTES } from '../scene/spine';
+import { add3, cross3, dot3, normalize3, scale3, sub3 } from './camera';
 import { linkProgram, PALETTE } from './device';
+import { localToWorldOnFrame, type SheetFrame3D } from './sheetFrame';
 
 const RIBBONS_VS = `#version 300 es
 precision highp float;
@@ -583,6 +586,275 @@ export class FlowRibbonBuilder {
     this.addPolylineXZ([{ x: x0 - halfT, z: z1 }, { x: x1 + halfT, z: z1 }], fy, t, frameColor, false);
     this.addPolylineXZ([{ x: x0, z: z0 - halfT }, { x: x0, z: z1 + halfT }], fy, t, frameColor, false);
     this.addPolylineXZ([{ x: x1, z: z0 - halfT }, { x: x1, z: z1 + halfT }], fy, t, frameColor, false);
+  }
+
+  /**
+   * Append a smooth 3D extruded ribbon along arbitrary 3D waypoints using a parallel-transport
+   * (Bishop) frame so vertical climbs and cross-plane bends never twist or kink.
+   * When `crossRibbon` is true, also adds a subtle perpendicular fin so 3D ribbons remain crisp
+   * and legible from every orbit angle without vanishing edge-on.
+   */
+  addPolyline3D(
+    rawPoints: readonly Vec3[],
+    upHint: Vec3,
+    width: number,
+    color: FlowRibbonColor,
+    arrowHead = false,
+    arrowLength = 0.22,
+    arrowWidth = 0.22,
+    crossRibbon = true,
+  ): void {
+    const pts: Vec3[] = [];
+    for (const p of rawPoints) {
+      if (pts.length === 0) {
+        pts.push(p);
+      } else {
+        const prev = pts[pts.length - 1];
+        if (Math.hypot(p[0] - prev[0], p[1] - prev[1], p[2] - prev[2]) > 1e-4) {
+          pts.push(p);
+        }
+      }
+    }
+    if (pts.length < 2) return;
+
+    // Trim shaft slightly before tip for crisp arrowhead
+    let tipPoint: Vec3 | null = null;
+    let tipDir: Vec3 | null = null;
+    const shaft: Vec3[] = pts.map((p) => [p[0], p[1], p[2]]);
+
+    if (arrowHead) {
+      const last = shaft[shaft.length - 1];
+      const prev = shaft[shaft.length - 2];
+      const segVec = sub3(last, prev);
+      const segLen = Math.hypot(segVec[0], segVec[1], segVec[2]);
+      if (segLen > 1e-4) {
+        tipDir = [segVec[0] / segLen, segVec[1] / segLen, segVec[2] / segLen];
+        tipPoint = [last[0], last[1], last[2]];
+        const trim = Math.min(arrowLength * 0.84, segLen * 0.55);
+        shaft[shaft.length - 1] = sub3(last, scale3(tipDir, trim));
+      }
+    }
+
+    // Build per-vertex tangent T, normal N, binormal B via parallel transport
+    const n = shaft.length;
+    const tangents: Vec3[] = [];
+    for (let i = 0; i < n; i++) {
+      let dir: Vec3;
+      if (i === 0) {
+        dir = sub3(shaft[1], shaft[0]);
+      } else if (i === n - 1) {
+        dir = sub3(shaft[n - 1], shaft[n - 2]);
+      } else {
+        const dPrev = normalize3(sub3(shaft[i], shaft[i - 1]));
+        const dNext = normalize3(sub3(shaft[i + 1], shaft[i]));
+        const avg: Vec3 = [dPrev[0] + dNext[0], dPrev[1] + dNext[1], dPrev[2] + dNext[2]];
+        dir = Math.hypot(avg[0], avg[1], avg[2]) > 1e-5 ? avg : dNext;
+      }
+      tangents.push(normalize3(dir));
+    }
+
+    const normals: Vec3[] = [];
+    const binormals: Vec3[] = [];
+    // Initial normal orthogonal to tangents[0]
+    let n0Cand = sub3(upHint, scale3(tangents[0], dot3(upHint, tangents[0])));
+    if (Math.hypot(n0Cand[0], n0Cand[1], n0Cand[2]) < 1e-5) {
+      const alt: Vec3 = Math.abs(tangents[0][1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+      n0Cand = sub3(alt, scale3(tangents[0], dot3(alt, tangents[0])));
+    }
+    normals.push(normalize3(n0Cand));
+    binormals.push(normalize3(cross3(tangents[0], normals[0])));
+
+    for (let i = 1; i < n; i++) {
+      const prevN = normals[i - 1];
+      const tCur = tangents[i];
+      let nextN = sub3(prevN, scale3(tCur, dot3(prevN, tCur)));
+      if (Math.hypot(nextN[0], nextN[1], nextN[2]) < 1e-5) {
+        const prevB = binormals[i - 1];
+        nextN = cross3(prevB, tCur);
+      }
+      const nUnit = normalize3(nextN);
+      normals.push(nUnit);
+      binormals.push(normalize3(cross3(tCur, nUnit)));
+    }
+
+    const emitStrip = (axes: readonly Vec3[], halfW: number, col: FlowRibbonColor) => {
+      const baseIndex = this.verts.length / FLOW_RIBBON_VERTEX_FLOATS;
+      for (let i = 0; i < n; i++) {
+        const p = shaft[i];
+        const side = axes[i];
+        const along = n > 1 ? i / (n - 1) : 0;
+        const pL = sub3(p, scale3(side, halfW));
+        const pR = add3(p, scale3(side, halfW));
+        this.pushVertex(pL[0], pL[1], pL[2], -1, along, col);
+        this.pushVertex(pR[0], pR[1], pR[2], 1, along, col);
+      }
+      for (let i = 0; i < n - 1; i++) {
+        const i0 = baseIndex + i * 2;
+        const i1 = i0 + 1;
+        const i2 = i0 + 2;
+        const i3 = i0 + 3;
+        this.indices.push(i0, i1, i2, i1, i3, i2);
+      }
+    };
+
+    const halfW = width * 0.5;
+    emitStrip(binormals, halfW, color);
+    if (crossRibbon) {
+      const finColor: FlowRibbonColor = {
+        r: color.r,
+        g: color.g,
+        b: color.b,
+        a: color.a * 0.78,
+        borderAlpha: (color.borderAlpha ?? 0) * 0.7,
+      };
+      emitStrip(normals, halfW * 0.78, finColor);
+    }
+
+    if (arrowHead && tipPoint && tipDir) {
+      const endB = binormals[n - 1];
+      const endN = normals[n - 1];
+      const basePt = sub3(tipPoint, scale3(tipDir, arrowLength));
+      const ah = arrowWidth * 0.5;
+      const emitHead = (side: Vec3, col: FlowRibbonColor) => {
+        const pL = sub3(basePt, scale3(side, ah));
+        const pR = add3(basePt, scale3(side, ah));
+        const vL = this.pushVertex(pL[0], pL[1], pL[2], -0.9, 1, col);
+        const vR = this.pushVertex(pR[0], pR[1], pR[2], 0.9, 1, col);
+        const vT = this.pushVertex(tipPoint![0], tipPoint![1], tipPoint![2], 0.0, 1, col);
+        this.indices.push(vL, vR, vT);
+      };
+      emitHead(endB, color);
+      if (crossRibbon) {
+        emitHead(endN, { ...color, a: color.a * 0.8 });
+      }
+    }
+  }
+
+  /** Append a smooth 3D cubic Bezier ribbon between arbitrary 3D points. */
+  addCubic3D(
+    p0: Vec3,
+    p1: Vec3,
+    p2: Vec3,
+    p3: Vec3,
+    upHint: Vec3,
+    width: number,
+    color: FlowRibbonColor,
+    arrowHead = false,
+    segments = 20,
+    crossRibbon = true,
+    arrowLength = 0.2,
+    arrowWidth = 0.2,
+  ): void {
+    const pts: Vec3[] = [];
+    for (let i = 0; i <= segments; i++) {
+      const t = i / segments;
+      const mt = 1 - t;
+      const b0 = mt * mt * mt;
+      const b1 = 3 * mt * mt * t;
+      const b2 = 3 * mt * t * t;
+      const b3 = t * t * t;
+      pts.push([
+        b0 * p0[0] + b1 * p1[0] + b2 * p2[0] + b3 * p3[0],
+        b0 * p0[1] + b1 * p1[1] + b2 * p2[1] + b3 * p3[1],
+        b0 * p0[2] + b1 * p1[2] + b2 * p2[2] + b3 * p3[2],
+      ]);
+    }
+    this.addPolyline3D(pts, upHint, width, color, arrowHead, arrowLength, arrowWidth, crossRibbon);
+  }
+
+  /**
+   * Draw a crisp cell or row/column span highlight flush on an oriented `SheetFrame3D` plane.
+   * When `doubleSided` is true, draws the identical local-coordinate highlight slightly proud
+   * of BOTH the `+N` and `-N` faces so inspecting from either side shows the exact same cell.
+   */
+  addCellHighlightOnFrame(
+    frame: SheetFrame3D,
+    rowStart: number,
+    rowEnd: number,
+    colStart: number,
+    colEnd: number,
+    gridRows: number,
+    gridCols: number,
+    normalOffset: number,
+    fillColor: FlowRibbonColor,
+    frameColor: FlowRibbonColor,
+    frameThickness = 0.022,
+    doubleSided = true,
+  ): void {
+    const c0 = Math.max(0, Math.min(gridCols - 1, colStart));
+    const c1 = Math.max(c0, Math.min(gridCols - 1, colEnd));
+    const r0 = Math.max(0, Math.min(gridRows - 1, rowStart));
+    const r1 = Math.max(r0, Math.min(gridRows - 1, rowEnd));
+
+    const lx0 = -0.5 + c0 / gridCols;
+    const lx1 = -0.5 + (c1 + 1) / gridCols;
+    const lz0 = -0.5 + r0 / gridRows;
+    const lz1 = -0.5 + (r1 + 1) / gridRows;
+
+    const spanU = (lx1 - lx0) * frame.extent[0];
+    const spanV = (lz1 - lz0) * frame.extent[2];
+    const t = Math.min(frameThickness, Math.min(spanU, spanV) * 0.45 + 0.014);
+    const halfT = t * 0.5;
+    const halfTuLocal = halfT / Math.max(1e-5, frame.extent[0]);
+    const halfTvLocal = halfT / Math.max(1e-5, frame.extent[2]);
+
+    const emitFace = (sign: 1 | -1) => {
+      const lyFill = sign * (0.5 + normalOffset / Math.max(1e-5, frame.extent[1]));
+      const lyEdge = sign * (0.5 + (normalOffset + 0.002) / Math.max(1e-5, frame.extent[1]));
+
+      const p00 = localToWorldOnFrame(frame, lx0, lyFill, lz0);
+      const p10 = localToWorldOnFrame(frame, lx1, lyFill, lz0);
+      const p11 = localToWorldOnFrame(frame, lx1, lyFill, lz1);
+      const p01 = localToWorldOnFrame(frame, lx0, lyFill, lz1);
+
+      if (fillColor.a > 0.004) {
+        const v0 = this.pushVertex(p00[0], p00[1], p00[2], 0, 0, fillColor);
+        const v1 = this.pushVertex(p10[0], p10[1], p10[2], 0, 0, fillColor);
+        const v2 = this.pushVertex(p11[0], p11[1], p11[2], 0, 1, fillColor);
+        const v3 = this.pushVertex(p01[0], p01[1], p01[2], 0, 1, fillColor);
+        this.indices.push(v0, v1, v2, v0, v2, v3);
+      }
+
+      const emitEdgeQuad = (a: Vec3, b: Vec3, sideAxis: Vec3) => {
+        const aL = sub3(a, scale3(sideAxis, halfT));
+        const aR = add3(a, scale3(sideAxis, halfT));
+        const bL = sub3(b, scale3(sideAxis, halfT));
+        const bR = add3(b, scale3(sideAxis, halfT));
+        const i0 = this.pushVertex(aL[0], aL[1], aL[2], -1, 0, frameColor);
+        const i1 = this.pushVertex(aR[0], aR[1], aR[2], 1, 0, frameColor);
+        const i2 = this.pushVertex(bL[0], bL[1], bL[2], -1, 1, frameColor);
+        const i3 = this.pushVertex(bR[0], bR[1], bR[2], 1, 1, frameColor);
+        this.indices.push(i0, i1, i2, i1, i3, i2);
+      };
+
+      // Top & bottom edges (along axisU, width along axisV)
+      emitEdgeQuad(
+        localToWorldOnFrame(frame, lx0 - halfTuLocal, lyEdge, lz0),
+        localToWorldOnFrame(frame, lx1 + halfTuLocal, lyEdge, lz0),
+        frame.axisV,
+      );
+      emitEdgeQuad(
+        localToWorldOnFrame(frame, lx0 - halfTuLocal, lyEdge, lz1),
+        localToWorldOnFrame(frame, lx1 + halfTuLocal, lyEdge, lz1),
+        frame.axisV,
+      );
+      // Left & right edges (along axisV, width along axisU)
+      emitEdgeQuad(
+        localToWorldOnFrame(frame, lx0, lyEdge, lz0 - halfTvLocal),
+        localToWorldOnFrame(frame, lx0, lyEdge, lz1 + halfTvLocal),
+        frame.axisU,
+      );
+      emitEdgeQuad(
+        localToWorldOnFrame(frame, lx1, lyEdge, lz0 - halfTvLocal),
+        localToWorldOnFrame(frame, lx1, lyEdge, lz1 + halfTvLocal),
+        frame.axisU,
+      );
+    };
+
+    emitFace(1);
+    if (doubleSided) {
+      emitFace(-1);
+    }
   }
 
   pack(): { vertices: Float32Array; indices: Uint32Array } {

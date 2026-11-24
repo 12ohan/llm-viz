@@ -7,7 +7,15 @@ import type { Rg32fValueAtlas } from './atlasPacker';
 import type { LayerFormulaReadout } from './sheetInspector';
 import type { DimensionCaliper, KvDepthTickAnchor, LandmarkAnchor } from './spine';
 
-export { buildGqaCutaway, kvHeadForQueryHead, parseQueryHeadPartId, formatQueryHeadId, GQA_FIT_BOUNDS } from './gqaCutaway';
+export {
+  buildGqaCutaway,
+  fitSpatialGqaCamera,
+  kvHeadForQueryHead,
+  parseQueryHeadPartId,
+  formatQueryHeadId,
+  GQA_FIT_BOUNDS,
+  GQA_SPATIAL_FIT_BOUNDS,
+} from './gqaCutaway';
 export { buildMambaCutaway, parseMambaHeadPartId, MAMBA_FIT_BOUNDS } from './mambaCutaway';
 export { formatMambaHeadId, mambaGroupForHead } from '../math/mambaSim';
 export { buildMoECutaway, parseMoeExpertPartId, MOE_FIT_BOUNDS } from './moeCutaway';
@@ -89,7 +97,9 @@ export interface CutawaySceneGeometry {
   /** Thin-sheet instances for SheetsPass (20 floats/instance). Present on all rebuilt cutaways. */
   readonly sheetData?: Float32Array;
   readonly sheetCount?: number;
-  /** Smooth 2D vector flow ribbons for FlatFlowRibbonsPass. */
+  /** Optional per-sheet 3D orthonormal basis buffer (6 floats/instance: axisU, axisN; axisV = U x N). */
+  readonly sheetBasisData?: Float32Array;
+  /** Smooth 2D/3D vector flow ribbons for FlatFlowRibbonsPass. */
   readonly flowVertices?: Float32Array;
   readonly flowIndices?: Uint32Array;
   /** Live RG32F value atlas texture data for SheetsPass. */

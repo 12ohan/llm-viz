@@ -21,6 +21,11 @@ import {
   transformVec4,
   type CameraSnapshot,
 } from './camera';
+import {
+  intersectRaySheetFrame,
+  type SheetFrame3D,
+  type SheetFrameRayHit,
+} from './sheetFrame';
 
 export interface Ray {
   readonly origin: Vec3;
@@ -41,6 +46,8 @@ export interface PickBox {
   readonly stateTokenIndex?: number;
   readonly min: Vec3;
   readonly max: Vec3;
+  /** Optional oriented 3D sheet frame. When provided, exact nonuniform-extent OBB picking is used. */
+  readonly frame?: SheetFrame3D;
 }
 
 export interface PickHit {
@@ -163,9 +170,17 @@ function clamp01(v: number): number {
 function findNearestBoxHit(ray: Ray, boxes: readonly PickBox[], isFascia: boolean): PickHit | null {
   let bestT = Infinity;
   let bestBox: PickBox | null = null;
+  let bestFrameHit: SheetFrameRayHit | null = null;
 
   for (const box of boxes) {
-    const t = intersectRayAabb(ray, box.min, box.max);
+    let t: number | null;
+    let frameHit: SheetFrameRayHit | null = null;
+    if (box.frame) {
+      frameHit = intersectRaySheetFrame(ray.origin, ray.direction, box.frame);
+      t = frameHit ? frameHit.t : null;
+    } else {
+      t = intersectRayAabb(ray, box.min, box.max);
+    }
     if (t === null) continue;
     if (
       bestBox === null ||
@@ -174,18 +189,27 @@ function findNearestBoxHit(ray: Ray, boxes: readonly PickBox[], isFascia: boolea
     ) {
       bestT = t;
       bestBox = box;
+      bestFrameHit = frameHit;
     }
   }
 
   if (!bestBox) return null;
-  const point = add3(ray.origin, scale3(ray.direction, bestT));
+  const point = bestFrameHit ? bestFrameHit.point : add3(ray.origin, scale3(ray.direction, bestT));
 
   let hitRow: number | undefined;
   let hitCol: number | undefined;
   if (bestBox.gridCols && bestBox.gridRows && bestBox.gridCols > 0 && bestBox.gridRows > 0) {
-    // Matches SheetsPass top-face UV: col 0 at min.x (-X), row 0 at min.z (-Z)
-    const u = clamp01((point[0] - bestBox.min[0]) / Math.max(1e-6, bestBox.max[0] - bestBox.min[0]));
-    const vFromTop = clamp01((point[2] - bestBox.min[2]) / Math.max(1e-6, bestBox.max[2] - bestBox.min[2]));
+    let u: number;
+    let vFromTop: number;
+    if (bestFrameHit) {
+      // Exact sheet-local (u, vRow) consistent across both +N and -N faces
+      u = bestFrameHit.u;
+      vFromTop = bestFrameHit.vRow;
+    } else {
+      // Matches SheetsPass XZ top-face UV: col 0 at min.x (-X), row 0 at min.z (-Z)
+      u = clamp01((point[0] - bestBox.min[0]) / Math.max(1e-6, bestBox.max[0] - bestBox.min[0]));
+      vFromTop = clamp01((point[2] - bestBox.min[2]) / Math.max(1e-6, bestBox.max[2] - bestBox.min[2]));
+    }
     hitCol = Math.min(bestBox.gridCols - 1, Math.max(0, Math.floor(u * bestBox.gridCols)));
     hitRow = Math.min(bestBox.gridRows - 1, Math.max(0, Math.floor(vFromTop * bestBox.gridRows)));
   }

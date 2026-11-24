@@ -2,7 +2,14 @@
  * Shared thin-sheet inspection types, palette constants, and dependency-thread
  * geometry helpers reused across GQA and Mamba-2 live cutaways (Stage A+1 · Increment 3).
  */
+import type { Vec3 } from '../model/spec';
+import { add3, dot3, scale3, sub3 } from '../render/camera';
 import type { FlowRibbonBuilder, FlowRibbonColor } from '../render/ribbons';
+import {
+  localToWorldOnFrame,
+  makeSheetFrame3D,
+  type SheetFrame3D,
+} from '../render/sheetFrame';
 
 /** Layer-agnostic readout contract consumed by the docked Formula Inspector bar. */
 export interface LayerFormulaReadout {
@@ -33,6 +40,8 @@ export interface SheetGeomRecord {
   readonly ez: number;
   readonly gridCols: number;
   readonly gridRows: number;
+  /** Optional 3D oriented frame. When omitted, defaults to horizontal XZ plane. */
+  readonly frame?: SheetFrame3D;
 }
 
 export interface WorldSpanRect {
@@ -41,6 +50,25 @@ export interface WorldSpanRect {
   readonly ex: number;
   readonly ez: number;
   readonly topY: number;
+}
+
+/** Oriented 3D cell/row/column span anchored on an arbitrary SheetFrame3D. */
+export interface WorldSpan3D {
+  readonly frame: SheetFrame3D;
+  readonly gridRows: number;
+  readonly gridCols: number;
+  readonly rowStart: number;
+  readonly rowEnd: number;
+  readonly colStart: number;
+  readonly colEnd: number;
+  /** World center on the sheet's midplane. */
+  readonly center: Vec3;
+  /** World center slightly proud of the +N face. */
+  readonly frontPoint: Vec3;
+  /** World center slightly proud of the -N face. */
+  readonly backPoint: Vec3;
+  readonly ex: number;
+  readonly ez: number;
 }
 
 // Restrained drafting-table ribbon palette
@@ -89,6 +117,112 @@ export function rectFromSheetGrid(
     ez: Math.max(0.035, z1 - z0),
     topY: sheet.cy + sheet.ey * 0.5,
   };
+}
+
+/** Resolve an oriented 3D cell/span descriptor on any SheetGeomRecord (defaults to XZ frame). */
+export function spanFromSheetGrid(
+  sheet: SheetGeomRecord,
+  rowStart: number,
+  rowEnd: number,
+  colStart: number,
+  colEnd: number,
+): WorldSpan3D {
+  const frame =
+    sheet.frame ??
+    makeSheetFrame3D([sheet.cx, sheet.cy, sheet.cz], [sheet.ex, sheet.ey, sheet.ez]);
+  const c0 = Math.max(0, Math.min(sheet.gridCols - 1, colStart));
+  const c1 = Math.max(c0, Math.min(sheet.gridCols - 1, colEnd));
+  const r0 = Math.max(0, Math.min(sheet.gridRows - 1, rowStart));
+  const r1 = Math.max(r0, Math.min(sheet.gridRows - 1, rowEnd));
+
+  const lxMid = -0.5 + (c0 + c1 + 1) * 0.5 / sheet.gridCols;
+  const lzMid = -0.5 + (r0 + r1 + 1) * 0.5 / sheet.gridRows;
+  const surfLy = 0.5 + 0.014 / Math.max(1e-5, frame.extent[1]);
+
+  return {
+    frame,
+    gridRows: sheet.gridRows,
+    gridCols: sheet.gridCols,
+    rowStart: r0,
+    rowEnd: r1,
+    colStart: c0,
+    colEnd: c1,
+    center: localToWorldOnFrame(frame, lxMid, 0, lzMid),
+    frontPoint: localToWorldOnFrame(frame, lxMid, surfLy, lzMid),
+    backPoint: localToWorldOnFrame(frame, lxMid, -surfLy, lzMid),
+    ex: Math.max(0.035, ((c1 - c0 + 1) / sheet.gridCols) * frame.extent[0]),
+    ez: Math.max(0.035, ((r1 - r0 + 1) / sheet.gridRows) * frame.extent[2]),
+  };
+}
+
+/** Draw an oriented cell highlight on a WorldSpan3D (flush on both +N and -N faces). */
+export function drawCellHighlight3D(
+  flow: FlowRibbonBuilder,
+  span: WorldSpan3D,
+  fillColor: FlowRibbonColor,
+  frameColor: FlowRibbonColor,
+  frameThickness = 0.022,
+  doubleSided = true,
+): void {
+  flow.addCellHighlightOnFrame(
+    span.frame,
+    span.rowStart,
+    span.rowEnd,
+    span.colStart,
+    span.colEnd,
+    span.gridRows,
+    span.gridCols,
+    0.008,
+    fillColor,
+    frameColor,
+    frameThickness,
+    doubleSided,
+  );
+}
+
+/** Draw upstream oriented highlight + smooth cross-plane 3D cubic dependency thread to target span. */
+export function drawOperandDependency3D(
+  flow: FlowRibbonBuilder,
+  upSpan: WorldSpan3D,
+  targetSpan: WorldSpan3D,
+  isOperandA: boolean,
+): void {
+  drawCellHighlight3D(
+    flow,
+    upSpan,
+    isOperandA ? CELL_OP_A_FILL : CELL_OP_B_FILL,
+    isOperandA ? CELL_OP_A_FRAME : CELL_OP_B_FRAME,
+    0.022,
+    true,
+  );
+
+  // Pick exit/entry face (+N vs -N) that faces toward the partner span so threads never pierce their own sheet.
+  // For horizontal deck sheets (axisN.y > 0.7) whose partner is within deck height, stay on the top (+N) face
+  // so threads arch cleanly above the sheets instead of diving underneath.
+  const delta = sub3(targetSpan.center, upSpan.center);
+  const dist = Math.hypot(delta[0], delta[1], delta[2]);
+  const upDot = dot3(delta, upSpan.frame.axisN);
+  const tgtDot = dot3(delta, targetSpan.frame.axisN);
+
+  const upIsHoriz = upSpan.frame.axisN[1] > 0.7;
+  const tgtIsHoriz = targetSpan.frame.axisN[1] > 0.7;
+
+  const upSign: 1 | -1 = upIsHoriz && delta[1] > -0.85 ? 1 : upDot >= -0.05 ? 1 : -1;
+  const tgtSign: 1 | -1 = tgtIsHoriz && delta[1] < 0.85 ? 1 : tgtDot <= 0.05 ? 1 : -1;
+
+  const p0 = upSign > 0 ? upSpan.frontPoint : upSpan.backPoint;
+  const p3 = tgtSign > 0 ? targetSpan.frontPoint : targetSpan.backPoint;
+
+  const lift = Math.max(0.24, Math.min(1.05, dist * 0.22));
+  const upN = scale3(upSpan.frame.axisN, upSign);
+  const tgtN = scale3(targetSpan.frame.axisN, tgtSign);
+  const horizPull = scale3(delta, 0.18);
+
+  const p1 = add3(add3(p0, scale3(upN, lift)), horizPull);
+  const p2 = add3(add3(p3, scale3(tgtN, lift)), scale3(horizPull, -1));
+
+  const threadCol = isOperandA ? THREAD_OP_A : THREAD_OP_B;
+  flow.addCubic3D(p0, p1, p2, p3, [0, 1, 0], 0.044, threadCol, true, 24, true, 0.14, 0.14);
 }
 
 /** Draw target cell highlight + upstream operand highlight + crisp curved dependency thread. */

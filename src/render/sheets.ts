@@ -18,6 +18,16 @@ import { linkProgram } from './device';
 export const SHEET_INSTANCE_FLOATS = 20;
 export const SHEET_INSTANCE_BYTES = SHEET_INSTANCE_FLOATS * 4;
 
+/**
+ * Optional parallel per-sheet 3D orientation buffer: 6 floats = 24 bytes per sheet.
+ *   [0..2] iAxisU  vec3  unit column axis (+col direction)
+ *   [3..5] iAxisN  vec3  unit sheet normal axis (thin thickness axis)
+ *   axisV = cross(axisU, axisN) is derived in-shader (strictly right-handed, det = +1).
+ * When omitted in upload(), identity XZ axes U=(1,0,0), N=(0,1,0) are used automatically.
+ */
+export const SHEET_BASIS_FLOATS = 6;
+export const SHEET_BASIS_BYTES = SHEET_BASIS_FLOATS * 4;
+
 export const SHEET_KIND_STANDARD = 0;
 export const SHEET_KIND_CAUSAL_SCORES = 1;
 export const SHEET_KIND_CAUSAL_SOFTMAX = 2;
@@ -57,11 +67,14 @@ layout(location = 10) in float iSeed;
 layout(location = 11) in vec4 iTexRect;
 layout(location = 12) in float iValueScale;
 layout(location = 13) in vec2 iFlags;
+layout(location = 14) in vec3 iAxisU;
+layout(location = 15) in vec3 iAxisN;
 
 uniform mat4 uViewProj;
 
 out vec2 vUv;
-flat out vec3 vNormal;
+flat out vec3 vLocalNormal;
+flat out vec3 vWorldNormal;
 flat out vec2 vGridDims;
 flat out int vSheetKind;
 flat out int vRole;
@@ -73,10 +86,25 @@ flat out float vValueScale;
 flat out vec2 vFlags;
 
 void main() {
-  vec3 worldPos = iCenter + aPos * iExtent;
+  vec3 uAxis = normalize(iAxisU);
+  vec3 nCand = iAxisN - dot(iAxisN, uAxis) * uAxis;
+  vec3 nAxis = length(nCand) > 1e-5 ? normalize(nCand) : vec3(0.0, 1.0, 0.0);
+  vec3 vAxis = normalize(cross(uAxis, nAxis));
+
+  vec3 worldPos =
+    iCenter +
+    (aPos.x * iExtent.x) * uAxis +
+    (aPos.y * iExtent.y) * nAxis +
+    (aPos.z * iExtent.z) * vAxis;
+
   gl_Position = uViewProj * vec4(worldPos, 1.0);
   vUv = aUv;
-  vNormal = aNormal;
+  vLocalNormal = aNormal;
+  vWorldNormal = normalize(
+    aNormal.x * uAxis +
+    aNormal.y * nAxis +
+    aNormal.z * vAxis
+  );
   vGridDims = max(iGridDims, vec2(1.0));
   vSheetKind = int(floor(iSheetKind + 0.5));
   vRole = int(floor(iRole + 0.5));
@@ -90,16 +118,18 @@ void main() {
 `;
 
 /**
- * Adapted from bbycroft/llm-viz blockRender.ts adaptive cell-grid LOD + calm drafting-table
- * surface shader. Uses fwidth() on logical cell coordinates so fine matrix cells smoothly
- * emerge as you zoom in and stay completely clean/unaliased when pulled back.
- * Samples live Float32 RG32F values (R = value, G = masked -inf flag) at exact cell centers.
+ * Adapted from bbycroft/llm-viz blockRender.ts adaptive cell-grid LOD + calm studio
+ * surface shader. Uses fwidth() on logical cell coordinates for both fine grid lines
+ * and numerical value contrast LOD so dense sheets stay crisp and unaliased at every zoom.
+ * Samples live Float32 RG32F values (R = value, G = masked -inf flag) consistently on both
+ * +N and -N faces of arbitrarily oriented 3D thin sheets.
  */
 const SHEETS_FS = `#version 300 es
 precision highp float;
 
 in vec2 vUv;
-flat in vec3 vNormal;
+flat in vec3 vLocalNormal;
+flat in vec3 vWorldNormal;
 flat in vec2 vGridDims;
 flat in int vSheetKind;
 flat in int vRole;
@@ -176,9 +206,15 @@ void main() {
   const vec3 PAPER_BG  = vec3(0.969, 0.973, 0.980); // #F7F8FA
   const vec3 CHARCOAL_NEG = vec3(0.23, 0.28, 0.36); // calm charcoal-slate for negative values
 
-  // Side edges & bottom face: plain matte neutral rim — thin architectural card edge
-  if (vNormal.y < 0.5) {
-    vec3 sideCol = vec3(0.66, 0.70, 0.76);
+  // Gentle studio directional shading from transformed world normal so 3D plane orientation
+  // reads immediately without compromising Float32 numerical value contrast.
+  vec3 keyLight = normalize(vec3(0.32, 0.86, 0.40));
+  float ndl = dot(normalize(vWorldNormal), keyLight);
+  float faceShade = clamp(0.905 + 0.105 * (0.5 + 0.5 * ndl), 0.90, 1.00);
+
+  // Side rims (local X/Z edges): plain matte architectural card rim
+  if (abs(vLocalNormal.y) < 0.5) {
+    vec3 sideCol = vec3(0.64, 0.69, 0.76);
     if (vSheetKind == 3) {
       sideCol = vec3(0.84, 0.87, 0.91);
     } else if (vHighlight == 1) {
@@ -190,7 +226,7 @@ void main() {
     } else if (vHighlight == 3) {
       sideCol = mix(sideCol, PAPER_BG, 0.45);
     }
-    float sideShade = abs(vNormal.z) > 0.5 ? 0.94 : 0.87;
+    float sideShade = 0.84 + 0.14 * (0.5 + 0.5 * ndl);
     fragColor = vec4(sideCol * sideShade, 1.0);
     return;
   }
@@ -207,12 +243,12 @@ void main() {
     float border = 1.0 - smoothstep(0.6, 1.6, min(edgePx.x, edgePx.y));
 
     vec3 fill = vec3(0.935, 0.945, 0.960);
-    vec3 lineCol = vec3(0.76, 0.80, 0.86);
+    vec3 lineCol = vec3(0.75, 0.79, 0.86);
     if (vHighlight == 1 || vHighlight == 2) {
       lineCol = mix(lineCol, OXIDE_RED, vHighlight == 1 ? 0.55 : 0.30);
     }
     vec3 col = mix(fill, lineCol, clamp(max(grid * 0.55, border * 0.85), 0.0, 1.0));
-    fragColor = vec4(col, 1.0);
+    fragColor = vec4(col * faceShade, 1.0);
     return;
   }
 
@@ -231,6 +267,11 @@ void main() {
   float cellCol = clamp(floor(vUv.x * vGridDims.x), 0.0, vGridDims.x - 1.0);
   float cellRow = clamp(floor((1.0 - vUv.y) * vGridDims.y), 0.0, vGridDims.y - 1.0);
   vec2 cellIdx = vec2(cellCol, cellRow);
+
+  // Screen-space cell size for numerical value LOD (prevents dense sheets turning into checkerboard noise)
+  float cellFwMax = max(fwidth(gridCoords.x), fwidth(gridCoords.y));
+  float cellPxMin = 1.0 / max(cellFwMax, 1e-5);
+  float valueLod = smoothstep(1.35, 4.6, cellPxMin);
 
   bool isCausal = (vSheetKind == 1 || vSheetKind == 2);
   bool isMaskedUpper = isCausal && (cellCol > cellRow);
@@ -255,15 +296,17 @@ void main() {
       float prob = clamp(texVal.r * vValueScale, 0.0, 1.0);
       float shaped = pow(prob, 0.56);
       vec3 zeroCol = mix(vec3(0.935, 0.946, 0.944), base, 0.35);
-      base = mix(zeroCol, posTint, shaped * 0.88);
+      float probGain = mix(0.62, 0.88, valueLod);
+      base = mix(zeroCol, posTint, shaped * probGain);
     } else {
-      // Restrained signed Float32 diverging encoding:
-      // near 0 -> calm light slate; positive -> muted semantic role tint; negative -> calm charcoal-slate
+      // Restrained signed Float32 diverging encoding with zoom-adaptive contrast LOD:
+      // dense far-away sheets settle smoothly toward calm architectural slate instead of pixel noise.
       float normVal = clamp(texVal.r * vValueScale, -1.0, 1.0);
       float mag = pow(abs(normVal), 0.76);
-      vec3 neutralZero = mix(vec3(0.922, 0.932, 0.946), base, 0.38);
-      vec3 negCol = mix(neutralZero, CHARCOAL_NEG, mag * 0.72);
-      vec3 posCol = mix(neutralZero, posTint, mag * 0.76);
+      vec3 neutralZero = mix(vec3(0.916, 0.928, 0.944), base, 0.42);
+      float contrast = mix(0.28, 1.0, valueLod);
+      vec3 negCol = mix(neutralZero, CHARCOAL_NEG, mag * 0.72 * contrast);
+      vec3 posCol = mix(neutralZero, posTint, mag * 0.76 * contrast);
       base = normVal >= 0.0 ? posCol : negCol;
     }
   } else if (isMaskedUpper) {
@@ -272,8 +315,7 @@ void main() {
     float hatchLine = gridAxisAlpha(hatchCoord, 0.55) * 0.16;
     base = mix(base, vec3(0.76, 0.79, 0.84), hatchLine);
   } else {
-    float fwMax = max(fwidth(gridCoords.x), fwidth(gridCoords.y));
-    float detailVis = smoothstep(3.5, 9.0, 1.0 / max(fwMax, 1e-5));
+    float detailVis = smoothstep(3.5, 9.0, cellPxMin);
     float h = hash21(cellIdx + vec2(vSeed * 13.7, vSeed * 5.3));
     float subtle = (h - 0.5) * 0.065 * detailVis;
     base = mix(base, accent, max(0.0, subtle * 2.2)) + vec3(min(0.0, subtle));
@@ -337,7 +379,7 @@ void main() {
     col = mix(col, vec3(0.50, 0.57, 0.68), 0.35);
   }
 
-  col = mix(col, borderCol, borderMask);
+  col = mix(col * faceShade, borderCol, borderMask);
   fragColor = vec4(col, 1.0);
 }
 `;
@@ -351,7 +393,7 @@ function buildUnitSheetGeometry(): { vertices: Float32Array; indices: Uint16Arra
     n: readonly [number, number, number];
     corners: readonly (readonly [number, number, number, number, number])[];
   }[] = [
-    // +Y top face: UV.x runs -X -> +X (0..1), UV.y runs +Z -> -Z (0..1, so row 0 at -Z is UV.y=1)
+    // +Y (+N) top/front data face: u = x + 0.5 (col 0 at -0.5), v = 0.5 - z (row 0 at z = -0.5 -> v = 1)
     {
       n: [0, 1, 0],
       corners: [
@@ -361,14 +403,16 @@ function buildUnitSheetGeometry(): { vertices: Float32Array; indices: Uint16Arra
         [-0.5, 0.5, -0.5, 0, 1],
       ],
     },
-    // -Y bottom face
+    // -Y (-N) bottom/back data face: derives UV from the exact same sheet-local (x, z) coordinates
+    // (u = x + 0.5, v = 0.5 - z) with outward CCW winding so every physical cell displays and picks
+    // the exact same numerical tensor value from either side.
     {
       n: [0, -1, 0],
       corners: [
-        [-0.5, -0.5, -0.5, 0, 0],
-        [0.5, -0.5, -0.5, 1, 0],
-        [0.5, -0.5, 0.5, 1, 1],
-        [-0.5, -0.5, 0.5, 0, 1],
+        [-0.5, -0.5, -0.5, 0, 1],
+        [0.5, -0.5, -0.5, 1, 1],
+        [0.5, -0.5, 0.5, 1, 0],
+        [-0.5, -0.5, 0.5, 0, 0],
       ],
     },
     // +X side
@@ -425,9 +469,9 @@ function buildUnitSheetGeometry(): { vertices: Float32Array; indices: Uint16Arra
 }
 
 /**
- * Instanced WebGL2 pass for thin, dimension-aware flat matrix sheets.
- * Supports adaptive fwidth() grid-LOD, causal lower-triangle rendering, restrained matte edges,
- * and direct binding of a Float32 value texture in Increment 2.
+ * Instanced WebGL2 pass for thin, dimension-aware flat matrix sheets in arbitrary 3D orientations.
+ * Supports adaptive fwidth() grid & value LOD, double-sided consistent RG32F cell lookup,
+ * causal lower-triangle rendering, restrained matte edges, and zero-overhead XZ defaults.
  */
 export class SheetsPass {
   private readonly gl: WebGL2RenderingContext;
@@ -436,12 +480,14 @@ export class SheetsPass {
   private quadVbo!: WebGLBuffer;
   private quadIbo!: WebGLBuffer;
   private instanceVbo!: WebGLBuffer;
+  private basisVbo!: WebGLBuffer;
   private dummyValueTex!: WebGLTexture;
   private liveValueTex: WebGLTexture | null = null;
   private boundValueTex: WebGLTexture | null = null;
   private uViewProj!: WebGLUniformLocation | null;
   private uValueTex!: WebGLUniformLocation | null;
   private instanceCount = 0;
+  private hasBasisBuffer = false;
 
   constructor(gl: WebGL2RenderingContext) {
     this.gl = gl;
@@ -459,9 +505,10 @@ export class SheetsPass {
     const quadVbo = gl.createBuffer();
     const quadIbo = gl.createBuffer();
     const instanceVbo = gl.createBuffer();
+    const basisVbo = gl.createBuffer();
     const dummyTex = gl.createTexture();
     const liveTex = gl.createTexture();
-    if (!vao || !quadVbo || !quadIbo || !instanceVbo || !dummyTex || !liveTex) {
+    if (!vao || !quadVbo || !quadIbo || !instanceVbo || !basisVbo || !dummyTex || !liveTex) {
       throw new Error('Failed to allocate SheetsPass WebGL resources');
     }
 
@@ -469,6 +516,7 @@ export class SheetsPass {
     this.quadVbo = quadVbo;
     this.quadIbo = quadIbo;
     this.instanceVbo = instanceVbo;
+    this.basisVbo = basisVbo;
     this.dummyValueTex = dummyTex;
     this.liveValueTex = liveTex;
 
@@ -520,6 +568,17 @@ export class SheetsPass {
     bindInst(12, 1, 17); // iValueScale
     bindInst(13, 2, 18); // iFlags (x: 0=signed diverging, 1=probability [0..1])
 
+    // Default identity XZ basis attributes (locations 14 & 15 disabled until basisData is uploaded)
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.basisVbo);
+    gl.vertexAttribPointer(14, 3, gl.FLOAT, false, SHEET_BASIS_BYTES, 0);
+    gl.vertexAttribDivisor(14, 1);
+    gl.vertexAttribPointer(15, 3, gl.FLOAT, false, SHEET_BASIS_BYTES, 12);
+    gl.vertexAttribDivisor(15, 1);
+    gl.disableVertexAttribArray(14);
+    gl.disableVertexAttribArray(15);
+    gl.vertexAttrib3f(14, 1, 0, 0);
+    gl.vertexAttrib3f(15, 0, 1, 0);
+
     gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
   }
@@ -540,11 +599,27 @@ export class SheetsPass {
     this.boundValueTex = this.liveValueTex;
   }
 
-  upload(data: Float32Array, count: number): void {
+  upload(data: Float32Array, count: number, basisData?: Float32Array): void {
     const gl = this.gl;
     this.instanceCount = count;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceVbo);
     gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
+
+    gl.bindVertexArray(this.vao);
+    if (basisData && basisData.length >= count * SHEET_BASIS_FLOATS) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.basisVbo);
+      gl.bufferData(gl.ARRAY_BUFFER, basisData, gl.DYNAMIC_DRAW);
+      gl.enableVertexAttribArray(14);
+      gl.enableVertexAttribArray(15);
+      this.hasBasisBuffer = true;
+    } else {
+      gl.disableVertexAttribArray(14);
+      gl.disableVertexAttribArray(15);
+      gl.vertexAttrib3f(14, 1, 0, 0);
+      gl.vertexAttrib3f(15, 0, 1, 0);
+      this.hasBasisBuffer = false;
+    }
+    gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
   }
 
@@ -569,6 +644,10 @@ export class SheetsPass {
     gl.polygonOffset(1.0, 1.0);
 
     gl.bindVertexArray(this.vao);
+    if (!this.hasBasisBuffer) {
+      gl.vertexAttrib3f(14, 1, 0, 0);
+      gl.vertexAttrib3f(15, 0, 1, 0);
+    }
     gl.drawElementsInstanced(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0, this.instanceCount);
     gl.bindVertexArray(null);
 
@@ -583,6 +662,7 @@ export class SheetsPass {
     gl.deleteBuffer(this.quadVbo);
     gl.deleteBuffer(this.quadIbo);
     gl.deleteBuffer(this.instanceVbo);
+    gl.deleteBuffer(this.basisVbo);
     gl.deleteTexture(this.dummyValueTex);
     if (this.liveValueTex) {
       gl.deleteTexture(this.liveValueTex);
