@@ -278,10 +278,12 @@ describe('Phase 1 MoE 128+1 Exact Operand Highlighting, Dimming & opFocusBounds'
     expect(activeRouterTiles.every((e) => e.box.headIndex === slot2Expert)).toBe(true);
     expect(dimmedRouterTiles).toHaveLength(132); // other 5 active experts (10 plates) + 122 idle tiles!
 
-    // Upstream operand A is rmsnorm; unrelated sheets dim cleanly
+    // Upstream operand A is rmsnorm and operand B is w_router; unrelated sheets dim cleanly
     const rmsEntry = routerScene.solidPickBoxes.findIndex((b) => b.tensorKey === 'rmsnorm');
     expect(highlightAt(routerScene, rmsEntry)).toBe(SHEET_HL_OPERAND_A);
-    for (const dimKey of ['input', 'w_router', 'topk_weights', 'routed_w_up', 'routed_act', 'routed_sum', 'shared_w_up', 'shared_act', 'shared_out', 'moe_out', 'residual']) {
+    const wRouterEntry = routerScene.solidPickBoxes.findIndex((b) => b.tensorKey === 'w_router');
+    expect(highlightAt(routerScene, wRouterEntry)).toBe(SHEET_HL_OPERAND_B);
+    for (const dimKey of ['input', 'topk_weights', 'routed_w_up', 'routed_act', 'routed_sum', 'shared_w_up', 'shared_act', 'shared_out', 'moe_out', 'residual']) {
       const idx = routerScene.solidPickBoxes.findIndex((b) => b.tensorKey === dimKey);
       expect(highlightAt(routerScene, idx), `MoE ${dimKey} should dim on router_bank trace`).toBe(SHEET_HL_DIMMED);
     }

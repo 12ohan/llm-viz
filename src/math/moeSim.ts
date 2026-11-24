@@ -847,6 +847,7 @@ export function describeMoeCellFormula(
           : `Not in Top-6 for t${tokIdx}; detail sheets preview its hypothetical ReLU² weights on demand while layer contribution stays 0.`,
         upstreamSpans: [
           { tensor: 'rmsnorm', rowStart: tokIdx, rowEnd: tokIdx, colStart: 0, colEnd: d - 1, tokenIndex: tokIdx },
+          { tensor: 'w_router', rowStart: expId, rowEnd: expId, colStart: 0, colEnd: d - 1, expertId: expId },
         ],
         activeExpertId: expId,
         isIdleExpert: !ev.isActive,
