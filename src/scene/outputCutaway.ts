@@ -52,6 +52,7 @@ import {
   type AtlasSlice,
   type Rg32fValueAtlas,
 } from './atlasPacker';
+import type { ActiveSheetCellGrid, CellPopoverSpec } from '../ui/overlay';
 import type { CutawayPartInfo, CutawaySceneGeometry } from './cutaways';
 import {
   CELL_OP_A_FILL,
@@ -1598,16 +1599,193 @@ export function buildOutputCutaway(
     return spanFromSheetGrid(rec, span.rowStart, span.rowEnd, span.colStart, span.colEnd);
   };
 
+  let cellPopover: CellPopoverSpec | null = null;
+  let activeOpPartIds: ReadonlySet<string> | undefined;
   if (activeFormula) {
+    const mapTensorPart = (t: OutputAuxTensorKey): string => {
+      switch (t) {
+        case 'residual_in':
+          return 'residual-in';
+        case 'rms_agg':
+          return 'rms-agg';
+        case 'gamma':
+          return 'final-gamma';
+        case 'final_norm':
+          return 'final-norm';
+        case 'w_lm_head':
+          return 'w-lm-head';
+        case 'logits':
+          return 'logits';
+        case 'softmax_agg':
+          return 'softmax-agg';
+        case 'probs':
+          return 'probs';
+      }
+    };
+    const partIds = new Set<string>([mapTensorPart(activeFormula.targetSpan.tensor)]);
     const targetSpan = resolveSpan(activeFormula.targetSpan);
     if (targetSpan) {
       drawCellHighlight3D(b.flow, targetSpan, CELL_TARGET_FILL, CELL_TARGET_FRAME, 0.024, true);
+      const sourceWorlds: {
+        readonly world: readonly [number, number, number];
+        readonly role: 'indigo' | 'teal';
+      }[] = [];
+      let hasOpA = false;
+      let hasOpB = false;
       for (const up of activeFormula.upstreamSpans) {
+        partIds.add(mapTensorPart(up.tensor));
         const upSpan = resolveSpan(up);
         if (!upSpan) continue;
-        drawOperandDependency3D(b.flow, upSpan, targetSpan, up.role === 'operand_a');
+        const isA = up.role === 'operand_a';
+        if (isA) hasOpA = true;
+        else hasOpB = true;
+        sourceWorlds.push({
+          world: upSpan.frontPoint,
+          role: isA ? 'indigo' : 'teal',
+        });
+        drawOperandDependency3D(b.flow, upSpan, targetSpan, isA);
+      }
+      const operandColors: ('indigo' | 'teal' | 'red')[] = [];
+      if (hasOpA) operandColors.push('indigo');
+      if (hasOpB) operandColors.push('teal');
+      operandColors.push('red');
+      cellPopover = {
+        world: targetSpan.frontPoint,
+        tensorLabel: activeFormula.tensorLabel,
+        coordLabel: activeFormula.coordLabel,
+        badge: activeFormula.headBadge ?? undefined,
+        equation: activeFormula.equation,
+        valueText: `= ${activeFormula.valueText}`,
+        operandColors,
+        sourceWorlds: sourceWorlds.length > 0 ? sourceWorlds : undefined,
+      };
+    }
+    if (activeFormula.cell.tensor === 'probs' && activeFormula.cell.vocabId !== undefined) {
+      partIds.add(`output-cand-${activeFormula.cell.vocabId}`);
+    }
+    activeOpPartIds = partIds;
+  }
+
+  // V3 Zoom-adaptive on-cell value grids for Probs, Logits, Final Norm (plus inspected target)
+  const activeCellGrids: ActiveSheetCellGrid[] = [];
+  const vocabLabels = Array.from(
+    { length: vocabSize },
+    (_, v) => `#${v} ${model.vocab[v] ?? ''}`.trim(),
+  );
+  const chanLabels = Array.from({ length: d }, (_, ch) => `ch${ch}`);
+  const outTokLabels = Array.from(
+    { length: T },
+    (_, t) => `t${offset + t} ${tokenLabels[t] ?? ''}`.trim(),
+  );
+  const pushOutputGrid = (
+    regKey: string,
+    values: Float32Array,
+    optsGrid: {
+      readonly format?: 'signed' | 'prob';
+      readonly activeRow?: number;
+      readonly activeCol?: number;
+      readonly colLabels?: readonly string[];
+      readonly rowLabels?: readonly string[];
+      readonly colDimLabel?: string;
+      readonly rowDimLabel?: string;
+    },
+  ): void => {
+    const rec = b.sheetRegistry.get(regKey);
+    if (!rec) return;
+    const frame =
+      rec.frame ??
+      makeSheetFrame3D([rec.cx, rec.cy, rec.cz], [rec.ex, rec.ey, rec.ez]);
+    activeCellGrids.push({
+      originWorld: frame.center,
+      extent: frame.extent,
+      axisU: frame.axisU,
+      axisN: frame.axisN,
+      cols: rec.gridCols,
+      rows: rec.gridRows,
+      values,
+      format: optsGrid.format ?? 'signed',
+      activeRow: optsGrid.activeRow,
+      activeCol: optsGrid.activeCol,
+      colLabels: optsGrid.colLabels,
+      rowLabels: optsGrid.rowLabels,
+      colDimLabel: optsGrid.colDimLabel,
+      rowDimLabel: optsGrid.rowDimLabel,
+    });
+  };
+
+  const probColValues = new Float32Array(vocabSize);
+  const logitColValues = new Float32Array(vocabSize);
+  for (let v = 0; v < vocabSize; v++) {
+    probColValues[v] = lmHead.probs[v * T + focusTok];
+    logitColValues[v] = lmHead.logits[v * T + focusTok];
+  }
+  pushOutputGrid('probs', probColValues, {
+    format: 'prob',
+    activeCol: 0,
+    activeRow: activeFormula?.cell.tensor === 'probs' ? activeFormula.cell.row : (top5[0]?.tokenId ?? 0),
+    colLabels: [`t${absFocusT} ${focusWord}`],
+    rowLabels: vocabLabels,
+    colDimLabel: 'P',
+    rowDimLabel: `V = ${vocabSize}`,
+  });
+  pushOutputGrid('logits', logitColValues, {
+    format: 'signed',
+    activeCol: 0,
+    activeRow: activeFormula?.cell.tensor === 'logits' ? activeFormula.cell.row : (top5[0]?.tokenId ?? 0),
+    colLabels: [`t${absFocusT} ${focusWord}`],
+    rowLabels: vocabLabels,
+    colDimLabel: 'z',
+    rowDimLabel: `V = ${vocabSize}`,
+  });
+
+  const finalNormValues = new Float32Array(T * d);
+  for (let t = 0; t < T; t++) {
+    for (let ch = 0; ch < d; ch++) {
+      finalNormValues[t * d + ch] = finalNorm.U_final[ch * T + t];
+    }
+  }
+  pushOutputGrid('final_norm', finalNormValues, {
+    format: 'signed',
+    activeRow: activeFormula?.cell.tensor === 'final_norm' ? activeFormula.cell.row : focusTok,
+    activeCol: activeFormula?.cell.tensor === 'final_norm' ? activeFormula.cell.col : undefined,
+    colLabels: chanLabels,
+    rowLabels: outTokLabels,
+    colDimLabel: `d = ${d}`,
+    rowDimLabel: T === 1 ? `S = 1 (t${absFocusT})` : `T = ${T}`,
+  });
+
+  if (activeFormula?.cell.tensor === 'residual_in') {
+    const resValues = new Float32Array(T * d);
+    for (let t = 0; t < T; t++) {
+      for (let ch = 0; ch < d; ch++) {
+        resValues[t * d + ch] = residualIn[ch * T + t];
       }
     }
+    pushOutputGrid('residual_in', resValues, {
+      format: 'signed',
+      activeRow: activeFormula.cell.row,
+      activeCol: activeFormula.cell.col,
+      colLabels: chanLabels,
+      rowLabels: outTokLabels,
+      colDimLabel: `d = ${d}`,
+      rowDimLabel: T === 1 ? `S = 1 (t${absFocusT})` : `T = ${T}`,
+    });
+  } else if (activeFormula?.cell.tensor === 'w_lm_head') {
+    const wLmValues = new Float32Array(vocabSize * d);
+    for (let v = 0; v < vocabSize; v++) {
+      for (let ch = 0; ch < d; ch++) {
+        wLmValues[v * d + ch] = lmHead.W_lm_head[v * d + ch];
+      }
+    }
+    pushOutputGrid('w_lm_head', wLmValues, {
+      format: 'signed',
+      activeRow: activeFormula.cell.row,
+      activeCol: activeFormula.cell.col,
+      colLabels: chanLabels,
+      rowLabels: vocabLabels,
+      colDimLabel: `d = ${d}`,
+      rowDimLabel: `V = ${vocabSize}`,
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -1723,7 +1901,7 @@ export function buildOutputCutaway(
 
   const packed = b.pack();
   return {
-    kind: 'cutaway_output' as unknown as CutawaySceneGeometry['kind'],
+    kind: 'cutaway_output',
     bayId: 53,
     ...packed,
     fitBounds: OUTPUT_SPATIAL_FIT_BOUNDS,
@@ -1733,6 +1911,10 @@ export function buildOutputCutaway(
     calipers: b.calipers,
     valueAtlas: atlas,
     activeFormula,
+    outputFormula: activeFormula,
+    activeOpPartIds,
+    cellPopover,
+    activeCellGrids,
     solidPickBoxes: b.pickBoxes,
     partCatalog: buildOutputPartCatalog(
       d,

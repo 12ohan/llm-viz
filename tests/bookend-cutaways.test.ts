@@ -557,4 +557,59 @@ describe('V4 Bookend Cutaways — Dedicated 3D Thin-Sheet Embedding (NoPE) & Out
       }
     }
   });
+
+  it('emits V3 cellPopover, activeOpPartIds, embeddingFormula/outputFormula, and bit-exact activeCellGrids for both bookends', () => {
+    const model = createDefaultHybridModel();
+    const exec = runHybridExecution(model, { tokenIds: defaultTokenIdsForLength(8) });
+
+    const embScene = buildEmbeddingCutaway({
+      model,
+      embedding: { X: exec.X_embed },
+      tokenIds: exec.tokenIds,
+      tokenLabels: exec.tokenLabels,
+      focusToken: 3,
+      precision: 'bf16',
+      selectedPart: null,
+      hoveredPart: null,
+      activeCell: { tensor: 'x_embed', row: 2, col: 3, tokenIndex: 3, vocabId: exec.tokenIds[3] },
+    });
+    expect(embScene.embeddingFormula).toBeTruthy();
+    expect(embScene.activeOpPartIds?.has('x-embed')).toBe(true);
+    expect(embScene.activeOpPartIds?.has('w-embed')).toBe(true);
+    expect(embScene.activeOpPartIds?.has('token-strip')).toBe(true);
+    expect(embScene.cellPopover?.tensorLabel).toContain('Embedding');
+    expect(embScene.cellPopover?.sourceWorlds?.length).toBe(2);
+    expect(embScene.activeCellGrids?.length).toBe(2);
+    const x0Grid = embScene.activeCellGrids![0];
+    expect(x0Grid.rows).toBe(8);
+    expect(x0Grid.cols).toBe(8);
+    expect(Object.is(x0Grid.values[2 * 8 + 3], exec.X_embed[2 * 8 + 3])).toBe(true);
+
+    const top0 = exec.lmHead.topKByToken[7][0];
+    const outScene = buildOutputCutaway({
+      model,
+      residualIn: exec.residualStreams[exec.residualStreams.length - 1],
+      finalNorm: exec.finalNorm,
+      lmHead: exec.lmHead,
+      tokenLabels: exec.tokenLabels,
+      focusToken: 7,
+      precision: 'fp8_selective',
+      selectedPart: null,
+      hoveredPart: null,
+      activeCell: { tensor: 'logits', row: top0.tokenId, col: 0, tokenIndex: 7, vocabId: top0.tokenId },
+      isArDecode: false,
+    });
+    expect(outScene.outputFormula).toBeTruthy();
+    expect(outScene.activeOpPartIds?.has('logits')).toBe(true);
+    expect(outScene.activeOpPartIds?.has('final-norm')).toBe(true);
+    expect(outScene.activeOpPartIds?.has('w-lm-head')).toBe(true);
+    expect(outScene.cellPopover?.tensorLabel).toContain('Logits');
+    expect(outScene.cellPopover?.sourceWorlds?.length).toBe(2);
+    expect(outScene.activeCellGrids?.length).toBeGreaterThanOrEqual(3);
+    const probsGrid = outScene.activeCellGrids![0];
+    expect(probsGrid.format).toBe('prob');
+    expect(Object.is(probsGrid.values[top0.tokenId], exec.lmHead.probs[top0.tokenId * 8 + 7])).toBe(true);
+    const logitsGrid = outScene.activeCellGrids![1];
+    expect(Object.is(logitsGrid.values[top0.tokenId], exec.lmHead.logits[top0.tokenId * 8 + 7])).toBe(true);
+  });
 });

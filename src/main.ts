@@ -93,16 +93,27 @@ import { FlatFlowRibbonsPass, RibbonsPass } from './render/ribbons';
 import { SheetsPass } from './render/sheets';
 import { SolidsPass } from './render/solids';
 import {
+  buildEmbeddingCutaway,
   buildGqaCutaway,
   buildMambaCutaway,
   buildMoECutaway,
+  buildOutputCutaway,
+  EMBEDDING_STEPPER_STEPS,
+  fitSpatialEmbeddingCamera,
   fitSpatialGqaCamera,
   fitSpatialMambaCamera,
   fitSpatialMoeCamera,
+  fitSpatialOutputCamera,
+  OUTPUT_STEPPER_STEPS,
   parseMambaHeadPartId,
   parseMoeExpertPartId,
+  parseOutputCandidatePartId,
   parseQueryHeadPartId,
+  pickHitToEmbeddingCell,
+  pickHitToOutputCell,
   type CutawaySceneGeometry,
+  type EmbeddingCellRef,
+  type OutputCellRef,
 } from './scene/cutaways';
 import {
   boundsForBay,
@@ -111,13 +122,17 @@ import {
   TOWER_FIT_BOUNDS,
   type MacroSceneGeometry,
 } from './scene/spine';
-import { MacroControls, queryControlsElements } from './ui/controls';
+import {
+  MacroControls,
+  queryControlsElements,
+  type CrossBayNeighbor,
+} from './ui/controls';
 import { MemoryScalingDrawer } from './ui/memoryChart';
 import { MacroOverlay } from './ui/overlay';
 import {
-  getWalkthroughChapter,
-  nextChapterIndex,
-  prevChapterIndex,
+  getWalkthroughBeat,
+  nextBeatIndex,
+  prevBeatIndex,
 } from './story/walkthrough';
 
 const DRAG_THRESHOLD_PX = 5;
@@ -271,6 +286,30 @@ function sameMoeCell(a: MoeCellRef | null, b: MoeCellRef | null): boolean {
   );
 }
 
+function sameEmbeddingCell(a: EmbeddingCellRef | null, b: EmbeddingCellRef | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.tensor === b.tensor &&
+    a.row === b.row &&
+    a.col === b.col &&
+    a.tokenIndex === b.tokenIndex &&
+    a.vocabId === b.vocabId
+  );
+}
+
+function sameOutputCell(a: OutputCellRef | null, b: OutputCellRef | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.tensor === b.tensor &&
+    a.row === b.row &&
+    a.col === b.col &&
+    a.tokenIndex === b.tokenIndex &&
+    a.vocabId === b.vocabId
+  );
+}
+
 type CutawayWithOpFocusBounds = CutawaySceneGeometry & {
   readonly opFocusBounds?: Readonly<Record<number, AABB>>;
 };
@@ -322,8 +361,22 @@ function cameraPoseForCutaway(
 ): CameraPose {
   const isStackedNarrow = window.innerWidth <= 900 || metrics.innerWidth < 760;
 
-  // Spatial Increment 1 & 2: GQA and Mamba-2 3/4 views use true 3D multi-plane tensor
-  // composition with exact projective framing centered in the unobstructed canvas band.
+  // Spatial Increment 1, 2 & V4: 3D multi-plane tensor cutaways with exact projective framing
+  // centered in the unobstructed canvas band.
+  if (mode === 'cutaway_embedding') {
+    return fitSpatialEmbeddingCamera(metrics, bounds, {
+      topInsetPx: insets?.topInsetPx ?? (isStackedNarrow ? 12 : 84),
+      bottomInsetPx: insets?.bottomInsetPx ?? (isStackedNarrow ? 12 : 118),
+      isNarrow: isStackedNarrow,
+    });
+  }
+  if (mode === 'cutaway_output') {
+    return fitSpatialOutputCamera(metrics, bounds, {
+      topInsetPx: insets?.topInsetPx ?? (isStackedNarrow ? 12 : 84),
+      bottomInsetPx: insets?.bottomInsetPx ?? (isStackedNarrow ? 12 : 118),
+      isNarrow: isStackedNarrow,
+    });
+  }
   if (mode === 'cutaway_gqa' && sheetViewAngle === 'three_quarter') {
     return fitSpatialGqaCamera(bounds, metrics, {
       topInsetPx: insets?.topInsetPx ?? (isStackedNarrow ? 12 : 84),
@@ -421,6 +474,11 @@ function boot(): void {
   let savedMambaPlanPose: CameraPose | null = null;
   let savedMoeSpatialPose: CameraPose | null = null;
   let savedMoePlanPose: CameraPose | null = null;
+  let embeddingHoveredCell: EmbeddingCellRef | null = null;
+  let outputHoveredCell: OutputCellRef | null = null;
+  let bookendStepIndex: number | null = null;
+  let spineWaveStartMs: number | null = null;
+  const SPINE_WAVE_DURATION_MS = 900;
 
   let device: RenderDevice | null = null;
   let solidsPass: SolidsPass | null = null;
@@ -447,7 +505,7 @@ function boot(): void {
     showFallbackCard(
       fallbackEl,
       '3D WebGL2 Canvas Unavailable',
-      `Your browser could not initialize a WebGL2 context (${detail}). The 7-chapter architectural walkthrough, token scrubber, precision toggle, and interactive 1 → 1M memory scaling chart remain fully available.`,
+      `Your browser could not initialize a WebGL2 context (${detail}). The 22-beat architectural walkthrough, token scrubber, precision toggle, and interactive 1 → 1M memory scaling chart remain fully available.`,
       openMemoryChartFromFallback,
       true,
     );
@@ -456,14 +514,11 @@ function boot(): void {
   const overlay = new MacroOverlay(overlaySvg, overlayLabels);
   const controlEls = queryControlsElements();
 
-  const measureCutawayInsets = (mode: Exclude<ViewMode, 'tower'>) => {
+  const measureCutawayInsets = (_mode: Exclude<ViewMode, 'tower'>) => {
     const isMobileStack = window.innerWidth <= 900;
     const toolbarH = !isMobileStack ? controlEls.floatingToolbar.offsetHeight || 68 : 0;
     const topInsetPx = isMobileStack ? 12 : Math.max(64, toolbarH + 16);
-    const usesMathDock =
-      mode === 'cutaway_gqa' ||
-      mode === 'cutaway_mamba' ||
-      mode === 'cutaway_moe';
+    const usesMathDock = true;
     const dockH =
       usesMathDock && !controlEls.gqaMathDock.hidden
         ? controlEls.gqaMathDock.offsetHeight || 104
@@ -480,9 +535,19 @@ function boot(): void {
     flyAnim = null;
   };
 
+  /** Non-destructive tour exploration marker (V5 Audit S4): never destroys tourActive. */
+  const markTourExploring = (): boolean => {
+    if (state.tourActive && !state.tourExploring) {
+      state.tourExploring = true;
+      return true;
+    }
+    return false;
+  };
+
   const markManualCameraControl = () => {
     cancelFly();
-    if (!manualCameraOverride) {
+    const enteredExploring = markTourExploring();
+    if (!manualCameraOverride || enteredExploring) {
       manualCameraOverride = true;
       syncUi();
     }
@@ -523,11 +588,13 @@ function boot(): void {
   };
 
   const activeViewAngleForMode = (mode: Exclude<ViewMode, 'tower'>): GqaViewAngle =>
-    mode === 'cutaway_mamba'
-      ? state.mambaViewAngle
-      : mode === 'cutaway_moe'
-        ? state.moeViewAngle
-        : state.gqaViewAngle;
+    mode === 'cutaway_embedding' || mode === 'cutaway_output'
+      ? 'three_quarter'
+      : mode === 'cutaway_mamba'
+        ? state.mambaViewAngle
+        : mode === 'cutaway_moe'
+          ? state.moeViewAngle
+          : state.gqaViewAngle;
 
   // Single authoritative unified 52-layer miniature model + bounded execution cache + cached AR decode session
   const hybridModel = createDefaultHybridModel();
@@ -628,7 +695,90 @@ function boot(): void {
     });
   };
 
+  const activeEmbeddingPayload = () => {
+    if (state.executionMode === 'ar_decode') {
+      const step = getActiveDecodeStep(decodeSession);
+      return {
+        embedding: { X: step.X_embed },
+        tokenIds: step.newTokenIds,
+        tokenLabels: step.newTokenLabels,
+        startTokenOffset: step.prefixTokens,
+      };
+    }
+    const exec = activeHybridExecution();
+    return {
+      embedding: { X: exec.X_embed },
+      tokenIds: exec.tokenIds,
+      tokenLabels: exec.tokenLabels,
+      startTokenOffset: 0,
+    };
+  };
+
+  const activeOutputPayload = () => {
+    if (state.executionMode === 'ar_decode') {
+      const step = getActiveDecodeStep(decodeSession);
+      return {
+        residualIn: step.residualStreams[step.residualStreams.length - 1],
+        finalNorm: step.finalNorm,
+        lmHead: step.lmHead,
+        tokenLabels: step.newTokenLabels,
+        startTokenOffset: step.prefixTokens,
+        isArDecode: true,
+      };
+    }
+    const exec = activeHybridExecution();
+    return {
+      residualIn: exec.residualStreams[exec.residualStreams.length - 1],
+      finalNorm: exec.finalNorm,
+      lmHead: exec.lmHead,
+      tokenLabels: exec.tokenLabels,
+      startTokenOffset: 0,
+      isArDecode: false,
+    };
+  };
+
+  const clampedEmbeddingFocusToken = (tokenCount: number): number =>
+    Math.max(0, Math.min(Math.max(0, tokenCount - 1), state.embeddingFocusToken));
+
+  const clampedOutputFocusToken = (tokenCount: number): number =>
+    Math.max(0, Math.min(Math.max(0, tokenCount - 1), state.outputFocusToken));
+
   const buildActiveCutaway = (): CutawaySceneGeometry | null => {
+    if (state.mode === 'cutaway_embedding') {
+      const payload = activeEmbeddingPayload();
+      const focusToken = clampedEmbeddingFocusToken(payload.tokenIds.length);
+      return buildEmbeddingCutaway({
+        model: hybridModel,
+        embedding: payload.embedding,
+        tokenIds: payload.tokenIds,
+        tokenLabels: payload.tokenLabels,
+        startTokenOffset: payload.startTokenOffset,
+        focusToken,
+        precision: state.precision,
+        selectedPart: state.selectedPart,
+        hoveredPart: state.hoveredPart,
+        activeCell: embeddingHoveredCell ?? state.embeddingActiveCell,
+      });
+    }
+    if (state.mode === 'cutaway_output') {
+      const payload = activeOutputPayload();
+      const focusToken = clampedOutputFocusToken(payload.tokenLabels.length);
+      return buildOutputCutaway({
+        model: hybridModel,
+        residualIn: payload.residualIn,
+        finalNorm: payload.finalNorm,
+        lmHead: payload.lmHead,
+        tokenLabels: payload.tokenLabels,
+        startTokenOffset: payload.startTokenOffset,
+        focusToken,
+        precision: state.precision,
+        selectedPart: state.selectedPart,
+        hoveredPart: state.hoveredPart,
+        activeCell: outputHoveredCell ?? state.outputActiveCell,
+        isArDecode: payload.isArDecode,
+        selectedCandidateTokenId: parseOutputCandidatePartId(state.selectedPart),
+      });
+    }
     if (state.mode === 'cutaway_mamba') {
       const sim = activeMambaSim();
       return buildMambaCutaway({
@@ -639,6 +789,10 @@ function boot(): void {
         hoveredPart: state.hoveredPart,
         activeHead: state.mambaActiveHead,
         activeCell: resolveActiveMambaCell(),
+        stepperStep: state.mambaStepperActive ? state.mambaStepperStep : null,
+        stepperActive: state.mambaStepperActive,
+        stepperSubProgress: state.mambaStepperSubProgress,
+        reducedMotion: state.reducedMotion,
         viewAngle: state.mambaViewAngle,
         stateTokenIndex: state.mambaStateToken,
         simOverride: sim,
@@ -657,6 +811,9 @@ function boot(): void {
         activeExpert: state.moeActiveExpert ?? undefined,
         activeCell: resolveActiveMoeCell(),
         stepperStep: state.moeStepperActive ? state.moeStepperStep : null,
+        stepperActive: state.moeStepperActive,
+        stepperSubProgress: state.moeStepperSubProgress,
+        reducedMotion: state.reducedMotion,
         viewAngle: state.moeViewAngle,
         simOverride: sim,
       });
@@ -672,6 +829,10 @@ function boot(): void {
         activeGroup0Head: state.gqaActiveGroup0Head,
         activeGroup1Head: state.gqaActiveGroup1Head,
         activeCell: resolveActiveGqaCell(),
+        stepperStep: state.gqaStepperActive ? state.gqaStepperStep : null,
+        stepperActive: state.gqaStepperActive,
+        stepperPulsePhase: state.gqaStepperSubProgress,
+        reducedMotion: state.reducedMotion,
         viewAngle: state.gqaViewAngle,
         simOverride: sim,
       });
@@ -690,6 +851,13 @@ function boot(): void {
         precision: state.precision,
         selectedBay: state.selectedBay,
         hoveredBay: state.hoveredBay,
+        propagationWave:
+          state.spineWaveProgress !== null
+            ? {
+                progress: state.spineWaveProgress,
+                activeTokenIndex: Math.max(0, state.tokens - 1),
+              }
+            : null,
       });
       currentCutawayScene = null;
       if (device && !device.isLost && solidsPass && linesPass && ribbonsPass) {
@@ -721,6 +889,7 @@ function boot(): void {
             currentCutawayScene.sheetData,
             currentCutawayScene.sheetCount,
             currentCutawayScene.sheetBasisData,
+            currentCutawayScene.sheetRevealData,
           );
           linesPass.upload(currentCutawayScene.lineData, currentCutawayScene.lineCount);
           flatFlowPass.upload(
@@ -735,6 +904,25 @@ function boot(): void {
       }
     }
     geometryDirty = false;
+  };
+
+  const startSpineWave = () => {
+    if (state.mode !== 'tower') return;
+    if (state.reducedMotion) {
+      spineWaveStartMs = null;
+      state.spineWaveProgress = null;
+      geometryDirty = true;
+      rebuildSceneIfNeeded();
+      syncUi();
+      scheduleDraw();
+      return;
+    }
+    spineWaveStartMs = performance.now();
+    state.spineWaveProgress = 0;
+    geometryDirty = true;
+    rebuildSceneIfNeeded();
+    syncUi();
+    scheduleDraw();
   };
 
   const syncUi = () => {
@@ -798,9 +986,92 @@ function boot(): void {
     );
   };
 
-  const toggleCutawayStepperPlay = () => {
+  const applyBookendStepFocus = (step: number) => {
+    if (state.mode === 'cutaway_embedding') {
+      const clamped = Math.max(0, Math.min(EMBEDDING_STEPPER_STEPS.length - 1, step));
+      bookendStepIndex = clamped;
+      const payload = activeEmbeddingPayload();
+      const tok = clampedEmbeddingFocusToken(payload.tokenIds.length);
+      const vid = payload.tokenIds[tok] ?? 0;
+      embeddingHoveredCell = null;
+      if (clamped === 0) {
+        state.embeddingActiveCell = { tensor: 'token_strip', row: tok, col: 0, tokenIndex: tok, vocabId: vid };
+      } else if (clamped === 1) {
+        state.embeddingActiveCell = { tensor: 'w_embed', row: vid, col: 0, tokenIndex: tok, vocabId: vid };
+      } else {
+        state.embeddingActiveCell = { tensor: 'x_embed', row: 0, col: tok, tokenIndex: tok, vocabId: vid };
+      }
+      manualCameraOverride = false;
+      geometryDirty = true;
+      rebuildSceneIfNeeded();
+      syncUi();
+      const opBounds = resolveOpFocusBounds(currentCutawayScene, clamped);
+      if (opBounds && state.stepperAutoFollow) {
+        flyToPose(
+          cameraPoseForOpStep(
+            'cutaway_embedding',
+            opBounds,
+            currentMetrics,
+            'three_quarter',
+            measureCutawayInsets('cutaway_embedding'),
+          ),
+        );
+      }
+      scheduleDraw();
+      return;
+    }
+    if (state.mode === 'cutaway_output') {
+      const clamped = Math.max(0, Math.min(OUTPUT_STEPPER_STEPS.length - 1, step));
+      bookendStepIndex = clamped;
+      const payload = activeOutputPayload();
+      const tok = clampedOutputFocusToken(payload.tokenLabels.length);
+      const topCand = payload.lmHead.topKByToken[tok]?.[0]?.tokenId ?? 0;
+      outputHoveredCell = null;
+      if (clamped === 0) {
+        state.outputActiveCell = { tensor: 'residual_in', row: tok, col: 0, tokenIndex: tok };
+      } else if (clamped === 1) {
+        state.outputActiveCell = { tensor: 'final_norm', row: tok, col: 0, tokenIndex: tok };
+      } else if (clamped === 2) {
+        state.outputActiveCell = { tensor: 'w_lm_head', row: topCand, col: 0, vocabId: topCand };
+      } else if (clamped === 3) {
+        state.outputActiveCell = { tensor: 'logits', row: topCand, col: 0, tokenIndex: tok, vocabId: topCand };
+      } else {
+        state.outputActiveCell = { tensor: 'probs', row: topCand, col: 0, tokenIndex: tok, vocabId: topCand };
+      }
+      manualCameraOverride = false;
+      geometryDirty = true;
+      rebuildSceneIfNeeded();
+      syncUi();
+      const opBounds = resolveOpFocusBounds(currentCutawayScene, clamped);
+      if (opBounds && state.stepperAutoFollow) {
+        flyToPose(
+          cameraPoseForOpStep(
+            'cutaway_output',
+            opBounds,
+            currentMetrics,
+            'three_quarter',
+            measureCutawayInsets('cutaway_output'),
+          ),
+        );
+      }
+      scheduleDraw();
+    }
+  };
+
+  const toggleCutawayStepperPlay = (fromTourBar = false) => {
     if (state.mode === 'tower') return;
-    state.tourActive = false;
+    if (!fromTourBar) markTourExploring();
+
+    if (state.mode === 'cutaway_embedding') {
+      const next = ((bookendStepIndex ?? -1) + 1) % EMBEDDING_STEPPER_STEPS.length;
+      applyBookendStepFocus(next);
+      return;
+    }
+    if (state.mode === 'cutaway_output') {
+      const next = ((bookendStepIndex ?? -1) + 1) % OUTPUT_STEPPER_STEPS.length;
+      applyBookendStepFocus(next);
+      return;
+    }
 
     if (state.mode === 'cutaway_mamba') {
       state.mambaSelectedCell = null;
@@ -912,24 +1183,148 @@ function boot(): void {
     scheduleDraw();
   };
 
-  const applyTourChapter = (chapterIdx: number) => {
-    const ch = getWalkthroughChapter(chapterIdx);
-    if (state.mode === 'tower' && ch.mode !== 'tower') {
+  const flyCameraForBeat = (beatIndex: number) => {
+    const beat = getWalkthroughBeat(beatIndex);
+    manualCameraOverride = false;
+    lastAutoFollowedStepKey = '';
+    if (beat.mode === 'tower') {
+      flyToPose(cameraPoseForSection(beat.section, currentMetrics));
+      return;
+    }
+    if (!currentCutawayScene) return;
+    if (beat.mode === 'cutaway_embedding' || beat.mode === 'cutaway_output') {
+      if (beat.stepperStep !== undefined && beat.stepperStep > 0) {
+        const opBounds = resolveOpFocusBounds(currentCutawayScene, beat.stepperStep);
+        if (opBounds) {
+          flyToPose(
+            cameraPoseForOpStep(
+              beat.mode,
+              opBounds,
+              currentMetrics,
+              'three_quarter',
+              measureCutawayInsets(beat.mode),
+            ),
+          );
+          return;
+        }
+      }
+      flyToPose(
+        cameraPoseForCutaway(
+          beat.mode,
+          currentCutawayScene.fitBounds,
+          currentMetrics,
+          'three_quarter',
+          measureCutawayInsets(beat.mode),
+        ),
+      );
+      return;
+    }
+    if (beat.stepperStep !== undefined && state.stepperAutoFollow) {
+      focusCameraOnActiveOpStep(true);
+      return;
+    }
+    flyToPose(
+      cameraPoseForCutaway(
+        beat.mode,
+        currentCutawayScene.fitBounds,
+        currentMetrics,
+        activeViewAngleForMode(beat.mode),
+        measureCutawayInsets(beat.mode),
+      ),
+    );
+  };
+
+  const applyTourBeat = (beatIndex: number) => {
+    const beat = getWalkthroughBeat(beatIndex);
+    if (state.mode === 'tower' && beat.mode !== 'tower') {
       state.savedMacroCamera = cloneCameraPose(state.camera);
     }
+
     state.tourActive = true;
-    state.executionMode = 'full_sequence';
-    state.tourChapter = ch.index;
-    state.precision = ch.precision;
-    state.tokens = ch.tokens;
-    state.section = ch.section;
-    state.selectedBay = ch.selectedBay;
+    state.tourBeat = beat.index;
+    state.tourChapter = beat.chapterIndex;
+    state.tourExploring = false;
+    state.precision = beat.precision;
+    state.section = beat.section;
+    state.selectedBay = beat.selectedBay;
     state.hoveredBay = null;
     state.selectedPart = null;
     state.hoveredPart = null;
-    if (ch.mambaBayId) state.mambaBayId = ch.mambaBayId;
-    if (ch.gqaBayId) state.gqaBayId = ch.gqaBayId;
-    state.mode = ch.mode;
+
+    // Clear stale pinned/hovered cells & playback timers before staging the new beat
+    state.gqaHoveredCell = null;
+    state.gqaSelectedCell = null;
+    state.gqaStepperActive = false;
+    state.gqaStepperPlaying = false;
+    state.mambaHoveredCell = null;
+    state.mambaSelectedCell = null;
+    state.mambaStepperActive = false;
+    state.mambaStepperPlaying = false;
+    state.mambaTemporalPlaying = false;
+    state.moeHoveredCell = null;
+    state.moeSelectedCell = null;
+    state.moeStepperActive = false;
+    state.moeStepperPlaying = false;
+    state.moeTokenCycling = false;
+    state.embeddingActiveCell = null;
+    state.outputActiveCell = null;
+    embeddingHoveredCell = null;
+    outputHoveredCell = null;
+    bookendStepIndex = beat.stepperStep ?? null;
+    lastStepperTickMs = null;
+    lastMambaTemporalTickMs = null;
+    lastMoeCycleTickMs = null;
+    spineWaveStartMs = null;
+    state.spineWaveProgress = null;
+
+    if (beat.mambaBayId) state.mambaBayId = beat.mambaBayId;
+    if (beat.moeBayId) state.moeBayId = beat.moeBayId;
+    if (beat.gqaBayId) state.gqaBayId = beat.gqaBayId;
+    if (beat.gqaHead !== undefined) {
+      if (beat.gqaHead < 16) state.gqaActiveGroup0Head = beat.gqaHead;
+      else state.gqaActiveGroup1Head = beat.gqaHead;
+    }
+
+    state.executionMode = beat.executionMode;
+    if (beat.arAction === 'step_once_with_wave') {
+      if (getActiveDecodeStep(decodeSession).totalTokens <= 4) {
+        decodeSession = stepDecodeSessionGreedy(decodeSession);
+      }
+      state.tokens = getActiveDecodeStep(decodeSession).totalTokens;
+    } else if (beat.arAction === 'inspect_cached_gqa' || beat.arAction === 'invite_branch_and_chart') {
+      if (getActiveDecodeStep(decodeSession).totalTokens <= 4) {
+        decodeSession = stepDecodeSessionGreedy(decodeSession);
+      }
+      state.tokens = getActiveDecodeStep(decodeSession).totalTokens;
+    } else {
+      state.tokens = beat.tokens;
+    }
+
+    state.embeddingFocusToken = Math.max(0, state.tokens - 1);
+    state.outputFocusToken = Math.max(0, state.tokens - 1);
+    state.mambaStateToken = null;
+    state.moeFocusToken = null;
+    state.moeActiveExpert = null;
+    state.mode = beat.mode;
+
+    if (beat.stepperStep !== undefined) {
+      if (beat.mode === 'cutaway_gqa') {
+        state.gqaStepperActive = true;
+        state.gqaStepperStep = beat.stepperStep;
+        state.gqaStepperSubProgress = 0;
+        state.gqaStepperPlaying = Boolean(beat.stepperAutoPlay && !state.reducedMotion);
+      } else if (beat.mode === 'cutaway_mamba') {
+        state.mambaStepperActive = true;
+        state.mambaStepperStep = beat.stepperStep;
+        state.mambaStepperSubProgress = 0;
+        state.mambaStepperPlaying = Boolean(beat.stepperAutoPlay && !state.reducedMotion);
+      } else if (beat.mode === 'cutaway_moe') {
+        state.moeStepperActive = true;
+        state.moeStepperStep = beat.stepperStep;
+        state.moeStepperSubProgress = 0;
+        state.moeStepperPlaying = Boolean(beat.stepperAutoPlay && !state.reducedMotion);
+      }
+    }
 
     geometryDirty = true;
     rebuildSceneIfNeeded();
@@ -937,34 +1332,32 @@ function boot(): void {
     lastAutoFollowedStepKey = '';
     syncUi();
 
-    if (ch.mode === 'tower') {
-      flyToPose(cameraPoseForSection(ch.section, currentMetrics));
-    } else if (currentCutawayScene) {
-      flyToPose(
-        cameraPoseForCutaway(
-          ch.mode,
-          currentCutawayScene.fitBounds,
-          currentMetrics,
-          activeViewAngleForMode(ch.mode),
-          measureCutawayInsets(ch.mode),
-        ),
-      );
-    }
+    flyCameraForBeat(beat.index);
 
-    scheduleDraw();
+    if (beat.arAction === 'step_once_with_wave' && state.mode === 'tower') {
+      startSpineWave();
+    } else {
+      scheduleDraw();
+    }
   };
 
   const exitTourToFreeExplore = () => {
-    if (!state.tourActive) return;
+    if (!state.tourActive && !state.tourExploring) return;
     state.tourActive = false;
+    state.tourExploring = false;
     syncUi();
   };
 
   const selectMode = (nextMode: ViewMode, customPose?: CameraPose, keepTour = false) => {
-    if (!keepTour) state.tourActive = false;
+    if (!keepTour) markTourExploring();
     if (state.mode === 'tower' && nextMode !== 'tower') {
       state.savedMacroCamera = cloneCameraPose(state.camera);
+    } else if (state.mode === 'cutaway_embedding' && nextMode !== 'cutaway_embedding' && manualCameraOverride) {
+      state.savedEmbedPose = cloneCameraPose(state.camera);
+    } else if (state.mode === 'cutaway_output' && nextMode !== 'cutaway_output' && manualCameraOverride) {
+      state.savedOutputPose = cloneCameraPose(state.camera);
     }
+
     const modeChanged = state.mode !== nextMode;
     state.mode = nextMode;
     state.hoveredBay = null;
@@ -972,11 +1365,20 @@ function boot(): void {
     state.gqaHoveredCell = null;
     state.mambaHoveredCell = null;
     state.moeHoveredCell = null;
+    embeddingHoveredCell = null;
+    outputHoveredCell = null;
     if (modeChanged) {
       state.selectedPart = null;
       state.gqaSelectedCell = null;
       state.mambaSelectedCell = null;
       state.moeSelectedCell = null;
+      state.embeddingActiveCell = null;
+      state.outputActiveCell = null;
+      bookendStepIndex = null;
+      if (nextMode !== 'tower') {
+        spineWaveStartMs = null;
+        state.spineWaveProgress = null;
+      }
       if (nextMode !== 'cutaway_gqa') {
         state.gqaStepperPlaying = false;
       }
@@ -992,9 +1394,11 @@ function boot(): void {
       }
       lastStepperTickMs = null;
     }
-    if (nextMode === 'cutaway_mamba') state.section = 'mamba';
+    if (nextMode === 'cutaway_embedding') state.section = 'embedding';
+    else if (nextMode === 'cutaway_mamba') state.section = 'mamba';
     else if (nextMode === 'cutaway_moe') state.section = 'moe';
     else if (nextMode === 'cutaway_gqa') state.section = 'gqa';
+    else if (nextMode === 'cutaway_output') state.section = 'output';
 
     manualCameraOverride = false;
     lastAutoFollowedStepKey = '';
@@ -1006,6 +1410,10 @@ function boot(): void {
       flyToPose(customPose);
     } else if (nextMode === 'tower') {
       flyToPose(state.savedMacroCamera);
+    } else if (nextMode === 'cutaway_embedding' && state.savedEmbedPose) {
+      flyToPose(cloneCameraPose(state.savedEmbedPose));
+    } else if (nextMode === 'cutaway_output' && state.savedOutputPose) {
+      flyToPose(cloneCameraPose(state.savedOutputPose));
     } else if (currentCutawayScene) {
       const stepper = getActiveCutawayStepper();
       if (stepper?.active && state.stepperAutoFollow) {
@@ -1027,9 +1435,13 @@ function boot(): void {
   };
 
   const selectSection = (section: TocSectionId) => {
-    state.tourActive = false;
-    // If already in a cutaway and user clicks Mamba/MoE/GQA in TOC, switch cutaways cleanly!
+    markTourExploring();
+    // If already in a cutaway and user clicks any cutaway section in TOC, switch cutaways cleanly!
     if (state.mode !== 'tower') {
+      if (section === 'embedding') {
+        selectMode('cutaway_embedding');
+        return;
+      }
       if (section === 'mamba') {
         selectMode('cutaway_mamba');
         return;
@@ -1040,6 +1452,10 @@ function boot(): void {
       }
       if (section === 'gqa') {
         selectMode('cutaway_gqa');
+        return;
+      }
+      if (section === 'output') {
+        selectMode('cutaway_output');
         return;
       }
     }
@@ -1104,7 +1520,11 @@ function boot(): void {
       flyToPose(cameraPoseForSection('overview', currentMetrics));
       syncUi();
     } else if (currentCutawayScene) {
-      if (state.mode === 'cutaway_gqa') {
+      if (state.mode === 'cutaway_embedding') {
+        state.savedEmbedPose = null;
+      } else if (state.mode === 'cutaway_output') {
+        state.savedOutputPose = null;
+      } else if (state.mode === 'cutaway_gqa') {
         if (state.gqaViewAngle === 'three_quarter') savedGqaSpatialPose = null;
         else savedGqaPlanPose = null;
       } else if (state.mode === 'cutaway_mamba') {
@@ -1165,6 +1585,18 @@ function boot(): void {
     state.moeStepperPlaying = false;
     state.moeStepperStep = 0;
     state.moeStepperSubProgress = 0;
+    state.embeddingFocusToken = DEFAULT_TOKENS - 1;
+    state.outputFocusToken = DEFAULT_TOKENS - 1;
+    state.embeddingActiveCell = null;
+    state.outputActiveCell = null;
+    embeddingHoveredCell = null;
+    outputHoveredCell = null;
+    bookendStepIndex = null;
+    state.spineWaveProgress = null;
+    spineWaveStartMs = null;
+    state.savedEmbedPose = null;
+    state.savedOutputPose = null;
+    state.tourExploring = false;
     state.stepperAutoFollow = true;
     manualCameraOverride = false;
     lastAutoFollowedStepKey = '';
@@ -1203,7 +1635,7 @@ function boot(): void {
 
   const stepBay = (delta: -1 | 1) => {
     if (state.mode !== 'tower') return;
-    state.tourActive = false;
+    markTourExploring();
     if (state.selectedBay === null) {
       state.selectedBay = delta > 0 ? 1 : 52;
     } else {
@@ -1233,7 +1665,7 @@ function boot(): void {
     onSelectMode: (mode) => selectMode(mode),
     onSelectSection: selectSection,
     onSelectMambaBay: (bayId) => {
-      state.tourActive = false;
+      markTourExploring();
       if (state.mambaBayId === bayId && state.mode === 'cutaway_mamba') return;
       state.mambaBayId = bayId;
       state.selectedPart = null;
@@ -1243,6 +1675,7 @@ function boot(): void {
       markDirtyAndSchedule(true);
     },
     onSelectMambaView: (view: GqaViewAngle) => {
+      markTourExploring();
       if (state.mambaViewAngle === view && state.mode === 'cutaway_mamba') return;
       if (
         state.mode === 'cutaway_mamba' &&
@@ -1287,7 +1720,7 @@ function boot(): void {
       scheduleDraw();
     },
     onSelectMambaStateToken: (tokenIdx: number | null) => {
-      state.tourActive = false;
+      markTourExploring();
       state.mambaTemporalPlaying = false;
       lastMambaTemporalTickMs = null;
       state.mambaHoveredCell = null;
@@ -1305,7 +1738,7 @@ function boot(): void {
       markDirtyAndSchedule(true);
     },
     onStepMambaStateToken: (delta: -1 | 1) => {
-      state.tourActive = false;
+      markTourExploring();
       state.mambaTemporalPlaying = false;
       lastMambaTemporalTickMs = null;
       state.mambaHoveredCell = null;
@@ -1320,7 +1753,7 @@ function boot(): void {
       markDirtyAndSchedule(true);
     },
     onToggleMambaTemporalPlay: () => {
-      state.tourActive = false;
+      markTourExploring();
       state.mambaHoveredCell = null;
       state.hoveredPart = null;
       const cutT = activeCutawayTokens();
@@ -1356,7 +1789,7 @@ function boot(): void {
       markDirtyAndSchedule(true);
     },
     onSelectMoeBay: (bayId) => {
-      state.tourActive = false;
+      markTourExploring();
       if (state.moeBayId === bayId && state.mode === 'cutaway_moe') return;
       state.moeBayId = bayId;
       state.selectedPart = null;
@@ -1366,6 +1799,7 @@ function boot(): void {
       markDirtyAndSchedule(true);
     },
     onSelectMoeView: (view: GqaViewAngle) => {
+      markTourExploring();
       if (state.moeViewAngle === view && state.mode === 'cutaway_moe') return;
       if (
         state.mode === 'cutaway_moe' &&
@@ -1410,7 +1844,7 @@ function boot(): void {
       scheduleDraw();
     },
     onSelectMoeFocusToken: (tokenIdx: number) => {
-      state.tourActive = false;
+      markTourExploring();
       state.moeTokenCycling = false;
       lastMoeCycleTickMs = null;
       const clamped = Math.max(0, Math.min(activeCutawayTokens() - 1, tokenIdx));
@@ -1423,7 +1857,7 @@ function boot(): void {
       markDirtyAndSchedule(true);
     },
     onStepMoeFocusToken: (delta: -1 | 1) => {
-      state.tourActive = false;
+      markTourExploring();
       state.moeTokenCycling = false;
       lastMoeCycleTickMs = null;
       const sim = currentCutawayScene?.moeSim ?? activeMoeSim();
@@ -1439,7 +1873,7 @@ function boot(): void {
       markDirtyAndSchedule(true);
     },
     onToggleMoeTokenCycle: () => {
-      state.tourActive = false;
+      markTourExploring();
       state.moeHoveredCell = null;
       state.hoveredPart = null;
       if (state.reducedMotion) {
@@ -1481,7 +1915,7 @@ function boot(): void {
       markDirtyAndSchedule(true);
     },
     onSelectMoeExpert: (expertId: number) => {
-      state.tourActive = false;
+      markTourExploring();
       state.moeTokenCycling = false;
       lastMoeCycleTickMs = null;
       const clamped = Math.max(0, Math.min(127, expertId));
@@ -1502,7 +1936,7 @@ function boot(): void {
       markDirtyAndSchedule(true);
     },
     onSelectGqaBay: (bayId) => {
-      state.tourActive = false;
+      markTourExploring();
       if (state.gqaBayId === bayId && state.mode === 'cutaway_gqa') return;
       state.gqaBayId = bayId;
       state.selectedPart = null;
@@ -1512,6 +1946,7 @@ function boot(): void {
       markDirtyAndSchedule(true);
     },
     onSelectGqaView: (view: GqaViewAngle) => {
+      markTourExploring();
       if (state.gqaViewAngle === view && state.mode === 'cutaway_gqa') return;
       if (
         state.mode === 'cutaway_gqa' &&
@@ -1556,7 +1991,7 @@ function boot(): void {
       scheduleDraw();
     },
     onSelectPart: (partId: string | null) => {
-      state.tourActive = false;
+      markTourExploring();
       state.selectedPart = partId;
       state.hoveredPart = null;
       applyHeadSelectionToGroupHeads(partId);
@@ -1564,6 +1999,8 @@ function boot(): void {
         state.gqaSelectedCell = null;
         state.mambaSelectedCell = null;
         state.moeSelectedCell = null;
+        state.embeddingActiveCell = null;
+        state.outputActiveCell = null;
       } else if (parseQueryHeadPartId(partId) !== null && state.gqaSelectedCell) {
         // Clear stale cell from a different head so the newly selected head's live Scores/Softmax stay in sync
         state.gqaSelectedCell = null;
@@ -1578,7 +2015,20 @@ function boot(): void {
     onTokensChange: (nextTokens) => {
       const clamped = Math.max(MIN_TOKENS, Math.min(MAX_TOKENS, nextTokens));
       if (clamped === state.tokens) return;
+      markTourExploring();
       state.tokens = clamped;
+      if (state.embeddingFocusToken >= clamped) {
+        state.embeddingFocusToken = clamped - 1;
+      }
+      if (state.outputFocusToken >= clamped) {
+        state.outputFocusToken = clamped - 1;
+      }
+      if (state.embeddingActiveCell && (state.embeddingActiveCell.tokenIndex ?? 0) >= clamped) {
+        state.embeddingActiveCell = null;
+      }
+      if (state.outputActiveCell && (state.outputActiveCell.tokenIndex ?? 0) >= clamped) {
+        state.outputActiveCell = null;
+      }
       if (state.mambaStateToken !== null && state.mambaStateToken >= clamped) {
         state.mambaStateToken = clamped - 1;
       }
@@ -1596,6 +2046,7 @@ function boot(): void {
     },
     onPrecisionChange: (mode: PrecisionMode) => {
       if (mode === state.precision) return;
+      markTourExploring();
       state.precision = mode;
       markDirtyAndSchedule(true);
     },
@@ -1618,25 +2069,102 @@ function boot(): void {
       state.mambaHoveredCell = null;
       state.moeSelectedCell = null;
       state.moeHoveredCell = null;
+      state.embeddingActiveCell = null;
+      state.outputActiveCell = null;
+      embeddingHoveredCell = null;
+      outputHoveredCell = null;
       markDirtyAndSchedule(true);
     },
     onTourToggle: () => {
       if (state.tourActive) {
         exitTourToFreeExplore();
       } else {
-        applyTourChapter(state.tourChapter);
+        applyTourBeat(state.tourBeat);
       }
     },
     onTourPrev: () => {
-      const prev = prevChapterIndex(state.tourChapter);
-      if (prev !== null) applyTourChapter(prev);
+      const prev = prevBeatIndex(state.tourBeat);
+      if (prev !== null) applyTourBeat(prev);
     },
     onTourNext: () => {
-      const next = nextChapterIndex(state.tourChapter);
-      if (next !== null) applyTourChapter(next);
+      const next = nextBeatIndex(state.tourBeat);
+      if (next !== null) applyTourBeat(next);
     },
-    onTourRestart: () => applyTourChapter(0),
+    onTourBeatPrev: () => {
+      const prev = prevBeatIndex(state.tourBeat);
+      if (prev !== null) applyTourBeat(prev);
+    },
+    onTourBeatNext: () => {
+      const next = nextBeatIndex(state.tourBeat);
+      if (next !== null) applyTourBeat(next);
+    },
+    onTourJumpBeat: (beatIndex: number) => applyTourBeat(beatIndex),
+    onTourResumeBeat: () => applyTourBeat(state.tourBeat),
+    onTourRefitBeat: () => {
+      if (!state.tourActive) {
+        fitActiveView();
+        return;
+      }
+      const beat = getWalkthroughBeat(state.tourBeat);
+      if (state.mode !== beat.mode) {
+        applyTourBeat(state.tourBeat);
+        return;
+      }
+      flyCameraForBeat(state.tourBeat);
+      syncUi();
+      scheduleDraw();
+    },
+    onTourToggleBeatPlay: () => toggleCutawayStepperPlay(true),
+    onTourRestart: () => applyTourBeat(0),
     onTourExit: exitTourToFreeExplore,
+    onSelectEmbeddingToken: (tokenIdx: number) => {
+      markTourExploring();
+      const payload = activeEmbeddingPayload();
+      const clamped = Math.max(0, Math.min(payload.tokenIds.length - 1, tokenIdx));
+      state.embeddingFocusToken = clamped;
+      embeddingHoveredCell = null;
+      state.embeddingActiveCell = {
+        tensor: 'x_embed',
+        row: 0,
+        col: clamped,
+        tokenIndex: clamped,
+        vocabId: payload.tokenIds[clamped],
+      };
+      markDirtyAndSchedule(true);
+    },
+    onSelectOutputToken: (tokenIdx: number) => {
+      markTourExploring();
+      const payload = activeOutputPayload();
+      const clamped = Math.max(0, Math.min(payload.tokenLabels.length - 1, tokenIdx));
+      state.outputFocusToken = clamped;
+      outputHoveredCell = null;
+      const topCand = payload.lmHead.topKByToken[clamped]?.[0]?.tokenId ?? 0;
+      state.outputActiveCell = {
+        tensor: 'probs',
+        row: topCand,
+        col: 0,
+        tokenIndex: clamped,
+        vocabId: topCand,
+      };
+      markDirtyAndSchedule(true);
+    },
+    onNavigateAdjacentBay: (neighbor: CrossBayNeighbor) => {
+      if (neighbor.mode === 'cutaway_mamba') {
+        const bay = NEMOTRON_SPEC.bays[neighbor.bayId - 1];
+        state.mambaBayId = neighbor.bayId === 42 || bay?.feeder ? 42 : 1;
+      } else if (neighbor.mode === 'cutaway_moe') {
+        state.moeBayId = neighbor.bayId === 52 ? 52 : 2;
+      } else if (neighbor.mode === 'cutaway_gqa') {
+        state.gqaBayId = neighbor.bayId === 43 ? 43 : 6;
+      }
+      selectMode(neighbor.mode);
+    },
+    onReplaySpineWave: () => {
+      if (state.mode !== 'tower') {
+        selectMode('tower', cameraPoseForSection('overview', currentMetrics), true);
+      }
+      startSpineWave();
+    },
     onToggleMemoryChart: () => {
       state.memoryChartOpen = !state.memoryChartOpen;
       if (state.memoryChartOpen) state.shortcutsOpen = false;
@@ -1652,9 +2180,21 @@ function boot(): void {
       syncUi();
     },
     onGqaStepPrev: () => {
-      state.tourActive = false;
+      markTourExploring();
       lastStepperTickMs = null;
       manualCameraOverride = false;
+      if (state.mode === 'cutaway_embedding') {
+        const cur = bookendStepIndex ?? 0;
+        const prev = (cur - 1 + EMBEDDING_STEPPER_STEPS.length) % EMBEDDING_STEPPER_STEPS.length;
+        applyBookendStepFocus(prev);
+        return;
+      }
+      if (state.mode === 'cutaway_output') {
+        const cur = bookendStepIndex ?? 0;
+        const prev = (cur - 1 + OUTPUT_STEPPER_STEPS.length) % OUTPUT_STEPPER_STEPS.length;
+        applyBookendStepFocus(prev);
+        return;
+      }
       if (state.mode === 'cutaway_mamba') {
         state.mambaSelectedCell = null;
         state.mambaHoveredCell = null;
@@ -1699,9 +2239,21 @@ function boot(): void {
       scheduleDraw();
     },
     onGqaStepNext: () => {
-      state.tourActive = false;
+      markTourExploring();
       lastStepperTickMs = null;
       manualCameraOverride = false;
+      if (state.mode === 'cutaway_embedding') {
+        const cur = bookendStepIndex ?? -1;
+        const next = (cur + 1) % EMBEDDING_STEPPER_STEPS.length;
+        applyBookendStepFocus(next);
+        return;
+      }
+      if (state.mode === 'cutaway_output') {
+        const cur = bookendStepIndex ?? -1;
+        const next = (cur + 1) % OUTPUT_STEPPER_STEPS.length;
+        applyBookendStepFocus(next);
+        return;
+      }
       if (state.mode === 'cutaway_mamba') {
         state.mambaSelectedCell = null;
         state.mambaHoveredCell = null;
@@ -1742,11 +2294,15 @@ function boot(): void {
       focusCameraOnActiveOpStep(true);
       scheduleDraw();
     },
-    onGqaStepTogglePlay: toggleCutawayStepperPlay,
+    onGqaStepTogglePlay: () => toggleCutawayStepperPlay(false),
     onGqaStepSelect: (step: number) => {
-      state.tourActive = false;
+      markTourExploring();
       lastStepperTickMs = null;
       manualCameraOverride = false;
+      if (state.mode === 'cutaway_embedding' || state.mode === 'cutaway_output') {
+        applyBookendStepFocus(step);
+        return;
+      }
       if (state.mode === 'cutaway_mamba') {
         state.mambaSelectedCell = null;
         state.mambaHoveredCell = null;
@@ -1776,8 +2332,24 @@ function boot(): void {
       scheduleDraw();
     },
     onGqaStepScrub: (progress01: number) => {
-      state.tourActive = false;
+      markTourExploring();
       lastStepperTickMs = null;
+      if (state.mode === 'cutaway_embedding') {
+        const step = Math.min(
+          EMBEDDING_STEPPER_STEPS.length - 1,
+          Math.floor(Math.max(0, Math.min(0.9999, progress01)) * EMBEDDING_STEPPER_STEPS.length),
+        );
+        applyBookendStepFocus(step);
+        return;
+      }
+      if (state.mode === 'cutaway_output') {
+        const step = Math.min(
+          OUTPUT_STEPPER_STEPS.length - 1,
+          Math.floor(Math.max(0, Math.min(0.9999, progress01)) * OUTPUT_STEPPER_STEPS.length),
+        );
+        applyBookendStepFocus(step);
+        return;
+      }
       if (state.mode === 'cutaway_mamba') {
         state.mambaSelectedCell = null;
         state.mambaHoveredCell = null;
@@ -1801,7 +2373,10 @@ function boot(): void {
     },
     onGqaClearCell: () => {
       const hadStepper =
-        state.gqaStepperActive || state.mambaStepperActive || state.moeStepperActive;
+        state.gqaStepperActive ||
+        state.mambaStepperActive ||
+        state.moeStepperActive ||
+        bookendStepIndex !== null;
       state.gqaSelectedCell = null;
       state.gqaHoveredCell = null;
       state.gqaStepperActive = false;
@@ -1817,6 +2392,11 @@ function boot(): void {
       state.moeStepperActive = false;
       state.moeStepperPlaying = false;
       state.moeTokenCycling = false;
+      state.embeddingActiveCell = null;
+      state.outputActiveCell = null;
+      embeddingHoveredCell = null;
+      outputHoveredCell = null;
+      bookendStepIndex = null;
       lastStepperTickMs = null;
       lastMoeCycleTickMs = null;
       manualCameraOverride = false;
@@ -1850,6 +2430,7 @@ function boot(): void {
     },
     onSelectExecutionMode: (mode: ExecutionMode) => {
       if (mode === state.executionMode) return;
+      markTourExploring();
       state.executionMode = mode;
       state.mambaStateToken = null;
       state.mambaTemporalPlaying = false;
@@ -1862,18 +2443,30 @@ function boot(): void {
       state.moeHoveredCell = null;
       state.gqaSelectedCell = null;
       state.gqaHoveredCell = null;
+      state.embeddingActiveCell = null;
+      state.outputActiveCell = null;
+      embeddingHoveredCell = null;
+      outputHoveredCell = null;
       lastMambaTemporalTickMs = null;
       lastMoeCycleTickMs = null;
       if (mode === 'ar_decode') {
-        state.tourActive = false;
-        state.tokens = getActiveDecodeStep(decodeSession).totalTokens;
+        const activeStep = getActiveDecodeStep(decodeSession);
+        state.tokens = activeStep.totalTokens;
+        state.embeddingFocusToken = Math.max(0, activeStep.tokens - 1);
+        state.outputFocusToken = Math.max(0, activeStep.tokens - 1);
+      } else {
+        state.embeddingFocusToken = Math.max(0, state.tokens - 1);
+        state.outputFocusToken = Math.max(0, state.tokens - 1);
       }
       markDirtyAndSchedule(true);
     },
     onDecodeStepToken: (tokenId: number) => {
-      state.tourActive = false;
+      markTourExploring();
       decodeSession = stepDecodeSession(decodeSession, tokenId);
-      state.tokens = getActiveDecodeStep(decodeSession).totalTokens;
+      const activeStep = getActiveDecodeStep(decodeSession);
+      state.tokens = activeStep.totalTokens;
+      state.embeddingFocusToken = Math.max(0, activeStep.tokens - 1);
+      state.outputFocusToken = Math.max(0, activeStep.tokens - 1);
       state.mambaStateToken = null;
       state.mambaTemporalPlaying = false;
       state.mambaSelectedCell = null;
@@ -1885,12 +2478,23 @@ function boot(): void {
       state.moeHoveredCell = null;
       state.gqaSelectedCell = null;
       state.gqaHoveredCell = null;
-      markDirtyAndSchedule(true);
+      state.embeddingActiveCell = null;
+      state.outputActiveCell = null;
+      embeddingHoveredCell = null;
+      outputHoveredCell = null;
+      if (state.mode === 'tower') {
+        startSpineWave();
+      } else {
+        markDirtyAndSchedule(true);
+      }
     },
     onDecodeStepGreedy: () => {
-      state.tourActive = false;
+      markTourExploring();
       decodeSession = stepDecodeSessionGreedy(decodeSession);
-      state.tokens = getActiveDecodeStep(decodeSession).totalTokens;
+      const activeStep = getActiveDecodeStep(decodeSession);
+      state.tokens = activeStep.totalTokens;
+      state.embeddingFocusToken = Math.max(0, activeStep.tokens - 1);
+      state.outputFocusToken = Math.max(0, activeStep.tokens - 1);
       state.mambaStateToken = null;
       state.mambaTemporalPlaying = false;
       state.mambaSelectedCell = null;
@@ -1902,12 +2506,23 @@ function boot(): void {
       state.moeHoveredCell = null;
       state.gqaSelectedCell = null;
       state.gqaHoveredCell = null;
-      markDirtyAndSchedule(true);
+      state.embeddingActiveCell = null;
+      state.outputActiveCell = null;
+      embeddingHoveredCell = null;
+      outputHoveredCell = null;
+      if (state.mode === 'tower') {
+        startSpineWave();
+      } else {
+        markDirtyAndSchedule(true);
+      }
     },
     onDecodeNavStep: (stepIndex: number) => {
-      state.tourActive = false;
+      markTourExploring();
       decodeSession = navigateDecodeSession(decodeSession, stepIndex);
-      state.tokens = getActiveDecodeStep(decodeSession).totalTokens;
+      const activeStep = getActiveDecodeStep(decodeSession);
+      state.tokens = activeStep.totalTokens;
+      state.embeddingFocusToken = Math.max(0, activeStep.tokens - 1);
+      state.outputFocusToken = Math.max(0, activeStep.tokens - 1);
       state.mambaStateToken = null;
       state.mambaSelectedCell = null;
       state.mambaHoveredCell = null;
@@ -1917,12 +2532,19 @@ function boot(): void {
       state.moeHoveredCell = null;
       state.gqaSelectedCell = null;
       state.gqaHoveredCell = null;
+      state.embeddingActiveCell = null;
+      state.outputActiveCell = null;
+      embeddingHoveredCell = null;
+      outputHoveredCell = null;
       markDirtyAndSchedule(true);
     },
     onDecodeSwitchBranch: (branchId: string) => {
-      state.tourActive = false;
+      markTourExploring();
       decodeSession = switchDecodeSessionBranch(decodeSession, branchId);
-      state.tokens = getActiveDecodeStep(decodeSession).totalTokens;
+      const activeStep = getActiveDecodeStep(decodeSession);
+      state.tokens = activeStep.totalTokens;
+      state.embeddingFocusToken = Math.max(0, activeStep.tokens - 1);
+      state.outputFocusToken = Math.max(0, activeStep.tokens - 1);
       state.mambaStateToken = null;
       state.mambaSelectedCell = null;
       state.mambaHoveredCell = null;
@@ -1932,15 +2554,22 @@ function boot(): void {
       state.moeHoveredCell = null;
       state.gqaSelectedCell = null;
       state.gqaHoveredCell = null;
+      state.embeddingActiveCell = null;
+      state.outputActiveCell = null;
+      embeddingHoveredCell = null;
+      outputHoveredCell = null;
       markDirtyAndSchedule(true);
     },
     onDecodeReset: () => {
-      state.tourActive = false;
+      markTourExploring();
       decodeSession = createDecodeSession(hybridModel, {
         promptTokenIds: [0, 1, 2, 3],
         precisionMetadata: state.precision,
       });
-      state.tokens = getActiveDecodeStep(decodeSession).totalTokens;
+      const activeStep = getActiveDecodeStep(decodeSession);
+      state.tokens = activeStep.totalTokens;
+      state.embeddingFocusToken = Math.max(0, activeStep.tokens - 1);
+      state.outputFocusToken = Math.max(0, activeStep.tokens - 1);
       state.mambaStateToken = null;
       state.mambaSelectedCell = null;
       state.mambaHoveredCell = null;
@@ -1950,6 +2579,12 @@ function boot(): void {
       state.moeHoveredCell = null;
       state.gqaSelectedCell = null;
       state.gqaHoveredCell = null;
+      state.embeddingActiveCell = null;
+      state.outputActiveCell = null;
+      embeddingHoveredCell = null;
+      outputHoveredCell = null;
+      spineWaveStartMs = null;
+      state.spineWaveProgress = null;
       markDirtyAndSchedule(true);
     },
   });
@@ -2117,6 +2752,31 @@ function boot(): void {
       lastMoeCycleTickMs = null;
     }
 
+    // V4 52-Layer Spine Propagation Wave (~900 ms sweep along Tower emerald spine, instant under reducedMotion)
+    if (spineWaveStartMs !== null) {
+      if (state.reducedMotion || state.mode !== 'tower') {
+        spineWaveStartMs = null;
+        if (state.spineWaveProgress !== null) {
+          state.spineWaveProgress = null;
+          geometryDirty = true;
+          stepperChangedUi = true;
+        }
+      } else {
+        const elapsedWave = nowMs - spineWaveStartMs;
+        const p = Math.max(0, Math.min(1, elapsedWave / SPINE_WAVE_DURATION_MS));
+        if (p >= 1) {
+          spineWaveStartMs = null;
+          state.spineWaveProgress = null;
+          geometryDirty = true;
+          stepperChangedUi = true;
+        } else {
+          state.spineWaveProgress = p;
+          geometryDirty = true;
+          continueAnimating = true;
+        }
+      }
+    }
+
     rebuildSceneIfNeeded();
     if (stepperChangedUi) {
       syncUi();
@@ -2157,7 +2817,24 @@ function boot(): void {
           currentMetrics.dpr,
           currentSnapshot.eye,
         );
-        flatFlowPass.draw(currentSnapshot.viewProj);
+        const hasActivePulseRibbon =
+          !state.reducedMotion &&
+          currentCutawayScene !== null &&
+          Boolean(
+            currentCutawayScene.activeFormula ||
+            currentCutawayScene.embeddingFormula ||
+            currentCutawayScene.outputFormula ||
+            state.gqaStepperActive ||
+            state.mambaStepperActive ||
+            state.moeStepperActive ||
+            state.selectedPart !== null ||
+            state.hoveredPart !== null,
+          );
+        const pulseTime = hasActivePulseRibbon ? nowMs * 0.001 : -1;
+        flatFlowPass.draw(currentSnapshot.viewProj, pulseTime);
+        if (hasActivePulseRibbon) {
+          continueAnimating = true;
+        }
       } else {
         solidsPass.draw(currentSnapshot.viewProj);
         linesPass.draw(
@@ -2193,6 +2870,9 @@ function boot(): void {
         hoveredPart: state.hoveredPart,
         topInsetPx,
         bottomInsetPx,
+        activeOpPartIds: currentCutawayScene.activeOpPartIds ?? null,
+        cellPopover: currentCutawayScene.cellPopover ?? null,
+        activeCellGrids: currentCutawayScene.activeCellGrids ?? null,
       });
     }
 
@@ -2243,6 +2923,8 @@ function boot(): void {
       savedMambaPlanPose = null;
       savedMoeSpatialPose = null;
       savedMoePlanPose = null;
+      state.savedEmbedPose = null;
+      state.savedOutputPose = null;
       const stepper = getActiveCutawayStepper();
       const insets = measureCutawayInsets(state.mode);
       if (stepper?.active && state.stepperAutoFollow) {
@@ -2424,6 +3106,7 @@ function boot(): void {
       const totalDist = Math.hypot(ev.clientX - downX, ev.clientY - downY);
       if (!isDragging && totalDist >= DRAG_THRESHOLD_PX) {
         isDragging = true;
+        canvas.style.cursor = 'grabbing';
         markManualCameraControl();
       }
       if (isDragging && currentSnapshot) {
@@ -2443,10 +3126,30 @@ function boot(): void {
 
     if (activePointers.size === 0 && ev.pointerType !== 'touch') {
       const hit = pickAtClient(ev.clientX, ev.clientY);
+      canvas.style.cursor = hit !== null ? 'pointer' : '';
       if (state.mode === 'tower') {
         const hitBay = hit ? hit.bayId : null;
         if (hitBay !== state.hoveredBay) {
           state.hoveredBay = hitBay;
+          markDirtyAndSchedule(true);
+        }
+      } else if (state.mode === 'cutaway_embedding') {
+        const payload = activeEmbeddingPayload();
+        const hitPart = hit?.partId ?? null;
+        const hitCell = hit ? pickHitToEmbeddingCell(hit, payload.tokenIds) : null;
+        if (hitPart !== state.hoveredPart || !sameEmbeddingCell(hitCell, embeddingHoveredCell)) {
+          state.hoveredPart = hitPart;
+          embeddingHoveredCell = hitCell;
+          markDirtyAndSchedule(true);
+        }
+      } else if (state.mode === 'cutaway_output') {
+        const payload = activeOutputPayload();
+        const focusTok = clampedOutputFocusToken(payload.tokenLabels.length);
+        const hitPart = hit?.partId ?? null;
+        const hitCell = hit ? pickHitToOutputCell(hit, focusTok) : null;
+        if (hitPart !== state.hoveredPart || !sameOutputCell(hitCell, outputHoveredCell)) {
+          state.hoveredPart = hitPart;
+          outputHoveredCell = hitCell;
           markDirtyAndSchedule(true);
         }
       } else if (state.mode === 'cutaway_gqa') {
@@ -2549,13 +3252,52 @@ function boot(): void {
       const hit = pickAtClient(ev.clientX, ev.clientY);
       if (state.mode === 'tower') {
         const hitBay = hit ? hit.bayId : null;
-        if (hitBay !== null) state.tourActive = false;
+        if (hitBay !== null) markTourExploring();
         state.selectedBay = hitBay;
         state.hoveredBay = hitBay;
+      } else if (state.mode === 'cutaway_embedding') {
+        const payload = activeEmbeddingPayload();
+        const hitPart = hit?.partId ?? null;
+        const hitCell = hit ? pickHitToEmbeddingCell(hit, payload.tokenIds) : null;
+        if (hitPart !== null || hitCell !== null) markTourExploring();
+        if (hitCell?.tokenIndex !== undefined) {
+          state.embeddingFocusToken = Math.max(0, Math.min(payload.tokenIds.length - 1, hitCell.tokenIndex));
+        }
+        state.selectedPart = hitPart;
+        state.hoveredPart = hitPart;
+        state.embeddingActiveCell = hitCell;
+        embeddingHoveredCell = hitCell;
+      } else if (state.mode === 'cutaway_output') {
+        const payload = activeOutputPayload();
+        const focusTok = clampedOutputFocusToken(payload.tokenLabels.length);
+        const candId = parseOutputCandidatePartId(hit?.partId);
+        if (candId !== null && state.executionMode === 'ar_decode') {
+          markTourExploring();
+          decodeSession = stepDecodeSession(decodeSession, candId);
+          const activeStep = getActiveDecodeStep(decodeSession);
+          state.tokens = activeStep.totalTokens;
+          state.embeddingFocusToken = Math.max(0, activeStep.tokens - 1);
+          state.outputFocusToken = Math.max(0, activeStep.tokens - 1);
+          state.selectedPart = `output-cand-${candId}`;
+          state.hoveredPart = state.selectedPart;
+          state.outputActiveCell = null;
+          outputHoveredCell = null;
+        } else {
+          const hitPart = hit?.partId ?? null;
+          const hitCell = hit ? pickHitToOutputCell(hit, focusTok) : null;
+          if (hitPart !== null || hitCell !== null) markTourExploring();
+          if (hitCell?.tokenIndex !== undefined) {
+            state.outputFocusToken = Math.max(0, Math.min(payload.tokenLabels.length - 1, hitCell.tokenIndex));
+          }
+          state.selectedPart = hitPart;
+          state.hoveredPart = hitPart;
+          state.outputActiveCell = hitCell;
+          outputHoveredCell = hitCell;
+        }
       } else if (state.mode === 'cutaway_gqa') {
         const hitPart =
           hit?.headIndex !== undefined ? `q-head-${hit.headIndex}` : hit?.partId ?? null;
-        if (hitPart !== null) state.tourActive = false;
+        if (hitPart !== null) markTourExploring();
         applyHeadSelectionToGroupHeads(hitPart);
         const hitCell = hit
           ? pickHitToGqaCell(hit, state.gqaActiveGroup0Head, state.gqaActiveGroup1Head)
@@ -2582,7 +3324,7 @@ function boot(): void {
             : hit?.headIndex !== undefined && hit.tensorKey === 'x'
               ? `mamba-head-${hit.headIndex}`
               : hit?.partId ?? null;
-        if (hitPart !== null) state.tourActive = false;
+        if (hitPart !== null) markTourExploring();
         applyHeadSelectionToGroupHeads(hitPart);
         const hitCell = hit
           ? pickHitToMambaCell(hit, state.mambaActiveHead, activeCutawayTokens())
@@ -2619,7 +3361,7 @@ function boot(): void {
           hit.headIndex !== undefined
             ? `moe-expert-${hit.headIndex}`
             : hit?.partId ?? null;
-        if (hitPart !== null) state.tourActive = false;
+        if (hitPart !== null) markTourExploring();
         const cellExp = inferMoeCellExpert(hitCell, sim, exp);
         if (cellExp !== null) {
           state.moeActiveExpert = cellExp;
@@ -2644,7 +3386,7 @@ function boot(): void {
         }
       } else {
         const hitPart = hit?.partId ?? null;
-        if (hitPart !== null) state.tourActive = false;
+        if (hitPart !== null) markTourExploring();
         state.selectedPart = hitPart;
         state.hoveredPart = hitPart;
       }
@@ -2655,6 +3397,7 @@ function boot(): void {
       primaryPointerId = null;
       isDragging = false;
       pendingSelectionCancelled = false;
+      canvas.style.cursor = '';
     }
   };
 
@@ -2665,6 +3408,7 @@ function boot(): void {
     if (state.mode !== 'tower') return;
     const hit = pickAtClient(ev.clientX, ev.clientY);
     if (hit) {
+      markTourExploring();
       state.selectedBay = hit.bayId;
       state.hoveredBay = hit.bayId;
       zoomToBay(hit.bayId);
@@ -2673,18 +3417,23 @@ function boot(): void {
   });
 
   canvas.addEventListener('pointerleave', () => {
+    canvas.style.cursor = '';
     if (
       state.hoveredBay !== null ||
       state.hoveredPart !== null ||
       state.gqaHoveredCell !== null ||
       state.mambaHoveredCell !== null ||
-      state.moeHoveredCell !== null
+      state.moeHoveredCell !== null ||
+      embeddingHoveredCell !== null ||
+      outputHoveredCell !== null
     ) {
       state.hoveredBay = null;
       state.hoveredPart = null;
       state.gqaHoveredCell = null;
       state.mambaHoveredCell = null;
       state.moeHoveredCell = null;
+      embeddingHoveredCell = null;
+      outputHoveredCell = null;
       markDirtyAndSchedule(true);
     }
   });
@@ -2727,13 +3476,26 @@ function boot(): void {
       return;
     }
 
-    if (
-      key === ' ' &&
-      (state.mode === 'cutaway_gqa' || state.mode === 'cutaway_mamba' || state.mode === 'cutaway_moe')
-    ) {
-      ev.preventDefault();
-      toggleCutawayStepperPlay();
-      return;
+    if (key === ' ') {
+      if (state.tourActive) {
+        ev.preventDefault();
+        const targetBeat = ev.shiftKey
+          ? prevBeatIndex(state.tourBeat)
+          : nextBeatIndex(state.tourBeat);
+        if (targetBeat !== null) applyTourBeat(targetBeat);
+        return;
+      }
+      if (
+        state.mode === 'cutaway_gqa' ||
+        state.mode === 'cutaway_mamba' ||
+        state.mode === 'cutaway_moe' ||
+        state.mode === 'cutaway_embedding' ||
+        state.mode === 'cutaway_output'
+      ) {
+        ev.preventDefault();
+        toggleCutawayStepperPlay(false);
+        return;
+      }
     }
 
     if (key === 'Escape') {
@@ -2755,11 +3517,17 @@ function boot(): void {
         state.mambaTemporalPlaying ||
         state.moeSelectedCell !== null ||
         state.moeStepperActive ||
-        state.moeTokenCycling
+        state.moeTokenCycling ||
+        state.embeddingActiveCell !== null ||
+        state.outputActiveCell !== null ||
+        bookendStepIndex !== null
       ) {
         ev.preventDefault();
         const hadStepper =
-          state.gqaStepperActive || state.mambaStepperActive || state.moeStepperActive;
+          state.gqaStepperActive ||
+          state.mambaStepperActive ||
+          state.moeStepperActive ||
+          bookendStepIndex !== null;
         state.gqaSelectedCell = null;
         state.gqaHoveredCell = null;
         state.gqaStepperActive = false;
@@ -2775,6 +3543,11 @@ function boot(): void {
         state.moeStepperActive = false;
         state.moeStepperPlaying = false;
         state.moeTokenCycling = false;
+        state.embeddingActiveCell = null;
+        state.outputActiveCell = null;
+        embeddingHoveredCell = null;
+        outputHoveredCell = null;
+        bookendStepIndex = null;
         lastStepperTickMs = null;
         lastMoeCycleTickMs = null;
         manualCameraOverride = false;
@@ -2823,8 +3596,19 @@ function boot(): void {
       selectMode('cutaway_gqa');
       return;
     }
+    if (key === '5') {
+      ev.preventDefault();
+      selectMode('cutaway_embedding');
+      return;
+    }
+    if (key === '6') {
+      ev.preventDefault();
+      selectMode('cutaway_output');
+      return;
+    }
     if (key === 'p' || key === 'P') {
       ev.preventDefault();
+      markTourExploring();
       state.precision = state.precision === 'bf16' ? 'fp8_selective' : 'bf16';
       markDirtyAndSchedule(true);
       return;
@@ -2845,8 +3629,8 @@ function boot(): void {
     if (key === 'ArrowRight') {
       if (state.tourActive) {
         ev.preventDefault();
-        const next = nextChapterIndex(state.tourChapter);
-        if (next !== null) applyTourChapter(next);
+        const next = nextBeatIndex(state.tourBeat);
+        if (next !== null) applyTourBeat(next);
       } else if (state.mode === 'tower') {
         ev.preventDefault();
         stepBay(1);
@@ -2857,8 +3641,8 @@ function boot(): void {
     if (key === 'ArrowLeft') {
       if (state.tourActive) {
         ev.preventDefault();
-        const prev = prevChapterIndex(state.tourChapter);
-        if (prev !== null) applyTourChapter(prev);
+        const prev = prevBeatIndex(state.tourBeat);
+        if (prev !== null) applyTourBeat(prev);
       } else if (state.mode === 'tower') {
         ev.preventDefault();
         stepBay(-1);

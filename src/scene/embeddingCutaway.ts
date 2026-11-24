@@ -44,6 +44,7 @@ import {
   type AtlasSlice,
   type Rg32fValueAtlas,
 } from './atlasPacker';
+import type { ActiveSheetCellGrid, CellPopoverSpec } from '../ui/overlay';
 import type { CutawayPartInfo, CutawaySceneGeometry } from './cutaways';
 import {
   CELL_OP_A_FILL,
@@ -1151,16 +1152,126 @@ export function buildEmbeddingCutaway(
     return spanFromSheetGrid(rec, span.rowStart, span.rowEnd, span.colStart, span.colEnd);
   };
 
+  let cellPopover: CellPopoverSpec | null = null;
+  let activeOpPartIds: ReadonlySet<string> | undefined;
   if (activeFormula) {
+    const mapTensorPart = (t: EmbeddingTensorKey): string =>
+      t === 'token_strip' ? 'token-strip' : t === 'w_embed' ? 'w-embed' : 'x-embed';
+    const partIds = new Set<string>([mapTensorPart(activeFormula.targetSpan.tensor)]);
     const targetSpan = resolveSpan(activeFormula.targetSpan);
     if (targetSpan) {
       drawCellHighlight3D(b.flow, targetSpan, CELL_TARGET_FILL, CELL_TARGET_FRAME, 0.025, true);
+      const sourceWorlds: {
+        readonly world: readonly [number, number, number];
+        readonly role: 'indigo' | 'teal';
+      }[] = [];
+      let hasOpA = false;
+      let hasOpB = false;
       for (const up of activeFormula.upstreamSpans) {
+        partIds.add(mapTensorPart(up.tensor));
         const upSpan = resolveSpan(up);
         if (!upSpan) continue;
-        drawOperandDependency3D(b.flow, upSpan, targetSpan, up.role === 'operand_a');
+        const isA = up.role === 'operand_a';
+        if (isA) hasOpA = true;
+        else hasOpB = true;
+        sourceWorlds.push({
+          world: upSpan.frontPoint,
+          role: isA ? 'indigo' : 'teal',
+        });
+        drawOperandDependency3D(b.flow, upSpan, targetSpan, isA);
+      }
+      const operandColors: ('indigo' | 'teal' | 'red')[] = [];
+      if (hasOpA) operandColors.push('indigo');
+      if (hasOpB) operandColors.push('teal');
+      operandColors.push('red');
+      cellPopover = {
+        world: targetSpan.frontPoint,
+        tensorLabel: activeFormula.tensorLabel,
+        coordLabel: activeFormula.coordLabel,
+        badge: activeFormula.headBadge ?? undefined,
+        equation: activeFormula.equation,
+        valueText:
+          activeFormula.cell.tensor === 'token_strip'
+            ? activeFormula.valueText
+            : `= ${activeFormula.valueText}`,
+        operandColors,
+        sourceWorlds: sourceWorlds.length > 0 ? sourceWorlds : undefined,
+      };
+    }
+    if (activeFormula.targetSpan.tensor === 'x_embed') {
+      partIds.add('residual-handoff');
+    }
+    activeOpPartIds = partIds;
+  }
+
+  // V3 Zoom-adaptive on-cell value grids for X₀ [d × T] and W_embed [V × d]
+  const activeCellGrids: ActiveSheetCellGrid[] = [];
+  const x0TokLabels = Array.from(
+    { length: T },
+    (_, t) => `t${offset + t} ${tokenLabels[t] ?? model.vocab[tokenIds[t] ?? 0] ?? ''}`.trim(),
+  );
+  const chanLabels = Array.from({ length: d }, (_, ch) => `ch${ch}`);
+  const vocabLabels = Array.from(
+    { length: vocabSize },
+    (_, v) => `#${v} ${model.vocab[v] ?? ''}`.trim(),
+  );
+
+  const x0Sheet = b.sheetRegistry.get('x_embed');
+  if (x0Sheet) {
+    const frame =
+      x0Sheet.frame ??
+      makeSheetFrame3D([x0Sheet.cx, x0Sheet.cy, x0Sheet.cz], [x0Sheet.ex, x0Sheet.ey, x0Sheet.ez]);
+    const x0Values = new Float32Array(d * T);
+    for (let ch = 0; ch < d; ch++) {
+      for (let t = 0; t < T; t++) {
+        x0Values[ch * T + t] = embedding.X[ch * T + t];
       }
     }
+    activeCellGrids.push({
+      originWorld: frame.center,
+      extent: frame.extent,
+      axisU: frame.axisU,
+      axisN: frame.axisN,
+      cols: T,
+      rows: d,
+      values: x0Values,
+      format: 'signed',
+      activeRow: activeFormula?.cell.tensor === 'x_embed' ? activeFormula.cell.row : undefined,
+      activeCol: activeFormula?.cell.tensor === 'x_embed' ? activeFormula.cell.col : focusTok,
+      colLabels: x0TokLabels,
+      rowLabels: chanLabels,
+      colDimLabel: T === 1 ? `S = 1 (t${absFocusT})` : `T = ${T}`,
+      rowDimLabel: `d = ${d}`,
+    });
+  }
+
+  const wSheet = b.sheetRegistry.get('w_embed');
+  if (wSheet) {
+    const frame =
+      wSheet.frame ??
+      makeSheetFrame3D([wSheet.cx, wSheet.cy, wSheet.cz], [wSheet.ex, wSheet.ey, wSheet.ez]);
+    const wValues = new Float32Array(vocabSize * d);
+    for (let v = 0; v < vocabSize; v++) {
+      for (let ch = 0; ch < d; ch++) {
+        wValues[v * d + ch] = model.W_embed[v * d + ch];
+      }
+    }
+    activeCellGrids.push({
+      originWorld: frame.center,
+      extent: frame.extent,
+      axisU: frame.axisU,
+      axisN: frame.axisN,
+      cols: d,
+      rows: vocabSize,
+      values: wValues,
+      format: 'signed',
+      activeRow: activeFormula?.cell.tensor === 'w_embed' ? activeFormula.cell.row : focusVocabId,
+      activeCol: activeFormula?.cell.tensor === 'w_embed' ? activeFormula.cell.col : undefined,
+      colLabels: chanLabels,
+      rowLabels: vocabLabels,
+      colDimLabel: `d = ${d}`,
+      rowDimLabel: `V = ${vocabSize}`,
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -1257,7 +1368,7 @@ export function buildEmbeddingCutaway(
 
   const packed = b.pack();
   return {
-    kind: 'cutaway_embedding' as unknown as CutawaySceneGeometry['kind'],
+    kind: 'cutaway_embedding',
     bayId: 0,
     ...packed,
     fitBounds: EMBEDDING_SPATIAL_FIT_BOUNDS,
@@ -1267,6 +1378,10 @@ export function buildEmbeddingCutaway(
     calipers: b.calipers,
     valueAtlas: atlas,
     activeFormula,
+    embeddingFormula: activeFormula,
+    activeOpPartIds,
+    cellPopover,
+    activeCellGrids,
     solidPickBoxes: b.pickBoxes,
     partCatalog: buildEmbeddingPartCatalog(
       T,
