@@ -58,6 +58,8 @@ import type {
 } from './cutaways';
 import type { GqaValueAtlas } from './gqaAtlas';
 import {
+  CELL_OP_A_FILL,
+  CELL_OP_A_FRAME,
   CELL_TARGET_FILL,
   CELL_TARGET_FRAME,
   computeSheetGroupBounds,
@@ -65,6 +67,7 @@ import {
   drawCellHighlight3D,
   drawOperandDependency3D,
   EMPTY_SHEET_FOCUS_SET,
+  fmtSigned,
   resolveSheetFocusRole,
   resolveSheetHighlight,
   RIBBON_ACTIVE,
@@ -74,6 +77,7 @@ import {
   RIBBON_RESIDUAL,
   RIBBON_RESIDUAL_ACTIVE,
   spanFromSheetGrid,
+  THREAD_OP_A,
   type SheetFocusEntry,
   type SheetFocusSet,
   type SheetGeomRecord,
@@ -1497,6 +1501,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
   // ==========================================================================
   // 7. LIVE 3D CELL HIGHLIGHTS & CROSS-PLANE OPERAND DEPENDENCY THREADS
   // ==========================================================================
+  let residualCarryInfo: { readonly ch: number; readonly tok: number; readonly val: number } | null = null;
   if (activeFormula) {
     const displayedHeads: readonly [number, number] = [group0Head, group1Head];
     const targetSpan = resolveSpatialSpan(b.sheetRegistry, activeFormula.targetSpan, displayedHeads);
@@ -1507,6 +1512,57 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
       for (const up of activeFormula.upstreamSpans) {
         const upSpan = resolveSpatialSpan(b.sheetRegistry, up, displayedHeads);
         if (!upSpan) continue;
+
+        // Focused visual routing for Input X -> + Residual Y: follow the overhead Residual Highway
+        // bridge instead of cutting horizontally offscreen through intermediate attention planes.
+        if (activeFormula.cell.tensor === 'residual' && up.tensor === 'input') {
+          drawCellHighlight3D(b.flow, upSpan, CELL_OP_A_FILL, CELL_OP_A_FRAME, 0.022, true);
+          const threadBridgeY = bridgeY + 0.09;
+          b.flow.addCubic3D(
+            upSpan.frontPoint,
+            [xInput, threadBridgeY * 0.86, -ioD * 0.5 - 0.78],
+            [xInput + 0.3, threadBridgeY, bridgeZ],
+            [xInput + 0.9, threadBridgeY, bridgeZ],
+            [0, 1, 0],
+            0.056,
+            THREAD_OP_A,
+            false,
+            16,
+            true,
+          );
+          b.flow.addPolyline3D(
+            [
+              [xInput + 0.85, threadBridgeY, bridgeZ],
+              [xResOut - 0.85, threadBridgeY, bridgeZ],
+            ],
+            [0, 1, 0],
+            0.056,
+            THREAD_OP_A,
+            false,
+            0.18,
+            0.18,
+            true,
+          );
+          b.flow.addCubic3D(
+            [xResOut - 0.9, threadBridgeY, bridgeZ],
+            [xResOut - 0.25, threadBridgeY, bridgeZ],
+            [targetSpan.frontPoint[0], threadBridgeY * 0.76, -ioD * 0.5 - 0.55],
+            targetSpan.frontPoint,
+            [0, 1, 0],
+            0.056,
+            THREAD_OP_A,
+            true,
+            18,
+            true,
+            0.16,
+            0.16,
+          );
+          const tok = Math.max(0, Math.min(clampedT - 1, activeFormula.cell.row));
+          const ch = Math.max(0, Math.min(sim.d - 1, activeFormula.cell.col));
+          residualCarryInfo = { ch, tok, val: sim.X[ch * clampedT + tok] };
+          continue;
+        }
+
         drawOperandDependency3D(b.flow, upSpan, targetSpan, up.role === 'operand_a');
       }
     }
@@ -1637,6 +1693,19 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     { id: 'g-oproj', label: 'W_O', world: [xWO, woY + woHeightY * 0.5 + 0.20, 0], partId: 'o-proj', align: 'top', tier: 'primary', tone: isFp8Mode ? 'gold' : 'default' },
     { id: 'g-res-out', label: '+ Residual', world: [xResOut, 0.18, ioD * 0.5 + 0.24], partId: 'residual-out', align: 'bottom', tier: 'primary' },
     { id: 'g-res-bridge', label: 'Residual Highway (2,688)', world: [0.3, bridgeY + 0.22, bridgeZ], partId: 'residual-in', align: 'top', tier: 'primary' },
+    ...(residualCarryInfo
+      ? [
+          {
+            id: 'g-res-carry',
+            label: `← Input X[${residualCarryInfo.ch}, t${residualCarryInfo.tok}] = ${fmtSigned(residualCarryInfo.val)}`,
+            world: [xResOut - 0.18, bridgeY * 0.80, bridgeZ * 0.62] as Vec3,
+            partId: 'residual-in',
+            align: 'left' as const,
+            tier: 'primary' as const,
+            tone: 'cyan' as const,
+          },
+        ]
+      : []),
 
     // Progressive detail labels (revealed on hover, selection, or close zoom)
     { id: 'g-nope', label: 'NoPE · order from Mamba-2', world: [xRms, 0.16, -ioD * 0.5 - 0.24], partId: 'rmsnorm', align: 'top', tier: 'detail', tone: 'cyan' },

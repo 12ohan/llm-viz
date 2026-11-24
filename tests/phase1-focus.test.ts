@@ -536,4 +536,56 @@ describe('Phase 1 GQA Exact Operand Highlighting, Dimming & opFocusBounds (Both 
       }
     });
   }
+
+  it('distinguishes explicit aggregate sheets from specialized sheets with accidentally missing metadata', () => {
+    const entry = {
+      tensor: 'q',
+      headIndex: 18,
+      kvHeadIndex: 1 as const,
+      role: 'operand_a' as const,
+    };
+
+    // Genuinely aggregate candidate matches intentionally when marked isAggregate: true
+    expect(matchesFocusEntry(entry, { tensor: 'q', isAggregate: true })).toBe(true);
+
+    // Specialized candidate (isAggregate: false) MUST reject missing headIndex/kvHeadIndex metadata
+    expect(matchesFocusEntry(entry, { tensor: 'q', isAggregate: false })).toBe(false);
+    expect(matchesFocusEntry(entry, { tensor: 'q', headIndex: 18, isAggregate: false })).toBe(false);
+    expect(matchesFocusEntry(entry, { tensor: 'q', headIndex: 18, kvHeadIndex: 1, isAggregate: false })).toBe(true);
+
+    // Specialized token/expert/tap candidates reject missing metadata when isAggregate: false
+    expect(
+      matchesFocusEntry(
+        { tensor: 'router_bank', expertId: 84, tokenStart: 7, tokenEnd: 7, role: 'target' },
+        { tensor: 'router_bank', expertId: 84, isAggregate: false },
+      ),
+    ).toBe(false);
+    expect(
+      matchesFocusEntry(
+        { tensor: 'conv_buf', tapStart: 3, tapEnd: 3, role: 'operand_a' },
+        { tensor: 'conv_buf', isAggregate: false },
+      ),
+    ).toBe(false);
+  });
+
+  it('routes GQA 3/4 final residual addition along the overhead bridge with carry-in badge without expanding opFocusBounds[5]', () => {
+    const resScene = buildGqaCutaway({
+      bayId: 6,
+      tokens: 8,
+      precision: 'bf16',
+      selectedPart: null,
+      hoveredPart: null,
+      viewAngle: 'three_quarter',
+      activeCell: { tensor: 'residual', row: 7, col: 0 },
+    });
+
+    // Keeps opFocusBounds[5] tightly framed around Concat/W_O/Residual (does NOT expand back to xInput = -7.85)
+    expect(resScene.opFocusBounds![5].min[0]).toBeGreaterThan(2.0);
+
+    // Emits focused carry-in landmark right at the visible Residual Highway descent elbow
+    const carryLm = resScene.landmarks.find((lm) => lm.id === 'g-res-carry');
+    expect(carryLm).toBeDefined();
+    expect(carryLm!.label).toContain('Input X[0, t7]');
+    expect(carryLm!.world[0]).toBeGreaterThan(5.0);
+  });
 });

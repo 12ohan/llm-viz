@@ -143,6 +143,13 @@ export interface SheetCandidateIdentity {
   readonly rowEnd?: number;
   readonly colStart?: number;
   readonly colEnd?: number;
+  /**
+   * Explicitly distinguishes genuinely aggregate multi-head/multi-token sheets (`true`)
+   * from specialized single-head/single-slice/single-tile sheets (`false`).
+   * When `false`, any specialized selector present on a focus entry must also be present
+   * on the candidate (preventing accidentally missing metadata from falsely matching).
+   */
+  readonly isAggregate?: boolean;
 }
 
 export interface SheetFocusSet {
@@ -165,58 +172,64 @@ export function createSheetFocusSet(entries: readonly SheetFocusEntry[]): SheetF
 /**
  * Exact full-identity match between a focus entry and a candidate sheet/tile.
  * Never matches by tensor key alone whenever finer-grained identity selectors are present.
+ * When `candidate.isAggregate === false`, missing specialized identity metadata on the
+ * candidate is rejected rather than wildcard-matched.
  */
 export function matchesFocusEntry(
   entry: SheetFocusEntry,
   candidate: SheetCandidateIdentity,
 ): boolean {
   if (entry.tensor !== candidate.tensor) return false;
-  if (
-    entry.headIndex !== undefined &&
-    candidate.headIndex !== undefined &&
-    entry.headIndex !== candidate.headIndex
-  ) {
-    return false;
-  }
-  if (
-    entry.kvHeadIndex !== undefined &&
-    candidate.kvHeadIndex !== undefined &&
-    entry.kvHeadIndex !== candidate.kvHeadIndex
-  ) {
-    return false;
-  }
-  if (
-    entry.groupIndex !== undefined &&
-    candidate.groupIndex !== undefined &&
-    entry.groupIndex !== candidate.groupIndex
-  ) {
-    return false;
-  }
-  if (
-    entry.expertId !== undefined &&
-    candidate.expertId !== undefined &&
-    entry.expertId !== candidate.expertId
-  ) {
-    return false;
-  }
-  if (
-    candidate.tokenIndex !== undefined &&
-    (entry.tokenStart !== undefined || entry.tokenEnd !== undefined)
-  ) {
-    const t0 = entry.tokenStart ?? entry.tokenEnd!;
-    const t1 = entry.tokenEnd ?? entry.tokenStart!;
-    if (candidate.tokenIndex < t0 || candidate.tokenIndex > t1) {
+  const requireSpecialized = candidate.isAggregate === false;
+
+  if (entry.headIndex !== undefined) {
+    if (candidate.headIndex === undefined) {
+      if (requireSpecialized) return false;
+    } else if (entry.headIndex !== candidate.headIndex) {
       return false;
     }
   }
-  if (
-    candidate.tapIndex !== undefined &&
-    (entry.tapStart !== undefined || entry.tapEnd !== undefined)
-  ) {
-    const s0 = entry.tapStart ?? entry.tapEnd!;
-    const s1 = entry.tapEnd ?? entry.tapStart!;
-    if (candidate.tapIndex < s0 || candidate.tapIndex > s1) {
+  if (entry.kvHeadIndex !== undefined) {
+    if (candidate.kvHeadIndex === undefined) {
+      if (requireSpecialized) return false;
+    } else if (entry.kvHeadIndex !== candidate.kvHeadIndex) {
       return false;
+    }
+  }
+  if (entry.groupIndex !== undefined) {
+    if (candidate.groupIndex === undefined) {
+      if (requireSpecialized) return false;
+    } else if (entry.groupIndex !== candidate.groupIndex) {
+      return false;
+    }
+  }
+  if (entry.expertId !== undefined) {
+    if (candidate.expertId === undefined) {
+      if (requireSpecialized) return false;
+    } else if (entry.expertId !== candidate.expertId) {
+      return false;
+    }
+  }
+  if (entry.tokenStart !== undefined || entry.tokenEnd !== undefined) {
+    if (candidate.tokenIndex === undefined) {
+      if (requireSpecialized) return false;
+    } else {
+      const t0 = entry.tokenStart ?? entry.tokenEnd!;
+      const t1 = entry.tokenEnd ?? entry.tokenStart!;
+      if (candidate.tokenIndex < t0 || candidate.tokenIndex > t1) {
+        return false;
+      }
+    }
+  }
+  if (entry.tapStart !== undefined || entry.tapEnd !== undefined) {
+    if (candidate.tapIndex === undefined) {
+      if (requireSpecialized) return false;
+    } else {
+      const s0 = entry.tapStart ?? entry.tapEnd!;
+      const s1 = entry.tapEnd ?? entry.tapStart!;
+      if (candidate.tapIndex < s0 || candidate.tapIndex > s1) {
+        return false;
+      }
     }
   }
   if (
