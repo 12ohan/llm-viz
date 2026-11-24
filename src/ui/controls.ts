@@ -6,6 +6,7 @@ import {
   formatBayId,
   formatBracketCaption,
   kvCachePrecision,
+  NEMOTRON_SPEC,
   PARAMETER_CAPTION,
   ssmStateDtype,
   type BayDescriptor,
@@ -33,15 +34,147 @@ import {
 import { MAMBA_STEPPER_STEPS } from '../math/mambaSim';
 import { formatExpertId, MOE_STEPPER_STEPS } from '../math/moeSim';
 import {
+  EMBEDDING_STEPPER_STEPS,
   formatMambaHeadId,
   formatQueryHeadId,
   mambaGroupForHead,
+  OUTPUT_STEPPER_STEPS,
   parseMambaHeadPartId,
   parseQueryHeadPartId,
   type CutawayPartInfo,
   type CutawaySceneGeometry,
 } from '../scene/cutaways';
-import { getWalkthroughChapter, WALKTHROUGH_COUNT } from '../story/walkthrough';
+import {
+  beatsForChapter,
+  getWalkthroughBeat,
+  getWalkthroughChapter,
+  WALKTHROUGH_BEAT_COUNT,
+  WALKTHROUGH_BEATS,
+} from '../story/walkthrough';
+
+export type CrossBayNodeKind = 'embedding' | 'output' | BayKind;
+
+export interface CrossBayNeighbor {
+  readonly kind: CrossBayNodeKind;
+  /** 0 for Embedding, 1..52 for tower bays, 53 for Output LM Head. */
+  readonly bayId: number;
+  readonly mode: Exclude<ViewMode, 'tower'>;
+  /** Concise label for clickable breadcrumb buttons, e.g. "Embed X₀", "Bay 01 M", "Bay 02 MoE". */
+  readonly shortLabel: string;
+  /** Full descriptive label for active breadcrumb pill & tooltip, e.g. "Bay 01 Mamba-2". */
+  readonly label: string;
+}
+
+export interface CrossBayNeighbors {
+  readonly prev: CrossBayNeighbor | null;
+  readonly current: CrossBayNeighbor;
+  readonly next: CrossBayNeighbor | null;
+}
+
+function makeEmbeddingCrossBayNode(): CrossBayNeighbor {
+  return {
+    kind: 'embedding',
+    bayId: 0,
+    mode: 'cutaway_embedding',
+    shortLabel: 'Embed X₀',
+    label: 'Embed X₀',
+  };
+}
+
+function makeOutputCrossBayNode(totalBays: number): CrossBayNeighbor {
+  return {
+    kind: 'output',
+    bayId: totalBays + 1,
+    mode: 'cutaway_output',
+    shortLabel: 'Output',
+    label: 'Output LM Head',
+  };
+}
+
+function makeBayCrossBayNode(bay: BayDescriptor): CrossBayNeighbor {
+  const idStr = formatBayId(bay.id);
+  const mode: Exclude<ViewMode, 'tower'> =
+    bay.kind === 'M' ? 'cutaway_mamba' : bay.kind === 'E' ? 'cutaway_moe' : 'cutaway_gqa';
+  const shortKind = bay.kind === 'M' ? 'M' : bay.kind === 'E' ? 'MoE' : 'GQA';
+  const fullKind = bay.kind === 'M' ? 'Mamba-2' : bay.kind === 'E' ? 'MoE' : 'GQA';
+  return {
+    kind: bay.kind,
+    bayId: bay.id,
+    mode,
+    shortLabel: `Bay ${idStr} ${shortKind}`,
+    label: `Bay ${idStr} ${fullKind}`,
+  };
+}
+
+/**
+ * Resolve upstream (prev), current, and downstream (next) architectural stages for any cutaway
+ * mode and bay ID along the 52-layer Nemotron 3 Nano spine (Embed X₀ → Bay 01..52 → Output LM Head).
+ */
+export function buildCrossBayNeighbors(
+  mode: ViewMode,
+  bayId?: number,
+  spec: NemotronSpec = NEMOTRON_SPEC,
+): CrossBayNeighbors | null {
+  const totalBays = spec.bays.length;
+  if (totalBays === 0) return null;
+
+  if (mode === 'cutaway_embedding') {
+    return {
+      prev: null,
+      current: makeEmbeddingCrossBayNode(),
+      next: makeBayCrossBayNode(spec.bays[0]),
+    };
+  }
+  if (mode === 'cutaway_output') {
+    return {
+      prev: makeBayCrossBayNode(spec.bays[totalBays - 1]),
+      current: makeOutputCrossBayNode(totalBays),
+      next: null,
+    };
+  }
+
+  let resolvedBayId: number | null = null;
+  if (bayId !== undefined && Number.isFinite(bayId)) {
+    const truncated = Math.trunc(bayId);
+    if (truncated === 0) {
+      return {
+        prev: null,
+        current: makeEmbeddingCrossBayNode(),
+        next: makeBayCrossBayNode(spec.bays[0]),
+      };
+    }
+    if (truncated > totalBays) {
+      return {
+        prev: makeBayCrossBayNode(spec.bays[totalBays - 1]),
+        current: makeOutputCrossBayNode(totalBays),
+        next: null,
+      };
+    }
+    resolvedBayId = Math.max(1, Math.min(totalBays, truncated));
+  } else if (mode === 'cutaway_mamba') {
+    resolvedBayId = 1;
+  } else if (mode === 'cutaway_moe') {
+    resolvedBayId = 2;
+  } else if (mode === 'cutaway_gqa') {
+    resolvedBayId = 6;
+  }
+
+  if (resolvedBayId === null) return null;
+  const currentBay = spec.bays[resolvedBayId - 1];
+  if (!currentBay) return null;
+
+  return {
+    prev:
+      resolvedBayId === 1
+        ? makeEmbeddingCrossBayNode()
+        : makeBayCrossBayNode(spec.bays[resolvedBayId - 2]),
+    current: makeBayCrossBayNode(currentBay),
+    next:
+      resolvedBayId === totalBays
+        ? makeOutputCrossBayNode(totalBays)
+        : makeBayCrossBayNode(spec.bays[resolvedBayId]),
+  };
+}
 
 export interface ControlsCallbacks {
   onSelectMode: (mode: ViewMode) => void;
@@ -89,7 +222,20 @@ export interface ControlsCallbacks {
   onDecodeNavStep: (stepIndex: number) => void;
   onDecodeSwitchBranch: (branchId: string) => void;
   onDecodeReset: () => void;
+  // V4 / V5 Optional Callbacks (backward-compatible prior to Wave 3 main.ts wiring)
+  onTourBeatPrev?: () => void;
+  onTourBeatNext?: () => void;
+  onTourJumpBeat?: (beatIndex: number) => void;
+  onTourResumeBeat?: () => void;
+  onTourRefitBeat?: () => void;
+  onTourToggleBeatPlay?: () => void;
+  onSelectEmbeddingToken?: (tokenIdx: number) => void;
+  onSelectOutputToken?: (tokenIdx: number) => void;
+  onNavigateAdjacentBay?: (neighbor: CrossBayNeighbor) => void;
+  onReplaySpineWave?: () => void;
 }
+
+export type UiCallbacks = ControlsCallbacks;
 
 interface SectionCopy {
   readonly title: string;
@@ -357,8 +503,23 @@ export function computeEditorialCacheKey(
   const decodeKey = decodeSession
     ? `${decodeSession.activeBranchId}:${decodeSession.activeStepIndex}:${decodeSession.branches.size}:${getActiveDecodeStep(decodeSession).stepExecutionId}:cand${selectedCandidateTokenId ?? 'g'}`
     : 'full';
-  const boundTok = isTower ? (boundaryInspectToken ?? 'last') : 'na';
-  return `${state.executionMode}:${decodeKey}:${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${execKey}:${boundTok}:${state.mode}:${state.mambaBayId}:${effMambaHead}:${effMambaTok}:${state.mambaStateToken ?? 'last'}:${state.mambaTemporalPlaying ? 'tplay' : 'tpause'}:${state.moeBayId}:${effMoeTok}:${effMoeExp}:${state.moeTokenCycling ? 'mplay' : 'mpause'}:${state.gqaBayId}:${effGqaG0}:${effGqaG1}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
+  const boundTok =
+    isTower || state.mode === 'cutaway_embedding' || state.mode === 'cutaway_output'
+      ? (boundaryInspectToken ?? 'last')
+      : 'na';
+  const tourKey = state.tourActive
+    ? `tour:${state.tourChapter}:b${state.tourBeat}:${state.tourExploring ? 'exp' : 'guided'}`
+    : 'free';
+  const waveKey = state.spineWaveProgress !== null ? 'wave' : 'idle';
+  const stepPlayKey =
+    state.mode === 'cutaway_mamba'
+      ? (state.mambaStepperPlaying ? 'sp1' : 'sp0')
+      : state.mode === 'cutaway_moe'
+        ? (state.moeStepperPlaying ? 'sp1' : 'sp0')
+        : state.mode === 'cutaway_gqa'
+          ? (state.gqaStepperPlaying ? 'sp1' : 'sp0')
+          : 'sp0';
+  return `${state.executionMode}:${decodeKey}:${tourKey}:${waveKey}:${stepPlayKey}:${execKey}:${boundTok}:${state.mode}:et${state.embeddingFocusToken}:ot${state.outputFocusToken}:${state.mambaBayId}:${effMambaHead}:${effMambaTok}:${state.mambaStateToken ?? 'last'}:${state.mambaTemporalPlaying ? 'tplay' : 'tpause'}:${state.moeBayId}:${effMoeTok}:${effMoeExp}:${state.moeTokenCycling ? 'mplay' : 'mpause'}:${state.gqaBayId}:${effGqaG0}:${effGqaG1}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
 }
 
 export class MacroControls {
@@ -430,18 +591,16 @@ export class MacroControls {
 
     for (const btn of this.els.modeButtons) {
       this.on(btn, 'click', () => {
-        const rawMode = btn.dataset.mode;
+        const rawMode = btn.dataset.mode ?? btn.dataset.view;
         if (
           rawMode === 'tower' ||
+          rawMode === 'cutaway_embedding' ||
           rawMode === 'cutaway_mamba' ||
           rawMode === 'cutaway_moe' ||
-          rawMode === 'cutaway_gqa'
+          rawMode === 'cutaway_gqa' ||
+          rawMode === 'cutaway_output'
         ) {
           this.cb.onSelectMode(rawMode);
-        } else if (rawMode === 'cutaway_embedding') {
-          this.cb.onSelectSection('embedding');
-        } else if (rawMode === 'cutaway_output') {
-          this.cb.onSelectSection('output');
         }
       });
     }
@@ -622,9 +781,10 @@ export class MacroControls {
     if (this.boundaryInspectToken !== null && this.boundaryInspectToken >= state.tokens) {
       this.boundaryInspectToken = state.tokens - 1;
     }
-    // Active View Mode Switcher
+    // Active View Mode Switcher (all 6 ViewModes: tower + 5 cutaways)
     for (const btn of this.els.modeButtons) {
-      const isAct = btn.dataset.mode === state.mode;
+      const btnMode = btn.dataset.mode ?? btn.dataset.view;
+      const isAct = btnMode === state.mode;
       btn.classList.toggle('is-active', isAct);
       btn.setAttribute('aria-selected', String(isAct));
     }
@@ -656,10 +816,7 @@ export class MacroControls {
     }
 
     // Floating corner badge & orbit hint (hidden when shared live Math Dock occupies bottom)
-    const usesLiveMathDock =
-      state.mode === 'cutaway_gqa' ||
-      state.mode === 'cutaway_mamba' ||
-      state.mode === 'cutaway_moe';
+    const usesLiveMathDock = state.mode !== 'tower';
     this.els.floatingBadge.hidden = usesLiveMathDock;
     this.els.orbitHint.hidden = usesLiveMathDock;
     this.els.gqaMathDock.hidden = !usesLiveMathDock;
@@ -670,32 +827,42 @@ export class MacroControls {
 
     if (state.mode === 'tower') {
       this.els.floatingBadge.textContent = 'Nemotron 3 Nano 30B-A3B · 3.2B active';
+    } else if (state.mode === 'cutaway_embedding') {
+      this.els.floatingBadge.textContent = 'Cutaway: Embedding (NoPE) · 131,072 × 2,688 Untied';
+      this.syncMathDock(state, activeCutaway, autoFollowManualPaused, decodeSession, activeExecution);
     } else if (state.mode === 'cutaway_mamba') {
       this.els.floatingBadge.textContent =
         state.mambaBayId === 42
           ? 'Cutaway: Mamba-2 · Bay 42 Feeder (BF16 §4.2)'
           : 'Cutaway: Mamba-2 · Bay 01 (47.1 MiB fixed state)';
-      this.syncMathDock(state, activeCutaway, autoFollowManualPaused, decodeSession);
+      this.syncMathDock(state, activeCutaway, autoFollowManualPaused, decodeSession, activeExecution);
     } else if (state.mode === 'cutaway_moe') {
       this.els.floatingBadge.textContent =
         state.moeBayId === 52
           ? 'Cutaway: MoE 128+1 · Bay 52 Final MoE (6 Active + Shared 3,712)'
           : 'Cutaway: MoE 128+1 · Bay 02 (6 Active + Shared 3,712)';
-      this.syncMathDock(state, activeCutaway, autoFollowManualPaused, decodeSession);
+      this.syncMathDock(state, activeCutaway, autoFollowManualPaused, decodeSession, activeExecution);
+    } else if (state.mode === 'cutaway_output') {
+      this.els.floatingBadge.textContent = 'Cutaway: Output & Untied LM Head · 2,688 → 131,072';
+      this.syncMathDock(state, activeCutaway, autoFollowManualPaused, decodeSession, activeExecution);
     } else {
       this.els.floatingBadge.textContent = `Cutaway: GQA Attention · Bay ${formatBayId(state.gqaBayId)} (32Q / 2KV, NoPE)`;
-      this.syncMathDock(state, activeCutaway, autoFollowManualPaused, decodeSession);
+      this.syncMathDock(state, activeCutaway, autoFollowManualPaused, decodeSession, activeExecution);
     }
 
     // Sync active TOC & mini-diagram highlight
     const effectiveSection: TocSectionId =
-      state.mode === 'cutaway_mamba'
-        ? 'mamba'
-        : state.mode === 'cutaway_moe'
-          ? 'moe'
-          : state.mode === 'cutaway_gqa'
-            ? 'gqa'
-            : state.section;
+      state.mode === 'cutaway_embedding'
+        ? 'embedding'
+        : state.mode === 'cutaway_mamba'
+          ? 'mamba'
+          : state.mode === 'cutaway_moe'
+            ? 'moe'
+            : state.mode === 'cutaway_gqa'
+              ? 'gqa'
+              : state.mode === 'cutaway_output'
+                ? 'output'
+                : state.section;
 
     for (const btn of this.els.tocButtons) {
       btn.classList.toggle('is-active', btn.dataset.section === effectiveSection);
@@ -750,16 +917,19 @@ export class MacroControls {
     this.els.bayClear.textContent = 'Clear';
     this.els.bayStepRow.hidden = !isTower;
 
-    // Guided Tour header toggle button
-    const activeChapter = getWalkthroughChapter(state.tourChapter);
+    // Guided Tour header toggle button (V5 22-beat readout)
+    const activeBeat = getWalkthroughBeat(state.tourBeat);
     this.els.tourToggleBtn.classList.toggle('is-active', state.tourActive);
     this.els.tourToggleBtn.textContent = state.tourActive
-      ? `Tour ${activeChapter.number}/${WALKTHROUGH_COUNT}`
+      ? `Beat ${activeBeat.id} · ${activeBeat.index + 1}/${WALKTHROUGH_BEAT_COUNT}`
       : 'Guided Tour';
+    this.els.tourToggleBtn.title = state.tourActive
+      ? `Guided Tour · Beat ${activeBeat.id} (Tour ${activeBeat.index + 1}/${WALKTHROUGH_BEAT_COUNT}) — click to toggle`
+      : 'Start 22-beat guided walkthrough';
 
-    // Memory Scaling chart trigger highlight (Chapter 7 + active open state)
+    // Memory Scaling chart trigger highlight (Beat 7.4 + active open state)
     const highlightChartBtn =
-      state.tourActive && Boolean(activeChapter.highlightMemoryChart) && !state.memoryChartOpen;
+      state.tourActive && Boolean(activeBeat.highlightMemoryChart) && !state.memoryChartOpen;
     this.els.memoryChartBtn.classList.toggle('is-open', state.memoryChartOpen);
     this.els.memoryChartBtn.classList.toggle('is-highlighted', highlightChartBtn);
     this.els.memoryChartBtn.setAttribute('aria-expanded', String(state.memoryChartOpen));
@@ -806,7 +976,7 @@ export class MacroControls {
     if (editorialKey !== this.lastEditorialKey) {
       this.lastEditorialKey = editorialKey;
       if (state.tourActive) {
-        this.renderTourEditorial(state);
+        this.renderWalkthroughPanel(state, decodeSession);
       } else if (isTower) {
         this.renderTowerEditorial(
           state.section,
@@ -821,6 +991,44 @@ export class MacroControls {
         this.renderCutawayEditorial(state, activePart, activeCutaway, activeExecution, decodeSession);
       }
     }
+
+    // Keep inline beat playback progress bar smooth without rebuilding the editorial DOM
+    if (state.tourActive && typeof this.els.editorialPanel.querySelector === 'function') {
+      const beatFill = this.els.editorialPanel.querySelector<HTMLElement>('.tour-beat-fill');
+      if (beatFill) {
+        const sub = this.activeCutawayStepperSubProgress(state, activeBeat);
+        beatFill.style.width = `${Math.round(Math.max(0, Math.min(1, sub)) * 100)}%`;
+      }
+    }
+  }
+
+  private activeCutawayStepperPlaying(state: SceneState): boolean {
+    if (state.mode === 'cutaway_mamba') {
+      return state.mambaStepperActive && state.mambaStepperPlaying;
+    }
+    if (state.mode === 'cutaway_moe') {
+      return state.moeStepperActive && state.moeStepperPlaying;
+    }
+    if (state.mode === 'cutaway_gqa') {
+      return state.gqaStepperActive && state.gqaStepperPlaying;
+    }
+    return false;
+  }
+
+  private activeCutawayStepperSubProgress(
+    state: SceneState,
+    beat = getWalkthroughBeat(state.tourBeat),
+  ): number {
+    if (state.mode === 'cutaway_mamba' && state.mambaStepperActive) {
+      return state.mambaStepperSubProgress;
+    }
+    if (state.mode === 'cutaway_moe' && state.moeStepperActive) {
+      return state.moeStepperSubProgress;
+    }
+    if (state.mode === 'cutaway_gqa' && state.gqaStepperActive) {
+      return state.gqaStepperSubProgress;
+    }
+    return beat.chapterBeatCount > 0 ? beat.beatInChapter / beat.chapterBeatCount : 0;
   }
 
   private syncMathDock(
@@ -828,41 +1036,61 @@ export class MacroControls {
     cutaway: CutawaySceneGeometry | null,
     autoFollowManualPaused: boolean,
     decodeSession: HybridDecodeSession | null = null,
+    activeExecution: HybridExecutionResult | null = null,
   ): void {
+    const isEmbed = state.mode === 'cutaway_embedding';
+    const isOutput = state.mode === 'cutaway_output';
     const isMamba = state.mode === 'cutaway_mamba';
     const isMoe = state.mode === 'cutaway_moe';
-    const formula = cutaway?.activeFormula ?? null;
+    const formula = isEmbed
+      ? (cutaway?.embeddingFormula ?? cutaway?.activeFormula ?? null)
+      : isOutput
+        ? (cutaway?.outputFormula ?? cutaway?.activeFormula ?? null)
+        : (cutaway?.activeFormula ?? null);
     const activeDecodeStep = decodeSession ? getActiveDecodeStep(decodeSession) : null;
-    const isPinnedCell = isMamba
-      ? state.mambaSelectedCell !== null
-      : isMoe
-        ? state.moeSelectedCell !== null
-        : state.gqaSelectedCell !== null;
-    const steps = isMamba
-      ? MAMBA_STEPPER_STEPS
-      : isMoe
-        ? MOE_STEPPER_STEPS
-        : GQA_STEPPER_STEPS;
+    const isPinnedCell = isEmbed
+      ? state.embeddingActiveCell !== null
+      : isOutput
+        ? state.outputActiveCell !== null
+        : isMamba
+          ? state.mambaSelectedCell !== null
+          : isMoe
+            ? state.moeSelectedCell !== null
+            : state.gqaSelectedCell !== null;
+    const steps = isEmbed
+      ? EMBEDDING_STEPPER_STEPS
+      : isOutput
+        ? OUTPUT_STEPPER_STEPS
+        : isMamba
+          ? MAMBA_STEPPER_STEPS
+          : isMoe
+            ? MOE_STEPPER_STEPS
+            : GQA_STEPPER_STEPS;
 
     // Update honest miniature simulator disclaimer note inside accessible popover & tooltip
     const gqaEpsLabel = formatEpsLabel(cutaway?.gqaSim?.rmsEps ?? 1e-5);
     const activeBayForTrace = isMamba ? state.mambaBayId : isMoe ? state.moeBayId : state.gqaBayId;
-    const traceOriginTag = activeDecodeStep
-      ? (() => {
-          const orig = activeDecodeStep.getLayerTraceOrigin(activeBayForTrace);
-          return orig === 'reconstructed_from_checkpoint'
-            ? ' · Reconstructed from checkpoint'
-            : ' · Computed this step';
-        })()
-      : '';
+    const traceOriginTag =
+      activeDecodeStep && !isEmbed && !isOutput
+        ? (() => {
+            const orig = activeDecodeStep.getLayerTraceOrigin(activeBayForTrace);
+            return orig === 'reconstructed_from_checkpoint'
+              ? ' · Reconstructed from checkpoint'
+              : ' · Computed this step';
+          })()
+        : '';
     const modePrefix = activeDecodeStep
       ? `Cached AR ${activeDecodeStep.provenance.stepKind} (${activeDecodeStep.provenance.branchId}, pos ${activeDecodeStep.provenance.tokenRange[0]}..${activeDecodeStep.provenance.tokenRange[1]}${traceOriginTag})`
       : 'Unified 52-layer miniature';
-    const noteText = isMamba
-      ? `${modePrefix} Mamba-2 sim (d=8, 16H/8G, dₕ=4, dₛ=4, ε=1e−5; synthetic Float32, rounded) · BF16/FP8 = production metadata`
-      : isMoe
-        ? `${modePrefix} MoE sim (d=8, 128E top-6, d_exp=4, d_shared=8, ×2.5, ε=1e−5; synthetic Float32, rounded) · BF16/FP8/FP32 = production metadata`
-        : `${modePrefix} GQA sim (d=8, 32Q/2KV, dₕ=4, NoPE, ε=${gqaEpsLabel}; synthetic Float32, rounded) · BF16/FP8 = production metadata`;
+    const noteText = isEmbed
+      ? `${modePrefix} Embedding sim (d=8, V=32, untied W_embed ≠ W_lm_head, NoPE; synthetic Float32, rounded) · 131,072 × 2,688 = production metadata`
+      : isOutput
+        ? `${modePrefix} Output & Untied LM Head sim (d=8, V=32, ε=1e−5, untied W_lm_head ≠ W_embed; synthetic Float32, rounded) · 2,688 → 131,072 = production metadata`
+        : isMamba
+          ? `${modePrefix} Mamba-2 sim (d=8, 16H/8G, dₕ=4, dₛ=4, ε=1e−5; synthetic Float32, rounded) · BF16/FP8 = production metadata`
+          : isMoe
+            ? `${modePrefix} MoE sim (d=8, 128E top-6, d_exp=4, d_shared=8, ×2.5, ε=1e−5; synthetic Float32, rounded) · BF16/FP8/FP32 = production metadata`
+            : `${modePrefix} GQA sim (d=8, 32Q/2KV, dₕ=4, NoPE, ε=${gqaEpsLabel}; synthetic Float32, rounded) · BF16/FP8 = production metadata`;
     this.els.gqaFormulaNote.textContent = noteText;
     this.els.gqaFormulaNoteBtn.title = noteText;
 
@@ -893,7 +1121,31 @@ export class MacroControls {
       this.els.gqaFormulaValue.hidden = true;
       this.els.gqaCellClear.hidden = true;
 
-      if (isMamba) {
+      if (isEmbed) {
+        const tokLabels = activeDecodeStep?.newTokenLabels ?? activeExecution?.tokenLabels ?? [];
+        const totalT = tokLabels.length || state.tokens;
+        const localTok = Math.max(0, Math.min(totalT - 1, state.embeddingFocusToken));
+        const absTok = (activeDecodeStep?.prefixTokens ?? 0) + localTok;
+        const tokLbl = tokLabels[localTok] ?? `t${absTok}`;
+        this.els.gqaFormulaTensor.textContent = 'Miniature Embedding (NoPE)';
+        this.els.gqaFormulaCoord.textContent = `Focus: t${absTok} "${tokLbl}" · Untied 32×8 mini (131K×2,688 prod)`;
+        this.els.gqaFormulaEq.textContent =
+          'X₀[:, t] = W_embed[tokenId(t), :] — direct row lookup with zero positional embeddings (NoPE).';
+        this.els.gqaFormulaSub.textContent =
+          'Hover or click any cell in Input Tokens, W_embed, or X₀ to trace bit-exact hand-off into Bay 01 Mamba-2.';
+      } else if (isOutput) {
+        const tokLabels = activeDecodeStep?.newTokenLabels ?? activeExecution?.tokenLabels ?? [];
+        const totalT = tokLabels.length || state.tokens;
+        const localTok = Math.max(0, Math.min(totalT - 1, state.outputFocusToken));
+        const absTok = (activeDecodeStep?.prefixTokens ?? 0) + localTok;
+        const tokLbl = tokLabels[localTok] ?? `t${absTok}`;
+        this.els.gqaFormulaTensor.textContent = 'Miniature Output & Untied LM Head';
+        this.els.gqaFormulaCoord.textContent = `Focus: t${absTok} "${tokLbl}" · ε=1e−5 · V=32 mini (131K prod)`;
+        this.els.gqaFormulaEq.textContent =
+          'Bay 52 Y → Final RMSNorm (ε=1e−5) → Untied W_lm_head (≠ W_embed) → Logits → Softmax → Top-5 Next Tokens.';
+        this.els.gqaFormulaSub.textContent =
+          'Hover or click any cell in Bay 52 Y, Final Norm, W_lm_head, Logits, or Probs to inspect next-token probabilities.';
+      } else if (isMamba) {
         const sim = cutaway?.mambaSim;
         const simT = sim?.tokens ?? state.tokens;
         const activeH = cutaway?.mambaStats?.activeHead ?? state.mambaActiveHead;
@@ -962,26 +1214,39 @@ export class MacroControls {
       }
     }
 
-    const stepperActive = isMamba
-      ? state.mambaStepperActive
-      : isMoe
-        ? state.moeStepperActive
-        : state.gqaStepperActive;
-    const stepperPlaying = isMamba
-      ? state.mambaStepperPlaying
-      : isMoe
-        ? state.moeStepperPlaying
-        : state.gqaStepperPlaying;
-    const stepperStep = isMamba
-      ? state.mambaStepperStep
-      : isMoe
-        ? state.moeStepperStep
-        : state.gqaStepperStep;
-    const stepperSub = isMamba
-      ? state.mambaStepperSubProgress
-      : isMoe
-        ? state.moeStepperSubProgress
-        : state.gqaStepperSubProgress;
+    const activeTourBeat = state.tourActive ? getWalkthroughBeat(state.tourBeat) : null;
+    const bookendTourStep =
+      (isEmbed || isOutput) && activeTourBeat && activeTourBeat.mode === state.mode
+        ? (activeTourBeat.stepperStep ?? null)
+        : null;
+    const stepperActive = isEmbed || isOutput
+      ? bookendTourStep !== null
+      : isMamba
+        ? state.mambaStepperActive
+        : isMoe
+          ? state.moeStepperActive
+          : state.gqaStepperActive;
+    const stepperPlaying = isEmbed || isOutput
+      ? false
+      : isMamba
+        ? state.mambaStepperPlaying
+        : isMoe
+          ? state.moeStepperPlaying
+          : state.gqaStepperPlaying;
+    const stepperStep = isEmbed || isOutput
+      ? (bookendTourStep ?? 0)
+      : isMamba
+        ? state.mambaStepperStep
+        : isMoe
+          ? state.moeStepperStep
+          : state.gqaStepperStep;
+    const stepperSub = isEmbed || isOutput
+      ? 0
+      : isMamba
+        ? state.mambaStepperSubProgress
+        : isMoe
+          ? state.moeStepperSubProgress
+          : state.gqaStepperSubProgress;
 
     const playing = stepperActive && stepperPlaying;
     this.els.gqaStepPlay.textContent = playing ? '❚❚ Pause' : '▶ Play';
@@ -1001,13 +1266,19 @@ export class MacroControls {
 
     for (let i = 0; i < this.els.gqaStepPills.length; i++) {
       const btn = this.els.gqaStepPills[i];
-      if (steps[i]) {
-        btn.textContent = steps[i].shortLabel;
-        btn.title = steps[i].summary;
+      const stepDef = steps[i];
+      if (stepDef) {
+        btn.hidden = false;
+        btn.textContent = stepDef.shortLabel;
+        btn.title = stepDef.summary;
+        const isAct = stepperActive && i === stepperStep;
+        btn.classList.toggle('is-active', isAct);
+        btn.setAttribute('aria-selected', String(isAct));
+      } else {
+        btn.hidden = true;
+        btn.classList.remove('is-active');
+        btn.setAttribute('aria-selected', 'false');
       }
-      const isAct = stepperActive && i === stepperStep;
-      btn.classList.toggle('is-active', isAct);
-      btn.setAttribute('aria-selected', String(isAct));
     }
 
     const pct = String(Math.round(stepperSub * 100));
@@ -1016,46 +1287,157 @@ export class MacroControls {
     }
   }
 
-  private renderTourEditorial(state: SceneState): void {
-    const ch = getWalkthroughChapter(state.tourChapter);
+  private renderWalkthroughPanel(
+    state: SceneState,
+    decodeSession: HybridDecodeSession | null = null,
+  ): void {
+    const beat = getWalkthroughBeat(state.tourBeat);
+    const chapter = getWalkthroughChapter(beat.chapterIndex);
+    const chapterBeats = beatsForChapter(beat.chapterIndex);
+    const actRoman = beat.act === 1 ? 'Act I' : beat.act === 2 ? 'Act II' : 'Act III';
+
     const panel = this.els.editorialPanel;
     panel.classList.add('is-tour-mode');
     panel.innerHTML = '';
 
-    // Top bbycroft/llm-viz style < Chapter N / 7 > bar + subtle progress track
+    // 1. Top < Act I/II/III · Beat X.Y (N / 22) > navigation bar
     const navBar = document.createElement('div');
     navBar.className = 'tour-nav-bar';
 
     const prevBtn = document.createElement('button');
     prevBtn.type = 'button';
     prevBtn.className = 'tour-arrow-btn';
-    prevBtn.setAttribute('aria-label', 'Previous chapter');
+    prevBtn.dataset.testid = 'tour-beat-prev';
+    prevBtn.setAttribute('aria-label', 'Previous beat');
     prevBtn.textContent = '‹';
-    prevBtn.disabled = ch.index <= 0;
-    prevBtn.addEventListener('click', () => this.cb.onTourPrev());
+    prevBtn.disabled = beat.index <= 0;
+    prevBtn.addEventListener('click', () => {
+      if (this.cb.onTourBeatPrev) this.cb.onTourBeatPrev();
+      else this.cb.onTourPrev();
+    });
 
     const counter = document.createElement('span');
     counter.className = 'tour-counter';
     counter.setAttribute('data-testid', 'tour-chapter-counter');
-    counter.textContent = `Chapter ${ch.number} / ${WALKTHROUGH_COUNT}`;
+    counter.dataset.beatId = beat.id;
+    counter.textContent = `${actRoman} · Beat ${beat.id} (${beat.index + 1} / ${WALKTHROUGH_BEAT_COUNT})`;
+    counter.title = `${beat.actLabel} · ${chapter.shortTitle}`;
 
     const nextBtn = document.createElement('button');
     nextBtn.type = 'button';
     nextBtn.className = 'tour-arrow-btn';
-    nextBtn.setAttribute('aria-label', 'Next chapter');
+    nextBtn.dataset.testid = 'tour-beat-next';
+    nextBtn.setAttribute('aria-label', 'Next beat');
     nextBtn.textContent = '›';
-    nextBtn.disabled = ch.index >= WALKTHROUGH_COUNT - 1;
-    nextBtn.addEventListener('click', () => this.cb.onTourNext());
+    nextBtn.disabled = beat.index >= WALKTHROUGH_BEAT_COUNT - 1;
+    nextBtn.addEventListener('click', () => {
+      if (this.cb.onTourBeatNext) this.cb.onTourBeatNext();
+      else this.cb.onTourNext();
+    });
 
     navBar.append(prevBtn, counter, nextBtn);
 
-    const progressTrack = document.createElement('div');
-    progressTrack.className = 'tour-progress-track';
-    progressTrack.setAttribute('aria-hidden', 'true');
-    const progressFill = document.createElement('div');
-    progressFill.className = 'tour-progress-fill';
-    progressFill.style.width = `${(ch.number / WALKTHROUGH_COUNT) * 100}%`;
-    progressTrack.appendChild(progressFill);
+    // Chapter & Act subtitle
+    const subRow = document.createElement('div');
+    subRow.className = 'ed-sub';
+    subRow.dataset.testid = 'tour-chapter-subtitle';
+    subRow.textContent = `${beat.actLabel} · ${chapter.shortTitle}`;
+
+    // 2. Non-destructive "Exploring freely · Resume Beat X.Y" pill (keeps narrative intact!)
+    let exploringPill: HTMLDivElement | null = null;
+    if (state.tourExploring) {
+      exploringPill = document.createElement('div');
+      exploringPill.className = 'tour-exploring-pill';
+      exploringPill.dataset.testid = 'tour-exploring-pill';
+
+      const expLabel = document.createElement('span');
+      expLabel.textContent = 'Exploring freely';
+
+      const resumeBtn = document.createElement('button');
+      resumeBtn.type = 'button';
+      resumeBtn.className = 'tour-exploring-resume';
+      resumeBtn.dataset.testid = 'tour-resume-beat';
+      resumeBtn.textContent = `Resume Beat ${beat.id}`;
+      resumeBtn.title = `Restore camera and stage focus to Beat ${beat.id} (${beat.title})`;
+      resumeBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        this.cb.onTourResumeBeat?.();
+      });
+
+      exploringPill.addEventListener('click', () => {
+        this.cb.onTourResumeBeat?.();
+      });
+      exploringPill.append(expLabel, resumeBtn);
+    }
+
+    // 3. Body row: slim left 22-beat progress rail + scrollable narrative column
+    const bodyRow = document.createElement('div');
+    bodyRow.style.display = 'flex';
+    bodyRow.style.alignItems = 'stretch';
+    bodyRow.style.gap = '9px';
+    bodyRow.style.flex = '1 1 auto';
+    bodyRow.style.minHeight = '0';
+
+    const progressRail = document.createElement('div');
+    progressRail.className = 'tour-progress-rail';
+    progressRail.dataset.testid = 'tour-progress-rail';
+    progressRail.setAttribute('role', 'navigation');
+    progressRail.setAttribute('aria-label', '22-beat guided walkthrough progress');
+
+    const railFill = document.createElement('div');
+    railFill.className = 'tour-progress-rail-fill';
+    const fillPct =
+      WALKTHROUGH_BEAT_COUNT > 1
+        ? (beat.index / (WALKTHROUGH_BEAT_COUNT - 1)) * 100
+        : 100;
+    railFill.style.height = `${fillPct.toFixed(1)}%`;
+    progressRail.appendChild(railFill);
+
+    for (let i = 0; i < WALKTHROUGH_BEAT_COUNT; i++) {
+      const b = WALKTHROUGH_BEATS[i];
+      const topPct =
+        WALKTHROUGH_BEAT_COUNT > 1 ? (i / (WALKTHROUGH_BEAT_COUNT - 1)) * 100 : 0;
+      const pip = document.createElement('button');
+      pip.type = 'button';
+      pip.dataset.tourBeat = String(i);
+      pip.setAttribute('aria-label', `Jump to Beat ${b.id}: ${b.title}`);
+      pip.title = `Beat ${b.id} (${i + 1}/${WALKTHROUGH_BEAT_COUNT}) · ${b.title}`;
+
+      if (i === beat.index) {
+        pip.className = 'tour-progress-rail-dot';
+        pip.style.top = `${topPct.toFixed(2)}%`;
+        pip.style.padding = '0';
+        pip.style.cursor = 'pointer';
+        pip.setAttribute('aria-current', 'step');
+      } else {
+        pip.className = 'tour-progress-rail-pip';
+        pip.style.position = 'absolute';
+        pip.style.left = '50%';
+        pip.style.top = `${topPct.toFixed(2)}%`;
+        pip.style.transform = 'translate(-50%, -50%)';
+        pip.style.width = '10px';
+        pip.style.height = '8px';
+        pip.style.padding = '0';
+        pip.style.border = '0';
+        pip.style.background = 'transparent';
+        pip.style.cursor = 'pointer';
+        pip.style.display = 'flex';
+        pip.style.alignItems = 'center';
+        pip.style.justifyContent = 'center';
+        const dotInner = document.createElement('span');
+        dotInner.style.display = 'block';
+        dotInner.style.width = '4px';
+        dotInner.style.height = '4px';
+        dotInner.style.borderRadius = '999px';
+        dotInner.style.backgroundColor = i < beat.index ? '#93A5F6' : '#CBD5E1';
+        pip.appendChild(dotInner);
+      }
+
+      pip.addEventListener('click', () => {
+        this.cb.onTourJumpBeat?.(i);
+      });
+      progressRail.appendChild(pip);
+    }
 
     const scrollBody = document.createElement('div');
     scrollBody.className = 'tour-scroll-body';
@@ -1065,17 +1447,86 @@ export class MacroControls {
 
     const title = document.createElement('h2');
     title.className = 'ed-title';
-    title.textContent = `${ch.number}. ${ch.title}`;
+    title.textContent = `${beat.id} ${beat.title}`;
 
     const badge = document.createElement('span');
     badge.className = 'ed-badge';
-    if (ch.precision === 'fp8_selective') badge.classList.add('ed-badge-gold');
-    badge.textContent = ch.badge;
+    if (beat.precision === 'fp8_selective') badge.classList.add('ed-badge-gold');
+    badge.textContent = beat.badge;
 
     header.append(title, badge);
     scrollBody.appendChild(header);
 
-    for (const para of ch.paragraphs) {
+    // 4. Inline Beat Playback Strip on cutaway beats with stepperStep / stepperAutoPlay
+    if (
+      beat.mode !== 'tower' &&
+      (beat.stepperStep !== undefined || beat.stepperAutoPlay)
+    ) {
+      const beatBar = document.createElement('div');
+      beatBar.className = 'tour-beat-bar';
+      beatBar.dataset.testid = 'tour-beat-bar';
+
+      const refitBtn = document.createElement('button');
+      refitBtn.type = 'button';
+      refitBtn.className = 'tour-beat-btn';
+      refitBtn.dataset.testid = 'tour-beat-refit';
+      refitBtn.textContent = '↓ Refit';
+      refitBtn.title = `Refit camera onto Beat ${beat.id}'s active stage`;
+      refitBtn.addEventListener('click', () => {
+        if (this.cb.onTourRefitBeat) this.cb.onTourRefitBeat();
+        else this.cb.onFitAll();
+      });
+
+      const isPlaying = this.activeCutawayStepperPlaying(state);
+      const playBtn = document.createElement('button');
+      playBtn.type = 'button';
+      playBtn.className = isPlaying ? 'tour-beat-btn is-playing' : 'tour-beat-btn';
+      playBtn.dataset.testid = 'tour-beat-play';
+      playBtn.textContent = isPlaying ? '❚❚ Pause' : '▶ Play';
+      playBtn.setAttribute('aria-pressed', String(isPlaying));
+      playBtn.title = isPlaying ? 'Pause beat stepper animation' : 'Play beat stepper animation';
+      playBtn.addEventListener('click', () => {
+        if (this.cb.onTourToggleBeatPlay) this.cb.onTourToggleBeatPlay();
+        else this.cb.onGqaStepTogglePlay();
+      });
+
+      const beatTrack = document.createElement('div');
+      beatTrack.className = 'tour-beat-track';
+      const beatFill = document.createElement('div');
+      beatFill.className = 'tour-beat-fill';
+      const initSub = this.activeCutawayStepperSubProgress(state, beat);
+      beatFill.style.width = `${Math.round(Math.max(0, Math.min(1, initSub)) * 100)}%`;
+      beatTrack.appendChild(beatFill);
+
+      const dotsWrap = document.createElement('div');
+      dotsWrap.className = 'tour-beat-dots';
+      dotsWrap.setAttribute('aria-label', 'Chapter beats');
+      for (const chBeat of chapterBeats) {
+        const dot = document.createElement('button');
+        dot.type = 'button';
+        dot.className =
+          chBeat.index === beat.index
+            ? 'tour-beat-dot is-active'
+            : chBeat.index < beat.index
+              ? 'tour-beat-dot is-done'
+              : 'tour-beat-dot';
+        dot.dataset.tourBeat = String(chBeat.index);
+        dot.style.border = '0';
+        dot.style.padding = '0';
+        dot.style.cursor = 'pointer';
+        dot.setAttribute('aria-label', `Beat ${chBeat.id}: ${chBeat.title}`);
+        dot.title = `Beat ${chBeat.id}: ${chBeat.title}`;
+        dot.addEventListener('click', () => {
+          this.cb.onTourJumpBeat?.(chBeat.index);
+        });
+        dotsWrap.appendChild(dot);
+      }
+
+      beatBar.append(refitBtn, playBtn, beatTrack, dotsWrap);
+      scrollBody.appendChild(beatBar);
+    }
+
+    for (const para of beat.paragraphs) {
       const p = document.createElement('p');
       p.className = 'ed-body';
       p.textContent = para;
@@ -1084,25 +1535,48 @@ export class MacroControls {
 
     const list = document.createElement('ul');
     list.className = 'ed-specs';
-    for (const item of ch.takeaways) {
+    for (const item of beat.takeaways) {
       const li = document.createElement('li');
       li.textContent = item;
       list.appendChild(li);
     }
     scrollBody.appendChild(list);
 
-    // Bottom Continue -> / Exit Tour bar (always pinned visible!)
+    // 5. Embedded live AR Decode controls inside Act III (Beats 7.2–7.4) without exiting tour
+    if (beat.executionMode === 'ar_decode' && decodeSession) {
+      const arCard = this.buildArDecodeSessionCard(decodeSession, state.precision, state.mode);
+      arCard.style.marginTop = '7px';
+      scrollBody.appendChild(arCard);
+    }
+
+    // 6. Interactive Space cue hint
+    if (beat.interactivePrompt) {
+      const hint = document.createElement('div');
+      hint.className = 'tour-space-hint';
+      hint.dataset.testid = 'tour-space-hint';
+      hint.style.whiteSpace = 'normal';
+      hint.style.marginTop = '6px';
+      hint.textContent = beat.interactivePrompt;
+      scrollBody.appendChild(hint);
+    }
+
+    bodyRow.append(progressRail, scrollBody);
+
+    // 7. Bottom Continue -> / Exit Tour bar (always pinned visible!)
     const actions = document.createElement('div');
     actions.className = 'ed-actions tour-actions';
 
-    const isLast = ch.index >= WALKTHROUGH_COUNT - 1;
+    const isLast = beat.index >= WALKTHROUGH_BEAT_COUNT - 1;
     if (!isLast) {
       const contBtn = document.createElement('button');
       contBtn.type = 'button';
       contBtn.id = 'tour-continue-btn';
       contBtn.className = 'ed-cta-btn tour-continue-btn';
       contBtn.textContent = 'Continue →';
-      contBtn.addEventListener('click', () => this.cb.onTourNext());
+      contBtn.addEventListener('click', () => {
+        if (this.cb.onTourBeatNext) this.cb.onTourBeatNext();
+        else this.cb.onTourNext();
+      });
       actions.appendChild(contBtn);
     } else {
       const chartBtn = document.createElement('button');
@@ -1129,7 +1603,9 @@ export class MacroControls {
     exitBtn.addEventListener('click', () => this.cb.onTourExit());
     actions.appendChild(exitBtn);
 
-    panel.append(navBar, progressTrack, scrollBody, actions);
+    panel.append(navBar, subRow);
+    if (exploringPill) panel.appendChild(exploringPill);
+    panel.append(bodyRow, actions);
   }
 
   private setBoundaryInspectToken(tok: number): void {
@@ -1399,7 +1875,7 @@ export class MacroControls {
     actRow.append(insertBtn, greedyBtn);
     card.appendChild(actRow);
 
-    // Quick links into truthful incremental cutaways when viewing the 52-Layer Tower
+    // Quick links into truthful incremental cutaways + Replay Wave trigger when viewing the 52-Layer Tower
     if (mode === 'tower') {
       const cutRow = document.createElement('div');
       cutRow.className = 'ar-cutaway-links';
@@ -1412,7 +1888,18 @@ export class MacroControls {
         b.addEventListener('click', () => this.cb.onInspectInternals(kind, bayId));
         return b;
       };
+      const replayBtn = document.createElement('button');
+      replayBtn.type = 'button';
+      const waveActive =
+        this.lastSyncedState?.spineWaveProgress !== null &&
+        this.lastSyncedState?.spineWaveProgress !== undefined;
+      replayBtn.className = waveActive ? 'ed-flow-tok-btn is-active' : 'ed-flow-tok-btn';
+      replayBtn.dataset.testid = 'ar-replay-wave';
+      replayBtn.textContent = '⟳ Replay Wave';
+      replayBtn.title = 'Replay the 52-layer forward propagation wave along the emerald residual spine';
+      replayBtn.addEventListener('click', () => this.cb.onReplaySpineWave?.());
       cutRow.append(
+        replayBtn,
         mkCutBtn(`GQA Bay 43 [${step.tokens}×${step.totalTokens}]`, '*', 43, 'ar-inspect-gqa'),
         mkCutBtn(`Mamba Bay 01 (Hₜ)`, 'M', 1, 'ar-inspect-mamba'),
         mkCutBtn(`MoE Bay 02 (0 B)`, 'E', 2, 'ar-inspect-moe'),
@@ -1743,6 +2230,331 @@ export class MacroControls {
     }
   }
 
+  private navigateToCrossBayNeighbor(neighbor: CrossBayNeighbor): void {
+    if (this.cb.onNavigateAdjacentBay) {
+      this.cb.onNavigateAdjacentBay(neighbor);
+      return;
+    }
+    if (neighbor.kind === 'embedding') {
+      this.cb.onSelectMode('cutaway_embedding');
+    } else if (neighbor.kind === 'output') {
+      this.cb.onSelectMode('cutaway_output');
+    } else {
+      this.cb.onInspectInternals(neighbor.kind, neighbor.bayId);
+    }
+  }
+
+  /**
+   * Build the clickable V4 cross-bay continuity breadcrumb bar derived from live
+   * `activeExecution.baySummaries` / `activeDecodeStep.baySummaries`.
+   */
+  private buildCrossBayBreadcrumb(
+    state: SceneState,
+    cutaway: CutawaySceneGeometry | null,
+    activeExecution: HybridExecutionResult | null,
+    decodeSession: HybridDecodeSession | null,
+  ): HTMLElement | null {
+    const activeBayId =
+      state.mode === 'cutaway_embedding'
+        ? 0
+        : state.mode === 'cutaway_output'
+          ? this.spec.bays.length + 1
+          : state.mode === 'cutaway_mamba'
+            ? state.mambaBayId
+            : state.mode === 'cutaway_moe'
+              ? state.moeBayId
+              : state.mode === 'cutaway_gqa'
+                ? state.gqaBayId
+                : undefined;
+
+    const neighbors = buildCrossBayNeighbors(state.mode, activeBayId, this.spec);
+    if (!neighbors) return null;
+
+    const activeDecodeStep = decodeSession ? getActiveDecodeStep(decodeSession) : null;
+    const summaries = activeDecodeStep?.baySummaries ?? activeExecution?.baySummaries ?? null;
+    const finalNormRms = activeDecodeStep?.finalNorm.rms ?? activeExecution?.finalNorm.rms ?? null;
+    const summaryTokens = activeDecodeStep?.tokens ?? activeExecution?.tokens ?? state.tokens;
+
+    const rawTok =
+      state.mode === 'cutaway_embedding'
+        ? state.embeddingFocusToken
+        : state.mode === 'cutaway_output'
+          ? state.outputFocusToken
+          : state.mode === 'cutaway_mamba'
+            ? (cutaway?.mambaStats?.stateTokenIndex ?? state.mambaStateToken ?? summaryTokens - 1)
+            : state.mode === 'cutaway_moe'
+              ? (cutaway?.moeStats?.focusToken ?? state.moeFocusToken ?? summaryTokens - 1)
+              : summaryTokens - 1;
+    const focusTok = Math.max(0, Math.min(Math.max(0, summaryTokens - 1), rawTok));
+
+    const rmsForNode = (node: CrossBayNeighbor): number | null => {
+      if (!summaries || summaries.length === 0) return null;
+      if (node.kind === 'embedding') {
+        const val = summaries[0]?.rmsIn[focusTok];
+        return val !== undefined && Number.isFinite(val) ? val : null;
+      }
+      if (node.kind === 'output') {
+        const val = finalNormRms?.[focusTok] ?? summaries[summaries.length - 1]?.rmsOut[focusTok];
+        return val !== undefined && Number.isFinite(val) ? val : null;
+      }
+      const sum = summaries[node.bayId - 1];
+      const val = sum?.rmsOut[focusTok];
+      return val !== undefined && Number.isFinite(val) ? val : null;
+    };
+
+    const fmtRmsSuffix = (node: CrossBayNeighbor): string => {
+      const rms = rmsForNode(node);
+      return rms !== null ? ` (${rms.toFixed(2)})` : '';
+    };
+
+    const nav = document.createElement('nav');
+    nav.className = 'cutaway-breadcrumb';
+    nav.dataset.testid = 'cutaway-breadcrumb';
+    nav.setAttribute('aria-label', 'Cross-bay continuity');
+
+    if (neighbors.prev) {
+      const prevNode = neighbors.prev;
+      const prevBtn = document.createElement('button');
+      prevBtn.type = 'button';
+      prevBtn.className = 'cutaway-breadcrumb-btn';
+      prevBtn.dataset.breadcrumbDir = 'prev';
+      prevBtn.dataset.breadcrumbBay = String(prevNode.bayId);
+      const rmsSuffix = fmtRmsSuffix(prevNode);
+      prevBtn.textContent = `← ${prevNode.shortLabel}${rmsSuffix}`;
+      prevBtn.title = `Jump upstream to ${prevNode.label}${rmsSuffix}`;
+      prevBtn.addEventListener('click', () => this.navigateToCrossBayNeighbor(prevNode));
+      nav.appendChild(prevBtn);
+
+      const sep = document.createElement('span');
+      sep.className = 'cutaway-breadcrumb-sep';
+      sep.setAttribute('aria-hidden', 'true');
+      sep.textContent = '·';
+      nav.appendChild(sep);
+    }
+
+    const currSpan = document.createElement('span');
+    currSpan.className = 'cutaway-breadcrumb-current';
+    currSpan.dataset.testid = 'cutaway-breadcrumb-current';
+    currSpan.textContent = neighbors.current.label;
+    const currRms = rmsForNode(neighbors.current);
+    if (currRms !== null) {
+      currSpan.title = `${neighbors.current.label} · stream RMS = ${currRms.toFixed(3)}`;
+    }
+    nav.appendChild(currSpan);
+
+    if (neighbors.next) {
+      const nextNode = neighbors.next;
+      const sep = document.createElement('span');
+      sep.className = 'cutaway-breadcrumb-sep';
+      sep.setAttribute('aria-hidden', 'true');
+      sep.textContent = '·';
+      nav.appendChild(sep);
+
+      const nextBtn = document.createElement('button');
+      nextBtn.type = 'button';
+      nextBtn.className = 'cutaway-breadcrumb-btn';
+      nextBtn.dataset.breadcrumbDir = 'next';
+      nextBtn.dataset.breadcrumbBay = String(nextNode.bayId);
+      const rmsSuffix = fmtRmsSuffix(nextNode);
+      nextBtn.textContent = `${nextNode.shortLabel}${rmsSuffix} →`;
+      nextBtn.title = `Jump downstream to ${nextNode.label}${rmsSuffix}`;
+      nextBtn.addEventListener('click', () => this.navigateToCrossBayNeighbor(nextNode));
+      nav.appendChild(nextBtn);
+    }
+
+    return nav;
+  }
+
+  /** Interactive token chips & live X₀ RMS readout inside dedicated Embedding Cutaway panel. */
+  private buildEmbeddingCutawayInspector(
+    state: SceneState,
+    activeExecution: HybridExecutionResult | null,
+    decodeSession: HybridDecodeSession | null,
+  ): HTMLDivElement | null {
+    const activeDecodeStep = decodeSession ? getActiveDecodeStep(decodeSession) : null;
+    const T = activeDecodeStep?.tokens ?? activeExecution?.tokens ?? 0;
+    const d = activeDecodeStep?.d ?? activeExecution?.d ?? 8;
+    const X_embed = activeDecodeStep?.X_embed ?? activeExecution?.X_embed ?? null;
+    const tokenIds = activeDecodeStep?.newTokenIds ?? activeExecution?.tokenIds ?? null;
+    const tokenLabels = activeDecodeStep?.newTokenLabels ?? activeExecution?.tokenLabels ?? null;
+    const startOffset = activeDecodeStep?.prefixTokens ?? 0;
+
+    if (!X_embed || !tokenIds || !tokenLabels || T <= 0) return null;
+
+    const rawFocus = this.cb.onSelectEmbeddingToken
+      ? state.embeddingFocusToken
+      : (this.boundaryInspectToken ?? state.embeddingFocusToken);
+    const tok = Math.max(0, Math.min(T - 1, rawFocus));
+    const absTok = startOffset + tok;
+    const tokId = tokenIds[tok];
+    const tokLabel = tokenLabels[tok] ?? `t${absTok}`;
+
+    const card = document.createElement('div');
+    card.className = 'ed-flow-card';
+    card.dataset.testid = 'embedding-cutaway-inspector';
+
+    const head = document.createElement('div');
+    head.className = 'ed-flow-head';
+    const title = document.createElement('span');
+    title.className = 'ed-flow-title';
+    title.textContent = `Active Token · t${absTok} "${tokLabel}" (id ${tokId})`;
+    const tag = document.createElement('span');
+    tag.className = 'ed-flow-tag';
+    tag.textContent = 'NoPE · X₀';
+    head.append(title, tag);
+
+    const tokStrip = document.createElement('div');
+    tokStrip.className = 'ed-flow-tok-strip';
+    tokStrip.dataset.testid = 'embedding-token-strip';
+    for (let i = 0; i < T; i++) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `ed-flow-tok-btn${i === tok ? ' is-active' : ''}`;
+      btn.dataset.embeddingToken = String(i);
+      const absI = startOffset + i;
+      btn.textContent = `t${absI} ${tokenLabels[i] ?? ''}`.trim();
+      btn.setAttribute('aria-pressed', String(i === tok));
+      btn.addEventListener('click', () => {
+        if (this.cb.onSelectEmbeddingToken) this.cb.onSelectEmbeddingToken(i);
+        else this.setBoundaryInspectToken(i);
+      });
+      tokStrip.appendChild(btn);
+    }
+
+    const vecGrid = document.createElement('div');
+    vecGrid.className = 'ed-flow-vec-grid';
+    let sumSq = 0;
+    for (let ch = 0; ch < d; ch++) {
+      const v = X_embed[ch * T + tok];
+      sumSq += v * v;
+      const cell = document.createElement('div');
+      cell.className = 'ed-flow-vec-cell';
+      const idx = document.createElement('span');
+      idx.className = 'ed-flow-vec-idx';
+      idx.textContent = `c${ch}`;
+      const val = document.createElement('span');
+      val.className = 'ed-flow-vec-val';
+      val.textContent = fmtSigned(v, 2);
+      cell.append(idx, val);
+      vecGrid.appendChild(cell);
+    }
+    const rms = Math.sqrt(sumSq / d);
+
+    const meta = document.createElement('div');
+    meta.className = 'ed-flow-meta';
+    meta.dataset.testid = 'embedding-rms-readout';
+    meta.textContent = `RMS(X₀[:, t${absTok}]) = ${rms.toFixed(3)} · → Bay 01 Mamba-2 Input X (bit-exact)`;
+
+    const note = document.createElement('div');
+    note.className = 'ed-flow-note';
+    note.textContent =
+      'Synthetic Float32 mini (d=8, V=32, untied W_embed ≠ W_lm_head). Zero positional embeddings (NoPE); order enters in Bay 01 Mamba-2.';
+
+    card.append(head, tokStrip, vecGrid, meta, note);
+    return card;
+  }
+
+  /** Interactive token selector & live Top-5 next-token bars inside dedicated Output Cutaway panel. */
+  private buildOutputCutawayInspector(
+    state: SceneState,
+    activeExecution: HybridExecutionResult | null,
+    decodeSession: HybridDecodeSession | null,
+  ): HTMLDivElement | null {
+    const activeDecodeStep = decodeSession ? getActiveDecodeStep(decodeSession) : null;
+    const T = activeDecodeStep?.tokens ?? activeExecution?.tokens ?? 0;
+    const fn = activeDecodeStep?.finalNorm ?? activeExecution?.finalNorm ?? null;
+    const lmHead = activeDecodeStep?.lmHead ?? activeExecution?.lmHead ?? null;
+    const tokenLabels = activeDecodeStep?.newTokenLabels ?? activeExecution?.tokenLabels ?? null;
+    const startOffset = activeDecodeStep?.prefixTokens ?? 0;
+
+    if (!fn || !lmHead || !tokenLabels || T <= 0) return null;
+
+    const rawFocus = this.cb.onSelectOutputToken
+      ? state.outputFocusToken
+      : (this.boundaryInspectToken ?? state.outputFocusToken);
+    const tok = Math.max(0, Math.min(T - 1, rawFocus));
+    const absTok = startOffset + tok;
+    const tokLabel = tokenLabels[tok] ?? `t${absTok}`;
+    const preds = lmHead.topKByToken[tok] ?? [];
+    const maxProb = Math.max(0.05, preds[0]?.prob ?? 0.25);
+
+    const card = document.createElement('div');
+    card.className = 'ed-flow-card';
+    card.dataset.testid = 'output-cutaway-inspector';
+
+    const head = document.createElement('div');
+    head.className = 'ed-flow-head';
+    const title = document.createElement('span');
+    title.className = 'ed-flow-title';
+    title.textContent = `Final RMSNorm & LM Head · t${absTok} "${tokLabel}"`;
+    const tag = document.createElement('span');
+    tag.className = 'ed-flow-tag';
+    tag.textContent = `ε=${formatEpsLabel(fn.eps)}`;
+    head.append(title, tag);
+
+    const tokStrip = document.createElement('div');
+    tokStrip.className = 'ed-flow-tok-strip';
+    tokStrip.dataset.testid = 'output-token-strip';
+    for (let i = 0; i < T; i++) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `ed-flow-tok-btn${i === tok ? ' is-active' : ''}`;
+      btn.dataset.outputToken = String(i);
+      const absI = startOffset + i;
+      btn.textContent = `t${absI} ${tokenLabels[i] ?? ''}`.trim();
+      btn.setAttribute('aria-pressed', String(i === tok));
+      btn.addEventListener('click', () => {
+        if (this.cb.onSelectOutputToken) this.cb.onSelectOutputToken(i);
+        else this.setBoundaryInspectToken(i);
+      });
+      tokStrip.appendChild(btn);
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'ed-flow-meta';
+    meta.textContent = `← Bay 52 Final MoE Y (bit-exact) · rms_final = ${fn.rms[tok].toFixed(3)} · Top-5 Next Tokens:`;
+
+    const predList = document.createElement('div');
+    predList.className = 'ed-flow-pred-list';
+    predList.dataset.testid = 'output-top5-bars';
+    for (const pred of preds) {
+      const row = document.createElement('div');
+      row.className = 'ed-flow-pred-row';
+
+      const word = document.createElement('span');
+      word.className = 'ed-flow-pred-word';
+      word.textContent = pred.label;
+      word.title = `vocab #${pred.tokenId}: ${pred.label}`;
+
+      const track = document.createElement('div');
+      track.className = 'ed-flow-pred-track';
+      const bar = document.createElement('div');
+      bar.className = 'ed-flow-pred-bar';
+      bar.style.width = `${Math.max(4, Math.min(100, (pred.prob / maxProb) * 100)).toFixed(1)}%`;
+      track.appendChild(bar);
+
+      const logit = document.createElement('span');
+      logit.className = 'ed-flow-pred-logit';
+      logit.textContent = fmtSigned(pred.logit, 2);
+
+      const prob = document.createElement('span');
+      prob.className = 'ed-flow-pred-prob';
+      prob.textContent = `${(pred.prob * 100).toFixed(1)}%`;
+
+      row.append(word, track, logit, prob);
+      predList.appendChild(row);
+    }
+
+    const note = document.createElement('div');
+    note.className = 'ed-flow-note';
+    note.dataset.testid = 'output-synthetic-disclaimer';
+    note.textContent =
+      'Synthetic miniature demo (d=8, V=32, untied W_lm_head, Float32) — educational next-token probabilities, not 31.6B checkpoint logits.';
+
+    card.append(head, tokStrip, meta, predList, note);
+    return card;
+  }
+
   private renderCutawayEditorial(
     state: SceneState,
     activePart: string | null,
@@ -1753,6 +2565,17 @@ export class MacroControls {
     const panel = this.els.editorialPanel;
     panel.classList.remove('is-tour-mode');
     panel.innerHTML = '';
+
+    // 0. Clickable Cross-Bay Continuity Breadcrumb at top of every cutaway panel
+    const breadcrumb = this.buildCrossBayBreadcrumb(
+      state,
+      cutaway,
+      activeExecution,
+      decodeSession,
+    );
+    if (breadcrumb) {
+      panel.appendChild(breadcrumb);
+    }
 
     if (decodeSession) {
       panel.appendChild(this.buildArDecodeSessionCard(decodeSession, state.precision, state.mode));
@@ -1797,6 +2620,23 @@ export class MacroControls {
         clearBtn.addEventListener('click', () => this.cb.onClearSelection());
         actions.appendChild(clearBtn);
       }
+      if (state.mode === 'cutaway_embedding') {
+        const bay01Btn = document.createElement('button');
+        bay01Btn.type = 'button';
+        bay01Btn.className = 'ed-cta-btn';
+        bay01Btn.dataset.testid = 'embed-cta-bay01';
+        bay01Btn.textContent = '→ Bay 01 Mamba-2';
+        bay01Btn.addEventListener('click', () => this.cb.onInspectInternals('M', 1));
+        actions.appendChild(bay01Btn);
+      } else if (state.mode === 'cutaway_output') {
+        const bay52Btn = document.createElement('button');
+        bay52Btn.type = 'button';
+        bay52Btn.className = 'ed-cta-btn';
+        bay52Btn.dataset.testid = 'output-cta-bay52';
+        bay52Btn.textContent = '← Bay 52 Final MoE';
+        bay52Btn.addEventListener('click', () => this.cb.onInspectInternals('E', 52));
+        actions.appendChild(bay52Btn);
+      }
       const backBtn = document.createElement('button');
       backBtn.type = 'button';
       backBtn.className = 'ed-cta-btn ed-cta-secondary';
@@ -1805,7 +2645,13 @@ export class MacroControls {
       actions.appendChild(backBtn);
 
       panel.append(header, p, list);
-      if (state.mode === 'cutaway_gqa') {
+      if (state.mode === 'cutaway_embedding') {
+        const embCard = this.buildEmbeddingCutawayInspector(state, activeExecution, decodeSession);
+        if (embCard) panel.appendChild(embCard);
+      } else if (state.mode === 'cutaway_output' && !decodeSession) {
+        const outCard = this.buildOutputCutawayInspector(state, activeExecution, decodeSession);
+        if (outCard) panel.appendChild(outCard);
+      } else if (state.mode === 'cutaway_gqa') {
         panel.appendChild(this.buildGqaHeadSelector(state.selectedPart, state.hoveredPart));
       } else if (state.mode === 'cutaway_mamba') {
         const effHead = cutaway?.mambaStats?.activeHead ?? state.mambaActiveHead;
@@ -1834,7 +2680,32 @@ export class MacroControls {
     let bodyText = '';
     let specs: string[] = [];
 
-    if (state.mode === 'cutaway_mamba') {
+    if (state.mode === 'cutaway_embedding') {
+      title.textContent = 'Embedding Cutaway (NoPE)';
+      badge.textContent = '131,072 × 2,688 · Untied';
+
+      bodyText =
+        'Untied token lookup gathers one 2,688-channel row of W_embed per token ID directly into X₀ with zero matrix multiply. Nemotron 3 Nano uses NoPE — no positional embeddings are added here; causal order arrives downstream in Bay 01 Mamba-2.';
+
+      specs = [
+        'Untied table: 131,072 vocab × 2,688 hidden (~352M params · tie_word_embeddings: false)',
+        'Absent positional embeddings (NoPE): zero W_pos or RoPE — clean extrapolation toward 1M context',
+        'Bit-exact hand-off: Embedding output X₀ feeds directly onto the emerald spine into Bay 01 Mamba-2',
+      ];
+    } else if (state.mode === 'cutaway_output') {
+      title.textContent = 'Output & Untied LM Head';
+      badge.textContent = '2,688 → 131,072 · ε=1e−5';
+      if (isFp8) badge.classList.add('ed-badge-gold');
+
+      bodyText =
+        'After Bay 52 Final MoE, the emerald residual stream Y passes through Final RMSNorm (ε = 1e−5) and an independent untied LM Head (W_lm_head ≠ W_embed) to emit 131,072 vocabulary logits and next-token probabilities.';
+
+      specs = [
+        'Bay 52 MoE Y → Final RMSNorm (2,688, ε=1e−5) → Untied W_lm_head (2,688 × 131,072)',
+        'Untied output projection (~352M params) decouples next-token logits from input token embeddings',
+        'Synthetic miniature readout (d=8, V=32, Float32) demonstrates exact math — not 31.6B checkpoint logits',
+      ];
+    } else if (state.mode === 'cutaway_mamba') {
       const isFeeder = state.mambaBayId === 42;
       title.textContent = isFeeder
         ? 'Mamba-2 Cutaway · Bay 42 (Feeder)'
@@ -1928,6 +2799,23 @@ export class MacroControls {
 
     const actions = document.createElement('div');
     actions.className = 'ed-actions';
+    if (state.mode === 'cutaway_embedding') {
+      const bay01Btn = document.createElement('button');
+      bay01Btn.type = 'button';
+      bay01Btn.className = 'ed-cta-btn';
+      bay01Btn.dataset.testid = 'embed-cta-bay01';
+      bay01Btn.textContent = '→ Bay 01 Mamba-2';
+      bay01Btn.addEventListener('click', () => this.cb.onInspectInternals('M', 1));
+      actions.appendChild(bay01Btn);
+    } else if (state.mode === 'cutaway_output') {
+      const bay52Btn = document.createElement('button');
+      bay52Btn.type = 'button';
+      bay52Btn.className = 'ed-cta-btn';
+      bay52Btn.dataset.testid = 'output-cta-bay52';
+      bay52Btn.textContent = '← Bay 52 Final MoE';
+      bay52Btn.addEventListener('click', () => this.cb.onInspectInternals('E', 52));
+      actions.appendChild(bay52Btn);
+    }
     const backBtn = document.createElement('button');
     backBtn.type = 'button';
     backBtn.className = 'ed-cta-btn ed-cta-secondary';
@@ -1935,7 +2823,19 @@ export class MacroControls {
     backBtn.addEventListener('click', () => this.cb.onSelectMode('tower'));
     actions.appendChild(backBtn);
 
-    if (state.mode === 'cutaway_moe') {
+    if (state.mode === 'cutaway_embedding') {
+      panel.append(header, p);
+      const embCard = this.buildEmbeddingCutawayInspector(state, activeExecution, decodeSession);
+      if (embCard) panel.appendChild(embCard);
+      panel.appendChild(list);
+    } else if (state.mode === 'cutaway_output') {
+      panel.append(header, p);
+      if (state.executionMode !== 'ar_decode' || !decodeSession) {
+        const outCard = this.buildOutputCutawayInspector(state, activeExecution, decodeSession);
+        if (outCard) panel.appendChild(outCard);
+      }
+      panel.appendChild(list);
+    } else if (state.mode === 'cutaway_moe') {
       panel.append(header, p, this.buildMoeInspectorControls(state, cutaway), list);
     } else if (state.mode === 'cutaway_mamba') {
       const effHead = cutaway?.mambaStats?.activeHead ?? state.mambaActiveHead;
