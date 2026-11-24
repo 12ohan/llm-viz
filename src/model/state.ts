@@ -65,6 +65,7 @@ export interface SceneState {
   moeFocusToken: number | null;
   /** null means follow rank-0 Top-6 winner for focusToken; integer 0..127 focuses that expert. */
   moeActiveExpert: number | null;
+  moeTokenCycling: boolean;
   moeHoveredCell: MoeCellRef | null;
   moeSelectedCell: MoeCellRef | null;
   moeStepperActive: boolean;
@@ -159,6 +160,7 @@ export function createInitialState(defaultPose: CameraPose, reducedMotion = fals
     moeViewAngle: 'three_quarter',
     moeFocusToken: null,
     moeActiveExpert: null,
+    moeTokenCycling: false,
     moeHoveredCell: null,
     moeSelectedCell: null,
     moeStepperActive: false,

@@ -24,7 +24,13 @@ export {
   MAMBA_SPATIAL_FIT_BOUNDS,
 } from './mambaCutaway';
 export { formatMambaHeadId, mambaGroupForHead } from '../math/mambaSim';
-export { buildMoECutaway, parseMoeExpertPartId, MOE_FIT_BOUNDS } from './moeCutaway';
+export {
+  buildMoECutaway,
+  fitSpatialMoeCamera,
+  parseMoeExpertPartId,
+  MOE_FIT_BOUNDS,
+  MOE_SPATIAL_FIT_BOUNDS,
+} from './moeCutaway';
 export { activeRoutedExpertIndices, formatExpertId } from '../math/moeSim';
 
 export interface CutawayPartInfo {

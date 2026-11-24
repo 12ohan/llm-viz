@@ -54,10 +54,15 @@ import {
 import {
   inferMoeCellExpert,
   MOE_STEPPER_STEPS,
-  moeStepperCellForState,
   runMoeSim,
   type MoeCellRef,
 } from './math/moeSim';
+import {
+  advanceMoeTokenCycleTick,
+  resolveActiveMoeFocusToken,
+  resolveEffectiveMoeCell,
+  resolveMoeHoverDuringCycling,
+} from './model/moePlayback';
 import { RenderDevice } from './render/device';
 import { LinesPass } from './render/lines';
 import {
@@ -77,6 +82,7 @@ import {
   buildMoECutaway,
   fitSpatialGqaCamera,
   fitSpatialMambaCamera,
+  fitSpatialMoeCamera,
   parseMambaHeadPartId,
   parseMoeExpertPartId,
   parseQueryHeadPartId,
@@ -264,7 +270,7 @@ function resolveOpFocusBounds(
 }
 
 function cameraPoseForOpStep(
-  mode: Exclude<ViewMode, 'tower'>,
+  _mode: Exclude<ViewMode, 'tower'>,
   opBounds: AABB,
   metrics: ViewportMetrics,
   sheetViewAngle: GqaViewAngle = 'three_quarter',
@@ -276,12 +282,9 @@ function cameraPoseForOpStep(
   if (sheetViewAngle === 'near_plan') {
     azimuthDeg = 1.5;
     elevationDeg = 78;
-  } else if (mode === 'cutaway_gqa' || mode === 'cutaway_mamba') {
+  } else {
     azimuthDeg = isStackedNarrow ? 17 : 20;
     elevationDeg = isStackedNarrow ? 25 : 23.5;
-  } else {
-    azimuthDeg = 9;
-    elevationDeg = 50;
   }
   return fitOpBoundsCamera(opBounds, metrics, {
     azimuthDeg,
@@ -314,6 +317,13 @@ function cameraPoseForCutaway(
   }
   if (mode === 'cutaway_mamba' && sheetViewAngle === 'three_quarter') {
     return fitSpatialMambaCamera(bounds, metrics, {
+      topInsetPx: insets?.topInsetPx ?? (isStackedNarrow ? 12 : 84),
+      bottomInsetPx: insets?.bottomInsetPx ?? (isStackedNarrow ? 12 : 118),
+      isNarrow: isStackedNarrow,
+    });
+  }
+  if (mode === 'cutaway_moe' && sheetViewAngle === 'three_quarter') {
+    return fitSpatialMoeCamera(bounds, metrics, {
       topInsetPx: insets?.topInsetPx ?? (isStackedNarrow ? 12 : 84),
       bottomInsetPx: insets?.bottomInsetPx ?? (isStackedNarrow ? 12 : 118),
       isNarrow: isStackedNarrow,
@@ -385,6 +395,7 @@ function boot(): void {
   let flyAnim: FlyAnimation | null = null;
   let lastStepperTickMs: number | null = null;
   let lastMambaTemporalTickMs: number | null = null;
+  let lastMoeCycleTickMs: number | null = null;
   let lastStepperCellKey = '';
   let manualCameraOverride = false;
   let lastAutoFollowedStepKey = '';
@@ -392,6 +403,8 @@ function boot(): void {
   let savedGqaPlanPose: CameraPose | null = null;
   let savedMambaSpatialPose: CameraPose | null = null;
   let savedMambaPlanPose: CameraPose | null = null;
+  let savedMoeSpatialPose: CameraPose | null = null;
+  let savedMoePlanPose: CameraPose | null = null;
 
   let device: RenderDevice | null = null;
   let solidsPass: SolidsPass | null = null;
@@ -500,10 +513,8 @@ function boot(): void {
         ? state.moeViewAngle
         : state.gqaViewAngle;
 
-  const activeMoeFocusToken = (): number => {
-    const raw = state.moeFocusToken === null ? state.tokens - 1 : state.moeFocusToken;
-    return Math.max(0, Math.min(state.tokens - 1, raw));
-  };
+  const activeMoeFocusToken = (): number =>
+    resolveActiveMoeFocusToken(state.moeFocusToken, state.tokens);
 
   const activeMoeFocusExpert = (sim = runMoeSim(state.tokens), tok = activeMoeFocusToken()): number => {
     if (state.moeActiveExpert !== null) {
@@ -554,21 +565,17 @@ function boot(): void {
 
   const resolveActiveMoeCell = (): MoeCellRef | null => {
     if (state.mode !== 'cutaway_moe') return null;
-    if (state.moeHoveredCell) return state.moeHoveredCell;
-    if (state.moeSelectedCell) return state.moeSelectedCell;
-    if (state.moeStepperActive) {
-      const sim = runMoeSim(state.tokens);
-      const tok = activeMoeFocusToken();
-      const exp = activeMoeFocusExpert(sim, tok);
-      return moeStepperCellForState(
-        sim,
-        state.moeStepperStep,
-        state.moeStepperSubProgress,
-        tok,
-        exp,
-      );
-    }
-    return null;
+    return resolveEffectiveMoeCell({
+      sim: runMoeSim(state.tokens),
+      moeFocusToken: state.moeFocusToken,
+      moeActiveExpert: state.moeActiveExpert,
+      moeTokenCycling: state.moeTokenCycling,
+      moeHoveredCell: state.moeHoveredCell,
+      moeSelectedCell: state.moeSelectedCell,
+      moeStepperActive: state.moeStepperActive,
+      moeStepperStep: state.moeStepperStep,
+      moeStepperSubProgress: state.moeStepperSubProgress,
+    });
   };
 
   const buildActiveCutaway = (): CutawaySceneGeometry | null => {
@@ -597,6 +604,7 @@ function boot(): void {
         activeExpert: state.moeActiveExpert ?? undefined,
         activeCell: resolveActiveMoeCell(),
         stepperStep: state.moeStepperActive ? state.moeStepperStep : null,
+        viewAngle: state.moeViewAngle,
       });
     }
     if (state.mode === 'cutaway_gqa') {
@@ -770,6 +778,8 @@ function boot(): void {
     if (state.mode === 'cutaway_moe') {
       state.moeSelectedCell = null;
       state.moeHoveredCell = null;
+      state.moeTokenCycling = false;
+      lastMoeCycleTickMs = null;
       if (state.reducedMotion) {
         state.moeStepperActive = true;
         state.moeStepperPlaying = false;
@@ -914,6 +924,8 @@ function boot(): void {
       }
       if (nextMode !== 'cutaway_moe') {
         state.moeStepperPlaying = false;
+        state.moeTokenCycling = false;
+        lastMoeCycleTickMs = null;
       }
       lastStepperTickMs = null;
     }
@@ -1035,6 +1047,9 @@ function boot(): void {
       } else if (state.mode === 'cutaway_mamba') {
         if (state.mambaViewAngle === 'three_quarter') savedMambaSpatialPose = null;
         else savedMambaPlanPose = null;
+      } else if (state.mode === 'cutaway_moe') {
+        if (state.moeViewAngle === 'three_quarter') savedMoeSpatialPose = null;
+        else savedMoePlanPose = null;
       }
       flyToPose(
         cameraPoseForCutaway(
@@ -1075,6 +1090,7 @@ function boot(): void {
     state.gqaStepperSubProgress = 0;
     state.moeFocusToken = null;
     state.moeActiveExpert = null;
+    state.moeTokenCycling = false;
     state.moeHoveredCell = null;
     state.moeSelectedCell = null;
     state.moeStepperActive = false;
@@ -1086,10 +1102,13 @@ function boot(): void {
     lastAutoFollowedStepKey = '';
     lastStepperTickMs = null;
     lastMambaTemporalTickMs = null;
+    lastMoeCycleTickMs = null;
     savedGqaSpatialPose = null;
     savedGqaPlanPose = null;
     savedMambaSpatialPose = null;
     savedMambaPlanPose = null;
+    savedMoeSpatialPose = null;
+    savedMoePlanPose = null;
 
     if (state.mode === 'tower') {
       state.section = 'overview';
@@ -1277,37 +1296,116 @@ function boot(): void {
     },
     onSelectMoeView: (view: GqaViewAngle) => {
       if (state.moeViewAngle === view && state.mode === 'cutaway_moe') return;
-      state.moeViewAngle = view;
-      lastAutoFollowedStepKey = '';
-      if (state.mode === 'cutaway_moe' && currentCutawayScene) {
-        if (state.moeStepperActive && state.stepperAutoFollow && !manualCameraOverride) {
-          focusCameraOnActiveOpStep(true);
+      if (
+        state.mode === 'cutaway_moe' &&
+        !state.moeStepperActive &&
+        !flyAnim &&
+        manualCameraOverride
+      ) {
+        if (state.moeViewAngle === 'three_quarter') {
+          savedMoeSpatialPose = cloneCameraPose(state.camera);
         } else {
-          flyToPose(
-            cameraPoseForCutaway(
-              'cutaway_moe',
-              currentCutawayScene.fitBounds,
-              currentMetrics,
-              view,
-              measureCutawayInsets('cutaway_moe'),
-            ),
-          );
+          savedMoePlanPose = cloneCameraPose(state.camera);
         }
       }
-      syncUi();
+      state.moeViewAngle = view;
+      lastAutoFollowedStepKey = '';
+      // Preserve focused token, active expert, pinned cell, tokens, precision, and stepper state!
+      if (state.mode === 'cutaway_moe') {
+        geometryDirty = true;
+        rebuildSceneIfNeeded();
+        syncUi();
+        if (currentCutawayScene) {
+          if (state.moeStepperActive && state.stepperAutoFollow && !manualCameraOverride) {
+            focusCameraOnActiveOpStep(true);
+          } else {
+            const savedPose = view === 'three_quarter' ? savedMoeSpatialPose : savedMoePlanPose;
+            const nextPose =
+              savedPose !== null
+                ? cloneCameraPose(savedPose)
+                : cameraPoseForCutaway(
+                    'cutaway_moe',
+                    currentCutawayScene.fitBounds,
+                    currentMetrics,
+                    view,
+                    measureCutawayInsets('cutaway_moe'),
+                  );
+            flyToPose(nextPose);
+          }
+        }
+      } else {
+        syncUi();
+      }
+      scheduleDraw();
     },
     onSelectMoeFocusToken: (tokenIdx: number) => {
       state.tourActive = false;
+      state.moeTokenCycling = false;
+      lastMoeCycleTickMs = null;
       const clamped = Math.max(0, Math.min(state.tokens - 1, tokenIdx));
       state.moeFocusToken = clamped;
       state.moeActiveExpert = null; // follow rank-0 active expert for newly selected token
       state.moeSelectedCell = null;
       state.moeHoveredCell = null;
       state.selectedPart = null;
+      state.hoveredPart = null;
+      markDirtyAndSchedule(true);
+    },
+    onStepMoeFocusToken: (delta: -1 | 1) => {
+      state.tourActive = false;
+      state.moeTokenCycling = false;
+      lastMoeCycleTickMs = null;
+      const next = (activeMoeFocusToken() + delta + state.tokens) % state.tokens;
+      state.moeFocusToken = next;
+      state.moeActiveExpert = null;
+      state.moeSelectedCell = null;
+      state.moeHoveredCell = null;
+      state.selectedPart = null;
+      state.hoveredPart = null;
+      markDirtyAndSchedule(true);
+    },
+    onToggleMoeTokenCycle: () => {
+      state.tourActive = false;
+      state.moeHoveredCell = null;
+      state.hoveredPart = null;
+      if (state.reducedMotion) {
+        const next = (activeMoeFocusToken() + 1) % state.tokens;
+        state.moeFocusToken = next;
+        state.moeActiveExpert = null;
+        state.moeTokenCycling = false;
+        lastMoeCycleTickMs = null;
+        markDirtyAndSchedule(true);
+        return;
+      }
+      if (state.moeTokenCycling) {
+        state.moeTokenCycling = false;
+        lastMoeCycleTickMs = null;
+        syncUi();
+        return;
+      }
+      state.moeStepperPlaying = false;
+      lastStepperTickMs = null;
+      const cur = activeMoeFocusToken();
+      const startTok = state.moeFocusToken === null || cur >= state.tokens - 1 ? 0 : cur;
+      state.moeFocusToken = startTok;
+      state.moeActiveExpert = null;
+      if (state.moeSelectedCell !== null) {
+        const sim = runMoeSim(state.tokens);
+        state.moeSelectedCell = advanceMoeTokenCycleTick(
+          (startTok - 1 + state.tokens) % state.tokens,
+          sim,
+          state.moeSelectedCell,
+          null,
+        ).nextSelectedCell;
+      }
+      state.moeTokenCycling = true;
+      lastMoeCycleTickMs = null;
       markDirtyAndSchedule(true);
     },
     onSelectMoeExpert: (expertId: number) => {
       state.tourActive = false;
+      state.moeTokenCycling = false;
+      lastMoeCycleTickMs = null;
       const clamped = Math.max(0, Math.min(127, expertId));
       const tok = activeMoeFocusToken();
       state.moeActiveExpert = clamped;
@@ -1640,7 +1738,9 @@ function boot(): void {
       state.moeHoveredCell = null;
       state.moeStepperActive = false;
       state.moeStepperPlaying = false;
+      state.moeTokenCycling = false;
       lastStepperTickMs = null;
+      lastMoeCycleTickMs = null;
       manualCameraOverride = false;
       lastAutoFollowedStepKey = '';
       geometryDirty = true;
@@ -1806,6 +1906,35 @@ function boot(): void {
       lastMambaTemporalTickMs = null;
     }
 
+    // MoE per-token routing cycle loop (~1100 ms per token t = 0 -> T-1, respects reducedMotion)
+    if (
+      state.mode === 'cutaway_moe' &&
+      state.moeTokenCycling &&
+      !state.reducedMotion
+    ) {
+      if (lastMoeCycleTickMs === null) {
+        lastMoeCycleTickMs = nowMs;
+      } else if (nowMs - lastMoeCycleTickMs >= 1100) {
+        lastMoeCycleTickMs = nowMs;
+        const sim = currentCutawayScene?.moeSim ?? runMoeSim(state.tokens);
+        const tick = advanceMoeTokenCycleTick(
+          state.moeFocusToken,
+          sim,
+          state.moeSelectedCell,
+          state.moeHoveredCell,
+        );
+        state.moeFocusToken = tick.nextToken;
+        state.moeActiveExpert = null;
+        state.moeSelectedCell = tick.nextSelectedCell;
+        state.moeHoveredCell = tick.nextHoveredCell;
+        geometryDirty = true;
+        stepperChangedUi = true;
+      }
+      continueAnimating = true;
+    } else {
+      lastMoeCycleTickMs = null;
+    }
+
     rebuildSceneIfNeeded();
     if (stepperChangedUi) {
       syncUi();
@@ -1930,6 +2059,8 @@ function boot(): void {
       savedGqaPlanPose = null;
       savedMambaSpatialPose = null;
       savedMambaPlanPose = null;
+      savedMoeSpatialPose = null;
+      savedMoePlanPose = null;
       const stepper = getActiveCutawayStepper();
       const insets = measureCutawayInsets(state.mode);
       if (stepper?.active && state.stepperAutoFollow) {
@@ -2187,12 +2318,29 @@ function boot(): void {
             ? Math.max(0, Math.min(sim.tokens - 1, hit.tokenIndex))
             : tok;
         const topkSlice = sim.topk_indices.subarray(pickTok * sim.topK, (pickTok + 1) * sim.topK);
-        const hitCell = hit ? pickHitToMoeCell(hit, tok, exp, topkSlice) : null;
+        const rawHitCell = hit ? pickHitToMoeCell(hit, tok, exp, topkSlice) : null;
+        const resolvedHover = resolveMoeHoverDuringCycling(
+          rawHitCell,
+          state.moeTokenCycling,
+          tok,
+          sim,
+        );
+        const hitCell = resolvedHover.hoveredCell;
+        const pauseCycling = resolvedHover.shouldPauseTokenCycling;
         const hitPart =
-          hit?.tensorKey === 'router_bank' && hit.headIndex !== undefined
+          (hit?.tensorKey === 'router_bank' || hit?.partId === 'routed-branch') &&
+          hit.headIndex !== undefined
             ? `moe-expert-${hit.headIndex}`
             : hit?.partId ?? null;
-        if (hitPart !== state.hoveredPart || !sameMoeCell(hitCell, state.moeHoveredCell)) {
+        if (
+          pauseCycling ||
+          hitPart !== state.hoveredPart ||
+          !sameMoeCell(hitCell, state.moeHoveredCell)
+        ) {
+          if (pauseCycling) {
+            state.moeTokenCycling = false;
+            lastMoeCycleTickMs = null;
+          }
           state.hoveredPart = hitPart;
           state.moeHoveredCell = hitCell;
           markDirtyAndSchedule(true);
@@ -2284,7 +2432,8 @@ function boot(): void {
         const topkSlice = sim.topk_indices.subarray(pickTok * sim.topK, (pickTok + 1) * sim.topK);
         const hitCell = hit ? pickHitToMoeCell(hit, tok, exp, topkSlice) : null;
         const hitPart =
-          hit?.tensorKey === 'router_bank' && hit.headIndex !== undefined
+          (hit?.tensorKey === 'router_bank' || hit?.partId === 'routed-branch') &&
+          hit.headIndex !== undefined
             ? `moe-expert-${hit.headIndex}`
             : hit?.partId ?? null;
         if (hitPart !== null) state.tourActive = false;
@@ -2301,6 +2450,10 @@ function boot(): void {
         state.hoveredPart = hitPart;
         state.moeSelectedCell = hitCell;
         state.moeHoveredCell = hitCell;
+        if (hitCell !== null || hitPart !== null) {
+          state.moeTokenCycling = false;
+          lastMoeCycleTickMs = null;
+        }
         if (hitCell !== null) {
           state.moeStepperPlaying = false;
           state.moeStepperActive = false;
@@ -2418,7 +2571,8 @@ function boot(): void {
         state.mambaStepperActive ||
         state.mambaTemporalPlaying ||
         state.moeSelectedCell !== null ||
-        state.moeStepperActive
+        state.moeStepperActive ||
+        state.moeTokenCycling
       ) {
         ev.preventDefault();
         const hadStepper =
@@ -2437,7 +2591,9 @@ function boot(): void {
         state.moeHoveredCell = null;
         state.moeStepperActive = false;
         state.moeStepperPlaying = false;
+        state.moeTokenCycling = false;
         lastStepperTickMs = null;
+        lastMoeCycleTickMs = null;
         manualCameraOverride = false;
         lastAutoFollowedStepKey = '';
         geometryDirty = true;

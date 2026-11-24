@@ -31,9 +31,11 @@ import {
   type MoeCellFormula,
   type MoeCellRef,
   type MoeSheetSpan,
+  type MoeSimResult,
   type MoeTensorKey,
 } from '../math/moeSim';
 import type { PrecisionMode } from '../model/spec';
+import type { GqaViewAngle } from '../model/state';
 import type { AABB } from '../render/camera';
 import type { PickBox } from '../render/pick';
 import { FlowRibbonBuilder } from '../render/ribbons';
@@ -59,6 +61,11 @@ import {
 import type { AtlasSlice } from './atlasPacker';
 import type { CutawayPartInfo, CutawaySceneGeometry, MoECutawayStats } from './cutaways';
 import { buildMoeValueAtlas } from './moeAtlas';
+import {
+  buildMoeSpatialScene,
+  fitSpatialMoeCamera,
+  MOE_SPATIAL_FIT_BOUNDS,
+} from './moeSpatial';
 import {
   CELL_TARGET_FILL,
   CELL_TARGET_FRAME,
@@ -98,6 +105,8 @@ import {
 const SHEET_T = 0.068;
 const LIFT_Y = 0.032;
 
+export { fitSpatialMoeCamera, MOE_SPATIAL_FIT_BOUNDS };
+
 /** Invariant framing bounds across T=1..16, Bay 02/52, and BF16/FP8 Selective. */
 export const MOE_FIT_BOUNDS: AABB = {
   min: [-8.0, -0.35, -7.2],
@@ -122,6 +131,8 @@ export interface BuildMoECutawayOptions {
   readonly activeExpert?: number;
   readonly activeCell?: MoeCellRef | null;
   readonly stepperStep?: number | null;
+  /** Layout mode: `'three_quarter'` builds the 3D Spatial MoE architecture; `'near_plan'` (default) keeps the coplanar XZ schematic. */
+  readonly viewAngle?: GqaViewAngle;
 }
 
 interface MoeSheetSpec {
@@ -297,7 +308,11 @@ class MoeSheetBuilder {
   }
 }
 
-function buildMoeFocusSet(formula: MoeCellFormula | null): SheetFocusSet {
+function buildMoeFocusSet(
+  formula: MoeCellFormula | null,
+  sim: MoeSimResult,
+  focusToken: number,
+): SheetFocusSet {
   if (!formula) return EMPTY_SHEET_FOCUS_SET;
   const c = formula.cell;
   const targetEntry: SheetFocusEntry = {
@@ -322,7 +337,265 @@ function buildMoeFocusSet(formula: MoeCellFormula | null): SheetFocusSet {
     colEnd: up.colEnd,
     role: idx === 0 ? 'operand_a' : 'operand_b',
   }));
+
+  // Top-6 weight normalization refinement: w_j = (σ_j / Σ_{m=0..5} σ_m) × 2.5.
+  // The selected expert contributes the numerator (operand_a) AND joins all 6 selected unbiased
+  // sigmoid scores in the denominator; highlight the other 5 selected Top-6 experts as operand_b!
+  if (c.tensor === 'topk_weights') {
+    const tok = Math.max(0, Math.min(sim.tokens - 1, c.tokenIndex ?? focusToken));
+    const slot = Math.max(0, Math.min(sim.topK - 1, c.rankSlot ?? c.col));
+    const winnerId = sim.topk_indices[tok * sim.topK + slot];
+    for (let m = 0; m < sim.topK; m++) {
+      const eid = sim.topk_indices[tok * sim.topK + m];
+      if (eid === winnerId) continue;
+      const bankRow = Math.floor(eid / MOE_SIM_CONFIG.bankCols);
+      const bankCol = eid % MOE_SIM_CONFIG.bankCols;
+      upEntries.push({
+        tensor: 'router_bank',
+        expertId: eid,
+        tokenStart: tok,
+        tokenEnd: tok,
+        rowStart: bankRow,
+        rowEnd: bankRow,
+        colStart: bankCol,
+        colEnd: bankCol,
+        role: 'operand_b',
+      });
+    }
+  }
+
   return createSheetFocusSet([targetEntry, ...upEntries]);
+}
+
+function buildMoePartCatalog(params: {
+  readonly bayId: 2 | 52;
+  readonly isFp8Mode: boolean;
+  readonly focusToken: number;
+  readonly focusTokLabel: string;
+  readonly focusExpert: number;
+  readonly focusExpTag: string;
+  readonly activeExpertIds: readonly number[];
+  readonly focusedEval: ReturnType<typeof evaluateSingleRoutedExpert>;
+}): Record<string, CutawayPartInfo> {
+  const {
+    bayId,
+    isFp8Mode,
+    focusToken,
+    focusTokLabel,
+    focusExpert,
+    focusExpTag,
+    activeExpertIds,
+    focusedEval,
+  } = params;
+  const partCatalog: Record<string, CutawayPartInfo> = {
+    'residual-in': {
+      id: 'residual-in',
+      title: 'Residual Stream Input (2,688)',
+      badge: 'Activation · 0 B Token Cache',
+      summary:
+        'Incoming hidden state from the 2,688-channel emerald residual spine (miniature d=8). MoE layers are strictly per-token independent and allocate 0 B of sequence cache across 1 → 1M tokens.',
+      specs: [
+        'Production shape: [T, 2,688] · Miniature live sim: [T, 8] (Float32 storage)',
+        'Hover or click any cell to trace per-token RMSNorm, routing, and residual merge.',
+      ],
+    },
+    rmsnorm: {
+      id: 'rmsnorm',
+      title: 'Pre-MoE RMSNorm (ε = 1e−5)',
+      badge: isFp8Mode ? 'FP8 Selective (prod)' : 'BF16 (prod)',
+      summary:
+        'Normalizes each token vector by √(mean(X²) + 1e−5) × γ_in before forking in parallel to BOTH the sparse 128-expert router path (rear/center) and the always-on double-width shared expert (front).',
+      specs: [
+        'Matches NVIDIA NemotronH rms_norm_eps = 1e−5 (learned non-unit γ_in, no bias)',
+        'Strictly per-token independent: mutating any other token t′ ≠ t leaves U[:, t] unchanged.',
+      ],
+    },
+    'w-router': {
+      id: 'w-router',
+      title: 'Router Gate Linear (W_router · 128 × 2,688)',
+      badge: 'Always FP32 (Never FP8)',
+      summary:
+        'Computes 128 expert logits per token without linear bias, applies sigmoid, and adds learned e_score_correction_bias for Top-6 selection only. Kept strictly FP32 in production even under FP8 Selective (NVIDIA §4.2).',
+      specs: [
+        'Production: 128 × 2,688 (344K params, FP32) · Miniature: 128 × 8 (no bias)',
+        'e_score_correction_bias guides load-balanced selection without distorting expert weights.',
+      ],
+    },
+    'router-unbiased': {
+      id: 'router-unbiased',
+      title: 'Unbiased Sigmoid Scores (Bias Stripped)',
+      badge: 'Always FP32 · All 6 in Denom',
+      summary:
+        'After Top-6 winners are selected using biased choice scores (σ + e_score_correction_bias), the bias is discarded. All six selected UNBIASED sigmoid scores σ_m (including the numerator expert itself) sum into the normalization denominator Σ₆ σ_m.',
+      specs: [
+        `Active token t${focusToken} "${focusTokLabel}": ${activeExpertIds.map(formatExpertId).join(', ')}`,
+        'Selection uses (σ + bias); weight normalization strictly uses unbiased σ.',
+      ],
+    },
+    router: {
+      id: 'router',
+      title: 'Top-6 Router Weights (Unbiased σ → ×2.5)',
+      badge: 'Always FP32 · Σw = 2.500',
+      summary:
+        'Normalizes the 6 UNBIASED sigmoid scores (excluding e_score_correction_bias) by their 6-term sum Σ_{m=1..6} σ_m (including the numerator expert itself) and multiplies by routed_scaling_factor = 2.5.',
+      specs: [
+        `Active token t${focusToken} "${focusTokLabel}": ${activeExpertIds.map(formatExpertId).join(', ')}`,
+        'Equation: w_j = (σ_j / Σ_{m=1..6} σ_m) × 2.5 · Σw = 2.500.',
+      ],
+    },
+    'routed-bank': {
+      id: 'routed-bank',
+      title: `Active Top-6 Routed Experts (${focusExpTag})`,
+      badge: isFp8Mode ? 'FP8 Weights (prod) · 6/128 Active' : 'BF16 Weights (prod) · 6/128 Active',
+      summary:
+        'Only 6 of 128 routed experts execute per token (95.3% sparse) as paired non-gated ReLU² MLPs (W_up + W_down only, zero gate_proj). Click any active tile or Top-6 slot to magnify that expert in the detail workbench.',
+      specs: [
+        'Production: 128 experts × 2 matrices (1,856 width) = 1.30B params/layer × 23 = 29.8B (~94% of model)',
+        'Each active tile renders as 2 paired micro-plates representing non-gated W_up and W_down.',
+      ],
+    },
+    'routed-branch': {
+      id: 'routed-branch',
+      title: `Six Independent Routed Outputs (wᵢ·yᵢ · ${focusExpTag})`,
+      badge: '6 Parallel Branches → Σ₆',
+      summary:
+        'All six active Top-6 experts evaluate independently in parallel and scale their outputs by their normalized ×2.5 router weights before summing into Routed Sum. The detail workbench magnifies 1 of these 6 branches at a time.',
+      specs: [
+        `Active 6 for t${focusToken} "${focusTokLabel}": ${activeExpertIds.map(formatExpertId).join(', ')}`,
+        'Click any of the 6 weighted-output strips to magnify that expert inside W_up → ReLU² → W_down.',
+      ],
+    },
+    'inactive-experts': {
+      id: 'inactive-experts',
+      title: `Idle Routed Experts (122 / 128 Skipped · ${focusExpTag})`,
+      badge: '95.3% Sparse · 0 Contribution',
+      summary:
+        'These 122 routed experts ranked outside the Top-6 for the focused token and contribute exact 0 to the layer output. Clicking any idle tile previews its weights and hypothetical ReLU² activations on demand.',
+      specs: [
+        'Idle experts are never multiplied into Routed Sum (appliedWeight = 0).',
+        'Cycle or select tokens t0..t15 to watch different Top-6 expert subsets rise cleanly.',
+      ],
+    },
+    'routed-w-up': {
+      id: 'routed-w-up',
+      title: `Focused Expert ${focusExpTag} · W_up (1,856)`,
+      badge: isFp8Mode ? 'FP8 Weights (prod)' : 'BF16 Weights (prod)',
+      summary:
+        'First of only 2 matrices in NemotronHMLP (no SwiGLU gate_proj, no linear bias). Projects normalized token U into intermediate hidden width 1,856 (miniature d_exp = 4).',
+      specs: [
+        focusedEval.isActive
+          ? `${focusExpTag} is ACTIVE (#${(focusedEval.activeRank ?? 0) + 1} · w = ${focusedEval.appliedWeight.toFixed(3)}) for t${focusToken}.`
+          : `${focusExpTag} is IDLE (Rank #${focusedEval.choiceRank + 1}/128 · 0 contribution) for t${focusToken}.`,
+        'Production precision metadata: FP8 in FP8 Selective mode (live simulator stays Float32).',
+      ],
+    },
+    'routed-pre': {
+      id: 'routed-pre',
+      title: `Focused Expert ${focusExpTag} · Pre-Activation h`,
+      badge: 'h = W_up @ U',
+      summary:
+        'Linear pre-activation vector before ReLU². Negative or zero values are zeroed cleanly in the next step; positive entries are squared.',
+      specs: ['Miniature width: d_exp = 4 · Production width: moe_intermediate_size = 1,856'],
+    },
+    'routed-act': {
+      id: 'routed-act',
+      title: `Focused Expert ${focusExpTag} · ReLU² Activation`,
+      badge: 'max(0, h)² · Non-Gated',
+      summary:
+        'Applies squared ReLU (exact 0 for h ≤ 0, h² for h > 0) without a third gate_proj matrix, eliminating 33% of MLP weight matrices compared to SwiGLU.',
+      specs: ['Exact equation: a[i] = h[i] > 0 ? h[i] * h[i] : 0'],
+    },
+    'routed-w-down': {
+      id: 'routed-w-down',
+      title: `Focused Expert ${focusExpTag} · W_down (2,688)`,
+      badge: isFp8Mode ? 'FP8 Weights (prod)' : 'BF16 Weights (prod)',
+      summary:
+        'Second of the 2 expert matrices, projecting sparse ReLU² activations back to the 2,688-channel residual width before scaling by the expert’s Top-6 router weight.',
+      specs: ['Production: 1,856 → 2,688 · Miniature: 4 → 8 (no bias)'],
+    },
+    'routed-sum': {
+      id: 'routed-sum',
+      title: 'Parallel Routed Sum (Σ wᵢ·yᵢ)',
+      badge: '6 Active · ×2.5 Scaled',
+      summary:
+        'Weighted parallel sum of all 6 independently evaluated routed experts (scaled by routed_scaling_factor = 2.5). All 122 idle experts contribute exact 0.',
+      specs: ['Equation: y_routed[:, t] = Σ_{j=0..5} topk_weights[t, j] · y_{topk_indices[t, j]}[:, t]'],
+    },
+    'shared-expert': {
+      id: 'shared-expert',
+      title: 'Always-On Double-Width Shared Expert (3,712 = 2×)',
+      badge: isFp8Mode ? 'FP8 Weights (prod) · Unscaled 1×' : 'BF16 Weights (prod) · Unscaled 1×',
+      summary:
+        'Runs in parallel for EVERY token alongside the 128 routed experts. Its intermediate width is strictly 2× (3,712 = 2 × 1,856) while hidden input/output width remains 1× (2,688).',
+      specs: [
+        'Exact 2× intermediate width (miniature d_shared = 8 = 2 × d_exp) and 1× hidden width (d = 8).',
+        'NOT multiplied by routed_scaling_factor = 2.5 (added directly at 1.0× weight).',
+      ],
+    },
+    'shared-act': {
+      id: 'shared-act',
+      title: 'Shared Expert ReLU² (3,712 Width)',
+      badge: 'Always-On · 2× Intermediate',
+      summary:
+        'Non-gated ReLU² activation across all 3,712 shared intermediate channels (miniature 8 channels), providing dense always-on capacity in parallel with sparse routing.',
+      specs: ['Zero gate_proj, zero router gating, zero sequence cache.'],
+    },
+    'shared-w-down': {
+      id: 'shared-w-down',
+      title: 'Shared Expert W_down (3,712 → 2,688)',
+      badge: isFp8Mode ? 'FP8 Weights (prod) · 2× Inter' : 'BF16 Weights (prod) · 2× Inter',
+      summary:
+        'Double-intermediate-width down projection mapping 3,712 shared ReLU² activations back to the 2,688-channel hidden space (miniature 8 → 8).',
+      specs: ['Strictly 2× intermediate width (3,712 vs 1,856) and 1× hidden width (2,688).'],
+    },
+    'shared-out': {
+      id: 'shared-out',
+      title: 'Shared Expert Output (Unscaled 1.0×)',
+      badge: 'Parallel Branch · Always On',
+      summary:
+        'Output of the always-on double-width shared expert, merged directly with the 2.5×-scaled Top-6 Routed Sum.',
+      specs: ['Does NOT receive routed_scaling_factor = 2.5.'],
+    },
+    'moe-out': {
+      id: 'moe-out',
+      title: 'MoE Parallel Merge (Routed + Shared)',
+      badge: 'y_routed + y_shared',
+      summary:
+        'Combines the sparse Top-6 routed sum and the always-on double-width shared output before adding back to the untouched emerald residual stream.',
+      specs: ['Equation: y_moe = Σ_{j=1..6} wⱼ·yⱼ + y_shared'],
+    },
+    'residual-out': {
+      id: 'residual-out',
+      title: 'Residual Stream Merge (+ 2,688)',
+      badge: 'Activation · Emerald',
+      summary:
+        'Adds y_moe back into the continuous 2,688-channel emerald residual stream: Y = X + y_routed + y_shared.',
+      specs: [
+        bayId === 52
+          ? 'Bay 52 (Final MoE): feeds final RMSNorm and the untied LM Head (131,072 vocab).'
+          : 'Bay 02 (Granular MoE 128+1): feeds Bay 03 Mamba-2 along the hybrid spine.',
+      ],
+    },
+  };
+
+  partCatalog[`moe-expert-${focusExpert}`] = {
+    id: `moe-expert-${focusExpert}`,
+    title: focusedEval.isActive
+      ? `Routed Expert ${focusExpTag} · Active Top-6 #${(focusedEval.activeRank ?? 0) + 1}`
+      : `Routed Expert ${focusExpTag} · Idle (Rank #${focusedEval.choiceRank + 1}/128)`,
+    badge: focusedEval.isActive
+      ? `w = ${focusedEval.appliedWeight.toFixed(3)} · ReLU²`
+      : 'Skipped · 0 Contribution',
+    summary: focusedEval.isActive
+      ? `Selected in Top-6 for token t${focusToken} "${focusTokLabel}" via choice score ${focusedEval.choiceScore.toFixed(3)} (unbiased σ = ${focusedEval.unbiasedScore.toFixed(3)}, e_bias = ${focusedEval.bias >= 0 ? '+' : '−'}${Math.abs(focusedEval.bias).toFixed(3)}).`
+      : `Ranked #${focusedEval.choiceRank + 1} of 128 for token t${focusToken} "${focusTokLabel}" (choice score ${focusedEval.choiceScore.toFixed(3)}). Not executed in layer sum (0 contribution); detail workbench previews its hypothetical ReLU² weights on demand.`,
+    specs: [
+      `Non-gated 2-matrix MLP: W_up (2,688→1,856) + ReLU² + W_down (1,856→2,688), zero gate_proj.`,
+      `Production weights: ${isFp8Mode ? 'FP8 Selective (router remains FP32)' : 'BF16'} · 0 B token cache.`,
+    ],
+  };
+
+  return partCatalog;
 }
 
 export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeometry {
@@ -361,13 +634,66 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   const focusTokLabel = sim.tokenLabels[focusToken] ?? `t${focusToken}`;
 
   const atlas = buildMoeValueAtlas(sim, focusToken, focusExpert);
-  const b = new MoeSheetBuilder(bayId);
 
   // Compute live formula readout if a cell is hovered/selected/stepped
   const activeFormula: MoeCellFormula | null = opts.activeCell
     ? describeMoeCellFormula(sim, opts.activeCell, focusToken, focusExpert)
     : null;
-  const focusSet = buildMoeFocusSet(activeFormula);
+  const focusSet = buildMoeFocusSet(activeFormula, sim, focusToken);
+
+  const partCatalog = buildMoePartCatalog({
+    bayId,
+    isFp8Mode,
+    focusToken,
+    focusTokLabel,
+    focusExpert,
+    focusExpTag,
+    activeExpertIds,
+    focusedEval,
+  });
+
+  const moeStats: MoECutawayStats = {
+    bayId,
+    routedTotal: sim.nRoutedExperts,
+    routedActiveCount: sim.topK,
+    activeExpertIds,
+    sharedExpertCount: 1,
+    routedWidth: MOE_SIM_CONFIG.prodRoutedWidth,
+    sharedWidth: MOE_SIM_CONFIG.prodSharedWidth,
+    matricesPerExpert: 2,
+    hasGateProj: false,
+    cacheBytes: 0,
+    weightsFp8: isFp8Mode,
+    routerFp8: false,
+    focusToken,
+    focusExpert,
+    usesSmoothRibbons: true,
+    voxelArrowCount: 0,
+  };
+
+  if (opts.viewAngle === 'three_quarter') {
+    return buildMoeSpatialScene({
+      bayId,
+      clampedT,
+      isFp8Mode,
+      activePart,
+      focusToken,
+      focusExpert,
+      activeExpertIds,
+      activeRankMap,
+      focusedEval,
+      activeCell: opts.activeCell ?? null,
+      activeFormula,
+      focusSet,
+      stepperStep: opts.stepperStep ?? null,
+      sim,
+      atlas,
+      partCatalog,
+      moeStats,
+    });
+  }
+
+  const b = new MoeSheetBuilder(bayId);
   const hasCellTrace = focusSet.active;
   const step = hasCellTrace ? null : (opts.stepperStep ?? null);
   const hasPartFocus = activePart !== null || step !== null;
@@ -416,7 +742,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   // ==========================================================================
   // 1. RIGHT RESIDUAL HIGHWAY: Input X (2,688) ──────────────► + Residual
   // ==========================================================================
-  const resInHl = sheetHighlight({ tensor: 'input' }, ['residual-in'], [0, 5]);
+  const resInHl = sheetHighlight({ tensor: 'input', isAggregate: true }, ['residual-in'], [0, 5]);
   b.addSheet({
     cx: resX,
     cy: sheetY(resInHl),
@@ -437,7 +763,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     cellFamily: CELL_ACTIVATION_GREEN,
   });
 
-  const resOutHl = sheetHighlight({ tensor: 'residual' }, ['residual-out'], [5]);
+  const resOutHl = sheetHighlight({ tensor: 'residual', isAggregate: true }, ['residual-out'], [5]);
   b.addSheet({
     cx: resX,
     cy: sheetY(resOutHl),
@@ -484,7 +810,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   // ==========================================================================
   // 2. TOP PRE-NORM: RMSNorm (U) ──► Parallel Fork
   // ==========================================================================
-  const rmsHl = sheetHighlight({ tensor: 'rmsnorm' }, ['rmsnorm'], [0]);
+  const rmsHl = sheetHighlight({ tensor: 'rmsnorm', isAggregate: true }, ['rmsnorm'], [0]);
   b.addSheet({
     cx: rmsX,
     cy: sheetY(rmsHl),
@@ -530,7 +856,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   const wRouterW = 1.24;
   const wRouterD = 2.56;
   const wRouterHl = sheetHighlight(
-    { tensor: 'w_router' },
+    { tensor: 'w_router', isAggregate: true },
     ['w-router', 'router'],
     [1],
     isFp8Mode ? SHEET_HL_BF16_GOLD : SHEET_HL_NORMAL,
@@ -601,6 +927,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
       tensor: 'router_bank',
       expertId: e,
       tokenIndex: focusToken,
+      isAggregate: false,
     };
 
     if (isActiveWinner) {
@@ -748,7 +1075,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   const topkW = 4.32;
   const topkD = 0.66;
   const topkHl = sheetHighlight(
-    { tensor: 'topk_weights', tokenIndex: focusToken },
+    { tensor: 'topk_weights', tokenIndex: focusToken, isAggregate: true },
     ['router', 'topk-weights'],
     [2],
     isFp8Mode ? SHEET_HL_BF16_GOLD : SHEET_HL_NORMAL,
@@ -812,25 +1139,25 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   const detailIdleHl = focusedEval.isActive ? SHEET_HL_NORMAL : SHEET_HL_DIMMED;
   const expertPartMatch = activePart === `moe-expert-${focusExpert}`;
   const wUpHl = sheetHighlight(
-    { tensor: 'routed_w_up', expertId: focusExpert, tokenIndex: focusToken },
+    { tensor: 'routed_w_up', expertId: focusExpert, tokenIndex: focusToken, isAggregate: false },
     expertPartMatch ? ['routed-w-up', activePart!] : ['routed-w-up'],
     [3],
     detailIdleHl,
   );
   const preHl = sheetHighlight(
-    { tensor: 'routed_pre', expertId: focusExpert, tokenIndex: focusToken },
+    { tensor: 'routed_pre', expertId: focusExpert, tokenIndex: focusToken, isAggregate: false },
     expertPartMatch ? ['routed-pre', activePart!] : ['routed-pre'],
     [3],
     detailIdleHl,
   );
   const actHl = sheetHighlight(
-    { tensor: 'routed_act', expertId: focusExpert, tokenIndex: focusToken },
+    { tensor: 'routed_act', expertId: focusExpert, tokenIndex: focusToken, isAggregate: false },
     expertPartMatch ? ['routed-act', activePart!] : ['routed-act'],
     [3],
     detailIdleHl,
   );
   const wDownHl = sheetHighlight(
-    { tensor: 'routed_w_down', expertId: focusExpert, tokenIndex: focusToken },
+    { tensor: 'routed_w_down', expertId: focusExpert, tokenIndex: focusToken, isAggregate: false },
     expertPartMatch ? ['routed-w-down', activePart!] : ['routed-w-down'],
     [3],
     detailIdleHl,
@@ -1000,7 +1327,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   // ==========================================================================
   // 6. ROUTED SUM (Σ_{j=1..6} wⱼ·yⱼ)
   // ==========================================================================
-  const routedSumHl = sheetHighlight({ tensor: 'routed_sum' }, ['routed-sum'], [3, 5]);
+  const routedSumHl = sheetHighlight({ tensor: 'routed_sum', isAggregate: true }, ['routed-sum'], [3, 5]);
   b.addSheet({
     cx: routedCenterX,
     cy: sheetY(routedSumHl),
@@ -1061,14 +1388,14 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     0.48,
   );
 
-  const sharedUpHl = sheetHighlight({ tensor: 'shared_w_up' }, ['shared-expert'], [4]);
+  const sharedUpHl = sheetHighlight({ tensor: 'shared_w_up', isAggregate: true }, ['shared-expert'], [4]);
   const sharedActHl = sheetHighlight(
-    { tensor: 'shared_act', tokenIndex: focusToken },
+    { tensor: 'shared_act', tokenIndex: focusToken, isAggregate: false },
     ['shared-act', 'shared-expert'],
     [4],
   );
-  const sharedDownHl = sheetHighlight({ tensor: 'shared_w_down' }, ['shared-w-down', 'shared-expert'], [4]);
-  const sharedOutHl = sheetHighlight({ tensor: 'shared_out' }, ['shared-out', 'shared-expert'], [4, 5]);
+  const sharedDownHl = sheetHighlight({ tensor: 'shared_w_down', isAggregate: true }, ['shared-w-down', 'shared-expert'], [4]);
+  const sharedOutHl = sheetHighlight({ tensor: 'shared_out', isAggregate: true }, ['shared-out', 'shared-expert'], [4, 5]);
 
   b.addSheet({
     cx: sharedX,
@@ -1218,7 +1545,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   // 8. BOTTOM PARALLEL MERGE: Routed Sum + Shared Out -> MoE Out -> + Residual
   // ==========================================================================
   const moeOutX = 1.65;
-  const moeOutHl = sheetHighlight({ tensor: 'moe_out' }, ['moe-out', 'merge-sum'], [5]);
+  const moeOutHl = sheetHighlight({ tensor: 'moe_out', isAggregate: true }, ['moe-out', 'merge-sum'], [5]);
   b.addSheet({
     cx: moeOutX,
     cy: sheetY(moeOutHl),
@@ -1371,6 +1698,26 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
         if (!upRect) return;
         drawOperandDependencyXZ(b.flow, upRect, targetRect, idx === 0);
       });
+      // Refinement 2: In Near-Plan too, show all 5 other Top-6 unbiased denominator contributors on topk_weights!
+      if (c.tensor === 'topk_weights') {
+        const slot = Math.max(0, Math.min(sim.topK - 1, c.rankSlot ?? c.col));
+        const winnerId = sim.topk_indices[focusToken * sim.topK + slot];
+        for (const eid of activeExpertIds) {
+          if (eid === winnerId) continue;
+          const denomRect = resolveSpanRect({
+            tensor: 'router_bank',
+            rowStart: Math.floor(eid / MOE_SIM_CONFIG.bankCols),
+            rowEnd: Math.floor(eid / MOE_SIM_CONFIG.bankCols),
+            colStart: eid % MOE_SIM_CONFIG.bankCols,
+            colEnd: eid % MOE_SIM_CONFIG.bankCols,
+            expertId: eid,
+            tokenIndex: focusToken,
+          });
+          if (denomRect) {
+            drawOperandDependencyXZ(b.flow, denomRect, targetRect, false);
+          }
+        }
+      }
     }
   }
 
@@ -1530,196 +1877,6 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     partIds: ['shared-expert', 'shared-w-down', 'shared-act', 'shared-out'],
   });
 
-  // ==========================================================================
-  // 11. PART CATALOG (Honest Nemotron 3 Nano MoE metadata + live focused state)
-  // ==========================================================================
-  const partCatalog: Record<string, CutawayPartInfo> = {
-    'residual-in': {
-      id: 'residual-in',
-      title: 'Residual Stream Input (2,688)',
-      badge: 'Activation · 0 B Token Cache',
-      summary:
-        'Incoming hidden state from the 2,688-channel emerald residual spine (miniature d=8). MoE layers are strictly per-token independent and allocate 0 B of sequence cache across 1 → 1M tokens.',
-      specs: [
-        'Production shape: [T, 2,688] · Miniature live sim: [T, 8] (Float32 storage)',
-        'Hover or click any cell to trace per-token RMSNorm, routing, and residual merge.',
-      ],
-    },
-    rmsnorm: {
-      id: 'rmsnorm',
-      title: 'Pre-MoE RMSNorm (ε = 1e−5)',
-      badge: isFp8Mode ? 'FP8 Selective (prod)' : 'BF16 (prod)',
-      summary:
-        'Normalizes each token vector by √(mean(X²) + 1e−5) × γ_in before forking in parallel to BOTH the sparse 128-expert router path (left) and the always-on double-width shared expert (right).',
-      specs: [
-        'Matches NVIDIA NemotronH rms_norm_eps = 1e−5 (learned non-unit γ_in, no bias)',
-        'Strictly per-token independent: mutating any other token t′ ≠ t leaves U[:, t] unchanged.',
-      ],
-    },
-    'w-router': {
-      id: 'w-router',
-      title: 'Router Gate Linear (W_router · 128 × 2,688)',
-      badge: 'Always FP32 (Never FP8)',
-      summary:
-        'Computes 128 expert logits per token without linear bias, applies sigmoid, and adds learned e_score_correction_bias for Top-6 selection only. Kept strictly FP32 in production even under FP8 Selective (NVIDIA §4.2).',
-      specs: [
-        'Production: 128 × 2,688 (344K params, FP32) · Miniature: 128 × 8 (no bias)',
-        'e_score_correction_bias guides load-balanced selection without distorting expert weights.',
-      ],
-    },
-    router: {
-      id: 'router',
-      title: 'Top-6 Router Weights (Unbiased σ → ×2.5)',
-      badge: 'Always FP32 · Σw = 2.500',
-      summary:
-        'Gathers the UNBIASED sigmoid scores (excluding e_score_correction_bias) for the 6 winning experts, normalizes them to sum to 1.0, and multiplies by routed_scaling_factor = 2.5.',
-      specs: [
-        `Active token t${focusToken} "${focusTokLabel}": ${activeExpertIds.map(formatExpertId).join(', ')}`,
-        'Selection uses (σ + e_score_correction_bias), while weight gather strictly uses unbiased σ.',
-      ],
-    },
-    'routed-bank': {
-      id: 'routed-bank',
-      title: `Active Top-6 Routed Experts (${focusExpTag})`,
-      badge: isFp8Mode ? 'FP8 Weights (prod) · 6/128 Active' : 'BF16 Weights (prod) · 6/128 Active',
-      summary:
-        'Only 6 of 128 routed experts execute per token (95.3% sparse) as paired non-gated ReLU² MLPs (W_up + W_down only, zero gate_proj). Click any active tile or Top-6 slot to synchronize the detail chain below.',
-      specs: [
-        'Production: 128 experts × 2 matrices (1,856 width) = 1.30B params/layer × 23 = 29.8B (~94% of model)',
-        'Each active tile renders as 2 paired micro-plates representing non-gated W_up and W_down.',
-      ],
-    },
-    'inactive-experts': {
-      id: 'inactive-experts',
-      title: `Idle Routed Experts (122 / 128 Skipped · ${focusExpTag})`,
-      badge: '95.3% Sparse · 0 Contribution',
-      summary:
-        'These 122 routed experts ranked outside the Top-6 for the focused token and contribute exact 0 to the layer output. Clicking any idle tile previews its weights and hypothetical ReLU² activations on demand.',
-      specs: [
-        'Idle experts are never multiplied into Routed Sum (appliedWeight = 0).',
-        'Scrub tokens t0..t15 to see different tokens activate distinct 6-expert combinations.',
-      ],
-    },
-    'routed-w-up': {
-      id: 'routed-w-up',
-      title: `Focused Expert ${focusExpTag} · W_up (1,856)`,
-      badge: isFp8Mode ? 'FP8 Weights (prod)' : 'BF16 Weights (prod)',
-      summary:
-        'First of only 2 matrices in NemotronHMLP (no SwiGLU gate_proj, no linear bias). Projects normalized token U into intermediate hidden width 1,856 (miniature d_exp = 4).',
-      specs: [
-        focusedEval.isActive
-          ? `${focusExpTag} is ACTIVE (#${(focusedEval.activeRank ?? 0) + 1} · w = ${focusedEval.appliedWeight.toFixed(3)}) for t${focusToken}.`
-          : `${focusExpTag} is IDLE (Rank #${focusedEval.choiceRank + 1}/128 · 0 contribution) for t${focusToken}.`,
-        'Production precision metadata: FP8 in FP8 Selective mode (live simulator stays Float32).',
-      ],
-    },
-    'routed-pre': {
-      id: 'routed-pre',
-      title: `Focused Expert ${focusExpTag} · Pre-Activation h`,
-      badge: 'h = W_up @ U',
-      summary:
-        'Linear pre-activation vector before ReLU². Negative or zero values are zeroed cleanly in the next step; positive entries are squared.',
-      specs: ['Miniature width: d_exp = 4 · Production width: moe_intermediate_size = 1,856'],
-    },
-    'routed-act': {
-      id: 'routed-act',
-      title: `Focused Expert ${focusExpTag} · ReLU² Activation`,
-      badge: 'max(0, h)² · Non-Gated',
-      summary:
-        'Applies squared ReLU (exact 0 for h ≤ 0, h² for h > 0) without a third gate_proj matrix, eliminating 33% of MLP weight matrices compared to SwiGLU.',
-      specs: ['Exact equation: a[i] = h[i] > 0 ? h[i] * h[i] : 0'],
-    },
-    'routed-w-down': {
-      id: 'routed-w-down',
-      title: `Focused Expert ${focusExpTag} · W_down (2,688)`,
-      badge: isFp8Mode ? 'FP8 Weights (prod)' : 'BF16 Weights (prod)',
-      summary:
-        'Second of the 2 expert matrices, projecting sparse ReLU² activations back to the 2,688-channel residual width before scaling by the expert’s Top-6 router weight.',
-      specs: ['Production: 1,856 → 2,688 · Miniature: 4 → 8 (no bias)'],
-    },
-    'routed-sum': {
-      id: 'routed-sum',
-      title: 'Parallel Routed Sum (Σ wᵢ·yᵢ)',
-      badge: '6 Active · ×2.5 Scaled',
-      summary:
-        'Weighted parallel sum of all 6 active routed experts (scaled by routed_scaling_factor = 2.5). All 122 idle experts contribute exact 0.',
-      specs: ['Equation: y_routed[:, t] = Σ_{j=0..5} topk_weights[t, j] · y_{topk_indices[t, j]}[:, t]'],
-    },
-    'shared-expert': {
-      id: 'shared-expert',
-      title: 'Always-On Double-Width Shared Expert (3,712 = 2×)',
-      badge: isFp8Mode ? 'FP8 Weights (prod) · Unscaled 1×' : 'BF16 Weights (prod) · Unscaled 1×',
-      summary:
-        'Runs in parallel for EVERY token alongside the 128 routed experts. Its intermediate width is 3,712 (= 2 × 1,856; reported as "2 shared experts" in arXiv:2512.20848v1 and fused into one double-width MLP in the checkpoint).',
-      specs: [
-        'Visibly 2× wider/taller than a routed expert (miniature d_shared = 8 = 2 × d_exp).',
-        'NOT multiplied by routed_scaling_factor = 2.5 (added directly at 1.0× weight).',
-      ],
-    },
-    'shared-act': {
-      id: 'shared-act',
-      title: 'Shared Expert ReLU² (3,712 Width)',
-      badge: 'Always-On · 2× Width',
-      summary:
-        'Non-gated ReLU² activation across all 3,712 shared intermediate channels (miniature 8 channels), providing dense always-on capacity in parallel with sparse routing.',
-      specs: ['Zero gate_proj, zero router gating, zero sequence cache.'],
-    },
-    'shared-w-down': {
-      id: 'shared-w-down',
-      title: 'Shared Expert W_down (3,712 → 2,688)',
-      badge: isFp8Mode ? 'FP8 Weights (prod) · 2×' : 'BF16 Weights (prod) · 2×',
-      summary:
-        'Double-width down projection mapping 3,712 shared ReLU² activations back to the 2,688-channel hidden space (miniature 8 → 8).',
-      specs: ['Visibly 2× wider than routed W_down (1,856 → 2,688).'],
-    },
-    'shared-out': {
-      id: 'shared-out',
-      title: 'Shared Expert Output (Unscaled 1.0×)',
-      badge: 'Parallel Branch · Always On',
-      summary:
-        'Output of the always-on double-width shared expert, merged directly with the 2.5×-scaled Top-6 Routed Sum.',
-      specs: ['Does NOT receive routed_scaling_factor = 2.5.'],
-    },
-    'moe-out': {
-      id: 'moe-out',
-      title: 'MoE Parallel Merge (Routed + Shared)',
-      badge: 'y_routed + y_shared',
-      summary:
-        'Combines the sparse Top-6 routed sum and the always-on double-width shared output before adding back to the untouched emerald residual stream.',
-      specs: ['Equation: y_moe = Σ_{j=1..6} wⱼ·yⱼ + y_shared'],
-    },
-    'residual-out': {
-      id: 'residual-out',
-      title: 'Residual Stream Merge (+ 2,688)',
-      badge: 'Activation · Emerald',
-      summary:
-        'Adds y_moe back into the continuous 2,688-channel emerald residual stream: Y = X + y_routed + y_shared.',
-      specs: [
-        bayId === 52
-          ? 'Bay 52 (Final MoE): feeds final RMSNorm and the untied LM Head (131,072 vocab).'
-          : 'Bay 02 (Granular MoE 128+1): feeds Bay 03 Mamba-2 along the hybrid spine.',
-      ],
-    },
-  };
-
-  // Add per-expert entry for the currently focused expert when referenced as `moe-expert-<id>`
-  partCatalog[`moe-expert-${focusExpert}`] = {
-    id: `moe-expert-${focusExpert}`,
-    title: focusedEval.isActive
-      ? `Routed Expert ${focusExpTag} · Active Top-6 #${(focusedEval.activeRank ?? 0) + 1}`
-      : `Routed Expert ${focusExpTag} · Idle (Rank #${focusedEval.choiceRank + 1}/128)`,
-    badge: focusedEval.isActive
-      ? `w = ${focusedEval.appliedWeight.toFixed(3)} · ReLU²`
-      : 'Skipped · 0 Contribution',
-    summary: focusedEval.isActive
-      ? `Selected in Top-6 for token t${focusToken} "${focusTokLabel}" via choice score ${focusedEval.choiceScore.toFixed(3)} (unbiased σ = ${focusedEval.unbiasedScore.toFixed(3)}, e_bias = ${focusedEval.bias >= 0 ? '+' : '−'}${Math.abs(focusedEval.bias).toFixed(3)}).`
-      : `Ranked #${focusedEval.choiceRank + 1} of 128 for token t${focusToken} "${focusTokLabel}" (choice score ${focusedEval.choiceScore.toFixed(3)}). Not executed in layer sum (0 contribution); detail sheets preview its hypothetical ReLU² weights on demand.`,
-    specs: [
-      `Non-gated 2-matrix MLP: W_up (2,688→1,856) + ReLU² + W_down (1,856→2,688), zero gate_proj.`,
-      `Production weights: ${isFp8Mode ? 'FP8 Selective (router remains FP32)' : 'BF16'} · 0 B token cache.`,
-    ],
-  };
-
   const packed = b.pack();
   const reg = (k: string) => b.sheetRegistry.get(k);
   const opFocusBounds: Record<number, AABB> = {
@@ -1729,25 +1886,6 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     3: computeSheetGroupBounds([reg('routed_w_up'), reg('routed_pre'), reg('routed_act'), reg('routed_w_down'), reg('routed_sum')], 0.50, 0.12, 0.50, MOE_FIT_BOUNDS),
     4: computeSheetGroupBounds([reg('shared_w_up'), reg('shared_act'), reg('shared_w_down'), reg('shared_out')], 0.50, 0.12, 0.50, MOE_FIT_BOUNDS),
     5: computeSheetGroupBounds([reg('routed_sum'), reg('shared_out'), reg('moe_out'), reg('residual')], 0.50, 0.12, 0.50, MOE_FIT_BOUNDS),
-  };
-
-  const moeStats: MoECutawayStats = {
-    bayId,
-    routedTotal: sim.nRoutedExperts,
-    routedActiveCount: sim.topK,
-    activeExpertIds,
-    sharedExpertCount: 1,
-    routedWidth: MOE_SIM_CONFIG.prodRoutedWidth,
-    sharedWidth: MOE_SIM_CONFIG.prodSharedWidth,
-    matricesPerExpert: 2,
-    hasGateProj: false,
-    cacheBytes: 0,
-    weightsFp8: isFp8Mode,
-    routerFp8: false,
-    focusToken,
-    focusExpert,
-    usesSmoothRibbons: true,
-    voxelArrowCount: 0,
   };
 
   return {

@@ -47,6 +47,8 @@ export interface ControlsCallbacks {
   onSelectMoeBay: (bayId: 2 | 52) => void;
   onSelectMoeView: (view: GqaViewAngle) => void;
   onSelectMoeFocusToken: (tokenIdx: number) => void;
+  onStepMoeFocusToken: (delta: -1 | 1) => void;
+  onToggleMoeTokenCycle: () => void;
   onSelectMoeExpert: (expertId: number) => void;
   onSelectGqaBay: (bayId: 6 | 43) => void;
   onSelectGqaView: (view: GqaViewAngle) => void;
@@ -310,7 +312,7 @@ export function computeEditorialCacheKey(
   const effMoeExp = activeCutaway?.moeStats?.focusExpert ?? state.moeActiveExpert ?? 'top0';
   const effGqaG0 = activeCutaway?.gqaStats?.activeGroup0Head ?? state.gqaActiveGroup0Head;
   const effGqaG1 = activeCutaway?.gqaStats?.activeGroup1Head ?? state.gqaActiveGroup1Head;
-  return `${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${state.mode}:${state.mambaBayId}:${effMambaHead}:${effMambaTok}:${state.mambaStateToken ?? 'last'}:${state.mambaTemporalPlaying ? 'tplay' : 'tpause'}:${state.moeBayId}:${effMoeTok}:${effMoeExp}:${state.gqaBayId}:${effGqaG0}:${effGqaG1}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
+  return `${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${state.mode}:${state.mambaBayId}:${effMambaHead}:${effMambaTok}:${state.mambaStateToken ?? 'last'}:${state.mambaTemporalPlaying ? 'tplay' : 'tpause'}:${state.moeBayId}:${effMoeTok}:${effMoeExp}:${state.moeTokenCycling ? 'mplay' : 'mpause'}:${state.gqaBayId}:${effGqaG0}:${effGqaG1}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
 }
 
 export class MacroControls {
@@ -1284,15 +1286,51 @@ export class MacroControls {
     const focusTok = cutaway?.moeStats?.focusToken ?? Math.max(0, state.tokens - 1);
     const focusExp = cutaway?.moeStats?.focusExpert ?? cutaway?.moeStats?.activeExpertIds[0] ?? 0;
 
-    // 1. Focused Token Row
+    // 1. Focused Token Row + Lightweight Per-Token Cycling (0 B sequence cache!)
     const tokTop = document.createElement('div');
     tokTop.className = 'qhead-top-row';
     const tokHeading = document.createElement('span');
     tokHeading.className = 'qhead-heading';
     const tokLabel = sim?.tokenLabels[focusTok] ?? `t${focusTok}`;
-    tokHeading.textContent = `Focused Token: t${focusTok} "${tokLabel}" (1..${state.tokens})`;
+    tokHeading.textContent = `Focused Token: t${focusTok} "${tokLabel}" (${focusTok + 1}/${state.tokens})`;
     tokTop.appendChild(tokHeading);
     wrap.appendChild(tokTop);
+
+    const cycleRow = document.createElement('div');
+    cycleRow.className = 'mtemp-controls-row';
+
+    const prevTokBtn = document.createElement('button');
+    prevTokBtn.type = 'button';
+    prevTokBtn.className = 'mtemp-btn';
+    prevTokBtn.dataset.testid = 'moe-t-prev';
+    prevTokBtn.textContent = '◀';
+    prevTokBtn.title = 'Previous token (t − 1)';
+    prevTokBtn.disabled = state.tokens <= 1;
+    prevTokBtn.addEventListener('click', () => this.cb.onStepMoeFocusToken(-1));
+
+    const cycleBtn = document.createElement('button');
+    cycleBtn.type = 'button';
+    cycleBtn.className = state.moeTokenCycling
+      ? 'mtemp-btn mtemp-play-btn is-playing'
+      : 'mtemp-btn mtemp-play-btn';
+    cycleBtn.dataset.testid = 'moe-t-cycle';
+    cycleBtn.textContent = state.moeTokenCycling ? '❚❚ Pause t' : '▶ Cycle t';
+    cycleBtn.title = 'Cycle tokens t = 0 → T−1 to watch Top-6 active experts switch independently (0 B cache)';
+    cycleBtn.disabled = state.tokens <= 1;
+    cycleBtn.setAttribute('aria-pressed', String(state.moeTokenCycling));
+    cycleBtn.addEventListener('click', () => this.cb.onToggleMoeTokenCycle());
+
+    const nextTokBtn = document.createElement('button');
+    nextTokBtn.type = 'button';
+    nextTokBtn.className = 'mtemp-btn';
+    nextTokBtn.dataset.testid = 'moe-t-next';
+    nextTokBtn.textContent = '▶';
+    nextTokBtn.title = 'Next token (t + 1)';
+    nextTokBtn.disabled = state.tokens <= 1;
+    nextTokBtn.addEventListener('click', () => this.cb.onStepMoeFocusToken(1));
+
+    cycleRow.append(prevTokBtn, cycleBtn, nextTokBtn);
+    wrap.appendChild(cycleRow);
 
     const tokGrid = document.createElement('div');
     tokGrid.className = 'moe-token-grid';

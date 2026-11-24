@@ -42,7 +42,9 @@ export interface MoeValueAtlas extends Rg32fValueAtlas {
   readonly rmsnorm: AtlasSlice;
   readonly wRouter: AtlasSlice;
   readonly routerBankTiles: readonly AtlasSlice[]; // 128 individual [1×1] slices (E000..E127)
-  readonly topkWeights: AtlasSlice; // [1 × 6]
+  readonly topkUnbiased: AtlasSlice; // [1 × 6] unbiased sigmoid scores (bias stripped before norm)
+  readonly topkWeights: AtlasSlice; // [1 × 6] normalized ×2.5 router weights
+  readonly activeWeightedOut: readonly AtlasSlice[]; // 6 × [1 × 8] per-branch w_j·y_j outputs
   readonly routedWUp: AtlasSlice; // [4 × 8]
   readonly routedPre: AtlasSlice; // [4 × 1]
   readonly routedAct: AtlasSlice; // [4 × 1]
@@ -134,18 +136,47 @@ export function buildMoeValueAtlas(
     });
   }
 
-  // 3. Top-6 Weights [1 × 6] at x = 48..53, y = 8
+  // 3. Top-6 Weights [1 × 6] at x = 48..53, y = 8 & Unbiased Sigmoid Scores [1 × 6] at x = 54..59, y = 8
   let maxTopW = 0.5;
+  let maxRawS = 0.5;
   for (let j = 0; j < topK; j++) {
     const w = sim.topk_weights[tokIdx * topK + j];
+    const rs = sim.topk_raw_scores[tokIdx * topK + j];
     if (w > maxTopW) maxTopW = w;
+    if (rs > maxRawS) maxRawS = rs;
     setTexel(48 + j, 8, w);
+    setTexel(54 + j, 8, rs);
   }
   const topkWeights: AtlasSlice = {
     rect: makeRect(48, 8, topK, 1),
     scale: 1 / Math.max(0.65, maxTopW),
     mode: 1,
   };
+  const topkUnbiased: AtlasSlice = {
+    rect: makeRect(54, 8, topK, 1),
+    scale: 1 / Math.max(0.65, maxRawS),
+    mode: 1,
+  };
+
+  // 3B. Six Independent Active Routed Branch Weighted Outputs (w_j · y_j, [1 × 8] each) at x = 100..107, y = 0..5
+  let maxBranchOut = 0.25;
+  for (let j = 0; j < topK; j++) {
+    const w = sim.topk_weights[tokIdx * topK + j];
+    const yBase = (tokIdx * topK + j) * d;
+    for (let o = 0; o < d; o++) {
+      const val = w * sim.active_y[yBase + o];
+      if (Math.abs(val) > maxBranchOut) maxBranchOut = Math.abs(val);
+      setTexel(100 + o, j, val, false);
+    }
+  }
+  const activeWeightedOut: AtlasSlice[] = [];
+  for (let j = 0; j < topK; j++) {
+    activeWeightedOut.push({
+      rect: makeRect(100, j, d, 1),
+      scale: 1 / maxBranchOut,
+      mode: 0,
+    });
+  }
 
   // 4. Focused Routed Expert Detail (active or on-demand idle preview) at x = 64..77, y = 0..7
   const focusedEval = evaluateSingleRoutedExpert(sim, expId, tokIdx);
@@ -249,7 +280,9 @@ export function buildMoeValueAtlas(
     rmsnorm,
     wRouter,
     routerBankTiles,
+    topkUnbiased,
     topkWeights,
+    activeWeightedOut,
     routedWUp,
     routedPre,
     routedAct,

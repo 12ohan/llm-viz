@@ -288,7 +288,8 @@ describe('Phase 1 MoE 128+1 Exact Operand Highlighting, Dimming & opFocusBounds'
       expect(highlightAt(routerScene, idx), `MoE ${dimKey} should dim on router_bank trace`).toBe(SHEET_HL_DIMMED);
     }
 
-    // (2) Inspecting topk_weights slot #2 -> highlights topk_weights (ACTIVE) & ONLY slot2Expert tile (OPERAND_A)
+    // (2) Inspecting topk_weights slot #2 -> highlights topk_weights (ACTIVE), selected numerator
+    //     slot2Expert (OPERAND_A), the other 5 Top-6 denominator winners (OPERAND_B), and dims all 122 idle tiles
     const topkScene = buildMoECutaway({
       bayId: 2,
       tokens: 8,
@@ -312,9 +313,17 @@ describe('Phase 1 MoE 128+1 Exact Operand Highlighting, Dimming & opFocusBounds'
       .map((box, idx) => ({ box, idx, hl: highlightAt(topkScene, idx) }))
       .filter((e) => e.box.tensorKey === 'router_bank');
     const opABank = topkBank.filter((e) => e.hl === SHEET_HL_OPERAND_A);
+    const opBBank = topkBank.filter((e) => e.hl === SHEET_HL_OPERAND_B);
+    const winnerSet = new Set(winners);
     expect(opABank).toHaveLength(2);
     expect(opABank.every((e) => e.box.headIndex === slot2Expert)).toBe(true);
-    expect(topkBank.filter((e) => e.hl === SHEET_HL_DIMMED)).toHaveLength(132);
+    expect(opBBank).toHaveLength(10); // other 5 active Top-6 experts × 2 micro-plates (denominator terms)
+    expect(
+      opBBank.every(
+        (e) => e.box.headIndex !== undefined && e.box.headIndex !== slot2Expert && winnerSet.has(e.box.headIndex),
+      ),
+    ).toBe(true);
+    expect(topkBank.filter((e) => e.hl === SHEET_HL_DIMMED)).toHaveLength(122); // all 122 unselected idle experts
 
     // (3) Inspecting routed_act (ReLU²) -> highlights ONLY routed_act (ACTIVE) & routed_pre (OPERAND_A)
     const routedActScene = buildMoECutaway({
