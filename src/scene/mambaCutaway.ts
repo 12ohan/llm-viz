@@ -1233,7 +1233,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     { id: 'm-c', label: 'C (8 grps)', world: [cX, 0.08, zSplit - splitDepth * 0.5 - 0.18], partId: 'c-proj', align: 'top', tier: 'primary' },
     {
       id: 'm-hprev',
-      label: `H_{t−1} (${headTag})`,
+      label: `Hₜ₋₁ (${headTag})`,
       world: [hPrevX, 0.08, zSsm - hSize * 0.5 - 0.18],
       partId: 'ssm-state-prev',
       align: 'top',
@@ -1242,7 +1242,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     },
     {
       id: 'm-hcurr',
-      label: `H_t (${headTag} · Fixed)`,
+      label: `Hₜ (${headTag} · Fixed)`,
       world: [hCurrX, 0.08, zSsm - hSize * 0.5 - 0.18],
       partId: 'ssm-state-curr',
       align: 'top',
@@ -1258,7 +1258,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
       tier: 'primary',
       tone: 'cyan',
     },
-    { id: 'm-y', label: 'y = H_t·C + D·x', world: [yX - yW * 0.5 - 0.18, 0.08, zY], partId: 'ssm-readout', align: 'left', tier: 'primary' },
+    { id: 'm-y', label: 'y = Hₜ·C + D·x', world: [yX - yW * 0.5 - 0.18, 0.08, zY], partId: 'ssm-readout', align: 'left', tier: 'primary' },
     { id: 'm-gnorm', label: 'Gate→8-Grp Norm', world: [normX - normW * 0.5 - 0.22, 0.08, zNorm], partId: 'group-norm', align: 'left', tier: 'primary' },
     {
       id: 'm-out-proj',
@@ -1272,7 +1272,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     { id: 'm-res-out', label: '+ Residual', world: [resX, 0.08, zOut + 0.66], partId: 'residual-out', align: 'bottom', tier: 'primary' },
     // Detail zoom-revealed callouts
     { id: 'm-xbc-pre-sec', label: `xBC_pre (T=${clampedT})`, world: [convX + convW * 0.5 + 0.18, 0.08, zXbcPre], partId: 'xbc-pre', align: 'right', tier: 'detail', tone: 'muted' },
-    { id: 'm-loop-sec', label: 'In-place update: H_t = dA·H_{t−1} + Δt·x·B', world: [(hPrevX + hCurrX) * 0.5, 0.08, zSsm + hSize * 0.5 + 0.62], partId: 'ssm-state-curr', align: 'bottom', tier: 'detail', tone: 'cyan' },
+    { id: 'm-loop-sec', label: 'In-place update: Hₜ = dA·Hₜ₋₁ + Δt·x·B', world: [(hPrevX + hCurrX) * 0.5, 0.08, zSsm + hSize * 0.5 + 0.62], partId: 'ssm-state-curr', align: 'bottom', tier: 'detail', tone: 'cyan' },
   );
 
   if (isFeeder) {
@@ -1377,7 +1377,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
         'Per-head discretization step Δt = softplus(Δt_raw + Δt_bias) > 0 controlling continuous decay A = −exp(A_log) < 0 via dA = exp(Δt · A) ∈ (0, 1).',
       specs: [
         'Uses numerically stable softplus: max(v, 0) + log1p(exp(−|v|))',
-        'Balances retention (dA · H_{t−1}) against new write energy (Δt · x · B)',
+        'Balances retention (dA · Hₜ₋₁) against new write energy (Δt · x · B)',
       ],
     },
     'b-proj': {
@@ -1385,7 +1385,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
       title: 'Grouped Input Projection B (8 Groups)',
       badge: '8 Groups · Shared across heads',
       summary:
-        'Post-Conv1D+SiLU write keys shared across the 8 Mamba-2 groups (2 miniature heads/group; 8 production heads/group). Outer-products with Δt · x to write into H_t.',
+        'Post-Conv1D+SiLU write keys shared across the 8 Mamba-2 groups (2 miniature heads/group; 8 production heads/group). Outer-products with Δt · x to write into Hₜ.',
       specs: [
         'Production: 8 groups × 128 state dim = 1,024 · Miniature: 8 × 4 = 32',
         `Active head ${headTag} reads group G${activeGroup} columns.`,
@@ -1396,29 +1396,29 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
       title: 'Grouped Readout Projection C (8 Groups)',
       badge: '8 Groups · Shared across heads',
       summary:
-        'Post-Conv1D+SiLU readout queries shared across the 8 Mamba-2 groups. Contracts the updated SSM state H_t along state dimension n to produce y_ssm.',
+        'Post-Conv1D+SiLU readout queries shared across the 8 Mamba-2 groups. Contracts the updated SSM state Hₜ along state dimension n to produce y_ssm.',
       specs: [
         'Production: 8 groups × 128 state dim = 1,024 · Miniature: 8 × 4 = 32',
-        `Active head ${headTag} contracts H_t with C[G${activeGroup}].`,
+        `Active head ${headTag} contracts Hₜ with C[G${activeGroup}].`,
       ],
     },
     'ssm-state-prev': {
       id: 'ssm-state-prev',
-      title: `Prior SSM State H_{t−1} (${headTag} · G${activeGroup})`,
+      title: `Prior SSM State Hₜ₋₁ (${headTag} · G${activeGroup})`,
       badge: 'Fixed Size · FP32',
       summary:
         'State matrix carried from the previous token (all zeros at T = 1). In production inference only the single active state buffer is kept and overwritten in place; H_history is browser-only playback history.',
       specs: [
         `Active miniature head: ${headTag} (4×4) · Production head: 64×128 FP32`,
-        'Decays elementwise by dA = exp(Δt · A) ∈ (0, 1) into H_t.',
+        'Decays elementwise by dA = exp(Δt · A) ∈ (0, 1) into Hₜ.',
       ],
     },
     'ssm-state-curr': {
       id: 'ssm-state-curr',
-      title: `SSM State H_t (${headTag} · G${activeGroup})`,
+      title: `SSM State Hₜ (${headTag} · G${activeGroup})`,
       badge: 'Fixed Size · 46.0 MiB FP32 / 23 bays',
       summary:
-        'Updated recurrent state H_t = dA · H_{t−1} + Δt · x · B. Scrubbing T = 1 → 16 refreshes values inside this exact fixed-size matrix without allocating a single extra byte of SSM memory.',
+        'Updated recurrent state Hₜ = dA · Hₜ₋₁ + Δt · x · B. Scrubbing T = 1 → 16 refreshes values inside this exact fixed-size matrix without allocating a single extra byte of SSM memory.',
       specs: [
         'Persistent SSM state: 64×64×128×4 B = 2.00 MiB/bay (46.0 MiB FP32 across 23 bays)',
         'Combined persistent Mamba state: 46.0 MiB SSM + ~1.08 MiB Conv1D ≈ 47.1 MiB fixed (T=1 → 1M)',
@@ -1430,7 +1430,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
       title: '64-Head Production SSM State Bank (FP32)',
       badge: '46.0 MiB SSM + 1.08 MiB Conv1D',
       summary:
-        'All 64 production SSM heads (8 groups × 8 heads, each 64×128 FP32) remain strictly fixed in size from 1 to 1M tokens. Click any tile to inspect its mapped miniature head H00–H15 in H_{t−1} ⇄ H_t.',
+        'All 64 production SSM heads (8 groups × 8 heads, each 64×128 FP32) remain strictly fixed in size from 1 to 1M tokens. Click any tile to inspect its mapped miniature head H00–H15 in Hₜ₋₁ ⇄ Hₜ.',
       specs: [
         'Persistent SSM storage: 2.00 MiB/layer × 23 = 46.0 MiB FP32 (NEVER FP8)',
         'Persistent Conv1D storage: 48 KiB/layer × 23 = ~1.08 MiB BF16 → ~47.1 MiB total fixed',
@@ -1439,12 +1439,12 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     },
     'ssm-readout': {
       id: 'ssm-readout',
-      title: 'SSM State Readout + Skip (y = H_t·C + D·x)',
+      title: 'SSM State Readout + Skip (y = Hₜ·C + D·x)',
       badge: 'State Readout + Per-Head D',
       summary:
-        'Contracts each head’s updated state H_t with its group’s C vector and adds the learned per-head skip connection D[h] · x.',
+        'Contracts each head’s updated state Hₜ with its group’s C vector and adds the learned per-head skip connection D[h] · x.',
       specs: [
-        'Equation: y[h, p, t] = Σₙ H_t[h, p, n] · C[g, n, t] + D[h] · x[h, p, t]',
+        'Equation: y[h, p, t] = Σₙ Hₜ[h, p, n] · C[g, n, t] + D[h] · x[h, p, t]',
         'Feeds directly into MambaRMSNormGated.',
       ],
     },
@@ -1492,7 +1492,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
       title: `Mamba-2 Head ${hId} (Group G${g})`,
       badge: `A = ${sim.A[h].toFixed(2)} · D = ${sim.D[h].toFixed(2)}`,
       summary:
-        `Miniature head ${hId} shares B/C group G${g} with ${formatMambaHeadId(g * 2)}–${formatMambaHeadId(g * 2 + 1)} (mirroring 8 production heads per group across 64 heads). Selecting ${hId} updates the live H_{t−1} ⇄ H_t state sheets.`,
+        `Miniature head ${hId} shares B/C group G${g} with ${formatMambaHeadId(g * 2)}–${formatMambaHeadId(g * 2 + 1)} (mirroring 8 production heads per group across 64 heads). Selecting ${hId} updates the live Hₜ₋₁ ⇄ Hₜ state sheets.`,
       specs: [
         `Continuous decay A[${hId}] = −exp(${sim.A_log[h].toFixed(2)}) = ${sim.A[h].toFixed(3)} · Latest dA = ${sim.dA[h * clampedT + (clampedT - 1)].toFixed(3)}`,
         `Per-head skip D[${hId}] = ${sim.D[h].toFixed(3)} · Latest Δt = ${sim.dt[h * clampedT + (clampedT - 1)].toFixed(3)}`,

@@ -24,6 +24,7 @@ import {
 } from '../model/state';
 import { GQA_STEPPER_STEPS } from '../math/gqaSim';
 import { MAMBA_STEPPER_STEPS } from '../math/mambaSim';
+import { formatExpertId, MOE_STEPPER_STEPS } from '../math/moeSim';
 import {
   formatMambaHeadId,
   formatQueryHeadId,
@@ -40,6 +41,10 @@ export interface ControlsCallbacks {
   onSelectSection: (section: TocSectionId) => void;
   onSelectMambaBay: (bayId: 1 | 42) => void;
   onSelectMambaView: (view: GqaViewAngle) => void;
+  onSelectMoeBay: (bayId: 2 | 52) => void;
+  onSelectMoeView: (view: GqaViewAngle) => void;
+  onSelectMoeFocusToken: (tokenIdx: number) => void;
+  onSelectMoeExpert: (expertId: number) => void;
   onSelectGqaBay: (bayId: 6 | 43) => void;
   onSelectGqaView: (view: GqaViewAngle) => void;
   onSelectPart: (partId: string | null) => void;
@@ -167,6 +172,8 @@ export interface ControlsElements {
   presetButtons: HTMLButtonElement[];
   mambaBayButtons: HTMLButtonElement[];
   mambaViewButtons: HTMLButtonElement[];
+  moeBayButtons: HTMLButtonElement[];
+  moeViewButtons: HTMLButtonElement[];
   gqaBayButtons: HTMLButtonElement[];
   gqaViewButtons: HTMLButtonElement[];
   miniNodes: SVGGElement[];
@@ -225,6 +232,8 @@ export function queryControlsElements(): ControlsElements {
     presetButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('.pill-btn[data-preset]')),
     mambaBayButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-mamba-bay]')),
     mambaViewButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-mamba-view]')),
+    moeBayButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-moe-bay]')),
+    moeViewButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-moe-view]')),
     gqaBayButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-gqa-bay]')),
     gqaViewButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-gqa-view]')),
     miniNodes: Array.from(document.querySelectorAll<SVGGElement>('.mini-node[data-mini-section]')),
@@ -335,6 +344,22 @@ export class MacroControls {
       });
     }
 
+    for (const btn of this.els.moeBayButtons) {
+      this.on(btn, 'click', () => {
+        const id = Number.parseInt(btn.dataset.moeBay ?? '2', 10);
+        if (id === 2 || id === 52) this.cb.onSelectMoeBay(id);
+      });
+    }
+
+    for (const btn of this.els.moeViewButtons) {
+      this.on(btn, 'click', () => {
+        const view = btn.dataset.moeView as GqaViewAngle | undefined;
+        if (view === 'three_quarter' || view === 'near_plan') {
+          this.cb.onSelectMoeView(view);
+        }
+      });
+    }
+
     for (const btn of this.els.gqaBayButtons) {
       this.on(btn, 'click', () => {
         const id = Number.parseInt(btn.dataset.gqaBay ?? '6', 10);
@@ -423,12 +448,18 @@ export class MacroControls {
     this.els.moeSubbar.hidden = state.mode !== 'cutaway_moe';
     this.els.gqaSubbar.hidden = state.mode !== 'cutaway_gqa';
 
-    // Mamba & GQA representative bay & camera view toggles
+    // Mamba, MoE & GQA representative bay & camera view toggles
     for (const btn of this.els.mambaBayButtons) {
       btn.classList.toggle('is-active', Number(btn.dataset.mambaBay) === state.mambaBayId);
     }
     for (const btn of this.els.mambaViewButtons) {
       btn.classList.toggle('is-active', btn.dataset.mambaView === state.mambaViewAngle);
+    }
+    for (const btn of this.els.moeBayButtons) {
+      btn.classList.toggle('is-active', Number(btn.dataset.moeBay) === state.moeBayId);
+    }
+    for (const btn of this.els.moeViewButtons) {
+      btn.classList.toggle('is-active', btn.dataset.moeView === state.moeViewAngle);
     }
     for (const btn of this.els.gqaBayButtons) {
       btn.classList.toggle('is-active', Number(btn.dataset.gqaBay) === state.gqaBayId);
@@ -438,7 +469,10 @@ export class MacroControls {
     }
 
     // Floating corner badge & orbit hint (hidden when shared live Math Dock occupies bottom)
-    const usesLiveMathDock = state.mode === 'cutaway_gqa' || state.mode === 'cutaway_mamba';
+    const usesLiveMathDock =
+      state.mode === 'cutaway_gqa' ||
+      state.mode === 'cutaway_mamba' ||
+      state.mode === 'cutaway_moe';
     this.els.floatingBadge.hidden = usesLiveMathDock;
     this.els.orbitHint.hidden = usesLiveMathDock;
     this.els.gqaMathDock.hidden = !usesLiveMathDock;
@@ -453,7 +487,10 @@ export class MacroControls {
       this.syncMathDock(state, activeCutaway);
     } else if (state.mode === 'cutaway_moe') {
       this.els.floatingBadge.textContent =
-        'Cutaway: MoE 128+1 · Bay 02 (6 Active + Shared 3,712)';
+        state.moeBayId === 52
+          ? 'Cutaway: MoE 128+1 · Bay 52 Final MoE (6 Active + Shared 3,712)'
+          : 'Cutaway: MoE 128+1 · Bay 02 (6 Active + Shared 3,712)';
+      this.syncMathDock(state, activeCutaway);
     } else {
       this.els.floatingBadge.textContent = `Cutaway: GQA Attention · Bay ${formatBayId(state.gqaBayId)} (32Q / 2KV, NoPE)`;
       this.syncMathDock(state, activeCutaway);
@@ -555,7 +592,7 @@ export class MacroControls {
     // Middle editorial panel
     const activeBayId = isTower ? state.hoveredBay ?? state.selectedBay : null;
     const activePart = !isTower ? state.hoveredPart ?? state.selectedPart : null;
-    const editorialKey = `${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${state.mode}:${state.mambaBayId}:${state.mambaActiveHead}:${state.gqaBayId}:${state.gqaActiveGroup0Head}:${state.gqaActiveGroup1Head}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
+    const editorialKey = `${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${state.mode}:${state.mambaBayId}:${state.mambaActiveHead}:${state.moeBayId}:${state.moeFocusToken ?? 'last'}:${state.moeActiveExpert ?? 'top0'}:${state.gqaBayId}:${state.gqaActiveGroup0Head}:${state.gqaActiveGroup1Head}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
 
     if (editorialKey !== this.lastEditorialKey) {
       this.lastEditorialKey = editorialKey;
@@ -577,16 +614,25 @@ export class MacroControls {
 
   private syncMathDock(state: SceneState, cutaway: CutawaySceneGeometry | null): void {
     const isMamba = state.mode === 'cutaway_mamba';
+    const isMoe = state.mode === 'cutaway_moe';
     const formula = cutaway?.activeFormula ?? null;
     const isPinnedCell = isMamba
       ? state.mambaSelectedCell !== null
-      : state.gqaSelectedCell !== null;
-    const steps = isMamba ? MAMBA_STEPPER_STEPS : GQA_STEPPER_STEPS;
+      : isMoe
+        ? state.moeSelectedCell !== null
+        : state.gqaSelectedCell !== null;
+    const steps = isMamba
+      ? MAMBA_STEPPER_STEPS
+      : isMoe
+        ? MOE_STEPPER_STEPS
+        : GQA_STEPPER_STEPS;
 
     // Update honest miniature simulator disclaimer note
     this.els.gqaFormulaNote.textContent = isMamba
       ? 'Deterministic miniature Mamba-2 sim (d=8, 16H/8G, dₕ=4, dₛ=4; Float32 storage, rounded outputs) · Educational token labels · BF16/FP8 = production metadata'
-      : 'Deterministic miniature GQA sim (d=8, 32Q/2KV, dₕ=4; Float32 storage, rounded outputs) · Educational token labels · BF16/FP8 = production metadata';
+      : isMoe
+        ? 'Deterministic miniature MoE sim (d=8, 128E top-6, d_exp=4, d_shared=8, ×2.5; Float32 storage, rounded outputs) · Educational token labels · BF16/FP8/FP32 = production metadata'
+        : 'Deterministic miniature GQA sim (d=8, 32Q/2KV, dₕ=4; Float32 storage, rounded outputs) · Educational token labels · BF16/FP8 = production metadata';
 
     if (formula) {
       this.els.gqaFormulaTensor.textContent = formula.tensorLabel;
@@ -628,6 +674,18 @@ export class MacroControls {
         this.els.gqaFormulaSub.textContent = tokPreview
           ? `Educational token labels (T=${state.tokens}): ${tokPreview}`
           : '';
+      } else if (isMoe) {
+        const fTok = cutaway?.moeStats?.focusToken ?? Math.max(0, state.tokens - 1);
+        const fExp = cutaway?.moeStats?.focusExpert ?? cutaway?.moeStats?.activeExpertIds[0] ?? 0;
+        const tokLabel = cutaway?.moeSim?.tokenLabels[fTok] ?? `t${fTok}`;
+        this.els.gqaFormulaTensor.textContent = `Miniature MoE 128+1 · Bay ${formatBayId(state.moeBayId)}`;
+        this.els.gqaFormulaCoord.textContent = `Focus: t${fTok} "${tokLabel}" · ${formatExpertId(fExp)}`;
+        this.els.gqaFormulaEq.textContent =
+          'Hover or click any router tile, Top-6 slot, routed ReLU² cell, or 2× shared cell, or press Play to step through parallel MoE.';
+        const topList = cutaway?.moeStats?.activeExpertIds?.map(formatExpertId).join(', ') ?? '';
+        this.els.gqaFormulaSub.textContent = topList
+          ? `Top-6 active for t${fTok} "${tokLabel}": ${topList} (122 idle = 0 contrib) · 0 B token cache`
+          : '';
       } else {
         const g0 = formatQueryHeadId(cutaway?.gqaStats?.activeGroup0Head ?? state.gqaActiveGroup0Head);
         const g1 = formatQueryHeadId(cutaway?.gqaStats?.activeGroup1Head ?? state.gqaActiveGroup1Head);
@@ -644,10 +702,26 @@ export class MacroControls {
       }
     }
 
-    const stepperActive = isMamba ? state.mambaStepperActive : state.gqaStepperActive;
-    const stepperPlaying = isMamba ? state.mambaStepperPlaying : state.gqaStepperPlaying;
-    const stepperStep = isMamba ? state.mambaStepperStep : state.gqaStepperStep;
-    const stepperSub = isMamba ? state.mambaStepperSubProgress : state.gqaStepperSubProgress;
+    const stepperActive = isMamba
+      ? state.mambaStepperActive
+      : isMoe
+        ? state.moeStepperActive
+        : state.gqaStepperActive;
+    const stepperPlaying = isMamba
+      ? state.mambaStepperPlaying
+      : isMoe
+        ? state.moeStepperPlaying
+        : state.gqaStepperPlaying;
+    const stepperStep = isMamba
+      ? state.mambaStepperStep
+      : isMoe
+        ? state.moeStepperStep
+        : state.gqaStepperStep;
+    const stepperSub = isMamba
+      ? state.mambaStepperSubProgress
+      : isMoe
+        ? state.moeStepperSubProgress
+        : state.gqaStepperSubProgress;
 
     const playing = stepperActive && stepperPlaying;
     this.els.gqaStepPlay.textContent = playing ? '❚❚ Pause' : '▶ Play';
@@ -984,6 +1058,8 @@ export class MacroControls {
         panel.appendChild(
           this.buildMambaHeadSelector(state.mambaActiveHead, state.selectedPart, state.hoveredPart),
         );
+      } else if (state.mode === 'cutaway_moe') {
+        panel.appendChild(this.buildMoeInspectorControls(state, cutaway));
       }
       panel.appendChild(actions);
       return;
@@ -1012,8 +1088,8 @@ export class MacroControls {
       if (isFeeder && isFp8) badge.classList.add('ed-badge-gold');
 
       bodyText = isFeeder
-        ? 'Feeder preceding Bay 43 GQA — preserved in BF16 under NVIDIA §4.2. Runs a deterministic miniature Mamba-2 simulator (d=8, 16H/8G, dₕ=4, dₛ=4; Float32 tensor storage, rounded outputs) where sequence tensors grow with T while H_{t−1} ⇄ H_t and the 64-head bank stay fixed.'
-        : 'Runs a deterministic miniature Mamba-2 simulator (d=8, 16H/8G, dₕ=4, dₛ=4; Float32 tensor storage, rounded outputs). Sequence tensors (xBC_pre, z, x, B, C, Δt) grow with T while the 4-tap Conv1D buffer and H_{t−1} ⇄ H_t SSM state remain strictly constant.';
+        ? 'Feeder preceding Bay 43 GQA — preserved in BF16 under NVIDIA §4.2. Runs a deterministic miniature Mamba-2 simulator (d=8, 16H/8G, dₕ=4, dₛ=4; Float32 tensor storage, rounded outputs) where sequence tensors grow with T while Hₜ₋₁ ⇄ Hₜ and the 64-head bank stay fixed.'
+        : 'Runs a deterministic miniature Mamba-2 simulator (d=8, 16H/8G, dₕ=4, dₛ=4; Float32 tensor storage, rounded outputs). Sequence tensors (xBC_pre, z, x, B, C, Δt) grow with T while the 4-tap Conv1D buffer and Hₜ₋₁ ⇄ Hₜ SSM state remain strictly constant.';
 
       specs = [
         'Persistent storage (23 bays): 46.0 MiB SSM (FP32) + ~1.08 MiB Conv1D (BF16) ≈ 47.1 MiB fixed · H_history is browser-only playback',
@@ -1023,18 +1099,22 @@ export class MacroControls {
         'Gate FIRST (y·SiLU(z)) → 8-Group RMSNorm (ε=1e−5, norm_before_gate=False) · Select H00–H15 below.',
       ];
     } else if (state.mode === 'cutaway_moe') {
-      const activeIds = cutaway?.moeStats?.activeExpertIds ?? [];
-      const activeList = activeIds.map((id) => `#${id}`).join(', ');
-      title.textContent = 'MoE 128+1 Cutaway · Bay 02';
-      badge.textContent = `6 / 128 Active · T=${state.tokens}`;
+      const fTok = cutaway?.moeStats?.focusToken ?? Math.max(0, state.tokens - 1);
+      const tokLabel = cutaway?.moeSim?.tokenLabels[fTok] ?? `t${fTok}`;
+      title.textContent =
+        state.moeBayId === 52
+          ? 'MoE 128+1 Cutaway · Bay 52 (Final)'
+          : 'MoE 128+1 Cutaway · Bay 02';
+      badge.textContent = isFp8 ? 'FP8 Experts · FP32 Router' : `6 / 128 Active · t${fTok}`;
+      if (isFp8) badge.classList.add('ed-badge-gold');
 
       bodyText =
-        'Inside each MoE bay, experts execute in PARALLEL — never serialized. The sigmoid router activates 6 of 128 routed experts (2 non-gated ReLU² plates each: up_proj + down_proj, NO gate_proj) while 122 experts stay idle (95.3% skipped), running alongside the always-active double-width shared expert.';
+        `Runs a deterministic miniature MoE simulator (d=8, 128 routed top-6, d_exp=4, d_shared=8 = 2×, ×2.5; Float32 storage, rounded outputs). For token t${fTok} "${tokLabel}", RMSNorm forks in parallel into the sparse 128-expert bank (non-gated ReLU², no gate_proj) and the always-on 2× shared expert.`;
 
       specs = [
-        `Token T=${state.tokens} active routed experts: ${activeList || '6 of 128'}`,
-        SHARED_EXPERT_NOTE,
-        '1.30B params/layer × 23 = 29.8B (~94% of 31.6B weights) · 0 B token cache',
+        'Router: sigmoid(W_router·U) + e_score_correction_bias selects Top-6; unbiased σ gathers weights → norm × 2.5 (Router stays FP32 in FP8 Selective)',
+        SHARED_EXPERT_NOTE + ' (added unscaled at 1.0× alongside Top-6 routed sum)',
+        '1.30B params/layer × 23 = 29.8B (~94% of 31.6B weights) · 0 B dynamic token cache (strictly per-token independent)',
       ];
     } else {
       const perBayKiB = ((isFp8 ? 512 : 1024) * state.tokens) / 1024;
@@ -1077,15 +1157,89 @@ export class MacroControls {
     backBtn.addEventListener('click', () => this.cb.onSelectMode('tower'));
     actions.appendChild(backBtn);
 
-    panel.append(header, p, list);
-    if (state.mode === 'cutaway_gqa') {
-      panel.appendChild(this.buildGqaHeadSelector(state.selectedPart, state.hoveredPart));
-    } else if (state.mode === 'cutaway_mamba') {
-      panel.appendChild(
-        this.buildMambaHeadSelector(state.mambaActiveHead, state.selectedPart, state.hoveredPart),
-      );
+    if (state.mode === 'cutaway_moe') {
+      panel.append(header, p, this.buildMoeInspectorControls(state, cutaway), list);
+    } else {
+      panel.append(header, p, list);
+      if (state.mode === 'cutaway_gqa') {
+        panel.appendChild(this.buildGqaHeadSelector(state.selectedPart, state.hoveredPart));
+      } else if (state.mode === 'cutaway_mamba') {
+        panel.appendChild(
+          this.buildMambaHeadSelector(state.mambaActiveHead, state.selectedPart, state.hoveredPart),
+        );
+      }
     }
     panel.appendChild(actions);
+  }
+
+  /** Compact Focused Token (t0..t_{T-1}) & Top-6 Winning Expert selector inside MoE inspector. */
+  private buildMoeInspectorControls(
+    state: SceneState,
+    cutaway: CutawaySceneGeometry | null,
+  ): HTMLDivElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'qhead-selector';
+    wrap.setAttribute('data-testid', 'moe-inspector-controls');
+
+    const sim = cutaway?.moeSim ?? null;
+    const focusTok = cutaway?.moeStats?.focusToken ?? Math.max(0, state.tokens - 1);
+    const focusExp = cutaway?.moeStats?.focusExpert ?? cutaway?.moeStats?.activeExpertIds[0] ?? 0;
+
+    // 1. Focused Token Row
+    const tokTop = document.createElement('div');
+    tokTop.className = 'qhead-top-row';
+    const tokHeading = document.createElement('span');
+    tokHeading.className = 'qhead-heading';
+    const tokLabel = sim?.tokenLabels[focusTok] ?? `t${focusTok}`;
+    tokHeading.textContent = `Focused Token: t${focusTok} "${tokLabel}" (1..${state.tokens})`;
+    tokTop.appendChild(tokHeading);
+    wrap.appendChild(tokTop);
+
+    const tokGrid = document.createElement('div');
+    tokGrid.className = 'moe-token-grid';
+    for (let t = 0; t < state.tokens; t++) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'moe-tok-btn';
+      btn.dataset.moeToken = String(t);
+      const lbl = sim?.tokenLabels[t] ?? '';
+      btn.textContent = `t${t} ${lbl}`;
+      btn.title = `Inspect routing for token t${t} "${lbl}"`;
+      const isSel = t === focusTok;
+      btn.classList.toggle('is-selected', isSel);
+      btn.setAttribute('aria-pressed', String(isSel));
+      btn.addEventListener('click', () => this.cb.onSelectMoeFocusToken(t));
+      tokGrid.appendChild(btn);
+    }
+    wrap.appendChild(tokGrid);
+
+    // 2. Top-6 Active Experts Row (clickable to sync detail chain)
+    if (sim) {
+      const expTop = document.createElement('div');
+      expTop.className = 'qhead-group-label';
+      expTop.textContent = `Top-6 Active Experts for t${focusTok} (×2.5 scaled, click to inspect):`;
+      wrap.appendChild(expTop);
+
+      const expGrid = document.createElement('div');
+      expGrid.className = 'moe-topk-grid';
+      for (let j = 0; j < sim.topK; j++) {
+        const eid = sim.topk_indices[focusTok * sim.topK + j];
+        const w = sim.topk_weights[focusTok * sim.topK + j];
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'moe-exp-btn';
+        btn.dataset.moeExpert = String(eid);
+        const isSel = eid === focusExp;
+        btn.classList.toggle('is-selected', isSel);
+        btn.setAttribute('aria-pressed', String(isSel));
+        btn.innerHTML = `<span>${formatExpertId(eid)}</span><span class="moe-exp-w">${w.toFixed(2)}</span>`;
+        btn.addEventListener('click', () => this.cb.onSelectMoeExpert(eid));
+        expGrid.appendChild(btn);
+      }
+      wrap.appendChild(expGrid);
+    }
+
+    return wrap;
   }
 
   /** Interactive Q00..Q31 head selector grouped into 16:1 KV banks inside GQA inspector. */

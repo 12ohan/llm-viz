@@ -44,12 +44,20 @@ import {
   runMambaSim,
   type MambaCellRef,
 } from './math/mambaSim';
+import {
+  inferMoeCellExpert,
+  MOE_STEPPER_STEPS,
+  moeStepperCellForState,
+  runMoeSim,
+  type MoeCellRef,
+} from './math/moeSim';
 import { RenderDevice } from './render/device';
 import { LinesPass } from './render/lines';
 import {
   clientPointToRay,
   pickHitToGqaCell,
   pickHitToMambaCell,
+  pickHitToMoeCell,
   pickMacroBay,
   type PickHit,
 } from './render/pick';
@@ -61,6 +69,7 @@ import {
   buildMambaCutaway,
   buildMoECutaway,
   parseMambaHeadPartId,
+  parseMoeExpertPartId,
   parseQueryHeadPartId,
   type CutawaySceneGeometry,
 } from './scene/cutaways';
@@ -218,19 +227,28 @@ function sameMambaCell(a: MambaCellRef | null, b: MambaCellRef | null): boolean 
   );
 }
 
+function sameMoeCell(a: MoeCellRef | null, b: MoeCellRef | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.tensor === b.tensor &&
+    a.row === b.row &&
+    a.col === b.col &&
+    a.tokenIndex === b.tokenIndex &&
+    a.expertId === b.expertId &&
+    a.rankSlot === b.rankSlot
+  );
+}
+
 function cameraPoseForCutaway(
-  mode: Exclude<ViewMode, 'tower'>,
+  _mode: Exclude<ViewMode, 'tower'>,
   bounds: AABB,
   metrics: ViewportMetrics,
   sheetViewAngle: GqaViewAngle = 'three_quarter',
 ): CameraPose {
-  if (mode === 'cutaway_moe') {
-    return fitPerspectiveToBounds(
-      bounds, 26, 28, metrics.innerWidth, metrics.innerHeight, DEFAULT_FOV_DEG, 0.88,
-    );
-  }
-  // cutaway_gqa & cutaway_mamba: XZ drafting-table thin-sheet schematic with consistent orientation,
-  // safe narrow-viewport framing, and subtle +Z target lift so bottom row clears the docked Math bar.
+  // All three cutaways (GQA, Mamba-2, MoE 128+1) share the XZ drafting-table thin-sheet schematic
+  // with consistent orientation, safe narrow-viewport framing, and subtle +Z target lift so the
+  // bottom row clears the docked Math bar.
   const isStackedNarrow = window.innerWidth <= 900 || metrics.innerWidth < 760;
   if (sheetViewAngle === 'near_plan') {
     const pose = fitPerspectiveToBounds(
@@ -361,11 +379,32 @@ function boot(): void {
     const mambaHead = parseMambaHeadPartId(partId);
     if (mambaHead !== null) {
       state.mambaActiveHead = mambaHead;
+      return;
+    }
+    const moeExp = parseMoeExpertPartId(partId);
+    if (moeExp !== null) {
+      state.moeActiveExpert = moeExp;
     }
   };
 
   const activeViewAngleForMode = (mode: Exclude<ViewMode, 'tower'>): GqaViewAngle =>
-    mode === 'cutaway_mamba' ? state.mambaViewAngle : state.gqaViewAngle;
+    mode === 'cutaway_mamba'
+      ? state.mambaViewAngle
+      : mode === 'cutaway_moe'
+        ? state.moeViewAngle
+        : state.gqaViewAngle;
+
+  const activeMoeFocusToken = (): number => {
+    const raw = state.moeFocusToken === null ? state.tokens - 1 : state.moeFocusToken;
+    return Math.max(0, Math.min(state.tokens - 1, raw));
+  };
+
+  const activeMoeFocusExpert = (sim = runMoeSim(state.tokens), tok = activeMoeFocusToken()): number => {
+    if (state.moeActiveExpert !== null) {
+      return Math.max(0, Math.min(sim.nRoutedExperts - 1, state.moeActiveExpert));
+    }
+    return sim.topk_indices[tok * sim.topK];
+  };
 
   const activeStepperHead = (): number => {
     const sel = parseQueryHeadPartId(state.selectedPart);
@@ -404,6 +443,25 @@ function boot(): void {
     return null;
   };
 
+  const resolveActiveMoeCell = (): MoeCellRef | null => {
+    if (state.mode !== 'cutaway_moe') return null;
+    if (state.moeHoveredCell) return state.moeHoveredCell;
+    if (state.moeSelectedCell) return state.moeSelectedCell;
+    if (state.moeStepperActive) {
+      const sim = runMoeSim(state.tokens);
+      const tok = activeMoeFocusToken();
+      const exp = activeMoeFocusExpert(sim, tok);
+      return moeStepperCellForState(
+        sim,
+        state.moeStepperStep,
+        state.moeStepperSubProgress,
+        tok,
+        exp,
+      );
+    }
+    return null;
+  };
+
   const buildActiveCutaway = (): CutawaySceneGeometry | null => {
     if (state.mode === 'cutaway_mamba') {
       return buildMambaCutaway({
@@ -417,11 +475,17 @@ function boot(): void {
       });
     }
     if (state.mode === 'cutaway_moe') {
+      const tok = activeMoeFocusToken();
       return buildMoECutaway({
+        bayId: state.moeBayId,
         tokens: state.tokens,
         precision: state.precision,
         selectedPart: state.selectedPart,
         hoveredPart: state.hoveredPart,
+        focusToken: tok,
+        activeExpert: state.moeActiveExpert ?? undefined,
+        activeCell: resolveActiveMoeCell(),
+        stepperStep: state.moeStepperActive ? state.moeStepperStep : null,
       });
     }
     if (state.mode === 'cutaway_gqa') {
@@ -557,15 +621,20 @@ function boot(): void {
     state.hoveredPart = null;
     state.gqaHoveredCell = null;
     state.mambaHoveredCell = null;
+    state.moeHoveredCell = null;
     if (modeChanged) {
       state.selectedPart = null;
       state.gqaSelectedCell = null;
       state.mambaSelectedCell = null;
+      state.moeSelectedCell = null;
       if (nextMode !== 'cutaway_gqa') {
         state.gqaStepperPlaying = false;
       }
       if (nextMode !== 'cutaway_mamba') {
         state.mambaStepperPlaying = false;
+      }
+      if (nextMode !== 'cutaway_moe') {
+        state.moeStepperPlaying = false;
       }
       lastStepperTickMs = null;
     }
@@ -635,6 +704,7 @@ function boot(): void {
       state.mambaBayId = bay?.feeder ? 42 : 1;
       selectMode('cutaway_mamba');
     } else if (kind === 'E') {
+      state.moeBayId = bayId === 52 ? 52 : 2;
       selectMode('cutaway_moe');
     } else {
       state.gqaBayId = bayId === 43 ? 43 : 6;
@@ -693,6 +763,14 @@ function boot(): void {
     state.gqaStepperPlaying = false;
     state.gqaStepperStep = 0;
     state.gqaStepperSubProgress = 0;
+    state.moeFocusToken = null;
+    state.moeActiveExpert = null;
+    state.moeHoveredCell = null;
+    state.moeSelectedCell = null;
+    state.moeStepperActive = false;
+    state.moeStepperPlaying = false;
+    state.moeStepperStep = 0;
+    state.moeStepperSubProgress = 0;
     lastStepperTickMs = null;
 
     if (state.mode === 'tower') {
@@ -763,6 +841,55 @@ function boot(): void {
       }
       syncUi();
     },
+    onSelectMoeBay: (bayId) => {
+      state.tourActive = false;
+      if (state.moeBayId === bayId && state.mode === 'cutaway_moe') return;
+      state.moeBayId = bayId;
+      state.selectedPart = null;
+      state.hoveredPart = null;
+      state.moeSelectedCell = null;
+      state.moeHoveredCell = null;
+      markDirtyAndSchedule(true);
+    },
+    onSelectMoeView: (view: GqaViewAngle) => {
+      if (state.moeViewAngle === view && state.mode === 'cutaway_moe') return;
+      state.moeViewAngle = view;
+      if (state.mode === 'cutaway_moe' && currentCutawayScene) {
+        flyToPose(
+          cameraPoseForCutaway('cutaway_moe', currentCutawayScene.fitBounds, currentMetrics, view),
+        );
+      }
+      syncUi();
+    },
+    onSelectMoeFocusToken: (tokenIdx: number) => {
+      state.tourActive = false;
+      const clamped = Math.max(0, Math.min(state.tokens - 1, tokenIdx));
+      state.moeFocusToken = clamped;
+      state.moeActiveExpert = null; // follow rank-0 active expert for newly selected token
+      state.moeSelectedCell = null;
+      state.moeHoveredCell = null;
+      state.selectedPart = null;
+      markDirtyAndSchedule(true);
+    },
+    onSelectMoeExpert: (expertId: number) => {
+      state.tourActive = false;
+      const clamped = Math.max(0, Math.min(127, expertId));
+      const tok = activeMoeFocusToken();
+      state.moeActiveExpert = clamped;
+      state.selectedPart = `moe-expert-${clamped}`;
+      state.hoveredPart = null;
+      state.moeStepperPlaying = false;
+      state.moeStepperActive = false;
+      state.moeSelectedCell = {
+        tensor: 'router_bank',
+        row: Math.floor(clamped / 16),
+        col: clamped % 16,
+        tokenIndex: tok,
+        expertId: clamped,
+      };
+      state.moeHoveredCell = null;
+      markDirtyAndSchedule(true);
+    },
     onSelectGqaBay: (bayId) => {
       state.tourActive = false;
       if (state.gqaBayId === bayId && state.mode === 'cutaway_gqa') return;
@@ -791,11 +918,14 @@ function boot(): void {
       if (partId === null) {
         state.gqaSelectedCell = null;
         state.mambaSelectedCell = null;
+        state.moeSelectedCell = null;
       } else if (parseQueryHeadPartId(partId) !== null && state.gqaSelectedCell) {
         // Clear stale cell from a different head so the newly selected head's live Scores/Softmax stay in sync
         state.gqaSelectedCell = null;
       } else if (parseMambaHeadPartId(partId) !== null && state.mambaSelectedCell) {
         state.mambaSelectedCell = null;
+      } else if (parseMoeExpertPartId(partId) !== null && state.moeSelectedCell) {
+        state.moeSelectedCell = null;
       }
       markDirtyAndSchedule(true);
     },
@@ -804,6 +934,13 @@ function boot(): void {
       const clamped = Math.max(MIN_TOKENS, Math.min(MAX_TOKENS, nextTokens));
       if (clamped === state.tokens) return;
       state.tokens = clamped;
+      if (state.moeFocusToken !== null && state.moeFocusToken >= clamped) {
+        state.moeFocusToken = clamped - 1;
+        state.moeActiveExpert = null;
+      }
+      if (state.moeSelectedCell && (state.moeSelectedCell.tokenIndex ?? 0) >= clamped) {
+        state.moeSelectedCell = null;
+      }
       markDirtyAndSchedule(true);
     },
     onPrecisionChange: (mode: PrecisionMode) => {
@@ -828,6 +965,8 @@ function boot(): void {
       state.gqaHoveredCell = null;
       state.mambaSelectedCell = null;
       state.mambaHoveredCell = null;
+      state.moeSelectedCell = null;
+      state.moeHoveredCell = null;
       markDirtyAndSchedule(true);
     },
     onTourToggle: () => {
@@ -876,6 +1015,18 @@ function boot(): void {
             (state.mambaStepperStep - 1 + MAMBA_STEPPER_STEPS.length) % MAMBA_STEPPER_STEPS.length;
         }
         state.mambaStepperSubProgress = 0;
+      } else if (state.mode === 'cutaway_moe') {
+        state.moeSelectedCell = null;
+        state.moeHoveredCell = null;
+        state.moeStepperPlaying = false;
+        if (!state.moeStepperActive) {
+          state.moeStepperActive = true;
+          state.moeStepperStep = MOE_STEPPER_STEPS.length - 1;
+        } else {
+          state.moeStepperStep =
+            (state.moeStepperStep - 1 + MOE_STEPPER_STEPS.length) % MOE_STEPPER_STEPS.length;
+        }
+        state.moeStepperSubProgress = 0;
       } else {
         state.gqaSelectedCell = null;
         state.gqaHoveredCell = null;
@@ -905,6 +1056,17 @@ function boot(): void {
           state.mambaStepperStep = (state.mambaStepperStep + 1) % MAMBA_STEPPER_STEPS.length;
         }
         state.mambaStepperSubProgress = 0;
+      } else if (state.mode === 'cutaway_moe') {
+        state.moeSelectedCell = null;
+        state.moeHoveredCell = null;
+        state.moeStepperPlaying = false;
+        if (!state.moeStepperActive) {
+          state.moeStepperActive = true;
+          state.moeStepperStep = 0;
+        } else {
+          state.moeStepperStep = (state.moeStepperStep + 1) % MOE_STEPPER_STEPS.length;
+        }
+        state.moeStepperSubProgress = 0;
       } else {
         state.gqaSelectedCell = null;
         state.gqaHoveredCell = null;
@@ -945,6 +1107,30 @@ function boot(): void {
         return;
       }
 
+      if (state.mode === 'cutaway_moe') {
+        state.moeSelectedCell = null;
+        state.moeHoveredCell = null;
+        if (state.reducedMotion) {
+          state.moeStepperActive = true;
+          state.moeStepperPlaying = false;
+          state.moeStepperStep = (state.moeStepperStep + 1) % MOE_STEPPER_STEPS.length;
+          state.moeStepperSubProgress = 0;
+          markDirtyAndSchedule(true);
+          return;
+        }
+        if (state.moeStepperActive && state.moeStepperPlaying) {
+          state.moeStepperPlaying = false;
+          lastStepperTickMs = null;
+          syncUi();
+        } else {
+          state.moeStepperActive = true;
+          state.moeStepperPlaying = true;
+          lastStepperTickMs = null;
+          markDirtyAndSchedule(true);
+        }
+        return;
+      }
+
       state.gqaSelectedCell = null;
       state.gqaHoveredCell = null;
       if (state.reducedMotion) {
@@ -976,6 +1162,13 @@ function boot(): void {
         state.mambaStepperPlaying = false;
         state.mambaStepperStep = Math.max(0, Math.min(MAMBA_STEPPER_STEPS.length - 1, step));
         state.mambaStepperSubProgress = 0;
+      } else if (state.mode === 'cutaway_moe') {
+        state.moeSelectedCell = null;
+        state.moeHoveredCell = null;
+        state.moeStepperActive = true;
+        state.moeStepperPlaying = false;
+        state.moeStepperStep = Math.max(0, Math.min(MOE_STEPPER_STEPS.length - 1, step));
+        state.moeStepperSubProgress = 0;
       } else {
         state.gqaSelectedCell = null;
         state.gqaHoveredCell = null;
@@ -995,6 +1188,12 @@ function boot(): void {
         state.mambaStepperActive = true;
         state.mambaStepperPlaying = false;
         state.mambaStepperSubProgress = Math.max(0, Math.min(0.9999, progress01));
+      } else if (state.mode === 'cutaway_moe') {
+        state.moeSelectedCell = null;
+        state.moeHoveredCell = null;
+        state.moeStepperActive = true;
+        state.moeStepperPlaying = false;
+        state.moeStepperSubProgress = Math.max(0, Math.min(0.9999, progress01));
       } else {
         state.gqaSelectedCell = null;
         state.gqaHoveredCell = null;
@@ -1009,6 +1208,8 @@ function boot(): void {
       state.gqaHoveredCell = null;
       state.mambaSelectedCell = null;
       state.mambaHoveredCell = null;
+      state.moeSelectedCell = null;
+      state.moeHoveredCell = null;
       markDirtyAndSchedule(true);
     },
   });
@@ -1086,6 +1287,32 @@ function boot(): void {
       }
       stepperChangedUi = true;
       continueAnimating = true;
+    } else if (
+      state.mode === 'cutaway_moe' &&
+      state.moeStepperActive &&
+      state.moeStepperPlaying &&
+      !state.reducedMotion
+    ) {
+      const dtSec =
+        lastStepperTickMs === null ? 0 : Math.max(0, Math.min(0.1, (nowMs - lastStepperTickMs) / 1000));
+      lastStepperTickMs = nowMs;
+      const nextProgress = state.moeStepperSubProgress + dtSec / 2.2;
+      if (nextProgress >= 1) {
+        state.moeStepperSubProgress = nextProgress % 1;
+        state.moeStepperStep = (state.moeStepperStep + 1) % MOE_STEPPER_STEPS.length;
+      } else {
+        state.moeStepperSubProgress = nextProgress;
+      }
+      const cell = resolveActiveMoeCell();
+      const key = cell
+        ? `moe:${state.moeStepperStep}:${cell.tensor}:${cell.row}:${cell.col}:${cell.expertId ?? -1}`
+        : '';
+      if (key !== lastStepperCellKey) {
+        lastStepperCellKey = key;
+        geometryDirty = true;
+      }
+      stepperChangedUi = true;
+      continueAnimating = true;
     } else {
       lastStepperTickMs = null;
     }
@@ -1156,7 +1383,10 @@ function boot(): void {
     } else if (currentCutawayScene) {
       const isMobileStack = window.innerWidth <= 900;
       const topInsetPx = isMobileStack ? 12 : 84;
-      const usesMathDock = state.mode === 'cutaway_gqa' || state.mode === 'cutaway_mamba';
+      const usesMathDock =
+        state.mode === 'cutaway_gqa' ||
+        state.mode === 'cutaway_mamba' ||
+        state.mode === 'cutaway_moe';
       const bottomInsetPx = isMobileStack
         ? 12
         : usesMathDock && !controlEls.gqaMathDock.hidden
@@ -1418,6 +1648,21 @@ function boot(): void {
           state.mambaHoveredCell = hitCell;
           markDirtyAndSchedule(true);
         }
+      } else if (state.mode === 'cutaway_moe') {
+        const sim = currentCutawayScene?.moeSim ?? runMoeSim(state.tokens);
+        const tok = activeMoeFocusToken();
+        const exp = activeMoeFocusExpert(sim, tok);
+        const topkSlice = sim.topk_indices.subarray(tok * sim.topK, (tok + 1) * sim.topK);
+        const hitCell = hit ? pickHitToMoeCell(hit, tok, exp, topkSlice) : null;
+        const hitPart =
+          hit?.tensorKey === 'router_bank' && hit.headIndex !== undefined
+            ? `moe-expert-${hit.headIndex}`
+            : hit?.partId ?? null;
+        if (hitPart !== state.hoveredPart || !sameMoeCell(hitCell, state.moeHoveredCell)) {
+          state.hoveredPart = hitPart;
+          state.moeHoveredCell = hitCell;
+          markDirtyAndSchedule(true);
+        }
       } else {
         const hitPart = hit?.partId ?? null;
         if (hitPart !== state.hoveredPart) {
@@ -1492,6 +1737,35 @@ function boot(): void {
           state.mambaStepperActive = false;
           lastStepperTickMs = null;
         }
+      } else if (state.mode === 'cutaway_moe') {
+        const sim = currentCutawayScene?.moeSim ?? runMoeSim(state.tokens);
+        const tok = activeMoeFocusToken();
+        const exp = activeMoeFocusExpert(sim, tok);
+        const topkSlice = sim.topk_indices.subarray(tok * sim.topK, (tok + 1) * sim.topK);
+        const hitCell = hit ? pickHitToMoeCell(hit, tok, exp, topkSlice) : null;
+        const hitPart =
+          hit?.tensorKey === 'router_bank' && hit.headIndex !== undefined
+            ? `moe-expert-${hit.headIndex}`
+            : hit?.partId ?? null;
+        if (hitPart !== null) state.tourActive = false;
+        const cellExp = inferMoeCellExpert(hitCell, sim);
+        if (cellExp !== null) {
+          state.moeActiveExpert = cellExp;
+        } else if (hit?.headIndex !== undefined) {
+          state.moeActiveExpert = hit.headIndex;
+        }
+        if (hitCell?.tokenIndex !== undefined) {
+          state.moeFocusToken = Math.max(0, Math.min(state.tokens - 1, hitCell.tokenIndex));
+        }
+        state.selectedPart = hitPart;
+        state.hoveredPart = hitPart;
+        state.moeSelectedCell = hitCell;
+        state.moeHoveredCell = hitCell;
+        if (hitCell !== null) {
+          state.moeStepperPlaying = false;
+          state.moeStepperActive = false;
+          lastStepperTickMs = null;
+        }
       } else {
         const hitPart = hit?.partId ?? null;
         if (hitPart !== null) state.tourActive = false;
@@ -1527,12 +1801,14 @@ function boot(): void {
       state.hoveredBay !== null ||
       state.hoveredPart !== null ||
       state.gqaHoveredCell !== null ||
-      state.mambaHoveredCell !== null
+      state.mambaHoveredCell !== null ||
+      state.moeHoveredCell !== null
     ) {
       state.hoveredBay = null;
       state.hoveredPart = null;
       state.gqaHoveredCell = null;
       state.mambaHoveredCell = null;
+      state.moeHoveredCell = null;
       markDirtyAndSchedule(true);
     }
   });
@@ -1575,7 +1851,10 @@ function boot(): void {
       return;
     }
 
-    if (key === ' ' && (state.mode === 'cutaway_gqa' || state.mode === 'cutaway_mamba')) {
+    if (
+      key === ' ' &&
+      (state.mode === 'cutaway_gqa' || state.mode === 'cutaway_mamba' || state.mode === 'cutaway_moe')
+    ) {
       ev.preventDefault();
       state.tourActive = false;
       if (state.mode === 'cutaway_mamba') {
@@ -1594,6 +1873,25 @@ function boot(): void {
         } else {
           state.mambaStepperActive = true;
           state.mambaStepperPlaying = true;
+          lastStepperTickMs = null;
+          markDirtyAndSchedule(true);
+        }
+      } else if (state.mode === 'cutaway_moe') {
+        state.moeSelectedCell = null;
+        state.moeHoveredCell = null;
+        if (state.reducedMotion) {
+          state.moeStepperActive = true;
+          state.moeStepperPlaying = false;
+          state.moeStepperStep = (state.moeStepperStep + 1) % MOE_STEPPER_STEPS.length;
+          state.moeStepperSubProgress = 0;
+          markDirtyAndSchedule(true);
+        } else if (state.moeStepperActive && state.moeStepperPlaying) {
+          state.moeStepperPlaying = false;
+          lastStepperTickMs = null;
+          syncUi();
+        } else {
+          state.moeStepperActive = true;
+          state.moeStepperPlaying = true;
           lastStepperTickMs = null;
           markDirtyAndSchedule(true);
         }
@@ -1633,7 +1931,9 @@ function boot(): void {
         state.gqaSelectedCell !== null ||
         state.gqaStepperActive ||
         state.mambaSelectedCell !== null ||
-        state.mambaStepperActive
+        state.mambaStepperActive ||
+        state.moeSelectedCell !== null ||
+        state.moeStepperActive
       ) {
         ev.preventDefault();
         state.gqaSelectedCell = null;
@@ -1644,6 +1944,10 @@ function boot(): void {
         state.mambaHoveredCell = null;
         state.mambaStepperActive = false;
         state.mambaStepperPlaying = false;
+        state.moeSelectedCell = null;
+        state.moeHoveredCell = null;
+        state.moeStepperActive = false;
+        state.moeStepperPlaying = false;
         lastStepperTickMs = null;
         markDirtyAndSchedule(true);
       } else if (state.selectedPart !== null || state.hoveredPart !== null) {

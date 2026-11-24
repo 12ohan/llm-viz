@@ -1,5 +1,6 @@
 import type { GqaCellRef } from '../math/gqaSim';
 import type { MambaCellRef } from '../math/mambaSim';
+import type { MoeCellRef } from '../math/moeSim';
 import type { PrecisionMode, Vec3 } from './spec';
 
 export interface CameraPose {
@@ -55,6 +56,18 @@ export interface SceneState {
   gqaStepperPlaying: boolean;
   gqaStepperStep: number;
   gqaStepperSubProgress: number;
+  moeBayId: 2 | 52;
+  moeViewAngle: GqaViewAngle;
+  /** null means follow latest token (T - 1); integer 0..T-1 pins a specific token in MoE cutaway. */
+  moeFocusToken: number | null;
+  /** null means follow rank-0 Top-6 winner for focusToken; integer 0..127 focuses that expert. */
+  moeActiveExpert: number | null;
+  moeHoveredCell: MoeCellRef | null;
+  moeSelectedCell: MoeCellRef | null;
+  moeStepperActive: boolean;
+  moeStepperPlaying: boolean;
+  moeStepperStep: number;
+  moeStepperSubProgress: number;
   camera: CameraPose;
   savedMacroCamera: CameraPose;
   reducedMotion: boolean;
@@ -136,6 +149,16 @@ export function createInitialState(defaultPose: CameraPose, reducedMotion = fals
     gqaStepperPlaying: false,
     gqaStepperStep: 0,
     gqaStepperSubProgress: 0,
+    moeBayId: 2,
+    moeViewAngle: 'three_quarter',
+    moeFocusToken: null,
+    moeActiveExpert: null,
+    moeHoveredCell: null,
+    moeSelectedCell: null,
+    moeStepperActive: false,
+    moeStepperPlaying: false,
+    moeStepperStep: 0,
+    moeStepperSubProgress: 0,
     camera: cloneCameraPose(defaultPose),
     savedMacroCamera: cloneCameraPose(defaultPose),
     reducedMotion,

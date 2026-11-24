@@ -263,9 +263,18 @@
               </div>
             </div>
 
-            <!-- Contextual sub-row: MoE Context (when mode === cutaway_moe) -->
+            <!-- Contextual sub-row: MoE Bay Switcher & View Toggle (when mode === cutaway_moe) -->
             <div id="moe-subbar" class="toolbar-row toolbar-row-sub" hidden>
-              <span class="subbar-chip">Bay 02 · Parallel 128 Routed (6 Active, ReLU²) + Shared Expert (3,712 = 2×1,856) · Click any slab</span>
+              <span class="subbar-label">Bay:</span>
+              <div class="preset-pills">
+                <button type="button" class="sub-toggle-btn is-active" data-moe-bay="2">Bay 02 · Granular MoE 128+1</button>
+                <button type="button" class="sub-toggle-btn" data-moe-bay="52">Bay 52 · Final MoE</button>
+              </div>
+              <span class="subbar-sep" aria-hidden="true">|</span>
+              <div class="preset-pills moe-view-group" role="group" aria-label="MoE camera view">
+                <button type="button" class="sub-toggle-btn is-active" data-moe-view="three_quarter">3/4 View</button>
+                <button type="button" class="sub-toggle-btn" data-moe-view="near_plan">Near-Plan View</button>
+              </div>
             </div>
 
             <!-- Contextual sub-row: GQA Bay Switcher & View Toggle (when mode === cutaway_gqa) -->

@@ -6,6 +6,11 @@ import {
   type MambaCellRef,
   type MambaTensorKey,
 } from '../math/mambaSim';
+import {
+  MOE_SIM_CONFIG,
+  type MoeCellRef,
+  type MoeTensorKey,
+} from '../math/moeSim';
 import type { Vec3 } from '../model/spec';
 import {
   add3,
@@ -62,6 +67,12 @@ const GQA_TENSOR_KEYS = new Set<string>([
 const MAMBA_TENSOR_KEYS = new Set<string>([
   'input', 'rmsnorm', 'w_in', 'z', 'xbc_pre', 'conv_buf', 'x',
   'b', 'c', 'dt', 'h_prev', 'h_curr', 'y', 'y_norm', 'w_out', 'residual',
+]);
+
+const MOE_TENSOR_KEYS = new Set<string>([
+  'input', 'rmsnorm', 'w_router', 'router_bank', 'topk_weights',
+  'routed_w_up', 'routed_pre', 'routed_act', 'routed_w_down', 'routed_sum',
+  'shared_w_up', 'shared_act', 'shared_w_down', 'shared_out', 'moe_out', 'residual',
 ]);
 
 /**
@@ -302,6 +313,89 @@ export function pickHitToMambaCell(
     };
   }
   return baseCell;
+}
+
+/** Resolve a ray-cast PickHit on a live MoE sheet into an exact logical MoeCellRef. */
+export function pickHitToMoeCell(
+  hit: PickHit | null,
+  focusToken: number,
+  focusExpert: number,
+  topkIndices?: readonly number[] | Int32Array,
+): MoeCellRef | null {
+  if (
+    !hit ||
+    !hit.tensorKey ||
+    !MOE_TENSOR_KEYS.has(hit.tensorKey) ||
+    hit.hitRow === undefined ||
+    hit.hitCol === undefined
+  ) {
+    return null;
+  }
+  const tensor = hit.tensorKey as MoeTensorKey;
+  const tokIdx = hit.tokenIndex ?? focusToken;
+
+  if (tensor === 'router_bank') {
+    const eid = hit.headIndex ?? focusExpert;
+    const bankRow = Math.floor(eid / MOE_SIM_CONFIG.bankCols);
+    const bankCol = eid % MOE_SIM_CONFIG.bankCols;
+    return {
+      tensor,
+      row: bankRow,
+      col: bankCol,
+      tokenIndex: tokIdx,
+      expertId: eid,
+    };
+  }
+  if (tensor === 'topk_weights') {
+    const slot = Math.max(0, Math.min(MOE_SIM_CONFIG.topK - 1, hit.hitCol));
+    const eid = topkIndices && topkIndices[slot] !== undefined ? topkIndices[slot] : focusExpert;
+    return {
+      tensor,
+      row: 0,
+      col: slot,
+      tokenIndex: tokIdx,
+      expertId: eid,
+      rankSlot: slot,
+    };
+  }
+  if (
+    tensor === 'routed_w_up' ||
+    tensor === 'routed_pre' ||
+    tensor === 'routed_act' ||
+    tensor === 'routed_w_down'
+  ) {
+    return {
+      tensor,
+      row: hit.hitRow,
+      col: hit.hitCol,
+      tokenIndex: tokIdx,
+      expertId: hit.headIndex ?? focusExpert,
+    };
+  }
+  if (tensor === 'w_router') {
+    return {
+      tensor,
+      row: hit.hitRow,
+      col: hit.hitCol,
+      tokenIndex: tokIdx,
+      expertId: hit.hitRow,
+    };
+  }
+  if (tensor === 'shared_w_up' || tensor === 'shared_act' || tensor === 'shared_w_down') {
+    return {
+      tensor,
+      row: hit.hitRow,
+      col: hit.hitCol,
+      tokenIndex: tokIdx,
+    };
+  }
+  // Sequence tensors (input, rmsnorm, routed_sum, shared_out, moe_out, residual): row IS tokenIndex
+  return {
+    tensor,
+    row: hit.hitRow,
+    col: hit.hitCol,
+    tokenIndex: hit.hitRow,
+  };
 }
 
 /** Test real solid AABBs first; fall back to fascia boxes only if solids miss. */
