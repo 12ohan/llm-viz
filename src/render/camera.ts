@@ -138,8 +138,18 @@ export function aabbCorners(bounds: AABB): Vec3[] {
   ];
 }
 
+export interface OpticalOffsetNdc {
+  /** Optional horizontal NDC shift applied to the projected target (positive shifts geometry right). */
+  readonly x?: number;
+  /** Optional vertical NDC shift applied to the projected target (positive shifts geometry up). */
+  readonly y?: number;
+}
+
 /**
  * Compute a perspective orbit pose that cleanly frames `bounds` inside the viewport.
+ * Uses exact per-corner projective distance so tall or deep bounds (like the 52-layer tower)
+ * fill the intended fraction without excessive depth-diagonal backoff, while keeping every
+ * corner strictly inside `[-fillFraction, +fillFraction]`.
  */
 export function fitPerspectiveToBounds(
   bounds: AABB,
@@ -149,6 +159,7 @@ export function fitPerspectiveToBounds(
   innerHeight: number,
   fovDeg = DEFAULT_FOV_DEG,
   fillFraction = 0.86,
+  opticalOffsetNdc?: OpticalOffsetNdc,
 ): CameraPose {
   const basis = computeCameraBasis(azimuthDeg, elevationDeg);
   const corners = aabbCorners(bounds);
@@ -173,26 +184,41 @@ export function fitPerspectiveToBounds(
   const midU = 0.5 * (minU + maxU);
   const midE = 0.5 * (minE + maxE);
 
-  const target: Vec3 = [
-    midR * basis.right[0] + midU * basis.up[0] + midE * basis.eyeDir[0],
-    midR * basis.right[1] + midU * basis.up[1] + midE * basis.eyeDir[1],
-    midR * basis.right[2] + midU * basis.up[2] + midE * basis.eyeDir[2],
-  ];
-
-  const halfR = 0.5 * (maxR - minR);
-  const halfU = 0.5 * (maxU - minU);
-  const halfE = 0.5 * (maxE - minE);
-
   const aspect = Math.max(0.25, innerWidth / Math.max(1, innerHeight));
   const tanHalfFovY = Math.tan((fovDeg * 0.5) * DEG_TO_RAD);
   const tanHalfFovX = tanHalfFovY * aspect;
+  const safeFill = Math.max(0.15, Math.min(0.98, Number.isFinite(fillFraction) ? fillFraction : 0.86));
 
-  const distY = halfU / (tanHalfFovY * fillFraction);
-  const distX = halfR / (tanHalfFovX * fillFraction);
+  let requiredDist = MIN_CAMERA_DISTANCE;
+  for (const p of corners) {
+    const dr = Math.abs(dot3(p, basis.right) - midR);
+    const du = Math.abs(dot3(p, basis.up) - midU);
+    const de = dot3(p, basis.eyeDir) - midE;
+    const dCorner = Math.max(
+      dr / (tanHalfFovX * safeFill) + de,
+      du / (tanHalfFovY * safeFill) + de,
+      de + 2.0,
+    );
+    if (Number.isFinite(dCorner) && dCorner > requiredDist) {
+      requiredDist = dCorner;
+    }
+  }
+
   const distance = Math.max(
     MIN_CAMERA_DISTANCE,
-    Math.min(MAX_CAMERA_DISTANCE, Math.max(distY, distX) + halfE),
+    Math.min(MAX_CAMERA_DISTANCE, requiredDist),
   );
+
+  const ndcShiftX = Number.isFinite(opticalOffsetNdc?.x) ? opticalOffsetNdc!.x! : 0;
+  const ndcShiftY = Number.isFinite(opticalOffsetNdc?.y) ? opticalOffsetNdc!.y! : 0;
+  const targetShiftR = -ndcShiftX * distance * tanHalfFovX;
+  const targetShiftU = -ndcShiftY * distance * tanHalfFovY;
+
+  const target: Vec3 = [
+    (midR + targetShiftR) * basis.right[0] + (midU + targetShiftU) * basis.up[0] + midE * basis.eyeDir[0],
+    (midR + targetShiftR) * basis.right[1] + (midU + targetShiftU) * basis.up[1] + midE * basis.eyeDir[1],
+    (midR + targetShiftR) * basis.right[2] + (midU + targetShiftU) * basis.up[2] + midE * basis.eyeDir[2],
+  ];
 
   return {
     target,

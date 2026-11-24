@@ -105,9 +105,13 @@ export function kvSliceFrontZ(tokenIndex1Based: number): number {
   return KV_TRACK_START_Z + KV_SLICE_PITCH * (tokenIndex1Based - 1) + KV_SLICE_DEPTH;
 }
 
+/**
+ * Optically balanced overview bounds for the 52-layer tower + left motif brackets +
+ * right-side landmark pills (compensating for 30° yaw +Z KV projection and top toolbar headroom).
+ */
 export const TOWER_FIT_BOUNDS: AABB = {
-  min: [-7.2, OUTPUT_LOGITS_Y - 1.5, -1.6],
-  max: [5.8, EMBED_Y + 2.4, KV_TRACK_START_Z + KV_TRACK_LENGTH + 0.6],
+  min: [-6.4, OUTPUT_LOGITS_Y - 0.8, -1.6],
+  max: [14.4, EMBED_Y + 5.2, KV_TRACK_START_Z + KV_TRACK_LENGTH + 0.6],
 };
 
 export interface BayAnchor {
@@ -286,22 +290,58 @@ function emitCuboidEdges(s: SolidSpec, dedupMap: Map<string, LineSpec>): void {
   }
 }
 
+export interface SpinePropagationWave {
+  /** Normalized progress in [0, 1] descending from Embedding (0.0) -> Bays 01..52 -> Output (1.0). */
+  readonly progress: number;
+  /** Optional 1-based token index (defaults to clampedTokens) highlighted on crossed GQA KV tracks. */
+  readonly activeTokenIndex?: number;
+}
+
 export interface BuildTowerOptions {
   readonly spec: NemotronSpec;
   readonly tokens: number;
   readonly precision: PrecisionMode;
   readonly selectedBay: number | null;
   readonly hoveredBay: number | null;
+  readonly propagationWave?: SpinePropagationWave | null;
+}
+
+/**
+ * Map a normalized propagation progress in [0, 1] smoothly from EMBED_Y through
+ * Bays 01..52 down to OUTPUT_LOGITS_Y, staying aligned with `bayIdx ≈ progress * 52`.
+ */
+function waveProgressToWorldY(waveP: number): number {
+  const u = waveP * 53;
+  if (u <= 0) return EMBED_Y;
+  if (u >= 53) return OUTPUT_LOGITS_Y;
+  if (u < 1) {
+    return EMBED_Y + (bayCenterY(1) - EMBED_Y) * u;
+  }
+  if (u > 52) {
+    return bayCenterY(52) + (OUTPUT_LOGITS_Y - bayCenterY(52)) * (u - 52);
+  }
+  const lo = Math.floor(u);
+  const hi = Math.min(52, lo + 1);
+  const frac = u - lo;
+  return bayCenterY(lo) + (bayCenterY(hi) - bayCenterY(lo)) * frac;
 }
 
 /**
  * Build the vertical top-to-bottom 52-layer Nemotron 3 Nano 3D tower in llm-viz visual language.
  */
 export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry {
-  const { spec, tokens, precision, selectedBay, hoveredBay } = options;
+  const { spec, tokens, precision, selectedBay, hoveredBay, propagationWave } = options;
   const clampedTokens = Math.max(1, Math.min(16, Math.round(tokens)));
   const ssmPhase = clampedTokens; // deterministic per-token cell hash phase
   const isFp8Mode = precision === 'fp8_selective';
+
+  const waveActive = propagationWave != null && Number.isFinite(propagationWave.progress);
+  const waveP = waveActive ? Math.max(0, Math.min(1, propagationWave!.progress)) : -1;
+  const waveBay = waveActive ? waveP * 53 : -100;
+  const waveY = waveActive ? waveProgressToWorldY(waveP) : 0;
+  const waveToken = waveActive
+    ? Math.max(1, Math.min(clampedTokens, Math.round(propagationWave!.activeTokenIndex ?? clampedTokens)))
+    : clampedTokens;
 
   const solids: SolidSpec[] = [];
   const ribbons: RibbonSpec[] = [];
@@ -357,7 +397,52 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
     alpha: 0.34,
   });
 
+  // V4 52-layer residual-spine propagation wavefront ribbons (traversed wake + glowing wavefront pulse)
+  if (waveActive) {
+    const traversedHeight = spineTopY - waveY;
+    if (traversedHeight > 0.35) {
+      ribbons.push({
+        cx: RESIDUAL_X,
+        cy: 0.5 * (spineTopY + waveY),
+        cz: 0,
+        ex: 0.52,
+        ey: traversedHeight,
+        ez: 0.52,
+        kind: RIBBON_KIND_BOX,
+        colorId: RIBBON_COLOR_EMERALD,
+        alpha: 0.46,
+      });
+    }
+    // Glowing emerald wavefront pulse capsule centered on waveY
+    ribbons.push({
+      cx: RESIDUAL_X,
+      cy: waveY,
+      cz: 0,
+      ex: 0.74,
+      ey: 2.5,
+      ez: 0.74,
+      kind: RIBBON_KIND_BOX,
+      colorId: RIBBON_COLOR_EMERALD,
+      alpha: 0.86,
+    });
+    // Leading downward directional emerald arrowhead along the spine
+    if (waveY > spineBottomY + 1.2) {
+      ribbons.push({
+        cx: RESIDUAL_X,
+        cy: Math.max(spineBottomY + 0.6, waveY - 1.55),
+        cz: 0,
+        ex: 0.64,
+        ey: 1.15,
+        ez: 0.64,
+        kind: RIBBON_KIND_ARROW_NEG_Y,
+        colorId: RIBBON_COLOR_EMERALD,
+        alpha: 0.90,
+      });
+    }
+  }
+
   // --- 2. Top Bookend: Embedding Matrix (131,072 × 2,688) ---
+  const waveAtEmbed = waveActive && waveP <= 0.08;
   pushSolid(
     {
       cx: 1.2, cy: EMBED_Y, cz: 0,
@@ -367,10 +452,10 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
       phase: 1,
       bayId: 0,
       cellScale: 0.24,
-      highlightFlag: 0,
-      lineStyle: LINE_STYLE_NEUTRAL,
-      cssWidth: 1.0,
-      lineAlpha: 0.55,
+      highlightFlag: waveAtEmbed ? 1 : 0,
+      lineStyle: waveAtEmbed ? LINE_STYLE_ACTIVE : LINE_STYLE_NEUTRAL,
+      cssWidth: waveAtEmbed ? 1.55 : 1.0,
+      lineAlpha: waveAtEmbed ? 0.95 : 0.55,
     },
     false,
   );
@@ -384,10 +469,10 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
       phase: clampedTokens,
       bayId: 0,
       cellScale: 0.20,
-      highlightFlag: 0,
-      lineStyle: LINE_STYLE_NEUTRAL,
-      cssWidth: 1.0,
-      lineAlpha: 0.55,
+      highlightFlag: waveAtEmbed ? 1 : 0,
+      lineStyle: waveAtEmbed ? LINE_STYLE_ACTIVE : LINE_STYLE_NEUTRAL,
+      cssWidth: waveAtEmbed ? 1.65 : 1.0,
+      lineAlpha: waveAtEmbed ? 1.0 : 0.55,
     },
     false,
   );
@@ -396,7 +481,7 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
     ex: 0.84, ey: 0.42, ez: 0.38,
     kind: RIBBON_KIND_ARROW_POS_X,
     colorId: RIBBON_COLOR_EMERALD,
-    alpha: 0.44,
+    alpha: waveAtEmbed ? 0.85 : 0.44,
   });
 
   landmarks.push({
@@ -414,6 +499,11 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
     const bodyIsFp8 = bodyPrecision(bay, precision) === 'fp8';
     const isPreservedBf16 = isFp8Mode && bay.sensitive;
 
+    const waveDist = waveActive ? Math.abs(bay.id - waveBay) : Infinity;
+    const nearWave = waveActive && waveDist <= 2.2;
+    const onWaveCore = waveActive && waveDist <= 1.25;
+    const waveCrossed = waveActive && waveBay >= bay.id - 0.35;
+
     const lineStyle = isActive
       ? LINE_STYLE_ACTIVE
       : isPreservedBf16
@@ -425,6 +515,7 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
     const fp8Flag = bodyIsFp8 ? 1 : 0;
 
     // Residual stream activation node on the right spine
+    const resNodeActive = isActive || nearWave;
     pushSolid(
       {
         cx: RESIDUAL_X, cy, cz: 0,
@@ -434,10 +525,10 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
         phase: bay.id + clampedTokens * 0.3,
         bayId: bay.id,
         cellScale: 0.20,
-        highlightFlag: isActive ? 1 : 0,
-        lineStyle: isActive ? LINE_STYLE_ACTIVE : LINE_STYLE_NEUTRAL,
-        cssWidth: isActive ? 1.6 : 0.85,
-        lineAlpha: isActive ? 1.0 : 0.45,
+        highlightFlag: resNodeActive ? 1 : 0,
+        lineStyle: resNodeActive ? LINE_STYLE_ACTIVE : LINE_STYLE_NEUTRAL,
+        cssWidth: isActive ? 1.6 : onWaveCore ? 1.8 : nearWave ? 1.4 : 0.85,
+        lineAlpha: resNodeActive ? 1.0 : 0.45,
         pickPart: 'residual-node',
       },
       true,
@@ -453,10 +544,10 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
         phase: bay.id,
         bayId: bay.id,
         cellScale: 0.18,
-        highlightFlag,
-        lineStyle,
-        cssWidth,
-        lineAlpha,
+        highlightFlag: onWaveCore ? 1 : highlightFlag,
+        lineStyle: onWaveCore ? LINE_STYLE_ACTIVE : lineStyle,
+        cssWidth: onWaveCore ? 1.55 : cssWidth,
+        lineAlpha: onWaveCore ? 0.96 : lineAlpha,
         pickPart: 'rmsnorm',
       },
       true,
@@ -465,10 +556,10 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
     // Emerald tap ribbon connecting residual spine <-> pre-norm
     ribbons.push({
       cx: 3.88, cy, cz: 0,
-      ex: 0.98, ey: 0.28, ez: 0.26,
+      ex: 0.98, ey: onWaveCore ? 0.36 : 0.28, ez: onWaveCore ? 0.34 : 0.26,
       kind: RIBBON_KIND_BOX,
       colorId: RIBBON_COLOR_EMERALD,
-      alpha: isActive ? 0.62 : bodyIsFp8 ? 0.18 : 0.36,
+      alpha: onWaveCore ? 0.88 : nearWave ? 0.68 : isActive ? 0.62 : bodyIsFp8 ? 0.18 : 0.36,
     });
 
     if (bay.kind === 'M') {
@@ -492,7 +583,8 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
       );
 
       // Conv1D causal band (6,144 × 4) — ALWAYS BF16 even in FP8 Selective!
-      const convGold = isFp8Mode && !isActive;
+      const convGold = isFp8Mode && !isActive && !onWaveCore;
+      const convHot = isActive || onWaveCore;
       pushSolid(
         {
           cx: 0.45, cy, cz: 0.08,
@@ -502,16 +594,17 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
           phase: ssmPhase + bay.id * 0.2,
           bayId: bay.id,
           cellScale: 0.20,
-          highlightFlag: isActive ? 1 : convGold ? 2 : 0,
-          lineStyle: isActive ? LINE_STYLE_ACTIVE : convGold ? LINE_STYLE_BF16_GOLD : LINE_STYLE_NEUTRAL,
-          cssWidth: isActive ? 1.7 : convGold ? 1.2 : 0.95,
-          lineAlpha: isActive ? 1.0 : convGold ? 0.82 : 0.55,
+          highlightFlag: convHot ? 1 : convGold ? 2 : 0,
+          lineStyle: convHot ? LINE_STYLE_ACTIVE : convGold ? LINE_STYLE_BF16_GOLD : LINE_STYLE_NEUTRAL,
+          cssWidth: convHot ? 1.7 : convGold ? 1.2 : 0.95,
+          lineAlpha: convHot ? 1.0 : convGold ? 0.82 : 0.55,
           pickPart: 'conv1d',
         },
         true,
       );
 
       // Square Cyan-Speckled SSM State Register (64 × 64 × 128, FP32 storage, phase steps with T!)
+      const ssmPulsed = isActive || nearWave;
       pushSolid(
         {
           cx: -1.35, cy, cz: 0,
@@ -521,14 +614,24 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
           phase: ssmPhase + bay.id * 0.37,
           bayId: bay.id,
           cellScale: 0.20,
-          highlightFlag,
-          lineStyle,
-          cssWidth: isActive ? 1.8 : isPreservedBf16 ? 1.45 : 1.0,
-          lineAlpha: isActive ? 1.0 : isPreservedBf16 ? 0.95 : 0.62,
+          highlightFlag: ssmPulsed ? 1 : highlightFlag,
+          lineStyle: ssmPulsed ? LINE_STYLE_ACTIVE : lineStyle,
+          cssWidth: ssmPulsed ? 1.8 : isPreservedBf16 ? 1.45 : 1.0,
+          lineAlpha: ssmPulsed ? 1.0 : isPreservedBf16 ? 0.95 : 0.62,
           pickPart: 'ssm-register',
         },
         true,
       );
+
+      if (onWaveCore) {
+        ribbons.push({
+          cx: -0.45, cy, cz: 0.04,
+          ex: 1.10, ey: 0.44, ez: 0.44,
+          kind: RIBBON_KIND_ARROW_NEG_X,
+          colorId: RIBBON_COLOR_CYAN,
+          alpha: 0.68,
+        });
+      }
 
       // Gated Output Projection (4,096 -> 2,688)
       pushSolid(
@@ -555,7 +658,7 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
         ex: 0.55, ey: 0.32, ez: 0.28,
         kind: RIBBON_KIND_ARROW_NEG_X,
         colorId: RIBBON_COLOR_PERIWINKLE,
-        alpha: bodyIsFp8 ? 0.20 : 0.44,
+        alpha: onWaveCore ? 0.78 : bodyIsFp8 ? 0.20 : 0.44,
       });
 
       bayAnchors.push({
@@ -577,6 +680,7 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
       });
     } else if (bay.kind === 'E') {
       // MoE (×23): Double-width Shared Expert (3,712) + Sigmoid Router (amber) + Tiled Bank of Routed Experts (6 active amber!)
+      const moeFlashed = isActive || nearWave;
       // Double-width shared expert slab connected cleanly beside pre-norm
       pushSolid(
         {
@@ -587,10 +691,10 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
           phase: bay.id * 1.7,
           bayId: bay.id,
           cellScale: 0.22,
-          highlightFlag,
-          lineStyle,
-          cssWidth,
-          lineAlpha,
+          highlightFlag: onWaveCore ? 1 : highlightFlag,
+          lineStyle: onWaveCore ? LINE_STYLE_ACTIVE : lineStyle,
+          cssWidth: onWaveCore ? 1.55 : cssWidth,
+          lineAlpha: onWaveCore ? 0.96 : lineAlpha,
           pickPart: 'shared-expert',
         },
         true,
@@ -606,10 +710,10 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
           phase: bay.id + clampedTokens,
           bayId: bay.id,
           cellScale: 0.18,
-          highlightFlag,
-          lineStyle,
-          cssWidth,
-          lineAlpha,
+          highlightFlag: moeFlashed ? 1 : highlightFlag,
+          lineStyle: moeFlashed ? LINE_STYLE_ACTIVE : lineStyle,
+          cssWidth: moeFlashed ? 1.65 : cssWidth,
+          lineAlpha: moeFlashed ? 1.0 : lineAlpha,
           pickPart: 'router',
         },
         true,
@@ -622,6 +726,7 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
         for (let c = 0; c < 4; c++) {
           const tileIdx = r * 4 + c;
           const isRoutedActive = tileIdx !== activeOffset && tileIdx !== (activeOffset + 4) % 8;
+          const tileFlashed = moeFlashed && isRoutedActive;
           const tx = -1.10 - c * 1.15;
           const tz = r === 0 ? -0.44 : 0.44;
           pushSolid(
@@ -637,15 +742,25 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
               phase: bay.id * 3 + tileIdx + clampedTokens * 0.5,
               bayId: bay.id,
               cellScale: 0.21,
-              highlightFlag,
-              lineStyle,
-              cssWidth: isActive ? 1.6 : 0.85,
-              lineAlpha: isActive ? 1.0 : bodyIsFp8 ? 0.28 : 0.48,
+              highlightFlag: tileFlashed ? 1 : highlightFlag,
+              lineStyle: tileFlashed ? LINE_STYLE_ACTIVE : lineStyle,
+              cssWidth: isActive ? 1.6 : tileFlashed ? 1.45 : 0.85,
+              lineAlpha: isActive ? 1.0 : tileFlashed ? 0.95 : bodyIsFp8 ? 0.28 : 0.48,
               pickPart: `expert-tile-${tileIdx}`,
             },
             true,
           );
         }
+      }
+
+      if (onWaveCore) {
+        ribbons.push({
+          cx: -0.58, cy, cz: 0,
+          ex: 0.76, ey: 0.36, ez: 0.36,
+          kind: RIBBON_KIND_ARROW_NEG_X,
+          colorId: RIBBON_COLOR_AMBER,
+          alpha: 0.70,
+        });
       }
 
       // Periwinkle block arrow from pre-norm into shared + router
@@ -654,7 +769,7 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
         ex: 0.52, ey: 0.30, ez: 0.28,
         kind: RIBBON_KIND_ARROW_NEG_X,
         colorId: RIBBON_COLOR_PERIWINKLE,
-        alpha: bodyIsFp8 ? 0.18 : 0.42,
+        alpha: onWaveCore ? 0.76 : bodyIsFp8 ? 0.18 : 0.42,
       });
 
       bayAnchors.push({
@@ -678,6 +793,7 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
       // GQA Attention (*, ×6 — bays 06, 13, 20, 27, 34, 43):
       // Multi-plate periwinkle-blue Q/K/V weight stack + O projection + TWO paired KV cache token tracks growing along +Z!
       // Body always stays BF16 (fp8Flag = 0), highlighted in gold in FP8 Selective mode!
+      const gqaHot = isActive || onWaveCore;
 
       // Q projection stack (32 Q heads = 4,096) — tall dramatic periwinkle-blue plate
       pushSolid(
@@ -689,10 +805,10 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
           phase: bay.id * 1.3,
           bayId: bay.id,
           cellScale: 0.22,
-          highlightFlag,
-          lineStyle,
-          cssWidth: isActive ? 1.85 : isPreservedBf16 ? 1.45 : 1.05,
-          lineAlpha: isActive ? 1.0 : isPreservedBf16 ? 0.95 : 0.62,
+          highlightFlag: gqaHot ? 1 : highlightFlag,
+          lineStyle: gqaHot ? LINE_STYLE_ACTIVE : lineStyle,
+          cssWidth: gqaHot ? 1.85 : isPreservedBf16 ? 1.45 : 1.05,
+          lineAlpha: gqaHot ? 1.0 : isPreservedBf16 ? 0.95 : 0.62,
           pickPart: 'q-proj',
         },
         true,
@@ -708,10 +824,10 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
           phase: bay.id * 1.9,
           bayId: bay.id,
           cellScale: 0.21,
-          highlightFlag,
-          lineStyle,
-          cssWidth: isActive ? 1.8 : isPreservedBf16 ? 1.4 : 1.0,
-          lineAlpha: isActive ? 1.0 : isPreservedBf16 ? 0.95 : 0.60,
+          highlightFlag: gqaHot ? 1 : highlightFlag,
+          lineStyle: gqaHot ? LINE_STYLE_ACTIVE : lineStyle,
+          cssWidth: gqaHot ? 1.8 : isPreservedBf16 ? 1.4 : 1.0,
+          lineAlpha: gqaHot ? 1.0 : isPreservedBf16 ? 0.95 : 0.60,
           pickPart: 'k-proj',
         },
         true,
@@ -725,10 +841,10 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
           phase: bay.id * 2.1,
           bayId: bay.id,
           cellScale: 0.21,
-          highlightFlag,
-          lineStyle,
-          cssWidth: isActive ? 1.8 : isPreservedBf16 ? 1.4 : 1.0,
-          lineAlpha: isActive ? 1.0 : isPreservedBf16 ? 0.95 : 0.60,
+          highlightFlag: gqaHot ? 1 : highlightFlag,
+          lineStyle: gqaHot ? LINE_STYLE_ACTIVE : lineStyle,
+          cssWidth: gqaHot ? 1.8 : isPreservedBf16 ? 1.4 : 1.0,
+          lineAlpha: gqaHot ? 1.0 : isPreservedBf16 ? 0.95 : 0.60,
           pickPart: 'v-proj',
         },
         true,
@@ -744,10 +860,10 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
           phase: bay.id * 2.7,
           bayId: bay.id,
           cellScale: 0.22,
-          highlightFlag,
-          lineStyle,
-          cssWidth: isActive ? 1.85 : isPreservedBf16 ? 1.45 : 1.05,
-          lineAlpha: isActive ? 1.0 : isPreservedBf16 ? 0.95 : 0.62,
+          highlightFlag: gqaHot ? 1 : highlightFlag,
+          lineStyle: gqaHot ? LINE_STYLE_ACTIVE : lineStyle,
+          cssWidth: gqaHot ? 1.85 : isPreservedBf16 ? 1.45 : 1.05,
+          lineAlpha: gqaHot ? 1.0 : isPreservedBf16 ? 0.95 : 0.62,
           pickPart: 'o-proj',
         },
         true,
@@ -759,15 +875,25 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
         ex: 0.64, ey: 0.36, ez: 0.32,
         kind: RIBBON_KIND_ARROW_NEG_X,
         colorId: RIBBON_COLOR_PERIWINKLE,
-        alpha: 0.48,
+        alpha: onWaveCore ? 0.82 : 0.48,
       });
       ribbons.push({
         cx: -2.42, cy, cz: -0.08,
         ex: 0.88, ey: 0.36, ez: 0.32,
         kind: RIBBON_KIND_ARROW_NEG_X,
         colorId: RIBBON_COLOR_PERIWINKLE,
-        alpha: 0.48,
+        alpha: onWaveCore ? 0.82 : 0.48,
       });
+
+      if (nearWave) {
+        ribbons.push({
+          cx: -0.30, cy: cy + 0.08, cz: kvSliceCenterZ(waveToken) - 0.55,
+          ex: 0.46, ey: 0.36, ez: 0.95,
+          kind: RIBBON_KIND_ARROW_POS_Z,
+          colorId: RIBBON_COLOR_CYAN,
+          alpha: onWaveCore ? 0.80 : 0.58,
+        });
+      }
 
       // TWO paired KV-cache tracks (K1, V1 | K2, V2) growing outward along +Z (tokens 1..T)
       const kvFp8 = kvCachePrecision(bay, precision) === 'fp8' ? 1 : 0;
@@ -799,7 +925,8 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
         // Active token slices j = 1..T flush atop guide rail (rail top = cy - 0.28, slice halfH = 0.26 -> slice cy = cy - 0.02)
         for (let j = 1; j <= clampedTokens; j++) {
           const isNewest = j === clampedTokens;
-          const highlightSlice = isActive && isNewest;
+          const waveAppendedSlice = waveCrossed && j === waveToken;
+          const highlightSlice = (isActive && isNewest) || waveAppendedSlice;
           pushSolid(
             {
               cx: rx,
@@ -815,8 +942,8 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
               cellScale: 0.17,
               highlightFlag: highlightSlice ? 1 : 0,
               lineStyle: highlightSlice ? LINE_STYLE_ACTIVE : LINE_STYLE_NEUTRAL,
-              cssWidth: highlightSlice ? 1.45 : isNewest ? 1.05 : 0.85,
-              lineAlpha: highlightSlice ? 0.95 : kvFp8 ? 0.40 : 0.58,
+              cssWidth: highlightSlice ? 1.55 : isNewest ? 1.05 : 0.85,
+              lineAlpha: highlightSlice ? 0.98 : kvFp8 ? 0.40 : 0.58,
               pickPart: `kv-slice-${r}-${j}`,
             },
             true,
@@ -884,6 +1011,8 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
   }
 
   // --- 5. Bottom Bookends: Final RMSNorm -> Untied LM Head -> Output Logits (131,072) ---
+  const waveAtFinalNorm = waveActive && waveP >= 0.94;
+  const waveAtOutput = waveActive && waveP >= 0.97;
   pushSolid(
     {
       cx: 1.6, cy: FINAL_NORM_Y, cz: 0,
@@ -893,10 +1022,10 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
       phase: 99,
       bayId: 0,
       cellScale: 0.19,
-      highlightFlag: 0,
-      lineStyle: LINE_STYLE_NEUTRAL,
-      cssWidth: 1.0,
-      lineAlpha: 0.55,
+      highlightFlag: waveAtFinalNorm ? 1 : 0,
+      lineStyle: waveAtFinalNorm ? LINE_STYLE_ACTIVE : LINE_STYLE_NEUTRAL,
+      cssWidth: waveAtFinalNorm ? 1.6 : 1.0,
+      lineAlpha: waveAtFinalNorm ? 0.98 : 0.55,
     },
     false,
   );
@@ -905,7 +1034,7 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
     ex: 1.0, ey: 0.34, ez: 0.32,
     kind: RIBBON_KIND_ARROW_NEG_X,
     colorId: RIBBON_COLOR_EMERALD,
-    alpha: 0.42,
+    alpha: waveAtFinalNorm ? 0.85 : 0.42,
   });
 
   // LM Head (Untied): 2,688 -> 131,072 periwinkle-blue weight slab
@@ -918,10 +1047,10 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
       phase: 101,
       bayId: 0,
       cellScale: 0.24,
-      highlightFlag: 0,
-      lineStyle: LINE_STYLE_NEUTRAL,
-      cssWidth: 1.0,
-      lineAlpha: 0.55,
+      highlightFlag: waveAtOutput ? 1 : 0,
+      lineStyle: waveAtOutput ? LINE_STYLE_ACTIVE : LINE_STYLE_NEUTRAL,
+      cssWidth: waveAtOutput ? 1.6 : 1.0,
+      lineAlpha: waveAtOutput ? 0.96 : 0.55,
     },
     false,
   );
@@ -930,7 +1059,7 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
     ex: 0.55, ey: 0.95, ez: 0.34,
     kind: RIBBON_KIND_ARROW_NEG_Y,
     colorId: RIBBON_COLOR_PERIWINKLE,
-    alpha: 0.48,
+    alpha: waveAtOutput ? 0.86 : 0.48,
   });
 
   // Output Logits (131,072) emerald-green activation plate
@@ -943,10 +1072,10 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
       phase: clampedTokens + 7,
       bayId: 0,
       cellScale: 0.22,
-      highlightFlag: 0,
-      lineStyle: LINE_STYLE_NEUTRAL,
-      cssWidth: 1.0,
-      lineAlpha: 0.55,
+      highlightFlag: waveAtOutput ? 1 : 0,
+      lineStyle: waveAtOutput ? LINE_STYLE_ACTIVE : LINE_STYLE_NEUTRAL,
+      cssWidth: waveAtOutput ? 1.7 : 1.0,
+      lineAlpha: waveAtOutput ? 1.0 : 0.55,
     },
     false,
   );
@@ -955,7 +1084,7 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
     ex: 0.55, ey: 0.90, ez: 0.34,
     kind: RIBBON_KIND_ARROW_NEG_Y,
     colorId: RIBBON_COLOR_EMERALD,
-    alpha: 0.45,
+    alpha: waveAtOutput ? 0.88 : 0.45,
   });
 
   landmarks.push(

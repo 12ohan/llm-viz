@@ -569,23 +569,30 @@ export class FlowRibbonBuilder {
     const z0 = cz - hz;
     const z1 = cz + hz;
 
-    // 1. Subtle interior tint quad
+    // 1. Subtle interior tint quad (along = -1 marks static cell highlight geometry)
     if (fillColor.a > 0.004) {
-      const v0 = this.pushVertex(x0, y, z0, 0, 0, fillColor);
-      const v1 = this.pushVertex(x1, y, z0, 0, 0, fillColor);
-      const v2 = this.pushVertex(x1, y, z1, 0, 1, fillColor);
-      const v3 = this.pushVertex(x0, y, z1, 0, 1, fillColor);
+      const v0 = this.pushVertex(x0, y, z0, 0, -1, fillColor);
+      const v1 = this.pushVertex(x1, y, z0, 0, -1, fillColor);
+      const v2 = this.pushVertex(x1, y, z1, 0, -1, fillColor);
+      const v3 = this.pushVertex(x0, y, z1, 0, -1, fillColor);
       this.indices.push(v0, v1, v2, v0, v2, v3);
     }
 
-    // 2. Crisp 4-sided perimeter frame slightly elevated above the fill
+    // 2. Crisp 4-sided perimeter frame slightly elevated above the fill (static, non-pulsed)
     const fy = y + 0.002;
     const t = Math.min(frameThickness, Math.min(ex, ez) * 0.45 + 0.014);
     const halfT = t * 0.5;
-    this.addPolylineXZ([{ x: x0 - halfT, z: z0 }, { x: x1 + halfT, z: z0 }], fy, t, frameColor, false);
-    this.addPolylineXZ([{ x: x0 - halfT, z: z1 }, { x: x1 + halfT, z: z1 }], fy, t, frameColor, false);
-    this.addPolylineXZ([{ x: x0, z: z0 - halfT }, { x: x0, z: z1 + halfT }], fy, t, frameColor, false);
-    this.addPolylineXZ([{ x: x1, z: z0 - halfT }, { x: x1, z: z1 + halfT }], fy, t, frameColor, false);
+    const emitStaticEdgeXZ = (ax: number, az: number, bx: number, bz: number, sideX: number, sideZ: number) => {
+      const i0 = this.pushVertex(ax - sideX * halfT, fy, az - sideZ * halfT, -1, -1, frameColor);
+      const i1 = this.pushVertex(ax + sideX * halfT, fy, az + sideZ * halfT, 1, -1, frameColor);
+      const i2 = this.pushVertex(bx - sideX * halfT, fy, bz - sideZ * halfT, -1, -1, frameColor);
+      const i3 = this.pushVertex(bx + sideX * halfT, fy, bz + sideZ * halfT, 1, -1, frameColor);
+      this.indices.push(i0, i1, i2, i1, i3, i2);
+    };
+    emitStaticEdgeXZ(x0 - halfT, z0, x1 + halfT, z0, 0, 1);
+    emitStaticEdgeXZ(x0 - halfT, z1, x1 + halfT, z1, 0, 1);
+    emitStaticEdgeXZ(x0, z0 - halfT, x0, z1 + halfT, 1, 0);
+    emitStaticEdgeXZ(x1, z0 - halfT, x1, z1 + halfT, 1, 0);
   }
 
   /**
@@ -808,10 +815,10 @@ export class FlowRibbonBuilder {
       const p01 = localToWorldOnFrame(frame, lx0, lyFill, lz1);
 
       if (fillColor.a > 0.004) {
-        const v0 = this.pushVertex(p00[0], p00[1], p00[2], 0, 0, fillColor);
-        const v1 = this.pushVertex(p10[0], p10[1], p10[2], 0, 0, fillColor);
-        const v2 = this.pushVertex(p11[0], p11[1], p11[2], 0, 1, fillColor);
-        const v3 = this.pushVertex(p01[0], p01[1], p01[2], 0, 1, fillColor);
+        const v0 = this.pushVertex(p00[0], p00[1], p00[2], 0, -1, fillColor);
+        const v1 = this.pushVertex(p10[0], p10[1], p10[2], 0, -1, fillColor);
+        const v2 = this.pushVertex(p11[0], p11[1], p11[2], 0, -1, fillColor);
+        const v3 = this.pushVertex(p01[0], p01[1], p01[2], 0, -1, fillColor);
         this.indices.push(v0, v1, v2, v0, v2, v3);
       }
 
@@ -820,10 +827,10 @@ export class FlowRibbonBuilder {
         const aR = add3(a, scale3(sideAxis, halfT));
         const bL = sub3(b, scale3(sideAxis, halfT));
         const bR = add3(b, scale3(sideAxis, halfT));
-        const i0 = this.pushVertex(aL[0], aL[1], aL[2], -1, 0, frameColor);
-        const i1 = this.pushVertex(aR[0], aR[1], aR[2], 1, 0, frameColor);
-        const i2 = this.pushVertex(bL[0], bL[1], bL[2], -1, 1, frameColor);
-        const i3 = this.pushVertex(bR[0], bR[1], bR[2], 1, 1, frameColor);
+        const i0 = this.pushVertex(aL[0], aL[1], aL[2], -1, -1, frameColor);
+        const i1 = this.pushVertex(aR[0], aR[1], aR[2], 1, -1, frameColor);
+        const i2 = this.pushVertex(bL[0], bL[1], bL[2], -1, -1, frameColor);
+        const i3 = this.pushVertex(bR[0], bR[1], bR[2], 1, -1, frameColor);
         this.indices.push(i0, i1, i2, i1, i3, i2);
       };
 
@@ -898,6 +905,8 @@ in float vAlong;
 in vec4 vColor;
 in float vBorderAlpha;
 
+uniform float uPulseTime;
+
 out vec4 fragColor;
 
 void main() {
@@ -909,6 +918,18 @@ void main() {
   float border = smoothstep(1.0 - fw * 2.6, 1.0 - fw * 0.9, dist) * vBorderAlpha;
   vec3 col = mix(vColor.rgb, vColor.rgb * 0.68, border);
   float alpha = vColor.a * cov;
+
+  // V2 animated directional dataflow pulse along active high-alpha dependency threads
+  // (vAlong < 0 marks static cell-highlight frames; uPulseTime < 0 renders completely static)
+  if (uPulseTime >= 0.0 && vColor.a >= 0.65 && vAlong >= -0.001) {
+    float phase = fract(vAlong * 1.4 - uPulseTime * 0.85);
+    float band = smoothstep(0.18, 0.54, phase) * (1.0 - smoothstep(0.54, 0.72, phase));
+    float core = 1.0 - smoothstep(0.25, 0.92, dist);
+    float pulse = band * core;
+    col = mix(col, mix(col, vec3(1.0, 0.99, 0.97), 0.78), pulse * 0.58);
+    alpha = min(1.0, alpha + pulse * 0.14 * cov);
+  }
+
   if (alpha < 0.004) discard;
   fragColor = vec4(col, alpha);
 }
@@ -917,6 +938,7 @@ void main() {
 /**
  * Smooth continuous flat extruded quad ribbon pass (no voxel cubes or stair-stepping).
  * Alpha-blended, depth-tested with depthMask(false), double-sided for both 3/4 and near-plan views.
+ * Supports optional V2 directional dataflow pulse animation via `draw(viewProj, pulseTime)`.
  */
 export class FlatFlowRibbonsPass {
   private readonly gl: WebGL2RenderingContext;
@@ -925,6 +947,7 @@ export class FlatFlowRibbonsPass {
   private vbo!: WebGLBuffer;
   private ibo!: WebGLBuffer;
   private uViewProj!: WebGLUniformLocation | null;
+  private uPulseTime!: WebGLUniformLocation | null;
   private indexCount = 0;
 
   constructor(gl: WebGL2RenderingContext) {
@@ -936,6 +959,7 @@ export class FlatFlowRibbonsPass {
     const gl = this.gl;
     this.program = linkProgram(gl, FLAT_FLOW_VS, FLAT_FLOW_FS);
     this.uViewProj = gl.getUniformLocation(this.program, 'uViewProj');
+    this.uPulseTime = gl.getUniformLocation(this.program, 'uPulseTime');
 
     const vao = gl.createVertexArray();
     const vbo = gl.createBuffer();
@@ -977,12 +1001,13 @@ export class FlatFlowRibbonsPass {
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
   }
 
-  draw(viewProj: Float32Array): void {
+  draw(viewProj: Float32Array, pulseTime = -1): void {
     if (this.indexCount <= 0) return;
     const gl = this.gl;
 
     gl.useProgram(this.program);
     gl.uniformMatrix4fv(this.uViewProj, false, viewProj);
+    gl.uniform1f(this.uPulseTime, pulseTime);
 
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
