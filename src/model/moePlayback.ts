@@ -23,6 +23,18 @@ export function isMoeWeightTensor(tensor: MoeTensorKey): boolean {
   return tensor === 'w_router' || tensor === 'shared_w_up' || tensor === 'shared_w_down';
 }
 
+/**
+ * Strip any stale `tokenIndex` from token-independent weight cells (`w_router`, `shared_w_up`,
+ * `shared_w_down`) so stationary weight hover/pinning never overrides the active routing token.
+ */
+export function normalizeMoeWeightCell(cell: MoeCellRef): MoeCellRef {
+  if (!isMoeWeightTensor(cell.tensor) || cell.tokenIndex === undefined) {
+    return cell;
+  }
+  const { tokenIndex: _omit, ...rest } = cell;
+  return rest;
+}
+
 /** Clamp active MoE focus token to `[0..tokens-1]` (defaults to `tokens - 1`). */
 export function resolveActiveMoeFocusToken(
   moeFocusToken: number | null,
@@ -41,7 +53,7 @@ export function remapMoeCellToken(
 ): MoeCellRef {
   const clampedTok = Math.max(0, Math.min(sim.tokens - 1, Math.round(tok)));
   if (isMoeWeightTensor(cell.tensor)) {
-    return cell;
+    return normalizeMoeWeightCell(cell);
   }
   if (cell.tensor === 'topk_weights') {
     const slot = Math.max(0, Math.min(sim.topK - 1, cell.rankSlot ?? cell.col));
@@ -50,6 +62,9 @@ export function remapMoeCellToken(
   }
   if (isMoeSnapshotTensor(cell.tensor)) {
     return { ...cell, tokenIndex: clampedTok };
+  }
+  if (cell.tensor === 'routed_sum') {
+    return { tensor: 'routed_sum', row: clampedTok, col: cell.col, tokenIndex: clampedTok };
   }
   return { ...cell, row: clampedTok, tokenIndex: clampedTok };
 }
@@ -67,7 +82,8 @@ export interface MoeHoverCyclingResolution {
  *    the advancing `moeFocusToken` live (e.g. hovering `topk_weights` slot #1 streams each token's
  *    rank-1 winner; hovering a bank tile watches it flip active/idle across tokens).
  * 2. Hovering token-independent weights (`w_router`, `shared_w_up`, `shared_w_down`) or empty
- *    canvas while cycling: cycling CONTINUES uninterrupted.
+ *    canvas while cycling: cycling CONTINUES uninterrupted with `tokenIndex` stripped so the
+ *    routing snapshot, atlas, and formula upstream spans advance smoothly across tokens.
  * 3. Hovering a sequence-row tensor (`input`, `rmsnorm`, `routed_sum`, `shared_out`, `moe_out`,
  *    `residual`) while cycling: cycling CLEANLY PAUSES so the user inspects that exact token row
  *    directly under the cursor without timer desynchronization.
@@ -81,6 +97,9 @@ export function resolveMoeHoverDuringCycling(
   if (!hitCell) {
     return { hoveredCell: null, shouldPauseTokenCycling: false };
   }
+  if (isMoeWeightTensor(hitCell.tensor)) {
+    return { hoveredCell: normalizeMoeWeightCell(hitCell), shouldPauseTokenCycling: false };
+  }
   if (!moeTokenCycling) {
     return { hoveredCell: hitCell, shouldPauseTokenCycling: false };
   }
@@ -89,9 +108,6 @@ export function resolveMoeHoverDuringCycling(
       hoveredCell: remapMoeCellToken(hitCell, activeFocusToken, sim),
       shouldPauseTokenCycling: false,
     };
-  }
-  if (isMoeWeightTensor(hitCell.tensor)) {
-    return { hoveredCell: hitCell, shouldPauseTokenCycling: false };
   }
   return { hoveredCell: hitCell, shouldPauseTokenCycling: true };
 }
@@ -108,7 +124,7 @@ export interface ResolveEffectiveMoeCellParams {
   readonly moeStepperSubProgress: number;
 }
 
-/** Resolve the effective active MoE cell, preventing stale hover tokens during token cycling. */
+/** Resolve the effective active MoE cell, preventing stale hover/weight tokens during token cycling. */
 export function resolveEffectiveMoeCell(
   params: ResolveEffectiveMoeCellParams,
 ): MoeCellRef | null {
@@ -130,6 +146,9 @@ export function resolveEffectiveMoeCell(
       : sim.topk_indices[tok * sim.topK];
 
   if (moeHoveredCell) {
+    if (isMoeWeightTensor(moeHoveredCell.tensor)) {
+      return normalizeMoeWeightCell(moeHoveredCell);
+    }
     if (moeTokenCycling && isMoeSnapshotTensor(moeHoveredCell.tensor)) {
       return remapMoeCellToken(moeHoveredCell, tok, sim);
     }
@@ -137,6 +156,9 @@ export function resolveEffectiveMoeCell(
   }
 
   if (moeSelectedCell) {
+    if (isMoeWeightTensor(moeSelectedCell.tensor)) {
+      return normalizeMoeWeightCell(moeSelectedCell);
+    }
     if (moeTokenCycling) {
       return remapMoeCellToken(moeSelectedCell, tok, sim);
     }
@@ -156,29 +178,45 @@ export function resolveEffectiveMoeCell(
   return null;
 }
 
+export interface MoeTokenStepResult {
+  readonly nextToken: number;
+  readonly nextSelectedCell: MoeCellRef | null;
+}
+
+/** Step the MoE focused token by `delta` (`-1` or `+1`, wrapping modulo `T`) and keep any pinned cell synced. */
+export function stepMoeFocusToken(
+  moeFocusToken: number | null,
+  delta: -1 | 1,
+  sim: MoeSimResult,
+  moeSelectedCell: MoeCellRef | null,
+): MoeTokenStepResult {
+  const cur = resolveActiveMoeFocusToken(moeFocusToken, sim.tokens);
+  const nextToken = (cur + delta + sim.tokens) % sim.tokens;
+  const nextSelectedCell =
+    moeSelectedCell !== null ? remapMoeCellToken(moeSelectedCell, nextToken, sim) : null;
+  return { nextToken, nextSelectedCell };
+}
+
 export interface MoeTokenCycleTickResult {
   readonly nextToken: number;
   readonly nextSelectedCell: MoeCellRef | null;
   readonly nextHoveredCell: MoeCellRef | null;
 }
 
-/** Advance MoE token cycling by one token (`(cur + 1) % T`) and sync pinned/snapshot hovered cells. */
+/** Advance MoE token cycling by one token (`(cur + 1) % T`) and sync pinned/snapshot/weight hovered cells. */
 export function advanceMoeTokenCycleTick(
   moeFocusToken: number | null,
   sim: MoeSimResult,
   moeSelectedCell: MoeCellRef | null,
   moeHoveredCell: MoeCellRef | null,
 ): MoeTokenCycleTickResult {
-  const cur = resolveActiveMoeFocusToken(moeFocusToken, sim.tokens);
-  const nextToken = (cur + 1) % sim.tokens;
-  const nextSelectedCell =
-    moeSelectedCell !== null ? remapMoeCellToken(moeSelectedCell, nextToken, sim) : null;
+  const { nextToken, nextSelectedCell } = stepMoeFocusToken(moeFocusToken, 1, sim, moeSelectedCell);
   const nextHoveredCell =
     moeHoveredCell !== null
       ? isMoeSnapshotTensor(moeHoveredCell.tensor)
         ? remapMoeCellToken(moeHoveredCell, nextToken, sim)
         : isMoeWeightTensor(moeHoveredCell.tensor)
-          ? moeHoveredCell
+          ? normalizeMoeWeightCell(moeHoveredCell)
           : null
       : null;
   return { nextToken, nextSelectedCell, nextHoveredCell };

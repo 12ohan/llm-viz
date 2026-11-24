@@ -34,6 +34,7 @@ import {
   type MoeSimResult,
   type MoeTensorKey,
 } from '../math/moeSim';
+import { normalizeMoeWeightCell } from '../model/moePlayback';
 import type { PrecisionMode } from '../model/spec';
 import type { GqaViewAngle } from '../model/state';
 import type { AABB } from '../render/camera';
@@ -604,9 +605,11 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   const isFp8Mode = opts.precision === 'fp8_selective';
   const sim = runMoeSim(clampedT);
 
+  // Token-independent weight cells (w_router, shared_w_up, shared_w_down) must never pin focusToken
+  const effectiveActiveCell = opts.activeCell ? normalizeMoeWeightCell(opts.activeCell) : null;
   const focusToken = Math.max(
     0,
-    Math.min(clampedT - 1, opts.activeCell?.tokenIndex ?? opts.focusToken ?? clampedT - 1),
+    Math.min(clampedT - 1, effectiveActiveCell?.tokenIndex ?? opts.focusToken ?? clampedT - 1),
   );
   const activePart = opts.hoveredPart ?? opts.selectedPart;
 
@@ -626,7 +629,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     (opts.activeExpert !== undefined
       ? Math.max(0, Math.min(MOE_SIM_CONFIG.nRoutedExperts - 1, opts.activeExpert))
       : activeExpertIds[0]);
-  const inspectedExpert = inferMoeCellExpert(opts.activeCell ?? null, sim, rawFallbackExpert);
+  const inspectedExpert = inferMoeCellExpert(effectiveActiveCell, sim, rawFallbackExpert);
   const focusExpert = inspectedExpert ?? rawFallbackExpert;
 
   const focusedEval = evaluateSingleRoutedExpert(sim, focusExpert, focusToken);
@@ -636,8 +639,8 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   const atlas = buildMoeValueAtlas(sim, focusToken, focusExpert);
 
   // Compute live formula readout if a cell is hovered/selected/stepped
-  const activeFormula: MoeCellFormula | null = opts.activeCell
-    ? describeMoeCellFormula(sim, opts.activeCell, focusToken, focusExpert)
+  const activeFormula: MoeCellFormula | null = effectiveActiveCell
+    ? describeMoeCellFormula(sim, effectiveActiveCell, focusToken, focusExpert)
     : null;
   const focusSet = buildMoeFocusSet(activeFormula, sim, focusToken);
 
@@ -682,7 +685,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
       activeExpertIds,
       activeRankMap,
       focusedEval,
-      activeCell: opts.activeCell ?? null,
+      activeCell: effectiveActiveCell,
       activeFormula,
       focusSet,
       stepperStep: opts.stepperStep ?? null,
@@ -1412,7 +1415,6 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     seed: 71,
     partId: 'shared-expert',
     tensorKey: 'shared_w_up',
-    tokenIndex: focusToken,
     atlasSlice: atlas.sharedWUp,
     registryKey: 'shared_w_up',
     cellFamily: CELL_SSM_CYAN,
@@ -1454,7 +1456,6 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     seed: 79,
     partId: 'shared-w-down',
     tensorKey: 'shared_w_down',
-    tokenIndex: focusToken,
     atlasSlice: atlas.sharedWDown,
     registryKey: 'shared_w_down',
     cellFamily: CELL_SSM_CYAN,

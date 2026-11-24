@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { runMoeSim, type MoeCellRef } from '../src/math/moeSim';
+import { runMoeSim, type MoeCellFormula, type MoeCellRef } from '../src/math/moeSim';
 import {
   advanceMoeTokenCycleTick,
   resolveEffectiveMoeCell,
   resolveMoeHoverDuringCycling,
+  stepMoeFocusToken,
 } from '../src/model/moePlayback';
-import { DEFAULT_FOV_DEG } from '../src/model/state';
+import { createInitialState, DEFAULT_FOV_DEG } from '../src/model/state';
 import {
   aabbCorners,
   buildCameraSnapshot,
@@ -14,7 +15,7 @@ import {
   makeViewportMetrics,
   projectWorldToInnerCss,
 } from '../src/render/camera';
-import { pickHitToMoeCell, pickMacroBay, type Ray } from '../src/render/pick';
+import { pickHitToMoeCell, pickMacroBay, type PickBox, type Ray } from '../src/render/pick';
 import {
   SHEET_BASIS_FLOATS,
   SHEET_HL_ACTIVE,
@@ -32,6 +33,7 @@ import {
   MOE_SPATIAL_FIT_BOUNDS,
 } from '../src/scene/cutaways';
 import { SOLID_INSTANCE_FLOATS } from '../src/scene/spine';
+import { computeEditorialCacheKey } from '../src/ui/controls';
 
 function sheetHighlightAt(sheetData: Float32Array, idx: number): number {
   return sheetData[idx * SHEET_INSTANCE_FLOATS + 11];
@@ -444,5 +446,247 @@ describe('Spatial MoE (128+1) 3D Multi-Plane Cutaway, 6-Branch Convergence & Top
     expect(Object.keys(spatial.partCatalog).sort()).toEqual(
       Object.keys(nearPlan.partCatalog).sort(),
     );
+  });
+
+  it('7. keeps routing snapshots advancing under stationary picker-produced weight hover during token cycling', () => {
+    const T = 8;
+    const startTok = 1;
+    const sim = runMoeSim(T);
+    const startWinners = sim.topk_indices.subarray(startTok * 6, (startTok + 1) * 6);
+    const baseScene = buildMoECutaway({
+      bayId: 2,
+      tokens: T,
+      precision: 'bf16',
+      selectedPart: null,
+      hoveredPart: null,
+      focusToken: startTok,
+      viewAngle: 'three_quarter',
+    });
+
+    const castBoxRay = (box: PickBox, offsetU = 0, offsetV = 0): Ray => {
+      const f = box.frame!;
+      const pt: [number, number, number] = [
+        f.center[0] + offsetU * f.extent[0] * f.axisU[0] + offsetV * f.extent[2] * f.axisV[0],
+        f.center[1] + offsetU * f.extent[0] * f.axisU[1] + offsetV * f.extent[2] * f.axisV[1],
+        f.center[2] + offsetU * f.extent[0] * f.axisU[2] + offsetV * f.extent[2] * f.axisV[2],
+      ];
+      return {
+        origin: [pt[0] + f.axisN[0] * 3, pt[1] + f.axisN[1] * 3, pt[2] + f.axisN[2] * 3],
+        direction: [-f.axisN[0], -f.axisN[1], -f.axisN[2]],
+      };
+    };
+
+    // Test ALL THREE token-independent weight walls with real ray-picked MoeCellRefs!
+    for (const weightKey of ['w_router', 'shared_w_up', 'shared_w_down'] as const) {
+      const weightBox = baseScene.solidPickBoxes.find((b) => b.tensorKey === weightKey)!;
+      expect(weightBox).toBeDefined();
+      expect(weightBox.tokenIndex).toBeUndefined();
+
+      const hit = pickMacroBay(castBoxRay(weightBox, 0.1, -0.1), [weightBox], []);
+      expect(hit).not.toBeNull();
+      const pickedCell = pickHitToMoeCell(hit!, startTok, startWinners[0], startWinners);
+      expect(pickedCell).not.toBeNull();
+      expect(pickedCell!.tensor).toBe(weightKey);
+      expect(pickedCell!.tokenIndex).toBeUndefined();
+
+      // Hovering while cycling keeps cycling active and never pins startTok
+      const hoverRes = resolveMoeHoverDuringCycling(pickedCell, true, startTok, sim);
+      expect(hoverRes.shouldPauseTokenCycling).toBe(false);
+      expect(hoverRes.hoveredCell?.tokenIndex).toBeUndefined();
+
+      let curTok = startTok;
+      let curHover = hoverRes.hoveredCell;
+      for (const expectedTok of [2, 3, 4]) {
+        const tick = advanceMoeTokenCycleTick(curTok, sim, null, curHover);
+        expect(tick.nextToken).toBe(expectedTok);
+        expect(tick.nextHoveredCell?.tensor).toBe(weightKey);
+        expect(tick.nextHoveredCell?.tokenIndex).toBeUndefined();
+        curTok = tick.nextToken;
+        curHover = tick.nextHoveredCell;
+
+        const effCell = resolveEffectiveMoeCell({
+          sim,
+          moeFocusToken: curTok,
+          moeActiveExpert: null,
+          moeTokenCycling: true,
+          moeHoveredCell: curHover,
+          moeSelectedCell: null,
+          moeStepperActive: false,
+          moeStepperStep: 0,
+          moeStepperSubProgress: 0,
+        });
+        const rebuilt = buildMoECutaway({
+          bayId: 2,
+          tokens: T,
+          precision: 'bf16',
+          selectedPart: null,
+          hoveredPart: weightBox.partId ?? null,
+          focusToken: curTok,
+          activeCell: effCell,
+          viewAngle: 'three_quarter',
+        });
+        expect(rebuilt.moeStats?.focusToken).toBe(expectedTok);
+        expect(rebuilt.moeStats?.activeExpertIds).toEqual(
+          Array.from(sim.topk_indices.subarray(expectedTok * 6, (expectedTok + 1) * 6)),
+        );
+        expect((rebuilt.activeFormula as MoeCellFormula | null)?.upstreamSpans[0]?.tokenIndex).toBe(expectedTok);
+      }
+
+      // Defense-in-depth: even a manually stale tokenIndex on a weight cell cannot freeze buildMoECutaway
+      const staleWeight: MoeCellRef = { ...pickedCell!, tokenIndex: startTok };
+      const defensiveScene = buildMoECutaway({
+        bayId: 2,
+        tokens: T,
+        precision: 'bf16',
+        selectedPart: null,
+        hoveredPart: null,
+        focusToken: 5,
+        activeCell: staleWeight,
+        viewAngle: 'three_quarter',
+      });
+      expect(defensiveScene.moeStats?.focusToken).toBe(5);
+      expect((defensiveScene.activeFormula as MoeCellFormula | null)?.upstreamSpans[0]?.tokenIndex).toBe(5);
+    }
+
+    // Contrast: real picker-produced shared_act (snapshot) tracks advancing token; input (sequence) pauses cycling
+    const sharedActBox = baseScene.solidPickBoxes.find((b) => b.tensorKey === 'shared_act')!;
+    const sharedActCell = pickHitToMoeCell(
+      pickMacroBay(castBoxRay(sharedActBox), [sharedActBox], [])!,
+      startTok,
+      startWinners[0],
+      startWinners,
+    )!;
+    expect(sharedActCell.tokenIndex).toBe(startTok);
+    expect(resolveMoeHoverDuringCycling(sharedActCell, true, startTok, sim).shouldPauseTokenCycling).toBe(false);
+    expect(advanceMoeTokenCycleTick(startTok, sim, null, sharedActCell).nextHoveredCell?.tokenIndex).toBe(2);
+
+    const inputBox = baseScene.solidPickBoxes.find((b) => b.tensorKey === 'input')!;
+    const inputCell = pickHitToMoeCell(
+      pickMacroBay(castBoxRay(inputBox), [inputBox], [])!,
+      startTok,
+      startWinners[0],
+      startWinners,
+    )!;
+    expect(resolveMoeHoverDuringCycling(inputCell, true, startTok, sim).shouldPauseTokenCycling).toBe(true);
+  });
+
+  it('8. advances reduced-motion token step cleanly when a picker-produced cell is already pinned', () => {
+    const T = 8;
+    const startTok = 1;
+    const sim = runMoeSim(T);
+    const startWinners = sim.topk_indices.subarray(startTok * 6, (startTok + 1) * 6);
+    const baseScene = buildMoECutaway({
+      bayId: 2,
+      tokens: T,
+      precision: 'bf16',
+      selectedPart: null,
+      hoveredPart: null,
+      focusToken: startTok,
+      viewAngle: 'three_quarter',
+    });
+
+    const pickFromBox = (box: PickBox, offsetU = 0, offsetV = 0): MoeCellRef => {
+      const f = box.frame!;
+      const pt: [number, number, number] = [
+        f.center[0] + offsetU * f.extent[0] * f.axisU[0] + offsetV * f.extent[2] * f.axisV[0],
+        f.center[1] + offsetU * f.extent[0] * f.axisU[1] + offsetV * f.extent[2] * f.axisV[1],
+        f.center[2] + offsetU * f.extent[0] * f.axisU[2] + offsetV * f.extent[2] * f.axisV[2],
+      ];
+      const hit = pickMacroBay(
+        {
+          origin: [pt[0] + f.axisN[0] * 3, pt[1] + f.axisN[1] * 3, pt[2] + f.axisN[2] * 3],
+          direction: [-f.axisN[0], -f.axisN[1], -f.axisN[2]],
+        },
+        [box],
+        [],
+      );
+      expect(hit).not.toBeNull();
+      const cell = pickHitToMoeCell(hit!, startTok, startWinners[0], startWinners);
+      expect(cell).not.toBeNull();
+      return cell!;
+    };
+
+    const pinnedCases: Array<{ label: string; box: PickBox; offsetU?: number; offsetV?: number }> = [
+      { label: 'topk_weights', box: baseScene.solidPickBoxes.find((b) => b.tensorKey === 'topk_weights')!, offsetU: -0.4 },
+      {
+        label: 'router_bank',
+        box: baseScene.solidPickBoxes.find(
+          (b) => b.tensorKey === 'router_bank' && b.headIndex === startWinners[0],
+        )!,
+      },
+      { label: 'routed_sum', box: baseScene.solidPickBoxes.find((b) => b.tensorKey === 'routed_sum')!, offsetV: -0.25 },
+      { label: 'shared_w_up', box: baseScene.solidPickBoxes.find((b) => b.tensorKey === 'shared_w_up')! },
+    ];
+
+    const dummyPose = { target: [0, 0, 0] as const, azimuthDeg: 20, elevationDeg: 23.5, distance: 12, fovDeg: DEFAULT_FOV_DEG };
+    const state = createInitialState(dummyPose, true);
+    state.mode = 'cutaway_moe';
+    state.tokens = T;
+
+    for (const c of pinnedCases) {
+      const pinned = pickFromBox(c.box, c.offsetU ?? 0, c.offsetV ?? 0);
+      const pinnedTok = pinned.tokenIndex ?? startTok;
+      const expectedNextTok = (pinnedTok + 1) % T;
+      const beforeScene = buildMoECutaway({
+        bayId: 2,
+        tokens: T,
+        precision: 'bf16',
+        selectedPart: c.box.partId ?? null,
+        hoveredPart: null,
+        focusToken: pinnedTok,
+        activeCell: pinned,
+        viewAngle: 'three_quarter',
+      });
+      state.tourActive = false;
+      state.moeFocusToken = pinnedTok;
+      state.selectedPart = c.box.partId ?? null;
+      const keyBefore = computeEditorialCacheKey(state, beforeScene);
+
+      // Simulate reduced-motion single-step advancement (`▶ Cycle t` with reducedMotion = true)
+      const stepped = stepMoeFocusToken(pinnedTok, 1, sim, pinned);
+      expect(stepped.nextToken, `${c.label} nextToken`).toBe(expectedNextTok);
+      const effAfter = resolveEffectiveMoeCell({
+        sim,
+        moeFocusToken: stepped.nextToken,
+        moeActiveExpert: null,
+        moeTokenCycling: false, // reducedMotion keeps continuous cycling false!
+        moeHoveredCell: null,
+        moeSelectedCell: stepped.nextSelectedCell,
+        moeStepperActive: false,
+        moeStepperStep: 0,
+        moeStepperSubProgress: 0,
+      });
+      const afterScene = buildMoECutaway({
+        bayId: 2,
+        tokens: T,
+        precision: 'bf16',
+        selectedPart: c.box.partId ?? null,
+        hoveredPart: null,
+        focusToken: stepped.nextToken,
+        activeCell: effAfter,
+        viewAngle: 'three_quarter',
+      });
+      state.moeFocusToken = stepped.nextToken;
+      const keyAfter = computeEditorialCacheKey(state, afterScene);
+
+      expect(afterScene.moeStats?.focusToken, `${c.label} displayed focusToken`).toBe(expectedNextTok);
+      expect(afterScene.moeStats?.activeExpertIds).toEqual(
+        Array.from(sim.topk_indices.subarray(expectedNextTok * 6, (expectedNextTok + 1) * 6)),
+      );
+      expect(keyAfter).not.toBe(keyBefore);
+
+      if (c.label === 'topk_weights') {
+        const slot = pinned.rankSlot ?? pinned.col;
+        expect(stepped.nextSelectedCell?.expertId).toBe(sim.topk_indices[expectedNextTok * 6 + slot]);
+        expect(afterScene.activeFormula?.coordLabel).toContain(`t${expectedNextTok}`);
+      } else if (c.label === 'routed_sum') {
+        expect(stepped.nextSelectedCell?.row).toBe(expectedNextTok);
+        expect(afterScene.activeFormula?.coordLabel).toContain(`t${expectedNextTok}`);
+        expect(afterScene.moeStats?.focusExpert).toBe(sim.topk_indices[expectedNextTok * 6]);
+      } else if (c.label === 'shared_w_up') {
+        expect(stepped.nextSelectedCell?.tokenIndex).toBeUndefined();
+        expect(afterScene.activeFormula?.equation).toContain(`t${expectedNextTok}`);
+      }
+    }
   });
 });

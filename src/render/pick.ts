@@ -410,15 +410,23 @@ export function pickHitToMoeCell(
     };
   }
   if (tensor === 'w_router') {
+    // Token-independent learned weight matrix: omit tokenIndex so hover/pin never freezes token cycling
     return {
       tensor,
       row: hit.hitRow,
       col: hit.hitCol,
-      tokenIndex: tokIdx,
       expertId: hit.hitRow,
     };
   }
-  if (tensor === 'shared_w_up' || tensor === 'shared_act' || tensor === 'shared_w_down') {
+  if (tensor === 'shared_w_up' || tensor === 'shared_w_down') {
+    // Token-independent learned weight matrices: omit tokenIndex so hover/pin never freezes token cycling
+    return {
+      tensor,
+      row: hit.hitRow,
+      col: hit.hitCol,
+    };
+  }
+  if (tensor === 'shared_act') {
     return {
       tensor,
       row: hit.hitRow,

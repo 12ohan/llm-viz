@@ -59,9 +59,11 @@ import {
 } from './math/moeSim';
 import {
   advanceMoeTokenCycleTick,
+  remapMoeCellToken,
   resolveActiveMoeFocusToken,
   resolveEffectiveMoeCell,
   resolveMoeHoverDuringCycling,
+  stepMoeFocusToken,
 } from './model/moePlayback';
 import { RenderDevice } from './render/device';
 import { LinesPass } from './render/lines';
@@ -1355,13 +1357,16 @@ function boot(): void {
       state.tourActive = false;
       state.moeTokenCycling = false;
       lastMoeCycleTickMs = null;
-      const next = (activeMoeFocusToken() + delta + state.tokens) % state.tokens;
-      state.moeFocusToken = next;
+      const sim = currentCutawayScene?.moeSim ?? runMoeSim(state.tokens);
+      const stepped = stepMoeFocusToken(state.moeFocusToken, delta, sim, state.moeSelectedCell);
+      state.moeFocusToken = stepped.nextToken;
       state.moeActiveExpert = null;
-      state.moeSelectedCell = null;
+      state.moeSelectedCell = stepped.nextSelectedCell;
       state.moeHoveredCell = null;
-      state.selectedPart = null;
       state.hoveredPart = null;
+      if (state.moeSelectedCell === null && state.selectedPart?.startsWith('moe-expert-')) {
+        state.selectedPart = null;
+      }
       markDirtyAndSchedule(true);
     },
     onToggleMoeTokenCycle: () => {
@@ -1369,9 +1374,16 @@ function boot(): void {
       state.moeHoveredCell = null;
       state.hoveredPart = null;
       if (state.reducedMotion) {
-        const next = (activeMoeFocusToken() + 1) % state.tokens;
-        state.moeFocusToken = next;
+        const sim = currentCutawayScene?.moeSim ?? runMoeSim(state.tokens);
+        const stepped = stepMoeFocusToken(state.moeFocusToken, 1, sim, state.moeSelectedCell);
+        state.moeStepperPlaying = false;
+        lastStepperTickMs = null;
+        state.moeFocusToken = stepped.nextToken;
         state.moeActiveExpert = null;
+        state.moeSelectedCell = stepped.nextSelectedCell;
+        if (state.moeSelectedCell === null && state.selectedPart?.startsWith('moe-expert-')) {
+          state.selectedPart = null;
+        }
         state.moeTokenCycling = false;
         lastMoeCycleTickMs = null;
         markDirtyAndSchedule(true);
@@ -1390,13 +1402,10 @@ function boot(): void {
       state.moeFocusToken = startTok;
       state.moeActiveExpert = null;
       if (state.moeSelectedCell !== null) {
-        const sim = runMoeSim(state.tokens);
-        state.moeSelectedCell = advanceMoeTokenCycleTick(
-          (startTok - 1 + state.tokens) % state.tokens,
-          sim,
-          state.moeSelectedCell,
-          null,
-        ).nextSelectedCell;
+        const sim = currentCutawayScene?.moeSim ?? runMoeSim(state.tokens);
+        state.moeSelectedCell = remapMoeCellToken(state.moeSelectedCell, startTok, sim);
+      } else if (state.selectedPart?.startsWith('moe-expert-')) {
+        state.selectedPart = null;
       }
       state.moeTokenCycling = true;
       lastMoeCycleTickMs = null;
