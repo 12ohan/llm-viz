@@ -50,6 +50,7 @@ import {
   SHEET_HL_PATHWAY,
   SHEET_INSTANCE_FLOATS,
   SHEET_KIND_STANDARD,
+  SHEET_REVEAL_NONE,
   SHEET_ROLE_ACTIVATION,
   SHEET_ROLE_KV_K,
   SHEET_ROLE_KV_V,
@@ -63,9 +64,16 @@ import type { AtlasSlice } from './atlasPacker';
 import type { CutawayPartInfo, CutawaySceneGeometry, MoECutawayStats } from './cutaways';
 import { buildMoeValueAtlas } from './moeAtlas';
 import {
+  buildMoeActiveCellGrids,
+  buildMoeActiveOpPartIds,
+  buildMoeCellPopover,
   buildMoeSpatialScene,
+  computeMoeSheetReveal,
   fitSpatialMoeCamera,
   MOE_SPATIAL_FIT_BOUNDS,
+  type MoeRevealContext,
+  type MoeRevealTag,
+  type SheetRevealTuple,
 } from './moeSpatial';
 import {
   CELL_TARGET_FILL,
@@ -132,6 +140,12 @@ export interface BuildMoECutawayOptions {
   readonly activeExpert?: number;
   readonly activeCell?: MoeCellRef | null;
   readonly stepperStep?: number | null;
+  /** V2: Enable progressive cell-by-cell accumulation reveal when Math Stepper is active. Defaults to false. */
+  readonly stepperActive?: boolean;
+  /** V2: Suppress progressive reveal masking under prefers-reduced-motion. Defaults to false. */
+  readonly reducedMotion?: boolean;
+  /** Optional sub-step progress [0..1) for smooth frontier pulse phase. */
+  readonly stepperSubProgress?: number;
   /** Layout mode: `'three_quarter'` builds the 3D Spatial MoE architecture; `'near_plan'` (default) keeps the coplanar XZ schematic. */
   readonly viewAngle?: GqaViewAngle;
   /** Optional authoritative simulator result from a unified `HybridExecutionResult`. */
@@ -158,11 +172,14 @@ interface MoeSheetSpec {
   atlasSlice?: AtlasSlice;
   registryKey?: string;
   cellFamily: number;
+  reveal?: SheetRevealTuple;
 }
 
 class MoeSheetBuilder {
   private readonly bayId: number;
+  private readonly revealEnabled: boolean;
   private readonly sheetFloats: number[] = [];
+  private readonly revealFloats: number[] = [];
   private readonly solidFloats: number[] = [];
   private readonly lineFloats: number[] = [];
   readonly pickBoxes: PickBox[] = [];
@@ -171,8 +188,9 @@ class MoeSheetBuilder {
   readonly flow = new FlowRibbonBuilder();
   readonly sheetRegistry = new Map<string, SheetGeomRecord>();
 
-  constructor(bayId: number) {
+  constructor(bayId: number, revealEnabled = false) {
     this.bayId = bayId;
+    this.revealEnabled = revealEnabled;
   }
 
   addSheet(s: MoeSheetSpec): SheetGeomRecord {
@@ -194,6 +212,12 @@ class MoeSheetBuilder {
       scale,
       modeFlag, 0,
     );
+
+    // 1b. Optional parallel V2 progressive reveal buffer (4 floats/sheet)
+    if (this.revealEnabled) {
+      const rv = s.reveal ?? ([SHEET_REVEAL_NONE, 0, 0, 0] as const);
+      this.revealFloats.push(rv[0], rv[1], rv[2], rv[3]);
+    }
 
     // 2. 1-to-1 mirror in solidData (12 floats: fp8Flag at +7, seed at +8)
     this.solidFloats.push(
@@ -298,6 +322,7 @@ class MoeSheetBuilder {
     return {
       sheetData: new Float32Array(this.sheetFloats),
       sheetCount: this.sheetFloats.length / SHEET_INSTANCE_FLOATS,
+      ...(this.revealEnabled ? { sheetRevealData: new Float32Array(this.revealFloats) } : {}),
       solidData: new Float32Array(this.solidFloats),
       solidCount: this.solidFloats.length / SOLID_INSTANCE_FLOATS,
       lineData: new Float32Array(this.lineFloats),
@@ -679,6 +704,10 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     voxelArrowCount: 0,
   };
 
+  const stepperActive = opts.stepperActive ?? false;
+  const reducedMotion = opts.reducedMotion ?? false;
+  const stepperStep = opts.stepperStep ?? null;
+
   if (opts.viewAngle === 'three_quarter') {
     return buildMoeSpatialScene({
       bayId,
@@ -693,7 +722,10 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
       activeCell: effectiveActiveCell,
       activeFormula,
       focusSet,
-      stepperStep: opts.stepperStep ?? null,
+      stepperStep,
+      stepperActive,
+      reducedMotion,
+      stepperSubProgress: opts.stepperSubProgress,
       sim,
       atlas,
       partCatalog,
@@ -701,9 +733,30 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     });
   }
 
-  const b = new MoeSheetBuilder(bayId);
+  const revealEnabled =
+    stepperActive && !reducedMotion && stepperStep !== null && stepperStep !== undefined;
+  const pulsePhase =
+    opts.stepperSubProgress !== undefined && Number.isFinite(opts.stepperSubProgress)
+      ? ((opts.stepperSubProgress * 6) % 1 + 1) % 1
+      : 0.25;
+  const revealCtx: MoeRevealContext = {
+    enabled: revealEnabled,
+    step: stepperStep ?? 0,
+    activeCell: effectiveActiveCell,
+    focusToken,
+    focusExpert,
+    activeRankMap,
+    sim,
+    pulsePhase,
+  };
+  const sheetReveal = (
+    tag: MoeRevealTag,
+    revealOpts?: { readonly expertId?: number; readonly branchRank?: number },
+  ): SheetRevealTuple => computeMoeSheetReveal(revealCtx, tag, revealOpts);
+
+  const b = new MoeSheetBuilder(bayId, revealEnabled);
   const hasCellTrace = focusSet.active;
-  const step = hasCellTrace ? null : (opts.stepperStep ?? null);
+  const step = hasCellTrace ? null : stepperStep;
   const hasPartFocus = activePart !== null || step !== null;
   const hasAnyFocus = hasCellTrace || hasPartFocus;
 
@@ -769,6 +822,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     atlasSlice: atlas.input,
     registryKey: 'input',
     cellFamily: CELL_ACTIVATION_GREEN,
+    reveal: sheetReveal('input'),
   });
 
   const resOutHl = sheetHighlight({ tensor: 'residual', isAggregate: true }, ['residual-out'], [5]);
@@ -790,6 +844,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     atlasSlice: atlas.residual,
     registryKey: 'residual',
     cellFamily: CELL_ACTIVATION_GREEN,
+    reveal: sheetReveal('residual'),
   });
 
   // Straight emerald residual highway ribbon on the right
@@ -837,6 +892,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     atlasSlice: atlas.rmsnorm,
     registryKey: 'rmsnorm',
     cellFamily: CELL_MOE_AMBER,
+    reveal: sheetReveal('rmsnorm'),
   });
 
   // Input -> RMSNorm horizontal tap
@@ -887,6 +943,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     atlasSlice: atlas.wRouter,
     registryKey: 'w_router',
     cellFamily: CELL_MOE_AMBER,
+    reveal: sheetReveal('weight'),
   });
 
   // 8×16 Router Expert Bank (128 experts):
@@ -957,6 +1014,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
             ? LIFT_Y * 0.72
             : 0;
 
+      const activeTileReveal = sheetReveal('router_bank', { expertId: e });
       const topPlate = b.addSheet({
         cx,
         cy: plateY,
@@ -976,6 +1034,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
         tokenIndex: focusToken,
         atlasSlice: atlas.routerBankTiles[e],
         cellFamily: CELL_MOE_AMBER,
+        reveal: activeTileReveal,
       });
 
       b.addSheet({
@@ -997,6 +1056,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
         tokenIndex: focusToken,
         atlasSlice: atlas.routerBankTiles[e],
         cellFamily: CELL_WEIGHT_BLUE,
+        reveal: activeTileReveal,
       });
 
       bankTileGeom.set(e, {
@@ -1036,6 +1096,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
         tokenIndex: focusToken,
         atlasSlice: atlas.routerBankTiles[e],
         cellFamily: CELL_NEUTRAL,
+        reveal: sheetReveal('router_bank', { expertId: e }),
       });
       bankTileGeom.set(e, idleGeom);
     }
@@ -1107,6 +1168,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     atlasSlice: atlas.topkWeights,
     registryKey: 'topk_weights',
     cellFamily: CELL_MOE_AMBER,
+    reveal: sheetReveal('topk_weights'),
   });
 
   // 6 smooth fan-in ribbons from the 6 active expert tiles -> Top-6 Weights slots
@@ -1201,6 +1263,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     atlasSlice: atlas.routedWUp,
     registryKey: 'routed_w_up',
     cellFamily: CELL_WEIGHT_BLUE,
+    reveal: sheetReveal('weight'),
   });
 
   b.addSheet({
@@ -1223,6 +1286,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     atlasSlice: atlas.routedPre,
     registryKey: 'routed_pre',
     cellFamily: CELL_ACTIVATION_GREEN,
+    reveal: sheetReveal('routed_pre'),
   });
 
   b.addSheet({
@@ -1245,6 +1309,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     atlasSlice: atlas.routedAct,
     registryKey: 'routed_act',
     cellFamily: CELL_MOE_AMBER,
+    reveal: sheetReveal('routed_act'),
   });
 
   b.addSheet({
@@ -1267,6 +1332,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     atlasSlice: atlas.routedWDown,
     registryKey: 'routed_w_down',
     cellFamily: CELL_WEIGHT_BLUE,
+    reveal: sheetReveal('weight'),
   });
 
   // Horizontal chain ribbons inside Focused Routed Expert: W_up -> Pre-Act h -> ReLU² -> W_down
@@ -1354,6 +1420,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     atlasSlice: atlas.routedSum,
     registryKey: 'routed_sum',
     cellFamily: CELL_ACTIVATION_GREEN,
+    reveal: sheetReveal('routed_sum'),
   });
 
   b.flow.addCubicXZ(
@@ -1423,6 +1490,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     atlasSlice: atlas.sharedWUp,
     registryKey: 'shared_w_up',
     cellFamily: CELL_SSM_CYAN,
+    reveal: sheetReveal('weight'),
   });
 
   b.addSheet({
@@ -1444,6 +1512,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     atlasSlice: atlas.sharedAct,
     registryKey: 'shared_act',
     cellFamily: CELL_SSM_CYAN,
+    reveal: sheetReveal('shared_act'),
   });
 
   b.addSheet({
@@ -1464,6 +1533,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     atlasSlice: atlas.sharedWDown,
     registryKey: 'shared_w_down',
     cellFamily: CELL_SSM_CYAN,
+    reveal: sheetReveal('weight'),
   });
 
   b.addSheet({
@@ -1484,6 +1554,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     atlasSlice: atlas.sharedOut,
     registryKey: 'shared_out',
     cellFamily: CELL_SSM_CYAN,
+    reveal: sheetReveal('shared_out'),
   });
 
   // Right parallel fork from RMSNorm U -> Shared W_up -> Shared ReLU² -> Shared W_down -> Shared Out
@@ -1570,6 +1641,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     atlasSlice: atlas.moeOut,
     registryKey: 'moe_out',
     cellFamily: CELL_ACTIVATION_GREEN,
+    reveal: sheetReveal('moe_out'),
   });
 
   const mergeCol = hasCellTrace
@@ -1677,6 +1749,12 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     return rectFromSheetGrid(geom, span.rowStart, span.rowEnd, span.colStart, span.colEnd);
   };
 
+  let popoverTargetWorld: readonly [number, number, number] | null = null;
+  const popoverSources: {
+    readonly world: readonly [number, number, number];
+    readonly role: 'indigo' | 'teal';
+  }[] = [];
+
   if (activeFormula) {
     const c = activeFormula.cell;
     const targetRect = resolveSpanRect({
@@ -1689,6 +1767,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
       tokenIndex: c.tokenIndex,
     });
     if (targetRect) {
+      popoverTargetWorld = [targetRect.cx, targetRect.topY, targetRect.cz];
       b.flow.addCellHighlightXZ(
         targetRect.cx,
         targetRect.cz,
@@ -1702,12 +1781,17 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
       activeFormula.upstreamSpans.forEach((up, idx) => {
         const upRect = resolveSpanRect(up);
         if (!upRect) return;
+        popoverSources.push({
+          world: [upRect.cx, upRect.topY, upRect.cz],
+          role: idx === 0 ? 'indigo' : 'teal',
+        });
         drawOperandDependencyXZ(b.flow, upRect, targetRect, idx === 0);
       });
       // Refinement 2: In Near-Plan too, show all 5 other Top-6 unbiased denominator contributors on topk_weights!
       if (c.tensor === 'topk_weights') {
         const slot = Math.max(0, Math.min(sim.topK - 1, c.rankSlot ?? c.col));
         const winnerId = sim.topk_indices[focusToken * sim.topK + slot];
+        let addedDenomSource = false;
         for (const eid of activeExpertIds) {
           if (eid === winnerId) continue;
           const denomRect = resolveSpanRect({
@@ -1720,6 +1804,13 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
             tokenIndex: focusToken,
           });
           if (denomRect) {
+            if (!addedDenomSource) {
+              popoverSources.push({
+                world: [denomRect.cx, denomRect.topY, denomRect.cz],
+                role: 'teal',
+              });
+              addedDenomSource = true;
+            }
             drawOperandDependencyXZ(b.flow, denomRect, targetRect, false);
           }
         }
@@ -1883,6 +1974,27 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     partIds: ['shared-expert', 'shared-w-down', 'shared-act', 'shared-out'],
   });
 
+  const focusedRank = activeRankMap.get(focusExpert) ?? null;
+  const activeOpPartIds = buildMoeActiveOpPartIds(focusSet, activeFormula, activeRankMap);
+  const cellPopover = buildMoeCellPopover({
+    activeFormula,
+    sim,
+    focusToken,
+    focusExpert,
+    targetWorld: popoverTargetWorld,
+    sourceWorlds: popoverSources,
+  });
+  const activeCellGrids = buildMoeActiveCellGrids({
+    sheetRegistry: b.sheetRegistry,
+    sim,
+    focusToken,
+    focusExpert,
+    activeExpertIds,
+    focusedRank,
+    focusedEval,
+    activeFormula,
+  });
+
   const packed = b.pack();
   const reg = (k: string) => b.sheetRegistry.get(k);
   const opFocusBounds: Record<number, AABB> = {
@@ -1902,6 +2014,9 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     valueAtlas: atlas,
     moeSim: sim,
     activeFormula,
+    activeOpPartIds,
+    cellPopover,
+    activeCellGrids,
     fitBounds: MOE_FIT_BOUNDS,
     opFocusBounds,
     landmarks: b.landmarks,

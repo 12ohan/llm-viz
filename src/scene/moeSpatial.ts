@@ -42,6 +42,9 @@ import {
   SHEET_INSTANCE_FLOATS,
   SHEET_KIND_GHOST_RAIL,
   SHEET_KIND_STANDARD,
+  SHEET_REVEAL_NONE,
+  SHEET_REVEAL_ROW_MAJOR,
+  SHEET_REVEAL_UNCOMPUTED,
   SHEET_ROLE_ACTIVATION,
   SHEET_ROLE_KV_K,
   SHEET_ROLE_KV_V,
@@ -51,6 +54,7 @@ import {
   SHEET_ROLE_SOFTMAX,
   SHEET_ROLE_WEIGHT,
 } from '../render/sheets';
+import type { ActiveSheetCellGrid, CellPopoverSpec } from '../ui/overlay';
 import type { AtlasSlice } from './atlasPacker';
 import type { CutawayPartInfo, CutawaySceneGeometry, MoECutawayStats } from './cutaways';
 import type { MoeValueAtlas } from './moeAtlas';
@@ -224,6 +228,748 @@ const RIBBON_BRANCH_FOCUS: FlowRibbonColor = { r: 0.86, g: 0.30, b: 0.20, a: 0.7
 const TOKEN_ROW_FILL: FlowRibbonColor = { r: 0.14, g: 0.50, b: 0.72, a: 0.14, borderAlpha: 0.0 };
 const TOKEN_ROW_FRAME: FlowRibbonColor = { r: 0.14, g: 0.50, b: 0.72, a: 0.72, borderAlpha: 0.25 };
 
+export type MoeRevealTag =
+  | 'ghost_rail'
+  | 'input'
+  | 'rmsnorm'
+  | 'weight'
+  | 'router_bank'
+  | 'topk_unbiased'
+  | 'topk_weights'
+  | 'routed_pre'
+  | 'routed_act'
+  | 'routed_branch'
+  | 'routed_sum'
+  | 'shared_act'
+  | 'shared_out'
+  | 'moe_out'
+  | 'residual';
+
+export type SheetRevealTuple = readonly [number, number, number, number];
+
+export interface MoeRevealContext {
+  readonly enabled: boolean;
+  readonly step: number;
+  readonly activeCell: MoeCellRef | null;
+  readonly focusToken: number;
+  readonly focusExpert: number;
+  readonly activeRankMap: ReadonlyMap<number, number>;
+  readonly sim: MoeSimResult;
+  readonly pulsePhase: number;
+}
+
+const REVEAL_NONE_TUPLE: SheetRevealTuple = [SHEET_REVEAL_NONE, 0, 0, 0];
+const REVEAL_UNCOMPUTED_TUPLE: SheetRevealTuple = [SHEET_REVEAL_UNCOMPUTED, 0, 0, 0];
+
+function clampInt(v: number, lo: number, hi: number): number {
+  const t = Math.trunc(v);
+  return t < lo ? lo : t > hi ? hi : t;
+}
+
+/**
+ * Compute per-sheet V2 progressive accumulation reveal tuple
+ * `[revealMode, colFrontier, rowFrontier, pulsePhase]` for MoE 128+1 steps 0..5.
+ */
+export function computeMoeSheetReveal(
+  ctx: MoeRevealContext,
+  tag: MoeRevealTag,
+  opts?: { readonly expertId?: number; readonly branchRank?: number },
+): SheetRevealTuple {
+  if (!ctx.enabled) return REVEAL_NONE_TUPLE;
+  if (tag === 'ghost_rail' || tag === 'input' || tag === 'weight') {
+    return REVEAL_NONE_TUPLE;
+  }
+
+  const step = clampInt(ctx.step, 0, 5);
+  const { activeCell, focusToken, focusExpert, activeRankMap, sim, pulsePhase } = ctx;
+  const T = sim.tokens;
+  const d = sim.d;
+
+  switch (tag) {
+    case 'rmsnorm': {
+      if (step > 0) return REVEAL_NONE_TUPLE;
+      const tok = activeCell?.tensor === 'rmsnorm' ? clampInt(activeCell.row, 0, T - 1) : focusToken;
+      const ch = activeCell?.tensor === 'rmsnorm' ? clampInt(activeCell.col, 0, d - 1) : 0;
+      return [SHEET_REVEAL_ROW_MAJOR, ch, tok, pulsePhase];
+    }
+
+    case 'router_bank': {
+      if (step < 1) return REVEAL_UNCOMPUTED_TUPLE;
+      if (step > 1) return REVEAL_NONE_TUPLE;
+      const eid = opts?.expertId ?? 0;
+      const tileRank = activeRankMap.get(eid);
+      const stepExpert =
+        activeCell?.tensor === 'router_bank' && activeCell.expertId !== undefined
+          ? activeCell.expertId
+          : focusExpert;
+      const stepRank = activeRankMap.get(stepExpert);
+      if (stepRank !== undefined) {
+        if (tileRank !== undefined) {
+          if (tileRank < stepRank) return REVEAL_NONE_TUPLE;
+          if (tileRank === stepRank) return [SHEET_REVEAL_ROW_MAJOR, 0, 0, pulsePhase];
+          return REVEAL_UNCOMPUTED_TUPLE;
+        }
+        const idleCutoff = Math.floor(((stepRank + 1) / sim.topK) * sim.nRoutedExperts) - 1;
+        return eid <= idleCutoff ? REVEAL_NONE_TUPLE : REVEAL_UNCOMPUTED_TUPLE;
+      }
+      if (eid < stepExpert) return REVEAL_NONE_TUPLE;
+      if (eid === stepExpert) return [SHEET_REVEAL_ROW_MAJOR, 0, 0, pulsePhase];
+      return REVEAL_UNCOMPUTED_TUPLE;
+    }
+
+    case 'topk_unbiased': {
+      if (step < 2) return REVEAL_UNCOMPUTED_TUPLE;
+      // Step 3 (step === 2) keeps Unbiased σ 100% revealed so all 6 denominator terms stay visible
+      return REVEAL_NONE_TUPLE;
+    }
+
+    case 'topk_weights': {
+      if (step < 2) return REVEAL_UNCOMPUTED_TUPLE;
+      if (step > 2) return REVEAL_NONE_TUPLE;
+      const activeSlot =
+        activeCell?.tensor === 'topk_weights'
+          ? clampInt(activeCell.rankSlot ?? activeCell.col, 0, sim.topK - 1)
+          : (activeRankMap.get(focusExpert) ?? 0);
+      return [SHEET_REVEAL_ROW_MAJOR, activeSlot, 0, pulsePhase];
+    }
+
+    case 'routed_pre':
+    case 'routed_act': {
+      if (step < 3) return REVEAL_UNCOMPUTED_TUPLE;
+      if (step > 3) return REVEAL_NONE_TUPLE;
+      const activeH =
+        activeCell?.tensor === 'routed_act' ||
+        activeCell?.tensor === 'routed_pre' ||
+        activeCell?.tensor === 'routed_w_up'
+          ? clampInt(activeCell.row, 0, sim.dExp - 1)
+          : activeCell?.tensor === 'routed_w_down'
+            ? clampInt(activeCell.col, 0, sim.dExp - 1)
+            : 0;
+      return [SHEET_REVEAL_ROW_MAJOR, 0, activeH, pulsePhase];
+    }
+
+    case 'routed_branch': {
+      if (step < 3) return REVEAL_UNCOMPUTED_TUPLE;
+      if (step > 3) return REVEAL_NONE_TUPLE;
+      const j = opts?.branchRank ?? 0;
+      const activeRank = activeRankMap.get(focusExpert) ?? 0;
+      if (j < activeRank) return REVEAL_NONE_TUPLE;
+      if (j > activeRank) return REVEAL_UNCOMPUTED_TUPLE;
+      const activeH =
+        activeCell?.tensor === 'routed_act' ||
+        activeCell?.tensor === 'routed_pre' ||
+        activeCell?.tensor === 'routed_w_up'
+          ? clampInt(activeCell.row, 0, sim.dExp - 1)
+          : activeCell?.tensor === 'routed_w_down'
+            ? clampInt(activeCell.col, 0, sim.dExp - 1)
+            : 0;
+      const branchCol = clampInt(Math.floor(((activeH + 1) / sim.dExp) * d) - 1, 0, d - 1);
+      return [SHEET_REVEAL_ROW_MAJOR, branchCol, 0, pulsePhase];
+    }
+
+    case 'routed_sum': {
+      return step <= 3 ? REVEAL_UNCOMPUTED_TUPLE : REVEAL_NONE_TUPLE;
+    }
+
+    case 'shared_act': {
+      if (step < 4) return REVEAL_UNCOMPUTED_TUPLE;
+      if (step > 4) return REVEAL_NONE_TUPLE;
+      const activeS =
+        activeCell?.tensor === 'shared_act' || activeCell?.tensor === 'shared_w_up'
+          ? clampInt(activeCell.row, 0, sim.dShared - 1)
+          : activeCell?.tensor === 'shared_w_down'
+            ? clampInt(activeCell.col, 0, sim.dShared - 1)
+            : 0;
+      return [SHEET_REVEAL_ROW_MAJOR, 0, activeS, pulsePhase];
+    }
+
+    case 'shared_out': {
+      if (step < 4) return REVEAL_UNCOMPUTED_TUPLE;
+      if (step > 4) return REVEAL_NONE_TUPLE;
+      if (activeCell?.tensor === 'shared_out') {
+        return [
+          SHEET_REVEAL_ROW_MAJOR,
+          clampInt(activeCell.col, 0, d - 1),
+          clampInt(activeCell.row, 0, T - 1),
+          pulsePhase,
+        ];
+      }
+      const activeS =
+        activeCell?.tensor === 'shared_act' || activeCell?.tensor === 'shared_w_up'
+          ? clampInt(activeCell.row, 0, sim.dShared - 1)
+          : activeCell?.tensor === 'shared_w_down'
+            ? clampInt(activeCell.col, 0, sim.dShared - 1)
+            : 0;
+      const outCol = clampInt(Math.floor(((activeS + 1) / sim.dShared) * d) - 1, 0, d - 1);
+      return [SHEET_REVEAL_ROW_MAJOR, outCol, focusToken, pulsePhase];
+    }
+
+    case 'moe_out':
+    case 'residual': {
+      if (step < 5) return REVEAL_UNCOMPUTED_TUPLE;
+      const outTok =
+        activeCell?.tensor === 'residual' || activeCell?.tensor === 'moe_out'
+          ? clampInt(activeCell.row, 0, T - 1)
+          : focusToken;
+      const outCh =
+        activeCell?.tensor === 'residual' || activeCell?.tensor === 'moe_out'
+          ? clampInt(activeCell.col, 0, d - 1)
+          : 0;
+      return [SHEET_REVEAL_ROW_MAJOR, outCh, outTok, pulsePhase];
+    }
+  }
+}
+
+/**
+ * V1/V3 active-op participating part IDs for MacroOverlay secondary label dimming.
+ * Returns `undefined` when no cell focus is active so all labels remain full opacity.
+ */
+export function buildMoeActiveOpPartIds(
+  focusSet: SheetFocusSet,
+  activeFormula: MoeCellFormula | null,
+  activeRankMap: ReadonlyMap<number, number>,
+): ReadonlySet<string> | undefined {
+  if (!focusSet.active) return undefined;
+  const parts = new Set<string>();
+  const addTensorParts = (tensor: string, expertId?: number) => {
+    switch (tensor) {
+      case 'input':
+        parts.add('residual-in');
+        break;
+      case 'rmsnorm':
+        parts.add('rmsnorm');
+        break;
+      case 'w_router':
+        parts.add('w-router');
+        break;
+      case 'router_bank':
+        parts.add('routed-bank');
+        if (expertId !== undefined) {
+          parts.add(`moe-expert-${expertId}`);
+          if (!activeRankMap.has(expertId)) {
+            parts.add('inactive-experts');
+          }
+        }
+        break;
+      case 'topk_weights':
+        parts.add('router');
+        break;
+      case 'routed_w_up':
+        parts.add('routed-w-up');
+        break;
+      case 'routed_pre':
+        parts.add('routed-pre');
+        parts.add('routed-act');
+        break;
+      case 'routed_act':
+        parts.add('routed-act');
+        break;
+      case 'routed_w_down':
+        parts.add('routed-w-down');
+        break;
+      case 'routed_sum':
+        parts.add('routed-sum');
+        break;
+      case 'shared_w_up':
+        parts.add('shared-expert');
+        break;
+      case 'shared_act':
+        parts.add('shared-act');
+        break;
+      case 'shared_w_down':
+        parts.add('shared-w-down');
+        break;
+      case 'shared_out':
+        parts.add('shared-out');
+        break;
+      case 'moe_out':
+        parts.add('moe-out');
+        break;
+      case 'residual':
+        parts.add('residual-out');
+        break;
+    }
+  };
+
+  for (const entry of focusSet.entries) {
+    addTensorParts(entry.tensor, entry.expertId);
+  }
+
+  const c = activeFormula?.cell;
+  if (c?.tensor === 'topk_weights') {
+    parts.add('router');
+    parts.add('router-unbiased');
+    parts.add('routed-bank');
+    parts.add('moe-topk-norm-note');
+  } else if (c?.tensor === 'routed_sum') {
+    parts.add('routed-sum');
+    parts.add('routed-branch');
+    parts.add('router');
+    parts.add('routed-w-down');
+  } else if (c?.tensor === 'residual') {
+    parts.add('residual-out');
+    parts.add('moe-out');
+    parts.add('residual-in');
+    parts.add('moe-res-carry');
+  } else if (
+    c?.tensor === 'routed_act' ||
+    c?.tensor === 'routed_pre' ||
+    c?.tensor === 'routed_w_up' ||
+    c?.tensor === 'routed_w_down'
+  ) {
+    if (c.expertId !== undefined && activeRankMap.has(c.expertId)) {
+      parts.add('routed-branch');
+    }
+  }
+
+  return parts.size > 0 ? parts : undefined;
+}
+
+/**
+ * Build V3 floating in-canvas contextual formula popover anchored to the active/hovered 3D cell.
+ */
+export function buildMoeCellPopover(params: {
+  readonly activeFormula: MoeCellFormula | null;
+  readonly sim: MoeSimResult;
+  readonly focusToken: number;
+  readonly focusExpert: number;
+  readonly targetWorld: readonly [number, number, number] | null;
+  readonly sourceWorlds: readonly {
+    readonly world: readonly [number, number, number];
+    readonly role: 'indigo' | 'teal';
+  }[];
+}): CellPopoverSpec | null {
+  const { activeFormula, sim, focusToken, focusExpert, targetWorld, sourceWorlds } = params;
+  if (!activeFormula || !targetWorld) return null;
+
+  const c = activeFormula.cell;
+  const T = sim.tokens;
+  const d = sim.d;
+  const offset = sim.startTokenOffset ?? 0;
+  const tok = clampInt(c.tokenIndex ?? focusToken, 0, T - 1);
+  const absTok = offset + tok;
+  const tokWord = sim.tokenLabels[tok] ?? `t${absTok}`;
+  const expId = clampInt(c.expertId ?? activeFormula.activeExpertId ?? focusExpert, 0, sim.nRoutedExperts - 1);
+  const expTag = formatExpertId(expId);
+
+  let coordLabel = activeFormula.coordLabel;
+  let badge: string | undefined;
+  let equation = activeFormula.equation;
+
+  switch (c.tensor) {
+    case 'input': {
+      const t = clampInt(c.row, 0, T - 1);
+      const ch = clampInt(c.col, 0, d - 1);
+      badge = '0 B Cache';
+      equation = `X[${ch}, t${offset + t}] · RMS=${sim.rms[t].toFixed(3)}`;
+      break;
+    }
+    case 'rmsnorm': {
+      const t = clampInt(c.row, 0, T - 1);
+      const ch = clampInt(c.col, 0, d - 1);
+      const xv = sim.X[ch * T + t];
+      const g = sim.gamma_in[ch];
+      badge = 'ε=1e−5';
+      equation = `(${fmtSigned(xv, 2)} / ${sim.rms[t].toFixed(2)}) × γ[${ch}](${g.toFixed(2)})`;
+      break;
+    }
+    case 'w_router': {
+      const e = clampInt(c.row, 0, sim.nRoutedExperts - 1);
+      const ch = clampInt(c.col, 0, d - 1);
+      badge = 'FP32 Gate';
+      equation = `W_router[${formatExpertId(e)}, ${ch}] · bias ${fmtSigned(sim.e_score_correction_bias[e], 3)}`;
+      break;
+    }
+    case 'router_bank': {
+      const ev = evaluateSingleRoutedExpert(sim, expId, tok);
+      badge = ev.isActive ? `Top-6 #${(ev.activeRank ?? 0) + 1}` : `Idle #${ev.choiceRank + 1}`;
+      equation = `σ(${fmtSigned(ev.logit, 2)}) + bias(${fmtSigned(ev.bias, 2)}) = ${ev.choiceScore.toFixed(3)}`;
+      break;
+    }
+    case 'topk_weights': {
+      const slot = clampInt(c.rankSlot ?? c.col, 0, sim.topK - 1);
+      const rawS = sim.topk_raw_scores[tok * sim.topK + slot];
+      let rawSum = 0;
+      for (let m = 0; m < sim.topK; m++) rawSum += sim.topk_raw_scores[tok * sim.topK + m];
+      badge = 'FP32 · ×2.5';
+      equation = `(${rawS.toFixed(3)} / Σ₆ ${rawSum.toFixed(3)}) × 2.5`;
+      break;
+    }
+    case 'routed_w_up': {
+      const hRow = clampInt(c.row, 0, sim.dExp - 1);
+      const iCol = clampInt(c.col, 0, d - 1);
+      badge = activeFormula.isIdleExpert ? 'Idle Preview' : 'No gate_proj';
+      equation = `W_up[${expTag}, h${hRow}, c${iCol}] × U[${iCol}, t${absTok}]`;
+      break;
+    }
+    case 'routed_pre': {
+      const hRow = clampInt(c.row, 0, sim.dExp - 1);
+      const ev = evaluateSingleRoutedExpert(sim, expId, tok);
+      coordLabel = `t${absTok} "${tokWord}" · h${hRow}`;
+      badge = ev.h[hRow] > 0 ? 'Pass ReLU²' : 'Zeroed ≤0';
+      equation = `W_up[${expTag}, h${hRow}] · U[:, t${absTok}] → a=${ev.a[hRow].toFixed(2)}`;
+      break;
+    }
+    case 'routed_act': {
+      const hRow = clampInt(c.row, 0, sim.dExp - 1);
+      const ev = evaluateSingleRoutedExpert(sim, expId, tok);
+      coordLabel = `t${absTok} "${tokWord}" · h${hRow}`;
+      badge = ev.h[hRow] > 0 ? 'ReLU² (+)' : 'Exact 0';
+      equation = `max(0, ${fmtSigned(ev.h[hRow], 3)})²`;
+      break;
+    }
+    case 'routed_w_down': {
+      const oRow = clampInt(c.row, 0, d - 1);
+      const hCol = clampInt(c.col, 0, sim.dExp - 1);
+      badge = activeFormula.isIdleExpert ? 'Idle (0×)' : '1,856→2,688';
+      equation = `W_down[${expTag}, c${oRow}, h${hCol}] · a[${hCol}]`;
+      break;
+    }
+    case 'routed_sum': {
+      const t = clampInt(c.row, 0, T - 1);
+      const ch = clampInt(c.col, 0, d - 1);
+      badge = 'Σ₆ · ×2.5';
+      equation = `Σ_{j=1..6} wⱼ · yⱼ[${ch}, t${offset + t}]`;
+      break;
+    }
+    case 'shared_w_up': {
+      const hRow = clampInt(c.row, 0, sim.dShared - 1);
+      const iCol = clampInt(c.col, 0, d - 1);
+      badge = '2× Shared';
+      equation = `W_up_s[s${hRow}, c${iCol}] × U[${iCol}, t${absTok}]`;
+      break;
+    }
+    case 'shared_act': {
+      const hRow = clampInt(c.row, 0, sim.dShared - 1);
+      const hv = sim.shared_h[hRow * T + tok];
+      coordLabel = `t${absTok} "${tokWord}" · s${hRow}`;
+      badge = '2× Always-On';
+      equation = `max(0, ${fmtSigned(hv, 3)})² (3,712 width)`;
+      break;
+    }
+    case 'shared_w_down': {
+      const oRow = clampInt(c.row, 0, d - 1);
+      const hCol = clampInt(c.col, 0, sim.dShared - 1);
+      badge = '2× → 1×';
+      equation = `W_down_s[c${oRow}, s${hCol}] · a_s[${hCol}]`;
+      break;
+    }
+    case 'shared_out': {
+      const t = clampInt(c.row, 0, T - 1);
+      const ch = clampInt(c.col, 0, d - 1);
+      const tw = sim.tokenLabels[t] ?? `t${offset + t}`;
+      coordLabel = `t${offset + t} "${tw}" · ch ${ch}`;
+      badge = 'Unscaled 1×';
+      equation = `W_down_s[${ch}, :] · a_s[:, t${offset + t}]`;
+      break;
+    }
+    case 'moe_out': {
+      const t = clampInt(c.row, 0, T - 1);
+      const ch = clampInt(c.col, 0, d - 1);
+      const tw = sim.tokenLabels[t] ?? `t${offset + t}`;
+      coordLabel = `t${offset + t} "${tw}" · ch ${ch}`;
+      badge = 'Routed + Shared';
+      equation = `y_routed(${fmtSigned(sim.y_routed[ch * T + t], 2)}) + y_shared(${fmtSigned(sim.y_shared[ch * T + t], 2)})`;
+      break;
+    }
+    case 'residual':
+    default: {
+      const t = clampInt(c.row, 0, T - 1);
+      const ch = clampInt(c.col, 0, d - 1);
+      badge = 'X + y_moe';
+      equation = `X(${fmtSigned(sim.X[ch * T + t], 2)}) + y_moe(${fmtSigned(sim.y_moe[ch * T + t], 2)})`;
+      break;
+    }
+  }
+
+  const operandColors: ('indigo' | 'teal' | 'red')[] = [];
+  if (sourceWorlds.some((s) => s.role === 'indigo')) operandColors.push('indigo');
+  if (sourceWorlds.some((s) => s.role === 'teal')) operandColors.push('teal');
+  operandColors.push('red');
+
+  const rawVal = activeFormula.valueText;
+  const valueText = rawVal.startsWith('=') ? rawVal : `= ${rawVal}`;
+
+  return {
+    world: targetWorld,
+    tensorLabel: activeFormula.tensorLabel,
+    coordLabel,
+    badge,
+    equation,
+    valueText,
+    operandColors,
+    sourceWorlds: sourceWorlds.length > 0 ? sourceWorlds : undefined,
+  };
+}
+
+/**
+ * Build V3 zoom-adaptive `ActiveSheetCellGrid` descriptors for MoE 128+1 directly
+ * from live `sim` Float32 arrays with absolute token coordinate `t${absFocusToken}`.
+ * Always includes `Top-6`, `Unbiased σ` (when present in 3/4 view), workbench `ReLU²`,
+ * `Routed Sum`, and `Shared Out`, prioritizing the actively inspected sheet first.
+ */
+export function buildMoeActiveCellGrids(params: {
+  readonly sheetRegistry: ReadonlyMap<string, SheetGeomRecord>;
+  readonly sim: MoeSimResult;
+  readonly focusToken: number;
+  readonly focusExpert: number;
+  readonly activeExpertIds: readonly number[];
+  readonly focusedRank: number | null;
+  readonly focusedEval: ReturnType<typeof evaluateSingleRoutedExpert>;
+  readonly activeFormula: MoeCellFormula | null;
+}): readonly ActiveSheetCellGrid[] {
+  const {
+    sheetRegistry,
+    sim,
+    focusToken,
+    focusExpert,
+    activeExpertIds,
+    focusedRank,
+    focusedEval,
+    activeFormula,
+  } = params;
+
+  const T = sim.tokens;
+  const d = sim.d;
+  const offset = sim.startTokenOffset ?? 0;
+  const absFocusToken = offset + focusToken;
+  const focusExpTag = formatExpertId(focusExpert);
+  const expertLabels = activeExpertIds.map(formatExpertId);
+  const chLabels = Array.from({ length: d }, (_, ch) => `c${ch}`);
+  const activeTensor = activeFormula?.cell.tensor ?? null;
+
+  const frameAxes = (rec: SheetGeomRecord) => ({
+    originWorld: rec.frame ? rec.frame.center : ([rec.cx, rec.cy, rec.cz] as const),
+    extent: rec.frame ? rec.frame.extent : ([rec.ex, rec.ey, rec.ez] as const),
+    axisU: rec.frame ? rec.frame.axisU : FRAME_XZ_AXES.axisU,
+    axisN: rec.frame ? rec.frame.axisN : FRAME_XZ_AXES.axisN,
+  });
+
+  const makeTokenRowSliceGrid = (
+    key: string,
+    tensorData: Float32Array,
+    tok: number,
+    colDimLabel: string,
+    activeCol?: number,
+  ): ActiveSheetCellGrid | null => {
+    const rec = sheetRegistry.get(key);
+    if (!rec) return null;
+    const clampedTok = clampInt(tok, 0, T - 1);
+    const absTok = offset + clampedTok;
+    const rowSpan = spanFromSheetGrid(rec, clampedTok, clampedTok, 0, d - 1);
+    const base = frameAxes(rec);
+    const values = new Float32Array(d);
+    for (let ch = 0; ch < d; ch++) {
+      values[ch] = tensorData[ch * T + clampedTok];
+    }
+    return {
+      originWorld: rowSpan.center,
+      extent: [base.extent[0], base.extent[1], base.extent[2] / Math.max(1, rec.gridRows)],
+      axisU: base.axisU,
+      axisN: base.axisN,
+      cols: d,
+      rows: 1,
+      values,
+      format: 'signed',
+      activeCol,
+      activeRow: activeCol !== undefined ? 0 : undefined,
+      colLabels: chLabels,
+      rowLabels: [`t${absTok}`],
+      colDimLabel,
+    };
+  };
+
+  const grids: { readonly key: string; readonly grid: ActiveSheetCellGrid }[] = [];
+
+  // 1. Top-6 Normalized Weights [cols=6, rows=1] with expert IDs E031..
+  const topkRec = sheetRegistry.get('topk_weights');
+  if (topkRec) {
+    const base = frameAxes(topkRec);
+    const values = new Float32Array(sim.topK);
+    for (let j = 0; j < sim.topK; j++) {
+      values[j] = sim.topk_weights[focusToken * sim.topK + j];
+    }
+    const activeCol =
+      activeTensor === 'topk_weights'
+        ? clampInt(activeFormula!.cell.rankSlot ?? activeFormula!.cell.col, 0, sim.topK - 1)
+        : (focusedRank ?? undefined);
+    grids.push({
+      key: 'topk_weights',
+      grid: {
+        ...base,
+        cols: sim.topK,
+        rows: 1,
+        values,
+        format: 'prob',
+        activeCol,
+        activeRow: activeCol !== undefined ? 0 : undefined,
+        colLabels: expertLabels,
+        rowLabels: [`t${absFocusToken}`],
+        colDimLabel: 'Top-6 (×2.5)',
+      },
+    });
+  }
+
+  // 2. Unbiased Sigmoid Scores [cols=6, rows=1] (Spatial 3/4 two-tier normalization bridge)
+  const unbiasedRec = sheetRegistry.get('topk_unbiased');
+  if (unbiasedRec) {
+    const base = frameAxes(unbiasedRec);
+    const values = new Float32Array(sim.topK);
+    for (let j = 0; j < sim.topK; j++) {
+      values[j] = sim.topk_raw_scores[focusToken * sim.topK + j];
+    }
+    const activeCol =
+      activeTensor === 'topk_weights'
+        ? clampInt(activeFormula!.cell.rankSlot ?? activeFormula!.cell.col, 0, sim.topK - 1)
+        : undefined;
+    grids.push({
+      key: 'topk_unbiased',
+      grid: {
+        ...base,
+        cols: sim.topK,
+        rows: 1,
+        values,
+        format: 'prob',
+        activeCol,
+        activeRow: activeCol !== undefined ? 0 : undefined,
+        colLabels: expertLabels,
+        rowLabels: [`t${absFocusToken}`],
+        colDimLabel: 'Unbiased σ',
+      },
+    });
+  }
+
+  // 3. Active Workbench ReLU² [cols=1, rows=4]
+  const routedActRec = sheetRegistry.get('routed_act');
+  if (routedActRec) {
+    const base = frameAxes(routedActRec);
+    const values = Float32Array.from(focusedEval.a);
+    const activeRow =
+      activeTensor === 'routed_act' ? clampInt(activeFormula!.cell.row, 0, sim.dExp - 1) : undefined;
+    grids.push({
+      key: 'routed_act',
+      grid: {
+        ...base,
+        cols: 1,
+        rows: sim.dExp,
+        values,
+        format: 'prob',
+        activeCol: activeRow !== undefined ? 0 : undefined,
+        activeRow,
+        colLabels: [`${focusExpTag} · t${absFocusToken}`],
+        rowLabels: Array.from({ length: sim.dExp }, (_, h) => `h${h}`),
+        rowDimLabel: `ReLU² (${sim.dExp})`,
+      },
+    });
+  }
+
+  // 4. Routed Sum [cols=8, rows=1] for focused token t${absFocusToken}
+  const routedSumTok = activeTensor === 'routed_sum' ? activeFormula!.cell.row : focusToken;
+  const routedSumGrid = makeTokenRowSliceGrid(
+    'routed_sum',
+    sim.y_routed,
+    routedSumTok,
+    'Routed Σ₆',
+    activeTensor === 'routed_sum' ? clampInt(activeFormula!.cell.col, 0, d - 1) : undefined,
+  );
+  if (routedSumGrid) {
+    grids.push({ key: 'routed_sum', grid: routedSumGrid });
+  }
+
+  // 5. Shared Out [cols=8, rows=1] for focused token t${absFocusToken}
+  const sharedOutTok = activeTensor === 'shared_out' ? activeFormula!.cell.row : focusToken;
+  const sharedOutGrid = makeTokenRowSliceGrid(
+    'shared_out',
+    sim.y_shared,
+    sharedOutTok,
+    'Shared 1×',
+    activeTensor === 'shared_out' ? clampInt(activeFormula!.cell.col, 0, d - 1) : undefined,
+  );
+  if (sharedOutGrid) {
+    grids.push({ key: 'shared_out', grid: sharedOutGrid });
+  }
+
+  // Optional active-step target grid when inspecting RMSNorm, Pre-Act h, Shared ReLU², MoE Out, or Residual
+  let priorityGrid: ActiveSheetCellGrid | null = null;
+  if (activeTensor === 'rmsnorm') {
+    priorityGrid = makeTokenRowSliceGrid(
+      'rmsnorm',
+      sim.U,
+      activeFormula!.cell.row,
+      'RMSNorm U',
+      clampInt(activeFormula!.cell.col, 0, d - 1),
+    );
+  } else if (activeTensor === 'routed_pre') {
+    const preRec = sheetRegistry.get('routed_pre');
+    if (preRec) {
+      const base = frameAxes(preRec);
+      priorityGrid = {
+        ...base,
+        cols: 1,
+        rows: sim.dExp,
+        values: Float32Array.from(focusedEval.h),
+        format: 'signed',
+        activeCol: 0,
+        activeRow: clampInt(activeFormula!.cell.row, 0, sim.dExp - 1),
+        colLabels: [`${focusExpTag} · t${absFocusToken}`],
+        rowLabels: Array.from({ length: sim.dExp }, (_, h) => `h${h}`),
+        rowDimLabel: 'Pre-Act h',
+      };
+    }
+  } else if (activeTensor === 'shared_act') {
+    const sActRec = sheetRegistry.get('shared_act');
+    if (sActRec) {
+      const base = frameAxes(sActRec);
+      const values = new Float32Array(sim.dShared);
+      for (let s = 0; s < sim.dShared; s++) {
+        values[s] = sim.shared_a[s * T + focusToken];
+      }
+      priorityGrid = {
+        ...base,
+        cols: 1,
+        rows: sim.dShared,
+        values,
+        format: 'prob',
+        activeCol: 0,
+        activeRow: clampInt(activeFormula!.cell.row, 0, sim.dShared - 1),
+        colLabels: [`t${absFocusToken}`],
+        rowLabels: Array.from({ length: sim.dShared }, (_, s) => `s${s}`),
+        rowDimLabel: 'Shared 2×',
+      };
+    }
+  } else if (activeTensor === 'moe_out') {
+    priorityGrid = makeTokenRowSliceGrid(
+      'moe_out',
+      sim.y_moe,
+      activeFormula!.cell.row,
+      'MoE Out',
+      clampInt(activeFormula!.cell.col, 0, d - 1),
+    );
+  } else if (activeTensor === 'residual') {
+    priorityGrid = makeTokenRowSliceGrid(
+      'residual',
+      sim.Y,
+      activeFormula!.cell.row,
+      'Residual Y',
+      clampInt(activeFormula!.cell.col, 0, d - 1),
+    );
+  }
+
+  // Prioritize the actively inspected tensor's grid first so MacroOverlay's 64-node budget never starves it
+  const ordered: ActiveSheetCellGrid[] = [];
+  if (priorityGrid) {
+    ordered.push(priorityGrid);
+  }
+  for (const item of grids) {
+    if (activeTensor && item.key === activeTensor) {
+      ordered.unshift(item.grid);
+    } else {
+      ordered.push(item.grid);
+    }
+  }
+  return ordered;
+}
+
 interface SpatialMoeSheetSpec {
   readonly cx: number;
   readonly cy: number;
@@ -246,11 +992,13 @@ interface SpatialMoeSheetSpec {
   readonly atlasSlice?: AtlasSlice;
   readonly registryKey?: string;
   readonly cellFamily: number;
+  readonly reveal?: SheetRevealTuple;
 }
 
 class SpatialMoeBuilder {
   readonly sheetFloats: number[] = [];
   readonly basisFloats: number[] = [];
+  readonly revealFloats: number[] = [];
   readonly solidFloats: number[] = [];
   readonly lineFloats: number[] = [];
   readonly pickBoxes: PickBox[] = [];
@@ -259,9 +1007,11 @@ class SpatialMoeBuilder {
   readonly flow = new FlowRibbonBuilder();
   readonly sheetRegistry = new Map<string, SheetGeomRecord>();
   private readonly bayId: number;
+  private readonly revealEnabled: boolean;
 
-  constructor(bayId: number) {
+  constructor(bayId: number, revealEnabled = false) {
     this.bayId = bayId;
+    this.revealEnabled = revealEnabled;
   }
 
   addSheet(s: SpatialMoeSheetSpec): SheetGeomRecord {
@@ -296,6 +1046,12 @@ class SpatialMoeBuilder {
       frame.axisU[0], frame.axisU[1], frame.axisU[2],
       frame.axisN[0], frame.axisN[1], frame.axisN[2],
     );
+
+    // 2b. Optional parallel V2 progressive reveal buffer (4 floats: mode, colFrontier, rowFrontier, pulsePhase)
+    if (this.revealEnabled) {
+      const rv = s.reveal ?? REVEAL_NONE_TUPLE;
+      this.revealFloats.push(rv[0], rv[1], rv[2], rv[3]);
+    }
 
     // 3. 1-to-1 mirror in solidData (12 floats: fp8Flag at +7, seed at +8)
     this.solidFloats.push(
@@ -423,6 +1179,7 @@ class SpatialMoeBuilder {
       sheetData: new Float32Array(this.sheetFloats),
       sheetCount: this.sheetFloats.length / SHEET_INSTANCE_FLOATS,
       sheetBasisData: new Float32Array(this.basisFloats),
+      ...(this.revealEnabled ? { sheetRevealData: new Float32Array(this.revealFloats) } : {}),
       solidData: new Float32Array(this.solidFloats),
       solidCount: this.solidFloats.length / SOLID_INSTANCE_FLOATS,
       lineData: new Float32Array(this.lineFloats),
@@ -449,6 +1206,9 @@ export interface BuildMoeSpatialContext {
   readonly activeFormula: MoeCellFormula | null;
   readonly focusSet: SheetFocusSet;
   readonly stepperStep: number | null;
+  readonly stepperActive: boolean;
+  readonly reducedMotion: boolean;
+  readonly stepperSubProgress?: number;
   readonly sim: MoeSimResult;
   readonly atlas: MoeValueAtlas;
   readonly partCatalog: Readonly<Record<string, CutawayPartInfo>>;
@@ -517,16 +1277,41 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     activeExpertIds,
     activeRankMap,
     focusedEval,
+    activeCell,
     activeFormula,
     focusSet,
     stepperStep,
+    stepperActive,
+    reducedMotion,
+    stepperSubProgress,
     sim,
     atlas,
     partCatalog,
     moeStats,
   } = ctx;
 
-  const b = new SpatialMoeBuilder(bayId);
+  const revealEnabled =
+    stepperActive && !reducedMotion && stepperStep !== null && stepperStep !== undefined;
+  const pulsePhase =
+    stepperSubProgress !== undefined && Number.isFinite(stepperSubProgress)
+      ? ((stepperSubProgress * 6) % 1 + 1) % 1
+      : 0.25;
+  const revealCtx: MoeRevealContext = {
+    enabled: revealEnabled,
+    step: stepperStep ?? 0,
+    activeCell,
+    focusToken,
+    focusExpert,
+    activeRankMap,
+    sim,
+    pulsePhase,
+  };
+  const sheetReveal = (
+    tag: MoeRevealTag,
+    opts?: { readonly expertId?: number; readonly branchRank?: number },
+  ): SheetRevealTuple => computeMoeSheetReveal(revealCtx, tag, opts);
+
+  const b = new SpatialMoeBuilder(bayId, revealEnabled);
   const hasCellTrace = focusSet.active;
   const step = hasCellTrace ? null : stepperStep;
   const hasPartFocus = activePart !== null || step !== null;
@@ -651,6 +1436,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     atlasSlice: atlas.input,
     registryKey: 'input',
     cellFamily: CELL_ACTIVATION_GREEN,
+    reveal: sheetReveal('input'),
   });
 
   const resOutHl = sheetHighlight({ tensor: 'residual', isAggregate: true }, ['residual-out'], [5]);
@@ -674,6 +1460,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     atlasSlice: atlas.residual,
     registryKey: 'residual',
     cellFamily: CELL_ACTIVATION_GREEN,
+    reveal: sheetReveal('residual'),
   });
 
   // Overhead Emerald Residual Highway Bridge
@@ -747,6 +1534,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     atlasSlice: atlas.rmsnorm,
     registryKey: 'rmsnorm',
     cellFamily: CELL_MOE_AMBER,
+    reveal: sheetReveal('rmsnorm'),
   });
 
   // Input -> RMSNorm
@@ -799,6 +1587,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     atlasSlice: atlas.wRouter,
     registryKey: 'w_router',
     cellFamily: CELL_MOE_AMBER,
+    reveal: sheetReveal('weight'),
   });
 
   // RMSNorm -> Upright W_router (Rear Sparse Fork)
@@ -908,6 +1697,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
       );
 
       // Paired 2-matrix micro-plates (W_up + W_down, non-gated ReLU²) -> 12 'routed-bank' pickBoxes!
+      const activeTileReveal = sheetReveal('router_bank', { expertId: e });
       b.addSheet({
         cx,
         cy: towerY,
@@ -928,6 +1718,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
         tokenIndex: focusToken,
         atlasSlice: atlas.routerBankTiles[e],
         cellFamily: CELL_MOE_AMBER,
+        reveal: activeTileReveal,
       });
 
       b.addSheet({
@@ -950,6 +1741,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
         tokenIndex: focusToken,
         atlasSlice: atlas.routerBankTiles[e],
         cellFamily: CELL_WEIGHT_BLUE,
+        reveal: activeTileReveal,
       });
 
       const mergedFrame = makeSheetFrame3D(
@@ -1004,6 +1796,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
         tokenIndex: focusToken,
         atlasSlice: atlas.routerBankTiles[e],
         cellFamily: CELL_NEUTRAL,
+        reveal: sheetReveal('router_bank', { expertId: e }),
       });
       bankTileGeom.set(e, idleGeom);
     }
@@ -1080,6 +1873,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     atlasSlice: atlas.topkUnbiased,
     registryKey: 'topk_unbiased',
     cellFamily: CELL_MOE_AMBER,
+    reveal: sheetReveal('topk_unbiased'),
   });
 
   // Tier 2: Normalized ×2.5 Top-6 Weights [1 x 6]
@@ -1109,6 +1903,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     atlasSlice: atlas.topkWeights,
     registryKey: 'topk_weights',
     cellFamily: CELL_MOE_AMBER,
+    reveal: sheetReveal('topk_weights'),
   });
 
   // 6 arched 3D ribbons from the 6 risen winning stadium tiles -> Unbiased σ slots -> Top-6 Weights
@@ -1213,6 +2008,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     atlasSlice: atlas.routedWUp,
     registryKey: 'routed_w_up',
     cellFamily: CELL_WEIGHT_BLUE,
+    reveal: sheetReveal('weight'),
   });
 
   // Horizontal Pre-Activation h [4 x 1]
@@ -1237,6 +2033,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     atlasSlice: atlas.routedPre,
     registryKey: 'routed_pre',
     cellFamily: CELL_ACTIVATION_GREEN,
+    reveal: sheetReveal('routed_pre'),
   });
 
   // Horizontal ReLU² Activation [4 x 1] (Non-Gated — NO gate_proj!)
@@ -1261,6 +2058,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     atlasSlice: atlas.routedAct,
     registryKey: 'routed_act',
     cellFamily: CELL_MOE_AMBER,
+    reveal: sheetReveal('routed_act'),
   });
 
   // Upright Routed W_down Wall [d=8, d_exp=4] (1.0x intermediate x 1.0x hidden)
@@ -1286,6 +2084,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     atlasSlice: atlas.routedWDown,
     registryKey: 'routed_w_down',
     cellFamily: CELL_WEIGHT_BLUE,
+    reveal: sheetReveal('weight'),
   });
 
   // Internal workbench flow ribbons: W_up -> Pre-Act h -> ReLU² -> W_down
@@ -1401,6 +2200,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
       atlasSlice: atlas.activeWeightedOut[j],
       registryKey: `routed_branch:${j}`,
       cellFamily: CELL_ACTIVATION_GREEN,
+      reveal: sheetReveal('routed_branch', { branchRank: j }),
     });
     branchGeom.set(j, rec);
 
@@ -1482,6 +2282,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     atlasSlice: atlas.routedSum,
     registryKey: 'routed_sum',
     cellFamily: CELL_ACTIVATION_GREEN,
+    reveal: sheetReveal('routed_sum'),
   });
 
   // All 6 weighted-output branch strips converge visibly into Routed Sum!
@@ -1573,6 +2374,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     atlasSlice: atlas.sharedWUp,
     registryKey: 'shared_w_up',
     cellFamily: CELL_SSM_CYAN,
+    reveal: sheetReveal('weight'),
   });
 
   // Horizontal Shared ReLU² [8 x 1] -> EXACT 2.0x intermediate (1.24)!
@@ -1596,6 +2398,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     atlasSlice: atlas.sharedAct,
     registryKey: 'shared_act',
     cellFamily: CELL_SSM_CYAN,
+    reveal: sheetReveal('shared_act'),
   });
 
   // Upright Shared W_down Wall [d=8, d_shared=8] -> EXACT 2.0x intermediate (1.24) x 1.0x hidden (1.10)!
@@ -1619,6 +2422,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     atlasSlice: atlas.sharedWDown,
     registryKey: 'shared_w_down',
     cellFamily: CELL_SSM_CYAN,
+    reveal: sheetReveal('weight'),
   });
 
   // Shared Out (Unscaled 1.0x)
@@ -1642,6 +2446,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     atlasSlice: atlas.sharedOut,
     registryKey: 'shared_out',
     cellFamily: CELL_SSM_CYAN,
+    reveal: sheetReveal('shared_out'),
   });
 
   // Parallel Shared Expert flow ribbons: RMSNorm -> Shared W_up -> Shared ReLU² -> Shared W_down -> Shared Out
@@ -1735,6 +2540,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     atlasSlice: atlas.moeOut,
     registryKey: 'moe_out',
     cellFamily: CELL_ACTIVATION_GREEN,
+    reveal: sheetReveal('moe_out'),
   });
 
   const mergeAct = !hasCellTrace && (moeOutHl === SHEET_HL_ACTIVE || resOutHl === SHEET_HL_ACTIVE || step === 5);
@@ -1790,6 +2596,11 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
   }
 
   let residualCarryInfo: { readonly ch: number; readonly tok: number; readonly val: number } | null = null;
+  let popoverTargetWorld: readonly [number, number, number] | null = null;
+  const popoverSources: {
+    readonly world: readonly [number, number, number];
+    readonly role: 'indigo' | 'teal';
+  }[] = [];
 
   if (activeFormula) {
     const c = activeFormula.cell;
@@ -1810,6 +2621,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     );
 
     if (targetSpan) {
+      popoverTargetWorld = targetSpan.frontPoint;
       drawCellHighlight3D(b.flow, targetSpan, CELL_TARGET_FILL, CELL_TARGET_FRAME, 0.024, true);
 
       // Refinement 2: Special high-clarity visualization for Top-6 Normalization (biased selection vs unbiased σ & 6-term denom!)
@@ -1826,6 +2638,10 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
           // 2. Indigo numerator cell highlight on slot j itself (stacked clearly inside the 6-slot denominator!)
           const numSlotSpan = spanFromSheetGrid(unbiasedRec, 0, 0, slot, slot);
           drawCellHighlight3D(b.flow, numSlotSpan, CELL_OP_A_FILL, CELL_OP_A_FRAME, 0.025, true);
+          popoverSources.push(
+            { world: numSlotSpan.frontPoint, role: 'indigo' },
+            { world: fullDenomSpan.frontPoint, role: 'teal' },
+          );
 
           // 3. Bank tiles -> Unbiased σ strip (indigo for numerator expert, teal for other 5 denominator contributors)
           for (let m = 0; m < sim.topK; m++) {
@@ -1876,6 +2692,10 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
             focusExpert,
           );
           if (!upSpan) continue;
+          popoverSources.push({
+            world: upSpan.frontPoint,
+            role: idx === 0 ? 'indigo' : 'teal',
+          });
 
           // Step 6: Route Input X -> + Residual Y along overhead emerald Residual Highway with carry-in badge!
           if (c.tensor === 'residual' && up.tensor === 'input') {
@@ -1983,17 +2803,19 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     {
       id: 'moe-bank',
       label: `Router Bank (128 · σ+bias → Top-6 · t${absFocusToken} "${focusTokLabel}")`,
-      world: [bankCenterX, 0.92, zRouted - bankD * 0.5 - 0.18],
+      world: [bankCenterX - 0.28, 0.96, zRouted - bankD * 0.5 - 0.24],
       partId: 'routed-bank',
       align: 'top',
       tier: 'primary',
     },
     {
+      // V1 Critical Label Fix: anchor cleanly exterior in front (+Z > topkSpanZ*0.5 + 0.55) at deck level
+      // with align:'bottom' so it NEVER obscures the Unbiased σ or Top-6 6-slot convergence strips!
       id: 'moe-topk',
       label: isFp8Mode ? 'Unbiased σ → Top-6 (×2.5 · FP32)' : 'Unbiased σ → Top-6 (×2.5)',
-      world: [(xUnbiased + xTopk) * 0.5, bridgeDeckY + 0.44, zRouted + topkSpanZ * 0.5 + 0.16],
+      world: [(xUnbiased + xTopk) * 0.5, 0.08, zRouted + topkSpanZ * 0.5 + 0.62],
       partId: 'router',
-      align: 'top',
+      align: 'bottom',
       tier: 'primary',
       tone: isFp8Mode ? 'gold' : 'default',
     },
@@ -2010,7 +2832,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     {
       id: 'moe-routed-act',
       label: 'ReLU² (No gate_proj)',
-      world: [(xRoutedPre + xRoutedAct) * 0.5, 0.18, zRouted + ROUTED_INTER_SPAN * 0.5 + 0.22],
+      world: [(xRoutedPre + xRoutedAct) * 0.5, 0.06, zRouted + ROUTED_INTER_SPAN * 0.5 + 0.48],
       partId: 'routed-act',
       align: 'bottom',
       tier: 'primary',
@@ -2026,7 +2848,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     {
       id: 'moe-branches',
       label: '6× Active (wᵢ·yᵢ)',
-      world: [xBranches, 0.26, zRouted - topkSpanZ * 0.5 - 0.16],
+      world: [xBranches - 0.10, 0.34, zRouted - topkSpanZ * 0.5 - 0.34],
       partId: 'routed-branch',
       align: 'top',
       tier: 'primary',
@@ -2034,7 +2856,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     {
       id: 'moe-routed-sum',
       label: 'Routed Sum (Σ₆)',
-      world: [xBranchOut, 0.18, zRoutedSum - ioMaxZ * 0.5 - 0.20],
+      world: [xBranchOut + 0.16, 0.18, zRoutedSum - ioMaxZ * 0.5 - 0.30],
       partId: 'routed-sum',
       align: 'top',
       tier: 'primary',
@@ -2044,7 +2866,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
       label: isFp8Mode
         ? 'Shared W_up (3,712 = 2×) · FP8'
         : 'Shared W_up (3,712 = 2×)',
-      world: [xSharedUp, 0.14, zShared + HIDDEN_SPAN * 0.5 + 0.24],
+      world: [xSharedUp, 0.12, zShared + HIDDEN_SPAN * 0.5 + 0.26],
       partId: 'shared-expert',
       align: 'bottom',
       tier: 'primary',
@@ -2053,7 +2875,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     {
       id: 'moe-shared-act',
       label: 'Shared ReLU² (2×)',
-      world: [xSharedAct, 0.16, zShared + SHARED_INTER_SPAN * 0.5 + 0.22],
+      world: [xSharedAct, 0.08, zShared + SHARED_INTER_SPAN * 0.5 + 0.26],
       partId: 'shared-act',
       align: 'bottom',
       tier: 'primary',
@@ -2062,7 +2884,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     {
       id: 'moe-shared-down',
       label: isFp8Mode ? 'Shared W_down (2×) · FP8' : 'Shared W_down (2×)',
-      world: [xSharedDown, 0.14, zShared + SHARED_INTER_SPAN * 0.5 + 0.24],
+      world: [xSharedDown, 0.12, zShared + SHARED_INTER_SPAN * 0.5 + 0.26],
       partId: 'shared-w-down',
       align: 'bottom',
       tier: 'primary',
@@ -2071,7 +2893,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     {
       id: 'moe-shared-out',
       label: 'Shared Out (1× Unscaled)',
-      world: [xBranchOut, 0.16, zSharedOut + ioMaxZ * 0.5 + 0.22],
+      world: [xBranchOut, 0.14, zSharedOut + ioMaxZ * 0.5 + 0.24],
       partId: 'shared-out',
       align: 'bottom',
       tier: 'primary',
@@ -2115,13 +2937,13 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
           },
         ]
       : []),
-    // Contextual Top-6 normalization note on Step 3
+    // Contextual Top-6 normalization note on Step 3 (opposite -Z rear top side, cleanly separated from moe-topk and moe-bank)
     ...(isInspectingTopk
       ? [
           {
             id: 'moe-topk-norm-note',
             label: 'Bias dropped → w = (σⱼ / Σ₆ σₘ) × 2.5 (all 6 in denom)',
-            world: [(xUnbiased + xTopk) * 0.5, bridgeDeckY + 0.72, zRouted - topkSpanZ * 0.5 - 0.10] as Vec3,
+            world: [(xUnbiased + xTopk) * 0.5 + 0.12, bridgeDeckY + 1.56, zRouted - topkSpanZ * 0.5 - 0.24] as Vec3,
             partId: 'router',
             align: 'top' as const,
             tier: 'primary' as const,
@@ -2135,7 +2957,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
       label: focusedEval.isActive
         ? `Magnified #${(focusedRank ?? 0) + 1}/6: ${focusExpTag} (w=${focusedEval.appliedWeight.toFixed(2)})`
         : `${focusExpTag} IDLE PREVIEW (Rank #${focusedEval.choiceRank + 1}/128 · 0 contrib)`,
-      world: [(xRoutedWUp + xRoutedWDown) * 0.5, 0.14, wbZ1 + 0.18],
+      world: [(xRoutedWUp + xRoutedWDown) * 0.5, 0.04, wbZ1 + 0.42],
       partId: 'routed-w-up',
       align: 'bottom',
       tier: 'detail',
@@ -2186,6 +3008,27 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     ),
   };
 
+  // V3: Active-op label dimming set, floating contextual cell popover, and zoom-adaptive cell grids
+  const activeOpPartIds = buildMoeActiveOpPartIds(focusSet, activeFormula, activeRankMap);
+  const cellPopover = buildMoeCellPopover({
+    activeFormula,
+    sim,
+    focusToken,
+    focusExpert,
+    targetWorld: popoverTargetWorld,
+    sourceWorlds: popoverSources,
+  });
+  const activeCellGrids = buildMoeActiveCellGrids({
+    sheetRegistry: b.sheetRegistry,
+    sim,
+    focusToken,
+    focusExpert,
+    activeExpertIds,
+    focusedRank,
+    focusedEval,
+    activeFormula,
+  });
+
   const packed = b.pack();
   return {
     kind: 'cutaway_moe',
@@ -2195,6 +3038,9 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     valueAtlas: atlas,
     moeSim: sim,
     activeFormula,
+    activeOpPartIds,
+    cellPopover,
+    activeCellGrids,
     fitBounds: MOE_SPATIAL_FIT_BOUNDS,
     opFocusBounds,
     landmarks: b.landmarks,
