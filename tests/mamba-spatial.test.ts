@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
+import { runMambaSim, type MambaCellRef } from '../src/math/mambaSim';
+import {
+  advanceMambaTemporalPlaybackTick,
+  resolveEffectiveMambaCell,
+  resolveMambaHoverDuringPlayback,
+} from '../src/model/mambaPlayback';
+import { createInitialState, createPerspectivePose } from '../src/model/state';
 import {
   aabbCorners,
   buildCameraSnapshot,
@@ -25,6 +32,7 @@ import {
   MAMBA_SPATIAL_FIT_BOUNDS,
 } from '../src/scene/cutaways';
 import { SOLID_INSTANCE_FLOATS } from '../src/scene/spine';
+import { computeEditorialCacheKey } from '../src/ui/controls';
 
 function sheetHighlightAt(sheetData: Float32Array, idx: number): number {
   return sheetData[idx * SHEET_INSTANCE_FLOATS + 11];
@@ -466,6 +474,164 @@ describe('Spatial Mamba-2 3D Multi-Plane Cutaway & Temporal Recurrence Playback'
     expect(bay01Spatial.activeFormula).toEqual(bay01NearPlan.activeFormula);
     expect(Object.keys(bay01Spatial.partCatalog).sort()).toEqual(
       Object.keys(bay01NearPlan.partCatalog).sort(),
+    );
+  });
+
+  it('7. enforces explicit hover vs. temporal playback policy so stale hover never freezes advancing snapshots', () => {
+    const T = 8;
+    const sim = runMambaSim(T);
+
+    // 7A. Hovering fixed-size state (H_t / H_{t-1} / Conv1D) during playback keeps playback running
+    // and synchronizes the hovered cell's token with the advancing temporal snapshot!
+    const hoveredHtAt4: MambaCellRef = {
+      tensor: 'h_curr',
+      row: 0,
+      col: 0,
+      headIndex: 0,
+      groupIndex: 0,
+      tokenIndex: 4,
+    };
+    const hoverFixed = resolveMambaHoverDuringPlayback(hoveredHtAt4, true, 4, T);
+    expect(hoverFixed.shouldPauseTemporalPlayback).toBe(false);
+    expect(hoverFixed.hoveredCell?.tokenIndex).toBe(4);
+
+    // Advance temporal tick from t=4 -> t=5 while cursor stays stationary on H_t
+    const tick = advanceMambaTemporalPlaybackTick(4, T, null, hoverFixed.hoveredCell);
+    expect(tick.nextToken).toBe(5);
+    expect(tick.nextHoveredCell?.tensor).toBe('h_curr');
+    expect(tick.nextHoveredCell?.tokenIndex).toBe(5);
+
+    // Structural guard: even if a stale hovered H_t cell (tokenIndex=4) reaches resolveEffectiveMambaCell
+    // while mambaTemporalPlaying is true at mambaStateToken=6, it remaps cleanly to t=6!
+    const effCell = resolveEffectiveMambaCell({
+      sim,
+      tokens: T,
+      activeHead: 0,
+      mambaStateToken: 6,
+      mambaTemporalPlaying: true,
+      mambaHoveredCell: hoveredHtAt4,
+      mambaSelectedCell: null,
+      mambaStepperActive: false,
+      mambaStepperStep: 0,
+      mambaStepperSubProgress: 0,
+    });
+    expect(effCell?.tokenIndex).toBe(6);
+
+    const sc4 = buildMambaCutaway({
+      bayId: 1,
+      tokens: T,
+      precision: 'bf16',
+      selectedPart: null,
+      hoveredPart: 'ssm-state-curr',
+      activeHead: 0,
+      activeCell: hoveredHtAt4,
+      stateTokenIndex: 4,
+      viewAngle: 'three_quarter',
+    });
+    const sc6 = buildMambaCutaway({
+      bayId: 1,
+      tokens: T,
+      precision: 'bf16',
+      selectedPart: null,
+      hoveredPart: 'ssm-state-curr',
+      activeHead: 0,
+      activeCell: effCell,
+      stateTokenIndex: 6,
+      viewAngle: 'three_quarter',
+    });
+    expect(sc4.mambaStats?.stateTokenIndex).toBe(4);
+    expect(sc6.mambaStats?.stateTokenIndex).toBe(6);
+    expect(sc6.activeFormula?.coordLabel).toContain('t6');
+    expect(sc6.activeFormula?.equation).not.toBe(sc4.activeFormula?.equation);
+
+    // 7B. Hovering token-independent weights (W_in / W_out) during playback keeps playback running
+    const hoverWeight = resolveMambaHoverDuringPlayback(
+      { tensor: 'w_in', row: 0, col: 10 },
+      true,
+      5,
+      T,
+    );
+    expect(hoverWeight.shouldPauseTemporalPlayback).toBe(false);
+
+    // 7C. Hovering a specific sequence-row tensor (Input X, x[H00], B, etc.) during playback cleanly
+    // pauses playback so cursor inspection owns the displayed token without timer conflict
+    const hoverSeq = resolveMambaHoverDuringPlayback(
+      { tensor: 'input', row: 2, col: 3, tokenIndex: 2 },
+      true,
+      5,
+      T,
+    );
+    expect(hoverSeq.shouldPauseTemporalPlayback).toBe(true);
+    expect(hoverSeq.hoveredCell?.row).toBe(2);
+    expect(hoverSeq.hoveredCell?.tokenIndex).toBe(2);
+  });
+
+  it('8. invalidates sidebar editorial cache key whenever effective inspected token or head changes within the same part', () => {
+    const state = createInitialState(createPerspectivePose([0, 0, 0], 18));
+    state.tourActive = false;
+    state.mode = 'cutaway_mamba';
+    state.tokens = 8;
+    state.mambaStateToken = null;
+    state.hoveredPart = 'residual-in';
+
+    const scInputT7 = buildMambaCutaway({
+      bayId: 1,
+      tokens: 8,
+      precision: 'bf16',
+      selectedPart: null,
+      hoveredPart: 'residual-in',
+      activeHead: 0,
+      activeCell: { tensor: 'input', row: 7, col: 0, tokenIndex: 7 },
+      stateTokenIndex: null,
+      viewAngle: 'three_quarter',
+    });
+    const scInputT2 = buildMambaCutaway({
+      bayId: 1,
+      tokens: 8,
+      precision: 'bf16',
+      selectedPart: null,
+      hoveredPart: 'residual-in',
+      activeHead: 0,
+      activeCell: { tensor: 'input', row: 2, col: 3, tokenIndex: 2 },
+      stateTokenIndex: null,
+      viewAngle: 'three_quarter',
+    });
+
+    expect(scInputT7.mambaStats?.stateTokenIndex).toBe(7);
+    expect(scInputT2.mambaStats?.stateTokenIndex).toBe(2);
+    expect(computeEditorialCacheKey(state, scInputT7)).not.toBe(
+      computeEditorialCacheKey(state, scInputT2),
+    );
+
+    // Same part ('dt-branch'), different head column (H00 -> H05) at same token
+    state.hoveredPart = 'dt-branch';
+    const scDtH0 = buildMambaCutaway({
+      bayId: 1,
+      tokens: 8,
+      precision: 'bf16',
+      selectedPart: null,
+      hoveredPart: 'dt-branch',
+      activeHead: 0,
+      activeCell: { tensor: 'dt', row: 5, col: 0, headIndex: 0, tokenIndex: 5 },
+      stateTokenIndex: null,
+      viewAngle: 'three_quarter',
+    });
+    const scDtH5 = buildMambaCutaway({
+      bayId: 1,
+      tokens: 8,
+      precision: 'bf16',
+      selectedPart: null,
+      hoveredPart: 'dt-branch',
+      activeHead: 0,
+      activeCell: { tensor: 'dt', row: 5, col: 5, headIndex: 5, tokenIndex: 5 },
+      stateTokenIndex: null,
+      viewAngle: 'three_quarter',
+    });
+
+    expect(scDtH0.mambaStats?.activeHead).toBe(0);
+    expect(scDtH5.mambaStats?.activeHead).toBe(5);
+    expect(computeEditorialCacheKey(state, scDtH0)).not.toBe(
+      computeEditorialCacheKey(state, scDtH5),
     );
   });
 });

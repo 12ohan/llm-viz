@@ -291,6 +291,28 @@ export function queryControlsElements(): ControlsElements {
   };
 }
 
+/**
+ * Build the sidebar editorial panel cache key. Includes effective cutaway token, head, and expert
+ * from `activeCutaway` so hovering or clicking across different tokens/heads within the same tensor
+ * or part always refreshes the sidebar Recurrence controls, head grid, and `partCatalog` specs.
+ */
+export function computeEditorialCacheKey(
+  state: SceneState,
+  activeCutaway: CutawaySceneGeometry | null,
+): string {
+  const isTower = state.mode === 'tower';
+  const activeBayId = isTower ? state.hoveredBay ?? state.selectedBay : null;
+  const activePart = !isTower ? state.hoveredPart ?? state.selectedPart : null;
+  const effMambaHead = activeCutaway?.mambaStats?.activeHead ?? state.mambaActiveHead;
+  const effMambaTok =
+    activeCutaway?.mambaStats?.stateTokenIndex ?? state.mambaStateToken ?? 'last';
+  const effMoeTok = activeCutaway?.moeStats?.focusToken ?? state.moeFocusToken ?? 'last';
+  const effMoeExp = activeCutaway?.moeStats?.focusExpert ?? state.moeActiveExpert ?? 'top0';
+  const effGqaG0 = activeCutaway?.gqaStats?.activeGroup0Head ?? state.gqaActiveGroup0Head;
+  const effGqaG1 = activeCutaway?.gqaStats?.activeGroup1Head ?? state.gqaActiveGroup1Head;
+  return `${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${state.mode}:${state.mambaBayId}:${effMambaHead}:${effMambaTok}:${state.mambaStateToken ?? 'last'}:${state.mambaTemporalPlaying ? 'tplay' : 'tpause'}:${state.moeBayId}:${effMoeTok}:${effMoeExp}:${state.gqaBayId}:${effGqaG0}:${effGqaG1}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
+}
+
 export class MacroControls {
   private readonly spec: NemotronSpec;
   private readonly els: ControlsElements;
@@ -639,7 +661,7 @@ export class MacroControls {
     // Middle editorial panel
     const activeBayId = isTower ? state.hoveredBay ?? state.selectedBay : null;
     const activePart = !isTower ? state.hoveredPart ?? state.selectedPart : null;
-    const editorialKey = `${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${state.mode}:${state.mambaBayId}:${state.mambaActiveHead}:${state.mambaStateToken ?? 'last'}:${state.mambaTemporalPlaying ? 'tplay' : 'tpause'}:${state.moeBayId}:${state.moeFocusToken ?? 'last'}:${state.moeActiveExpert ?? 'top0'}:${state.gqaBayId}:${state.gqaActiveGroup0Head}:${state.gqaActiveGroup1Head}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
+    const editorialKey = computeEditorialCacheKey(state, activeCutaway);
 
     if (editorialKey !== this.lastEditorialKey) {
       this.lastEditorialKey = editorialKey;
@@ -1125,9 +1147,10 @@ export class MacroControls {
       if (state.mode === 'cutaway_gqa') {
         panel.appendChild(this.buildGqaHeadSelector(state.selectedPart, state.hoveredPart));
       } else if (state.mode === 'cutaway_mamba') {
+        const effHead = cutaway?.mambaStats?.activeHead ?? state.mambaActiveHead;
         panel.appendChild(this.buildMambaTemporalControls(state, cutaway));
         panel.appendChild(
-          this.buildMambaHeadSelector(state.mambaActiveHead, state.selectedPart, state.hoveredPart),
+          this.buildMambaHeadSelector(effHead, state.selectedPart, state.hoveredPart),
         );
       } else if (state.mode === 'cutaway_moe') {
         panel.appendChild(this.buildMoeInspectorControls(state, cutaway));
@@ -1231,11 +1254,12 @@ export class MacroControls {
     if (state.mode === 'cutaway_moe') {
       panel.append(header, p, this.buildMoeInspectorControls(state, cutaway), list);
     } else if (state.mode === 'cutaway_mamba') {
+      const effHead = cutaway?.mambaStats?.activeHead ?? state.mambaActiveHead;
       panel.append(
         header,
         p,
         this.buildMambaTemporalControls(state, cutaway),
-        this.buildMambaHeadSelector(state.mambaActiveHead, state.selectedPart, state.hoveredPart),
+        this.buildMambaHeadSelector(effHead, state.selectedPart, state.hoveredPart),
         list,
       );
     } else {

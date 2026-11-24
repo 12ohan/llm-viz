@@ -41,10 +41,16 @@ import {
 import {
   inferMambaCellHead,
   MAMBA_STEPPER_STEPS,
-  mambaStepperCellForState,
   runMambaSim,
   type MambaCellRef,
 } from './math/mambaSim';
+import {
+  advanceMambaTemporalPlaybackTick,
+  remapMambaCellToken,
+  resolveActiveMambaStateToken,
+  resolveEffectiveMambaCell,
+  resolveMambaHoverDuringPlayback,
+} from './model/mambaPlayback';
 import {
   inferMoeCellExpert,
   MOE_STEPPER_STEPS,
@@ -527,40 +533,23 @@ function boot(): void {
     return null;
   };
 
-  const activeMambaStateToken = (): number => {
-    const raw = state.mambaStateToken === null ? state.tokens - 1 : state.mambaStateToken;
-    return Math.max(0, Math.min(state.tokens - 1, raw));
-  };
-
-  const remapMambaCellToken = (cell: MambaCellRef, tok: number): MambaCellRef => {
-    const clampedTok = Math.max(0, Math.min(state.tokens - 1, tok));
-    if (cell.tensor === 'conv_buf' || cell.tensor === 'h_prev' || cell.tensor === 'h_curr') {
-      return { ...cell, tokenIndex: clampedTok };
-    }
-    if (cell.tensor === 'w_in' || cell.tensor === 'w_out') {
-      return cell;
-    }
-    return { ...cell, row: clampedTok, tokenIndex: clampedTok };
-  };
+  const activeMambaStateToken = (): number =>
+    resolveActiveMambaStateToken(state.mambaStateToken, state.tokens);
 
   const resolveActiveMambaCell = (): MambaCellRef | null => {
     if (state.mode !== 'cutaway_mamba') return null;
-    if (state.mambaHoveredCell) return state.mambaHoveredCell;
-    if (state.mambaSelectedCell) return state.mambaSelectedCell;
-    if (state.mambaStepperActive) {
-      const sim = runMambaSim(state.tokens);
-      const cell = mambaStepperCellForState(
-        sim,
-        state.mambaActiveHead,
-        state.mambaStepperStep,
-        state.mambaStepperSubProgress,
-      );
-      if (state.mambaStateToken !== null) {
-        return remapMambaCellToken(cell, activeMambaStateToken());
-      }
-      return cell;
-    }
-    return null;
+    return resolveEffectiveMambaCell({
+      sim: runMambaSim(state.tokens),
+      tokens: state.tokens,
+      activeHead: state.mambaActiveHead,
+      mambaStateToken: state.mambaStateToken,
+      mambaTemporalPlaying: state.mambaTemporalPlaying,
+      mambaHoveredCell: state.mambaHoveredCell,
+      mambaSelectedCell: state.mambaSelectedCell,
+      mambaStepperActive: state.mambaStepperActive,
+      mambaStepperStep: state.mambaStepperStep,
+      mambaStepperSubProgress: state.mambaStepperSubProgress,
+    });
   };
 
   const resolveActiveMoeCell = (): MoeCellRef | null => {
@@ -1214,12 +1203,15 @@ function boot(): void {
       state.tourActive = false;
       state.mambaTemporalPlaying = false;
       lastMambaTemporalTickMs = null;
+      state.mambaHoveredCell = null;
+      state.hoveredPart = null;
       state.mambaStateToken =
         tokenIdx === null ? null : Math.max(0, Math.min(state.tokens - 1, tokenIdx));
       if (state.mambaSelectedCell !== null) {
         state.mambaSelectedCell = remapMambaCellToken(
           state.mambaSelectedCell,
           activeMambaStateToken(),
+          state.tokens,
         );
       }
       markDirtyAndSchedule(true);
@@ -1228,23 +1220,27 @@ function boot(): void {
       state.tourActive = false;
       state.mambaTemporalPlaying = false;
       lastMambaTemporalTickMs = null;
+      state.mambaHoveredCell = null;
+      state.hoveredPart = null;
       const cur = activeMambaStateToken();
       const next = (cur + delta + state.tokens) % state.tokens;
       state.mambaStateToken = next;
       if (state.mambaSelectedCell !== null) {
-        state.mambaSelectedCell = remapMambaCellToken(state.mambaSelectedCell, next);
+        state.mambaSelectedCell = remapMambaCellToken(state.mambaSelectedCell, next, state.tokens);
       }
       markDirtyAndSchedule(true);
     },
     onToggleMambaTemporalPlay: () => {
       state.tourActive = false;
+      state.mambaHoveredCell = null;
+      state.hoveredPart = null;
       if (state.reducedMotion) {
         const next = (activeMambaStateToken() + 1) % state.tokens;
         state.mambaStateToken = next;
         state.mambaTemporalPlaying = false;
         lastMambaTemporalTickMs = null;
         if (state.mambaSelectedCell !== null) {
-          state.mambaSelectedCell = remapMambaCellToken(state.mambaSelectedCell, next);
+          state.mambaSelectedCell = remapMambaCellToken(state.mambaSelectedCell, next, state.tokens);
         }
         markDirtyAndSchedule(true);
         return;
@@ -1263,7 +1259,7 @@ function boot(): void {
       const startTok = state.mambaStateToken === null || cur >= state.tokens - 1 ? 0 : cur;
       state.mambaStateToken = startTok;
       if (state.mambaSelectedCell !== null) {
-        state.mambaSelectedCell = remapMambaCellToken(state.mambaSelectedCell, startTok);
+        state.mambaSelectedCell = remapMambaCellToken(state.mambaSelectedCell, startTok, state.tokens);
       }
       state.mambaTemporalPlaying = true;
       lastMambaTemporalTickMs = null;
@@ -1793,11 +1789,15 @@ function boot(): void {
         lastMambaTemporalTickMs = nowMs;
       } else if (nowMs - lastMambaTemporalTickMs >= 950) {
         lastMambaTemporalTickMs = nowMs;
-        const nextTok = (activeMambaStateToken() + 1) % state.tokens;
-        state.mambaStateToken = nextTok;
-        if (state.mambaSelectedCell !== null) {
-          state.mambaSelectedCell = remapMambaCellToken(state.mambaSelectedCell, nextTok);
-        }
+        const tick = advanceMambaTemporalPlaybackTick(
+          state.mambaStateToken,
+          state.tokens,
+          state.mambaSelectedCell,
+          state.mambaHoveredCell,
+        );
+        state.mambaStateToken = tick.nextToken;
+        state.mambaSelectedCell = tick.nextSelectedCell;
+        state.mambaHoveredCell = tick.nextHoveredCell;
         geometryDirty = true;
         stepperChangedUi = true;
       }
@@ -2154,10 +2154,26 @@ function boot(): void {
             : hit?.headIndex !== undefined && hit.tensorKey === 'x'
               ? `mamba-head-${hit.headIndex}`
               : hit?.partId ?? null;
-        const hitCell = hit
+        const rawHitCell = hit
           ? pickHitToMambaCell(hit, state.mambaActiveHead, state.tokens)
           : null;
-        if (hitPart !== state.hoveredPart || !sameMambaCell(hitCell, state.mambaHoveredCell)) {
+        const resolvedHover = resolveMambaHoverDuringPlayback(
+          rawHitCell,
+          state.mambaTemporalPlaying,
+          activeMambaStateToken(),
+          state.tokens,
+        );
+        const hitCell = resolvedHover.hoveredCell;
+        const pausePlayback = resolvedHover.shouldPauseTemporalPlayback;
+        if (
+          pausePlayback ||
+          hitPart !== state.hoveredPart ||
+          !sameMambaCell(hitCell, state.mambaHoveredCell)
+        ) {
+          if (pausePlayback) {
+            state.mambaTemporalPlaying = false;
+            lastMambaTemporalTickMs = null;
+          }
           state.hoveredPart = hitPart;
           state.mambaHoveredCell = hitCell;
           markDirtyAndSchedule(true);
@@ -2253,7 +2269,9 @@ function boot(): void {
         if (hitCell !== null) {
           state.mambaStepperPlaying = false;
           state.mambaStepperActive = false;
+          state.mambaTemporalPlaying = false;
           lastStepperTickMs = null;
+          lastMambaTemporalTickMs = null;
         }
       } else if (state.mode === 'cutaway_moe') {
         const sim = currentCutawayScene?.moeSim ?? runMoeSim(state.tokens);
