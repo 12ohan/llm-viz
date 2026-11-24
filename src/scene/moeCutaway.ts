@@ -134,6 +134,8 @@ export interface BuildMoECutawayOptions {
   readonly stepperStep?: number | null;
   /** Layout mode: `'three_quarter'` builds the 3D Spatial MoE architecture; `'near_plan'` (default) keeps the coplanar XZ schematic. */
   readonly viewAngle?: GqaViewAngle;
+  /** Optional authoritative simulator result from a unified `HybridExecutionResult`. */
+  readonly simOverride?: MoeSimResult;
 }
 
 interface MoeSheetSpec {
@@ -601,9 +603,11 @@ function buildMoePartCatalog(params: {
 
 export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeometry {
   const bayId: 2 | 52 = opts.bayId === 52 ? 52 : 2;
-  const clampedT = Math.max(1, Math.min(MOE_SIM_CONFIG.maxTokens, Math.round(opts.tokens)));
+  const clampedT = opts.simOverride
+    ? opts.simOverride.tokens
+    : Math.max(1, Math.min(MOE_SIM_CONFIG.maxTokens, Math.round(opts.tokens)));
   const isFp8Mode = opts.precision === 'fp8_selective';
-  const sim = runMoeSim(clampedT);
+  const sim = opts.simOverride ?? runMoeSim(clampedT);
 
   // Token-independent weight cells (w_router, shared_w_up, shared_w_down) must never pin focusToken
   const effectiveActiveCell = opts.activeCell ? normalizeMoeWeightCell(opts.activeCell) : null;

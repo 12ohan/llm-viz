@@ -34,14 +34,19 @@ import {
 import {
   GQA_STEPPER_STEPS,
   inferGqaCellHead,
-  runGqaSim,
   stepperCellForState,
   type GqaCellRef,
 } from './math/gqaSim';
 import {
+  createDefaultHybridModel,
+  defaultTokenIdsForLength,
+  getOrRunHybridExecution,
+  HybridExecutionCache,
+  type HybridExecutionResult,
+} from './math/hybridFlow';
+import {
   inferMambaCellHead,
   MAMBA_STEPPER_STEPS,
-  runMambaSim,
   type MambaCellRef,
 } from './math/mambaSim';
 import {
@@ -54,7 +59,6 @@ import {
 import {
   inferMoeCellExpert,
   MOE_STEPPER_STEPS,
-  runMoeSim,
   type MoeCellRef,
 } from './math/moeSim';
 import {
@@ -515,10 +519,23 @@ function boot(): void {
         ? state.moeViewAngle
         : state.gqaViewAngle;
 
+  // Single authoritative unified 52-layer miniature model + bounded execution cache
+  const hybridModel = createDefaultHybridModel();
+  const hybridCache = new HybridExecutionCache(16);
+
+  const activeHybridExecution = (): HybridExecutionResult =>
+    getOrRunHybridExecution(hybridModel, hybridCache, {
+      tokenIds: defaultTokenIdsForLength(state.tokens),
+    });
+
+  const activeMambaSim = () => activeHybridExecution().getMambaTrace(state.mambaBayId);
+  const activeMoeSim = () => activeHybridExecution().getMoeTrace(state.moeBayId);
+  const activeGqaSim = () => activeHybridExecution().getGqaTrace(state.gqaBayId);
+
   const activeMoeFocusToken = (): number =>
     resolveActiveMoeFocusToken(state.moeFocusToken, state.tokens);
 
-  const activeMoeFocusExpert = (sim = runMoeSim(state.tokens), tok = activeMoeFocusToken()): number => {
+  const activeMoeFocusExpert = (sim = activeMoeSim(), tok = activeMoeFocusToken()): number => {
     if (state.moeActiveExpert !== null) {
       return Math.max(0, Math.min(sim.nRoutedExperts - 1, state.moeActiveExpert));
     }
@@ -535,7 +552,7 @@ function boot(): void {
     if (state.gqaHoveredCell) return state.gqaHoveredCell;
     if (state.gqaSelectedCell) return state.gqaSelectedCell;
     if (state.gqaStepperActive) {
-      const sim = runGqaSim(state.tokens);
+      const sim = activeGqaSim();
       return stepperCellForState(
         sim,
         activeStepperHead(),
@@ -552,7 +569,7 @@ function boot(): void {
   const resolveActiveMambaCell = (): MambaCellRef | null => {
     if (state.mode !== 'cutaway_mamba') return null;
     return resolveEffectiveMambaCell({
-      sim: runMambaSim(state.tokens),
+      sim: activeMambaSim(),
       tokens: state.tokens,
       activeHead: state.mambaActiveHead,
       mambaStateToken: state.mambaStateToken,
@@ -568,7 +585,7 @@ function boot(): void {
   const resolveActiveMoeCell = (): MoeCellRef | null => {
     if (state.mode !== 'cutaway_moe') return null;
     return resolveEffectiveMoeCell({
-      sim: runMoeSim(state.tokens),
+      sim: activeMoeSim(),
       moeFocusToken: state.moeFocusToken,
       moeActiveExpert: state.moeActiveExpert,
       moeTokenCycling: state.moeTokenCycling,
@@ -592,6 +609,7 @@ function boot(): void {
         activeCell: resolveActiveMambaCell(),
         viewAngle: state.mambaViewAngle,
         stateTokenIndex: state.mambaStateToken,
+        simOverride: activeMambaSim(),
       });
     }
     if (state.mode === 'cutaway_moe') {
@@ -607,6 +625,7 @@ function boot(): void {
         activeCell: resolveActiveMoeCell(),
         stepperStep: state.moeStepperActive ? state.moeStepperStep : null,
         viewAngle: state.moeViewAngle,
+        simOverride: activeMoeSim(),
       });
     }
     if (state.mode === 'cutaway_gqa') {
@@ -620,6 +639,7 @@ function boot(): void {
         activeGroup1Head: state.gqaActiveGroup1Head,
         activeCell: resolveActiveGqaCell(),
         viewAngle: state.gqaViewAngle,
+        simOverride: activeGqaSim(),
       });
     }
     return null;
@@ -684,7 +704,7 @@ function boot(): void {
   };
 
   const syncUi = () => {
-    controls.sync(state, currentCutawayScene, manualCameraOverride);
+    controls.sync(state, currentCutawayScene, manualCameraOverride, activeHybridExecution());
     memoryDrawer.sync(state.memoryChartOpen, state.precision, state.memoryProbeTokens);
   };
 
@@ -1357,7 +1377,7 @@ function boot(): void {
       state.tourActive = false;
       state.moeTokenCycling = false;
       lastMoeCycleTickMs = null;
-      const sim = currentCutawayScene?.moeSim ?? runMoeSim(state.tokens);
+      const sim = currentCutawayScene?.moeSim ?? activeMoeSim();
       const stepped = stepMoeFocusToken(state.moeFocusToken, delta, sim, state.moeSelectedCell);
       state.moeFocusToken = stepped.nextToken;
       state.moeActiveExpert = null;
@@ -1374,7 +1394,7 @@ function boot(): void {
       state.moeHoveredCell = null;
       state.hoveredPart = null;
       if (state.reducedMotion) {
-        const sim = currentCutawayScene?.moeSim ?? runMoeSim(state.tokens);
+        const sim = currentCutawayScene?.moeSim ?? activeMoeSim();
         const stepped = stepMoeFocusToken(state.moeFocusToken, 1, sim, state.moeSelectedCell);
         state.moeStepperPlaying = false;
         lastStepperTickMs = null;
@@ -1402,7 +1422,7 @@ function boot(): void {
       state.moeFocusToken = startTok;
       state.moeActiveExpert = null;
       if (state.moeSelectedCell !== null) {
-        const sim = currentCutawayScene?.moeSim ?? runMoeSim(state.tokens);
+        const sim = currentCutawayScene?.moeSim ?? activeMoeSim();
         state.moeSelectedCell = remapMoeCellToken(state.moeSelectedCell, startTok, sim);
       } else if (state.selectedPart?.startsWith('moe-expert-')) {
         state.selectedPart = null;
@@ -1925,7 +1945,7 @@ function boot(): void {
         lastMoeCycleTickMs = nowMs;
       } else if (nowMs - lastMoeCycleTickMs >= 1100) {
         lastMoeCycleTickMs = nowMs;
-        const sim = currentCutawayScene?.moeSim ?? runMoeSim(state.tokens);
+        const sim = currentCutawayScene?.moeSim ?? activeMoeSim();
         const tick = advanceMoeTokenCycleTick(
           state.moeFocusToken,
           sim,
@@ -2319,7 +2339,7 @@ function boot(): void {
           markDirtyAndSchedule(true);
         }
       } else if (state.mode === 'cutaway_moe') {
-        const sim = currentCutawayScene?.moeSim ?? runMoeSim(state.tokens);
+        const sim = currentCutawayScene?.moeSim ?? activeMoeSim();
         const tok = activeMoeFocusToken();
         const exp = activeMoeFocusExpert(sim, tok);
         const pickTok =
@@ -2431,7 +2451,7 @@ function boot(): void {
           lastMambaTemporalTickMs = null;
         }
       } else if (state.mode === 'cutaway_moe') {
-        const sim = currentCutawayScene?.moeSim ?? runMoeSim(state.tokens);
+        const sim = currentCutawayScene?.moeSim ?? activeMoeSim();
         const tok = activeMoeFocusToken();
         const exp = activeMoeFocusExpert(sim, tok);
         const pickTok =

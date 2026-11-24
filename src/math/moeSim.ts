@@ -18,7 +18,7 @@
  * weights are d=2,688, moe_intermediate_size=1,856, moe_shared_expert_intermediate_size=3,712.
  */
 
-import { EDUCATIONAL_TOKENS } from './gqaSim';
+import { formatEpsLabel, resolveSimTokens } from './gqaSim';
 import {
   fmtSigned,
   type LayerFormulaReadout,
@@ -115,6 +115,12 @@ export interface MoeSimFixture {
   readonly W_up_s?: Float32Array;
   /** Shared expert down weights [d, dShared] indexed [o * dShared + h]. */
   readonly W_down_s?: Float32Array;
+  /** Override RMSNorm epsilon (defaults to 1e-5). */
+  readonly rmsNormEps?: number;
+  /** Actual input token IDs for this execution (length T). */
+  readonly tokenIds?: readonly number[] | Int32Array;
+  /** Matching display labels for each token position (length T). */
+  readonly tokenLabels?: readonly string[];
 }
 
 export interface SingleRoutedExpertEval {
@@ -141,6 +147,7 @@ export interface SingleRoutedExpertEval {
 
 export interface MoeSimResult {
   readonly tokens: number;
+  readonly tokenIds: Int32Array;
   readonly tokenLabels: readonly string[];
   readonly d: number;
   readonly nRoutedExperts: number;
@@ -433,18 +440,19 @@ export function runMoeSim(tokens: number, fixture?: MoeSimFixture): MoeSimResult
   }
 
   const def = getDefaultWeights();
-  const { d, nRoutedExperts, topK, dExp, dShared, routedScalingFactor, rmsNormEps, probDenomEps } =
+  const { d, nRoutedExperts, topK, dExp, dShared, routedScalingFactor, probDenomEps } =
     MOE_SIM_CONFIG;
+  const rmsNormEps = fixture?.rmsNormEps ?? MOE_SIM_CONFIG.rmsNormEps;
+  const { tokenIds, tokenLabels } = resolveSimTokens(T, fixture?.tokenIds, fixture?.tokenLabels);
 
-  const gamma_in = fixture?.gamma_in ? new Float32Array(fixture.gamma_in) : def.gamma_in;
-  const W_router = fixture?.W_router ? new Float32Array(fixture.W_router) : def.W_router;
-  const e_score_correction_bias = fixture?.e_score_correction_bias
-    ? new Float32Array(fixture.e_score_correction_bias)
-    : def.e_score_correction_bias;
-  const W_up = fixture?.W_up ? new Float32Array(fixture.W_up) : def.W_up;
-  const W_down = fixture?.W_down ? new Float32Array(fixture.W_down) : def.W_down;
-  const W_up_s = fixture?.W_up_s ? new Float32Array(fixture.W_up_s) : def.W_up_s;
-  const W_down_s = fixture?.W_down_s ? new Float32Array(fixture.W_down_s) : def.W_down_s;
+  const gamma_in = fixture?.gamma_in ?? def.gamma_in;
+  const W_router = fixture?.W_router ?? def.W_router;
+  const e_score_correction_bias =
+    fixture?.e_score_correction_bias ?? def.e_score_correction_bias;
+  const W_up = fixture?.W_up ?? def.W_up;
+  const W_down = fixture?.W_down ?? def.W_down;
+  const W_up_s = fixture?.W_up_s ?? def.W_up_s;
+  const W_down_s = fixture?.W_down_s ?? def.W_down_s;
 
   // Slice X [d, T]
   const X = new Float32Array(d * T);
@@ -615,7 +623,8 @@ export function runMoeSim(tokens: number, fixture?: MoeSimFixture): MoeSimResult
 
   const result: MoeSimResult = {
     tokens: T,
-    tokenLabels: EDUCATIONAL_TOKENS.slice(0, T),
+    tokenIds,
+    tokenLabels,
     d,
     nRoutedExperts,
     topK,
@@ -782,12 +791,12 @@ export function describeMoeCellFormula(
         cell: { ...rawCell, row: t, col: ch, tokenIndex: t },
         tensorLabel: 'RMSNorm U',
         coordLabel: `t${t} "${tl}" · ch ${ch}`,
-        headBadge: 'ε = 1e−5 · Pre-MoE',
+        headBadge: `ε = ${formatEpsLabel(sim.eps)} · Pre-MoE`,
         value: uv,
         isMasked: false,
         valueText: fmtSigned(uv, 3),
         equation: `U[${ch}, t${t}] = (${fmtSigned(xv, 3)} / ${sim.rms[t].toFixed(3)}) × γ[${ch}](${g.toFixed(2)}) = ${fmtSigned(uv, 3)}`,
-        subEquation: `X_norm = ${fmtSigned(xn, 3)} · RMS = √(mean(X²) + 1e−5) = ${sim.rms[t].toFixed(3)} · Forks in parallel to Router & Shared Expert.`,
+        subEquation: `X_norm = ${fmtSigned(xn, 3)} · RMS = √(mean(X²) + ${formatEpsLabel(sim.eps)}) = ${sim.rms[t].toFixed(3)} · Forks in parallel to Router & Shared Expert.`,
         upstreamSpans: [
           { tensor: 'input', rowStart: t, rowEnd: t, colStart: 0, colEnd: d - 1, tokenIndex: t },
         ],

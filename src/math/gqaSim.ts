@@ -39,6 +39,67 @@ export const GQA_SIM_CONFIG = {
   rmsEps: 1e-6,
 } as const;
 
+/** Format an RMSNorm epsilon concisely with typographic minus (e.g. `1e-5` -> `1e−5`). */
+export function formatEpsLabel(eps: number): string {
+  if (Math.abs(eps - 1e-5) <= 1e-12) return '1e−5';
+  if (Math.abs(eps - 1e-6) <= 1e-13) return '1e−6';
+  return eps.toExponential().replace('e-', 'e−').replace('e+', 'e+');
+}
+
+/**
+ * Resolve token IDs and matching display labels for any miniature simulator invocation.
+ * Custom token IDs never silently inherit unrelated hardcoded educational labels.
+ */
+export function resolveSimTokens(
+  tokens: number,
+  fixtureTokenIds?: readonly number[] | Int32Array,
+  fixtureTokenLabels?: readonly string[],
+): { readonly tokenIds: Int32Array; readonly tokenLabels: readonly string[] } {
+  const tokenIds = new Int32Array(tokens);
+  if (fixtureTokenIds) {
+    for (let t = 0; t < tokens; t++) {
+      tokenIds[t] = fixtureTokenIds[t] ?? t;
+    }
+    const tokenLabels: string[] = [];
+    for (let t = 0; t < tokens; t++) {
+      tokenLabels.push(fixtureTokenLabels?.[t] ?? `id:${tokenIds[t]}`);
+    }
+    return { tokenIds, tokenLabels };
+  }
+  for (let t = 0; t < tokens; t++) {
+    tokenIds[t] = t;
+  }
+  if (fixtureTokenLabels) {
+    const tokenLabels: string[] = [];
+    for (let t = 0; t < tokens; t++) {
+      tokenLabels.push(fixtureTokenLabels[t] ?? `t${t}`);
+    }
+    return { tokenIds, tokenLabels };
+  }
+  return { tokenIds, tokenLabels: EDUCATIONAL_TOKENS.slice(0, tokens) };
+}
+
+export interface GqaSimFixture {
+  /** Input hidden state X: [d, T], indexed [i * T + t]. */
+  readonly X?: Float32Array;
+  /** Learned RMSNorm scale gamma: [d]. */
+  readonly gamma?: Float32Array;
+  /** Query projection W_Q: [qConcatDim, d]. */
+  readonly W_Q?: Float32Array;
+  /** Key projection W_K: [nKv * dHead, d]. */
+  readonly W_K?: Float32Array;
+  /** Value projection W_V: [nKv * dHead, d]. */
+  readonly W_V?: Float32Array;
+  /** Output projection W_O: [d, qConcatDim]. */
+  readonly W_O?: Float32Array;
+  /** Override RMSNorm epsilon (e.g. 1e-5 in unified 52-layer forward pass). */
+  readonly rmsEps?: number;
+  /** Actual input token IDs for this execution (length T). */
+  readonly tokenIds?: readonly number[] | Int32Array;
+  /** Matching display labels for each token position (length T). */
+  readonly tokenLabels?: readonly string[];
+}
+
 export type GqaTensorKey =
   | 'input'
   | 'rmsnorm'
@@ -121,12 +182,15 @@ export interface GqaCellFormula {
 
 export interface GqaSimResult {
   readonly tokens: number;
+  readonly tokenIds: Int32Array;
   readonly tokenLabels: readonly string[];
   readonly d: number;
   readonly nQ: number;
   readonly nKv: number;
   readonly dHead: number;
   readonly qConcatDim: number;
+  /** Effective RMSNorm epsilon used for this simulation (1e-6 standalone default; 1e-5 unified). */
+  readonly rmsEps: number;
   /** Input hidden state X: [8, T], indexed [i * T + t] */
   readonly X: Float32Array;
   /** Pre-gamma unit-RMS normalized state X_norm: [8, T], indexed [i * T + t] */
@@ -273,20 +337,34 @@ const simCache = new Map<number, GqaSimResult>();
 
 /**
  * Run (or fetch cached) deterministic Float32 forward pass for `tokens` in [1..16].
+ * Default calls (no fixture) are cached per T with standalone defaults (`rmsEps = 1e-6`).
+ * Fixture calls accept external `X`, weights, `rmsEps`, `tokenIds`, and `tokenLabels` without polluting the standalone cache.
  */
-export function runGqaSim(tokens: number): GqaSimResult {
+export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult {
   const T = Math.max(1, Math.min(GQA_SIM_CONFIG.maxTokens, Math.round(tokens)));
-  const cached = simCache.get(T);
-  if (cached) return cached;
+  if (!fixture) {
+    const cached = simCache.get(T);
+    if (cached) return cached;
+  }
 
-  const { d, nQ, nKv, dHead, qConcatDim, maxTokens, rmsEps } = GQA_SIM_CONFIG;
-  const { X_full, gamma, W_Q, W_K, W_V, W_O } = SIM_PARAMS;
+  const { d, nQ, nKv, dHead, qConcatDim, maxTokens } = GQA_SIM_CONFIG;
+  const rmsEps = fixture?.rmsEps ?? GQA_SIM_CONFIG.rmsEps;
+  const gamma = fixture?.gamma ?? SIM_PARAMS.gamma;
+  const W_Q = fixture?.W_Q ?? SIM_PARAMS.W_Q;
+  const W_K = fixture?.W_K ?? SIM_PARAMS.W_K;
+  const W_V = fixture?.W_V ?? SIM_PARAMS.W_V;
+  const W_O = fixture?.W_O ?? SIM_PARAMS.W_O;
+  const { tokenIds, tokenLabels } = resolveSimTokens(T, fixture?.tokenIds, fixture?.tokenLabels);
 
-  // 1. Slice input X [8, T]
+  // 1. Slice or copy input X [8, T]
   const X = new Float32Array(d * T);
-  for (let i = 0; i < d; i++) {
-    for (let t = 0; t < T; t++) {
-      X[i * T + t] = X_full[i * maxTokens + t];
+  if (fixture?.X) {
+    X.set(fixture.X.subarray(0, d * T));
+  } else {
+    for (let i = 0; i < d; i++) {
+      for (let t = 0; t < T; t++) {
+        X[i * T + t] = SIM_PARAMS.X_full[i * maxTokens + t];
+      }
     }
   }
 
@@ -429,12 +507,14 @@ export function runGqaSim(tokens: number): GqaSimResult {
 
   const result: GqaSimResult = {
     tokens: T,
-    tokenLabels: EDUCATIONAL_TOKENS.slice(0, T),
+    tokenIds,
+    tokenLabels,
     d,
     nQ,
     nKv,
     dHead,
     qConcatDim,
+    rmsEps,
     X,
     X_norm,
     rms,
@@ -455,7 +535,9 @@ export function runGqaSim(tokens: number): GqaSimResult {
     Y,
   };
 
-  simCache.set(T, result);
+  if (!fixture) {
+    simCache.set(T, result);
+  }
   return result;
 }
 
@@ -612,7 +694,7 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
         isMasked: false,
         valueText: fmtSigned(uVal),
         equation: `(X[${i},${t}] / rms) · γ[${i}] = (${fmtSigned(xVal)} / ${rmsVal.toFixed(3)}) · ${gVal.toFixed(2)} = ${fmtSigned(xn)} · ${gVal.toFixed(2)} = ${fmtSigned(uVal)}`,
-        subEquation: `Pre-γ unit-RMS X_norm[${i},${t}] = ${fmtSigned(xn)} · rms(X[:,${t}]) = √(mean(x²) + 1e−6) = ${rmsVal.toFixed(3)}`,
+        subEquation: `Pre-γ unit-RMS X_norm[${i},${t}] = ${fmtSigned(xn)} · rms(X[:,${t}]) = √(mean(x²) + ${formatEpsLabel(sim.rmsEps)}) = ${rmsVal.toFixed(3)}`,
         targetSpan: { tensor: 'rmsnorm', rowStart: t, rowEnd: t, colStart: i, colEnd: i, role: 'target' },
         upstreamSpans: [
           { tensor: 'input', rowStart: t, rowEnd: t, colStart: 0, colEnd: d - 1, role: 'operand_a' },

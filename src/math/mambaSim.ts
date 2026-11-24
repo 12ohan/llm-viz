@@ -15,7 +15,7 @@
  * Precision toggles (BF16 / FP8 Selective) are displayed strictly as production metadata.
  */
 
-import { EDUCATIONAL_TOKENS } from './gqaSim';
+import { EDUCATIONAL_TOKENS, formatEpsLabel, resolveSimTokens } from './gqaSim';
 import { fmtSigned, type LayerFormulaReadout, type StepperStepDef } from '../scene/sheetInspector';
 
 export { EDUCATIONAL_TOKENS };
@@ -102,10 +102,15 @@ export interface MambaSimFixture {
   readonly gamma_gate?: Float32Array;
   readonly W_out?: Float32Array;
   readonly eps?: number;
+  /** Actual input token IDs for this execution (length T). */
+  readonly tokenIds?: readonly number[] | Int32Array;
+  /** Matching display labels for each token position (length T). */
+  readonly tokenLabels?: readonly string[];
 }
 
 export interface MambaSimResult {
   readonly tokens: number;
+  readonly tokenIds: Int32Array;
   readonly d: number;
   readonly nHeads: number;
   readonly nGroups: number;
@@ -438,7 +443,7 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
   const gamma_gate = fixture?.gamma_gate ?? DEFAULT_WEIGHTS.gamma_gate;
   const W_out = fixture?.W_out ?? DEFAULT_WEIGHTS.W_out;
 
-  const tokenLabels = EDUCATIONAL_TOKENS.slice(0, T);
+  const { tokenIds, tokenLabels } = resolveSimTokens(T, fixture?.tokenIds, fixture?.tokenLabels);
 
   // 1. Input hidden state X [d, T]
   const X = new Float32Array(d * T);
@@ -630,6 +635,7 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
 
   const result: MambaSimResult = {
     tokens: T,
+    tokenIds,
     d,
     nHeads,
     nGroups,
@@ -797,7 +803,7 @@ export function describeMambaCellFormula(
         isMasked: false,
         valueText: fmtSigned(val),
         equation: `X[${i}, t=${t}] = ${fmtSigned(val)}  (miniature d=8 · prod 2,688)`,
-        subEquation: `Synthetic Float32 token embedding · RMS(X[:, t=${t}]) = ${sim.rms_in[t].toFixed(3)} (ε=1e−5)`,
+        subEquation: `Synthetic Float32 token embedding · RMS(X[:, t=${t}]) = ${sim.rms_in[t].toFixed(3)} (ε=${formatEpsLabel(sim.eps)})`,
         targetSpan: { tensor: 'input', rowStart: t, rowEnd: t, colStart: i, colEnd: i, role: 'target' },
         upstreamSpans: [],
       };
@@ -820,7 +826,7 @@ export function describeMambaCellFormula(
         isMasked: false,
         valueText: fmtSigned(uVal),
         equation: `U[${i}, t=${t}] = (${fmtSigned(xVal)} / ${rms.toFixed(3)}) · γ[${i}](${g.toFixed(3)}) = ${fmtSigned(uVal)}`,
-        subEquation: `X_norm = ${fmtSigned(xn)} · √(mean(X[:, t=${t}]²) + 1e−5) = ${rms.toFixed(4)}`,
+        subEquation: `X_norm = ${fmtSigned(xn)} · √(mean(X[:, t=${t}]²) + ${formatEpsLabel(sim.eps)}) = ${rms.toFixed(4)}`,
         targetSpan: { tensor: 'rmsnorm', rowStart: t, rowEnd: t, colStart: i, colEnd: i, role: 'target' },
         upstreamSpans: [
           { tensor: 'input', rowStart: t, rowEnd: t, colStart: 0, colEnd: d - 1, role: 'operand_a' },

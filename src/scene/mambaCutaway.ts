@@ -119,6 +119,8 @@ export interface MambaCutawayOptions {
   readonly viewAngle?: GqaViewAngle;
   /** Optional explicit recurrence token index `0..T-1` for temporal playback (overridden when activeCell specifies a token). */
   readonly stateTokenIndex?: number | null;
+  /** Optional authoritative simulator result from a unified `HybridExecutionResult`. */
+  readonly simOverride?: MambaSimResult;
 }
 
 interface MambaSheetSpec {
@@ -573,7 +575,9 @@ function buildMambaPartCatalog(params: {
  */
 export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeometry {
   const { bayId, precision, selectedPart, hoveredPart } = opts;
-  const clampedT = Math.max(1, Math.min(16, Math.round(opts.tokens)));
+  const clampedT = opts.simOverride
+    ? opts.simOverride.tokens
+    : Math.max(1, Math.min(16, Math.round(opts.tokens)));
   const bay = NEMOTRON_SPEC.bays[bayId - 1];
   const isFeeder = bay.feeder;
   const isFp8Mode = precision === 'fp8_selective';
@@ -595,7 +599,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   );
   const activeGroup = mambaGroupForHead(activeHead);
 
-  const sim = runMambaSim(clampedT);
+  const sim = opts.simOverride ?? runMambaSim(clampedT);
   const cellTokIdx = inferMambaCellToken(opts.activeCell, clampedT);
   const explicitTokIdx =
     opts.stateTokenIndex !== undefined && opts.stateTokenIndex !== null

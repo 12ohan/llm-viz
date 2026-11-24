@@ -22,7 +22,8 @@ import {
   type TocSectionId,
   type ViewMode,
 } from '../model/state';
-import { GQA_STEPPER_STEPS } from '../math/gqaSim';
+import { fmtSigned, formatEpsLabel, GQA_STEPPER_STEPS } from '../math/gqaSim';
+import type { HybridExecutionResult } from '../math/hybridFlow';
 import { MAMBA_STEPPER_STEPS } from '../math/mambaSim';
 import { formatExpertId, MOE_STEPPER_STEPS } from '../math/moeSim';
 import {
@@ -301,6 +302,8 @@ export function queryControlsElements(): ControlsElements {
 export function computeEditorialCacheKey(
   state: SceneState,
   activeCutaway: CutawaySceneGeometry | null,
+  activeExecution: HybridExecutionResult | null = null,
+  boundaryInspectToken: number | null = null,
 ): string {
   const isTower = state.mode === 'tower';
   const activeBayId = isTower ? state.hoveredBay ?? state.selectedBay : null;
@@ -312,7 +315,9 @@ export function computeEditorialCacheKey(
   const effMoeExp = activeCutaway?.moeStats?.focusExpert ?? state.moeActiveExpert ?? 'top0';
   const effGqaG0 = activeCutaway?.gqaStats?.activeGroup0Head ?? state.gqaActiveGroup0Head;
   const effGqaG1 = activeCutaway?.gqaStats?.activeGroup1Head ?? state.gqaActiveGroup1Head;
-  return `${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${state.mode}:${state.mambaBayId}:${effMambaHead}:${effMambaTok}:${state.mambaStateToken ?? 'last'}:${state.mambaTemporalPlaying ? 'tplay' : 'tpause'}:${state.moeBayId}:${effMoeTok}:${effMoeExp}:${state.moeTokenCycling ? 'mplay' : 'mpause'}:${state.gqaBayId}:${effGqaG0}:${effGqaG1}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
+  const execKey = activeExecution ? activeExecution.executionId : 'standalone';
+  const boundTok = isTower ? (boundaryInspectToken ?? 'last') : 'na';
+  return `${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${execKey}:${boundTok}:${state.mode}:${state.mambaBayId}:${effMambaHead}:${effMambaTok}:${state.mambaStateToken ?? 'last'}:${state.mambaTemporalPlaying ? 'tplay' : 'tpause'}:${state.moeBayId}:${effMoeTok}:${effMoeExp}:${state.moeTokenCycling ? 'mplay' : 'mpause'}:${state.gqaBayId}:${effGqaG0}:${effGqaG1}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
 }
 
 export class MacroControls {
@@ -323,6 +328,10 @@ export class MacroControls {
 
   private lastReadoutKey = '';
   private lastEditorialKey = '';
+  private boundaryInspectToken: number | null = null;
+  private lastSyncedState: SceneState | null = null;
+  private lastSyncedCutaway: CutawaySceneGeometry | null = null;
+  private lastSyncedExecution: HybridExecutionResult | null = null;
 
   constructor(spec: NemotronSpec, els: ControlsElements, cb: ControlsCallbacks) {
     this.spec = spec;
@@ -501,7 +510,14 @@ export class MacroControls {
     state: SceneState,
     activeCutaway: CutawaySceneGeometry | null = null,
     autoFollowManualPaused = false,
+    activeExecution: HybridExecutionResult | null = null,
   ): void {
+    this.lastSyncedState = state;
+    this.lastSyncedCutaway = activeCutaway;
+    this.lastSyncedExecution = activeExecution;
+    if (this.boundaryInspectToken !== null && this.boundaryInspectToken >= state.tokens) {
+      this.boundaryInspectToken = state.tokens - 1;
+    }
     // Active View Mode Switcher
     for (const btn of this.els.modeButtons) {
       const isAct = btn.dataset.mode === state.mode;
@@ -663,7 +679,12 @@ export class MacroControls {
     // Middle editorial panel
     const activeBayId = isTower ? state.hoveredBay ?? state.selectedBay : null;
     const activePart = !isTower ? state.hoveredPart ?? state.selectedPart : null;
-    const editorialKey = computeEditorialCacheKey(state, activeCutaway);
+    const editorialKey = computeEditorialCacheKey(
+      state,
+      activeCutaway,
+      activeExecution,
+      this.boundaryInspectToken,
+    );
 
     if (editorialKey !== this.lastEditorialKey) {
       this.lastEditorialKey = editorialKey;
@@ -676,9 +697,10 @@ export class MacroControls {
           state.selectedBay !== null,
           state.precision,
           state.tokens,
+          activeExecution,
         );
       } else {
-        this.renderCutawayEditorial(state, activePart, activeCutaway);
+        this.renderCutawayEditorial(state, activePart, activeCutaway, activeExecution);
       }
     }
   }
@@ -703,11 +725,12 @@ export class MacroControls {
         : GQA_STEPPER_STEPS;
 
     // Update honest miniature simulator disclaimer note inside accessible popover & tooltip
+    const gqaEpsLabel = formatEpsLabel(cutaway?.gqaSim?.rmsEps ?? 1e-5);
     const noteText = isMamba
-      ? 'Deterministic miniature Mamba-2 sim (d=8, 16H/8G, dₕ=4, dₛ=4; Float32 storage, rounded outputs) · Educational token labels · BF16/FP8 = production metadata'
+      ? 'Unified 52-layer miniature Mamba-2 sim (d=8, 16H/8G, dₕ=4, dₛ=4, ε=1e−5; synthetic Float32, rounded) · BF16/FP8 = production metadata'
       : isMoe
-        ? 'Deterministic miniature MoE sim (d=8, 128E top-6, d_exp=4, d_shared=8, ×2.5; Float32 storage, rounded outputs) · Educational token labels · BF16/FP8/FP32 = production metadata'
-        : 'Deterministic miniature GQA sim (d=8, 32Q/2KV, dₕ=4; Float32 storage, rounded outputs) · Educational token labels · BF16/FP8 = production metadata';
+        ? 'Unified 52-layer miniature MoE sim (d=8, 128E top-6, d_exp=4, d_shared=8, ×2.5, ε=1e−5; synthetic Float32, rounded) · BF16/FP8/FP32 = production metadata'
+        : `Unified 52-layer miniature GQA sim (d=8, 32Q/2KV, dₕ=4, NoPE, ε=${gqaEpsLabel}; synthetic Float32, rounded) · BF16/FP8 = production metadata`;
     this.els.gqaFormulaNote.textContent = noteText;
     this.els.gqaFormulaNoteBtn.title = noteText;
 
@@ -955,12 +978,175 @@ export class MacroControls {
     panel.append(navBar, progressTrack, scrollBody, actions);
   }
 
+  private setBoundaryInspectToken(tok: number): void {
+    this.boundaryInspectToken = tok;
+    if (this.lastSyncedState) {
+      this.sync(this.lastSyncedState, this.lastSyncedCutaway, false, this.lastSyncedExecution);
+    }
+  }
+
+  private buildEmbeddingNumericalCard(exec: HybridExecutionResult): HTMLDivElement {
+    const T = exec.tokens;
+    const tok = Math.max(0, Math.min(T - 1, this.boundaryInspectToken ?? T - 1));
+    const tokId = exec.tokenIds[tok];
+    const tokLabel = exec.tokenLabels[tok] ?? `t${tok}`;
+
+    const card = document.createElement('div');
+    card.className = 'ed-flow-card';
+    card.dataset.testid = 'embedding-flow-card';
+
+    const head = document.createElement('div');
+    head.className = 'ed-flow-head';
+    const title = document.createElement('span');
+    title.className = 'ed-flow-title';
+    title.textContent = `Live Mini Embedding · t${tok} "${tokLabel}" (id ${tokId})`;
+    const tag = document.createElement('span');
+    tag.className = 'ed-flow-tag';
+    tag.textContent = 'NoPE · X₀';
+    head.append(title, tag);
+
+    const tokStrip = document.createElement('div');
+    tokStrip.className = 'ed-flow-tok-strip';
+    for (let i = 0; i < T; i++) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `ed-flow-tok-btn${i === tok ? ' is-active' : ''}`;
+      btn.textContent = `t${i} ${exec.tokenLabels[i] ?? ''}`.trim();
+      btn.addEventListener('click', () => this.setBoundaryInspectToken(i));
+      tokStrip.appendChild(btn);
+    }
+
+    const vecGrid = document.createElement('div');
+    vecGrid.className = 'ed-flow-vec-grid';
+    let sumSq = 0;
+    for (let ch = 0; ch < exec.d; ch++) {
+      const v = exec.X_embed[ch * T + tok];
+      sumSq += v * v;
+      const cell = document.createElement('div');
+      cell.className = 'ed-flow-vec-cell';
+      const idx = document.createElement('span');
+      idx.className = 'ed-flow-vec-idx';
+      idx.textContent = `c${ch}`;
+      const val = document.createElement('span');
+      val.className = 'ed-flow-vec-val';
+      val.textContent = fmtSigned(v, 2);
+      cell.append(idx, val);
+      vecGrid.appendChild(cell);
+    }
+    const rms = Math.sqrt(sumSq / exec.d);
+
+    const meta = document.createElement('div');
+    meta.className = 'ed-flow-meta';
+    meta.textContent = `RMS(X₀[:, t${tok}]) = ${rms.toFixed(3)} · → Bay 01 Mamba-2 Input X (bit-exact)`;
+
+    const note = document.createElement('div');
+    note.className = 'ed-flow-note';
+    note.textContent = 'Synthetic Float32 mini (d=8, V=32, untied W_embed ≠ W_lm_head). Order enters via Bay 01 Mamba-2.';
+
+    const actions = document.createElement('div');
+    actions.className = 'ed-actions';
+    const inspectBtn = document.createElement('button');
+    inspectBtn.type = 'button';
+    inspectBtn.className = 'ed-cta-btn';
+    inspectBtn.textContent = 'Inspect Bay 01 Mamba-2 →';
+    inspectBtn.addEventListener('click', () => this.cb.onInspectInternals('M', 1));
+    actions.appendChild(inspectBtn);
+
+    card.append(head, tokStrip, vecGrid, meta, note, actions);
+    return card;
+  }
+
+  private buildOutputNumericalCard(exec: HybridExecutionResult): HTMLDivElement {
+    const T = exec.tokens;
+    const tok = Math.max(0, Math.min(T - 1, this.boundaryInspectToken ?? T - 1));
+    const tokLabel = exec.tokenLabels[tok] ?? `t${tok}`;
+    const fn = exec.finalNorm;
+    const preds = exec.lmHead.topKByToken[tok] ?? [];
+    const maxProb = Math.max(0.05, preds[0]?.prob ?? 0.25);
+
+    const card = document.createElement('div');
+    card.className = 'ed-flow-card';
+    card.dataset.testid = 'output-flow-card';
+
+    const head = document.createElement('div');
+    head.className = 'ed-flow-head';
+    const title = document.createElement('span');
+    title.className = 'ed-flow-title';
+    title.textContent = `Final RMSNorm & LM Head · t${tok} "${tokLabel}"`;
+    const tag = document.createElement('span');
+    tag.className = 'ed-flow-tag';
+    tag.textContent = `ε=${formatEpsLabel(fn.eps)}`;
+    head.append(title, tag);
+
+    const tokStrip = document.createElement('div');
+    tokStrip.className = 'ed-flow-tok-strip';
+    for (let i = 0; i < T; i++) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `ed-flow-tok-btn${i === tok ? ' is-active' : ''}`;
+      btn.textContent = `t${i} ${exec.tokenLabels[i] ?? ''}`.trim();
+      btn.addEventListener('click', () => this.setBoundaryInspectToken(i));
+      tokStrip.appendChild(btn);
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'ed-flow-meta';
+    meta.textContent = `← Bay 52 Final MoE Y (bit-exact) · rms_final = ${fn.rms[tok].toFixed(3)} · Top-5 Next Tokens:`;
+
+    const predList = document.createElement('div');
+    predList.className = 'ed-flow-pred-list';
+    for (const pred of preds) {
+      const row = document.createElement('div');
+      row.className = 'ed-flow-pred-row';
+
+      const word = document.createElement('span');
+      word.className = 'ed-flow-pred-word';
+      word.textContent = pred.label;
+      word.title = `vocab #${pred.tokenId}: ${pred.label}`;
+
+      const track = document.createElement('div');
+      track.className = 'ed-flow-pred-track';
+      const bar = document.createElement('div');
+      bar.className = 'ed-flow-pred-bar';
+      bar.style.width = `${Math.max(4, Math.min(100, (pred.prob / maxProb) * 100)).toFixed(1)}%`;
+      track.appendChild(bar);
+
+      const logit = document.createElement('span');
+      logit.className = 'ed-flow-pred-logit';
+      logit.textContent = fmtSigned(pred.logit, 2);
+
+      const prob = document.createElement('span');
+      prob.className = 'ed-flow-pred-prob';
+      prob.textContent = `${(pred.prob * 100).toFixed(1)}%`;
+
+      row.append(word, track, logit, prob);
+      predList.appendChild(row);
+    }
+
+    const note = document.createElement('div');
+    note.className = 'ed-flow-note';
+    note.textContent = 'Synthetic V=32 mini vocab & untied W_lm_head (Float32) — educational demo, not 31.6B checkpoint logits.';
+
+    const actions = document.createElement('div');
+    actions.className = 'ed-actions';
+    const inspectBtn = document.createElement('button');
+    inspectBtn.type = 'button';
+    inspectBtn.className = 'ed-cta-btn ed-cta-secondary';
+    inspectBtn.textContent = 'Inspect Bay 52 Final MoE →';
+    inspectBtn.addEventListener('click', () => this.cb.onInspectInternals('E', 52));
+    actions.appendChild(inspectBtn);
+
+    card.append(head, tokStrip, meta, predList, note, actions);
+    return card;
+  }
+
   private renderTowerEditorial(
     section: TocSectionId,
     bayId: number | null,
     isPinned: boolean,
     precision: PrecisionMode,
     tokens: number,
+    activeExecution: HybridExecutionResult | null = null,
   ): void {
     const panel = this.els.editorialPanel;
     panel.classList.remove('is-tour-mode');
@@ -999,6 +1185,17 @@ export class MacroControls {
           storageLine = 'Memory: 0 B token history (stateless MoE layer)';
           narrative = `Bay ${formatBayId(bay.id)} routes each token through a 128-score sigmoid gate to activate six routed experts (width 1,856, non-gated ReLU²) in parallel alongside one always-active shared expert.`;
           extraSpecs.push(SHARED_EXPERT_NOTE);
+        }
+
+        if (activeExecution) {
+          const sum = activeExecution.baySummaries[bay.id - 1];
+          const lastT = activeExecution.tokens - 1;
+          if (sum) {
+            const tokLabel = activeExecution.tokenLabels[lastT] ?? `t${lastT}`;
+            extraSpecs.push(
+              `Unified mini stream (t${lastT} "${tokLabel}"): RMS ${sum.rmsIn[lastT].toFixed(2)} → Δ ${sum.rmsDelta[lastT].toFixed(2)} → ${sum.rmsOut[lastT].toFixed(2)}`,
+            );
+          }
         }
 
         const header = document.createElement('div');
@@ -1073,7 +1270,13 @@ export class MacroControls {
       list.appendChild(li);
     }
 
-    panel.append(header, p, list);
+    panel.append(header, p);
+    if (activeExecution && section === 'embedding') {
+      panel.appendChild(this.buildEmbeddingNumericalCard(activeExecution));
+    } else if (activeExecution && section === 'output') {
+      panel.appendChild(this.buildOutputNumericalCard(activeExecution));
+    }
+    panel.appendChild(list);
 
     if (copy.inspectKind) {
       const actions = document.createElement('div');
@@ -1094,6 +1297,7 @@ export class MacroControls {
     state: SceneState,
     activePart: string | null,
     cutaway: CutawaySceneGeometry | null,
+    activeExecution: HybridExecutionResult | null = null,
   ): void {
     const panel = this.els.editorialPanel;
     panel.classList.remove('is-tour-mode');
@@ -1188,6 +1392,13 @@ export class MacroControls {
         : 'Deterministic miniature Mamba-2 sim (d=8, 16H/8G, dₕ=4, dₛ=4; Float32, rounded). Sequence decks grow with T while the 4-tap Conv1D buffer and Hₜ₋₁ ⇄ Hₜ pedestal stay fixed.';
 
       specs = [
+        ...(activeExecution
+          ? [
+              isFeeder
+                ? 'Unified 52-layer stream: Residual Y feeds Bay 43 GQA Input X bit-exact'
+                : 'Unified 52-layer stream: Input X = Untied Embedding X₀ (NoPE) · Residual Y → Bay 02 MoE X',
+            ]
+          : []),
         'Persistent storage (23 bays): 46.0 MiB SSM (FP32) + ~1.08 MiB Conv1D (BF16) ≈ 47.1 MiB fixed · H_history is browser-only playback',
         isFeeder
           ? 'Bay 42 Feeder metadata (§4.2): W_in, W_out, Conv1D preserved in BF16 (gold rim); live sim runs Float32'
@@ -1208,20 +1419,35 @@ export class MacroControls {
         `Runs a deterministic miniature MoE simulator (d=8, 128 routed top-6, d_exp=4, d_shared=8 = 2×, ×2.5; Float32 storage, rounded outputs). For token t${fTok} "${tokLabel}", RMSNorm forks in parallel into the sparse 128-expert bank (non-gated ReLU², no gate_proj) and the always-on 2× shared expert.`;
 
       specs = [
+        ...(activeExecution
+          ? [
+              state.moeBayId === 52
+                ? 'Unified 52-layer stream: Final Residual Y → Final RMSNorm (ε=1e−5) → Untied LM Head'
+                : 'Unified 52-layer stream: Input X = Bay 01 Mamba-2 Residual Y bit-exact',
+            ]
+          : []),
         'Router: sigmoid(W_router·U) + e_score_correction_bias selects Top-6; unbiased σ gathers weights → norm × 2.5 (Router stays FP32 in FP8 Selective)',
         SHARED_EXPERT_NOTE + ' (added unscaled at 1.0× alongside Top-6 routed sum)',
         '1.30B params/layer × 23 = 29.8B (~94% of 31.6B weights) · 0 B dynamic token cache (strictly per-token independent)',
       ];
     } else {
       const perBayKiB = ((isFp8 ? 512 : 1024) * state.tokens) / 1024;
+      const gqaEps = formatEpsLabel(cutaway?.gqaSim?.rmsEps ?? 1e-5);
       title.textContent = `GQA Cutaway · Bay ${formatBayId(state.gqaBayId)}`;
       badge.textContent = isFp8 ? 'BF16 Compute · FP8 KV' : '32Q / 2KV · NoPE';
       if (isFp8) badge.classList.add('ed-badge-gold');
 
       bodyText =
-        'Thirty-two query heads (Group 0: Q00–Q15 → KV₀; Group 1: Q16–Q31 → KV₁) drive a deterministic miniature simulator with Float32 tensor storage and rounded outputs (d=8, dₕ=4, NoPE) using educational token labels. Hover or click any cell for rounded numerical explanations.';
+        `Thirty-two query heads (Group 0: Q00–Q15 → KV₀; Group 1: Q16–Q31 → KV₁) drive a deterministic miniature simulator with Float32 tensor storage and rounded outputs (d=8, dₕ=4, NoPE, ε=${gqaEps}). Hover or click any cell for rounded numerical explanations.`;
 
       specs = [
+        ...(activeExecution
+          ? [
+              state.gqaBayId === 43
+                ? `Unified 52-layer stream: Input X = Bay 42 Mamba-2 Feeder Residual Y bit-exact (ε=${gqaEps})`
+                : `Unified 52-layer stream: Input X = Bay 05 Mamba-2 Feeder Residual Y bit-exact (ε=${gqaEps})`,
+            ]
+          : []),
         `Shared KV cache: 2 KV heads × ${state.tokens} tokens = ${perBayKiB} KiB (${isFp8 ? '+0.5 KiB/tok FP8 storage' : '+1 KiB/tok BF16 storage'})`,
         isFp8
           ? 'Production precision metadata (§4.2): Q/K/V/O compute BF16; KV storage FP8 (miniature sim uses Float32 storage)'

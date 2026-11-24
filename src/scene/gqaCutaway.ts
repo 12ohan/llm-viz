@@ -1,10 +1,12 @@
 import {
   describeCellFormula,
+  formatEpsLabel,
   inferGqaCellHead,
   runGqaSim,
   type GqaCellFormula,
   type GqaCellRef,
   type GqaSheetSpan,
+  type GqaSimResult,
   type GqaTensorKey,
 } from '../math/gqaSim';
 import {
@@ -109,6 +111,8 @@ export interface GqaCutawayOptions {
   readonly activeCell?: GqaCellRef | null;
   /** Layout mode: `'three_quarter'` builds the 3D Spatial GQA architecture; `'near_plan'` (default) keeps the coplanar XZ schematic. */
   readonly viewAngle?: GqaViewAngle;
+  /** Optional authoritative simulator result from a unified `HybridExecutionResult`. */
+  readonly simOverride?: GqaSimResult;
 }
 
 interface SheetSpec {
@@ -343,7 +347,9 @@ function resolveSpanWorldRect(
  */
 export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
   const { bayId, precision, selectedPart, hoveredPart } = opts;
-  const clampedT = Math.max(1, Math.min(16, Math.round(opts.tokens)));
+  const clampedT = opts.simOverride
+    ? opts.simOverride.tokens
+    : Math.max(1, Math.min(16, Math.round(opts.tokens)));
   const isFp8Mode = precision === 'fp8_selective';
   // Production precision metadata (NVIDIA §4.2): GQA compute bodies stay BF16; KV cache stores FP8.
   const computeFp8 = false;
@@ -367,8 +373,8 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
       : Math.max(16, Math.min(31, opts.activeGroup1Head ?? 16));
   const displayedHeads: readonly [number, number] = [group0Head, group1Head];
 
-  // Run deterministic miniature simulator and pack live RG32F value texture atlas
-  const sim = runGqaSim(clampedT);
+  // Use authoritative unified execution trace when supplied, or standalone miniature simulator
+  const sim = opts.simOverride ?? runGqaSim(clampedT);
   const atlas = buildGqaValueAtlas(sim, group0Head, group1Head);
   const activeFormula: GqaCellFormula | null = opts.activeCell
     ? describeCellFormula(sim, opts.activeCell)
@@ -385,7 +391,15 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
             ? 1
             : null;
 
-  const partCatalog = buildGqaPartCatalog(bayId, clampedT, isFp8Mode, kvCacheFp8, group0Head, group1Head);
+  const partCatalog = buildGqaPartCatalog(
+    bayId,
+    clampedT,
+    isFp8Mode,
+    kvCacheFp8,
+    group0Head,
+    group1Head,
+    sim.rmsEps,
+  );
 
   if (opts.viewAngle === 'three_quarter') {
     return buildGqaSpatialScene({
@@ -1563,9 +1577,11 @@ function buildGqaPartCatalog(
   kvCacheFp8: boolean,
   group0Head: number,
   group1Head: number,
+  rmsEps: number,
 ): Record<string, CutawayPartInfo> {
   const g0Tag = formatQueryHeadId(group0Head);
   const g1Tag = formatQueryHeadId(group1Head);
+  const epsText = formatEpsLabel(rmsEps);
   const perBayKiB = ((kvCacheFp8 ? 512 : 1024) * clampedT) / 1024;
   const perBaySlope = kvCacheFp8 ? '+0.5 KiB/tok (FP8 KV)' : '+1 KiB/tok (BF16 KV)';
   const precisionMetaLine = isFp8Mode
@@ -1587,12 +1603,12 @@ function buildGqaPartCatalog(
     },
     rmsnorm: {
       id: 'rmsnorm',
-      title: 'Pre-Attention RMSNorm · NoPE',
+      title: `Pre-Attention RMSNorm (ε = ${epsText}) · NoPE`,
       badge: isFp8Mode ? 'BF16 (§4.2)' : 'BF16',
       summary:
-        'Normalizes each token vector to unit RMS (X_norm) then multiplies by non-unit learned scale γ → U before Q/K/V projections. Hover any cell to inspect exact Float32 math.',
+        `Normalizes each token vector by √(mean(X²) + ${epsText}) (X_norm) then multiplies by non-unit learned scale γ → U before Q/K/V projections. Hover any cell to inspect exact Float32 math.`,
       specs: [
-        'Production width: 2,688 · Miniature live sim: d = 8',
+        `Production width: 2,688 · Miniature live sim: d = 8 · Effective ε = ${epsText}`,
         precisionMetaLine,
       ],
     },
