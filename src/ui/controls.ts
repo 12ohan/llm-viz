@@ -22,8 +22,13 @@ import {
   type TocSectionId,
   type ViewMode,
 } from '../model/state';
+import { GQA_STEPPER_STEPS } from '../math/gqaSim';
+import { MAMBA_STEPPER_STEPS } from '../math/mambaSim';
 import {
+  formatMambaHeadId,
   formatQueryHeadId,
+  mambaGroupForHead,
+  parseMambaHeadPartId,
   parseQueryHeadPartId,
   type CutawayPartInfo,
   type CutawaySceneGeometry,
@@ -34,6 +39,7 @@ export interface ControlsCallbacks {
   onSelectMode: (mode: ViewMode) => void;
   onSelectSection: (section: TocSectionId) => void;
   onSelectMambaBay: (bayId: 1 | 42) => void;
+  onSelectMambaView: (view: GqaViewAngle) => void;
   onSelectGqaBay: (bayId: 6 | 43) => void;
   onSelectGqaView: (view: GqaViewAngle) => void;
   onSelectPart: (partId: string | null) => void;
@@ -160,6 +166,7 @@ export interface ControlsElements {
   tocButtons: HTMLButtonElement[];
   presetButtons: HTMLButtonElement[];
   mambaBayButtons: HTMLButtonElement[];
+  mambaViewButtons: HTMLButtonElement[];
   gqaBayButtons: HTMLButtonElement[];
   gqaViewButtons: HTMLButtonElement[];
   miniNodes: SVGGElement[];
@@ -175,6 +182,7 @@ export interface ControlsElements {
   gqaFormulaCoord: HTMLSpanElement;
   gqaFormulaHead: HTMLSpanElement;
   gqaFormulaValue: HTMLSpanElement;
+  gqaFormulaNote: HTMLDivElement;
   gqaCellClear: HTMLButtonElement;
   gqaFormulaEq: HTMLDivElement;
   gqaFormulaSub: HTMLDivElement;
@@ -216,6 +224,7 @@ export function queryControlsElements(): ControlsElements {
     tocButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('.toc-btn[data-section]')),
     presetButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('.pill-btn[data-preset]')),
     mambaBayButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-mamba-bay]')),
+    mambaViewButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-mamba-view]')),
     gqaBayButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-gqa-bay]')),
     gqaViewButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-gqa-view]')),
     miniNodes: Array.from(document.querySelectorAll<SVGGElement>('.mini-node[data-mini-section]')),
@@ -231,6 +240,7 @@ export function queryControlsElements(): ControlsElements {
     gqaFormulaCoord: get<HTMLSpanElement>('gqa-formula-coord'),
     gqaFormulaHead: get<HTMLSpanElement>('gqa-formula-head'),
     gqaFormulaValue: get<HTMLSpanElement>('gqa-formula-value'),
+    gqaFormulaNote: get<HTMLDivElement>('gqa-formula-note'),
     gqaCellClear: get<HTMLButtonElement>('gqa-cell-clear'),
     gqaFormulaEq: get<HTMLDivElement>('gqa-formula-eq'),
     gqaFormulaSub: get<HTMLDivElement>('gqa-formula-sub'),
@@ -313,6 +323,15 @@ export class MacroControls {
       this.on(btn, 'click', () => {
         const id = Number.parseInt(btn.dataset.mambaBay ?? '1', 10);
         if (id === 1 || id === 42) this.cb.onSelectMambaBay(id);
+      });
+    }
+
+    for (const btn of this.els.mambaViewButtons) {
+      this.on(btn, 'click', () => {
+        const view = btn.dataset.mambaView as GqaViewAngle | undefined;
+        if (view === 'three_quarter' || view === 'near_plan') {
+          this.cb.onSelectMambaView(view);
+        }
       });
     }
 
@@ -404,9 +423,12 @@ export class MacroControls {
     this.els.moeSubbar.hidden = state.mode !== 'cutaway_moe';
     this.els.gqaSubbar.hidden = state.mode !== 'cutaway_gqa';
 
-    // Mamba & GQA representative bay toggles
+    // Mamba & GQA representative bay & camera view toggles
     for (const btn of this.els.mambaBayButtons) {
       btn.classList.toggle('is-active', Number(btn.dataset.mambaBay) === state.mambaBayId);
+    }
+    for (const btn of this.els.mambaViewButtons) {
+      btn.classList.toggle('is-active', btn.dataset.mambaView === state.mambaViewAngle);
     }
     for (const btn of this.els.gqaBayButtons) {
       btn.classList.toggle('is-active', Number(btn.dataset.gqaBay) === state.gqaBayId);
@@ -415,11 +437,11 @@ export class MacroControls {
       btn.classList.toggle('is-active', btn.dataset.gqaView === state.gqaViewAngle);
     }
 
-    // Floating corner badge & orbit hint (hidden in cutaway_gqa where docked math bar occupies bottom)
-    const isGqaCutaway = state.mode === 'cutaway_gqa';
-    this.els.floatingBadge.hidden = isGqaCutaway;
-    this.els.orbitHint.hidden = isGqaCutaway;
-    this.els.gqaMathDock.hidden = !isGqaCutaway;
+    // Floating corner badge & orbit hint (hidden when shared live Math Dock occupies bottom)
+    const usesLiveMathDock = state.mode === 'cutaway_gqa' || state.mode === 'cutaway_mamba';
+    this.els.floatingBadge.hidden = usesLiveMathDock;
+    this.els.orbitHint.hidden = usesLiveMathDock;
+    this.els.gqaMathDock.hidden = !usesLiveMathDock;
 
     if (state.mode === 'tower') {
       this.els.floatingBadge.textContent = 'Nemotron 3 Nano 30B-A3B · 3.2B active';
@@ -427,13 +449,14 @@ export class MacroControls {
       this.els.floatingBadge.textContent =
         state.mambaBayId === 42
           ? 'Cutaway: Mamba-2 · Bay 42 Feeder (BF16 §4.2)'
-          : 'Cutaway: Mamba-2 · Bay 01 (2.05 MiB fixed SSM)';
+          : 'Cutaway: Mamba-2 · Bay 01 (47.1 MiB fixed state)';
+      this.syncMathDock(state, activeCutaway);
     } else if (state.mode === 'cutaway_moe') {
       this.els.floatingBadge.textContent =
         'Cutaway: MoE 128+1 · Bay 02 (6 Active + Shared 3,712)';
     } else {
       this.els.floatingBadge.textContent = `Cutaway: GQA Attention · Bay ${formatBayId(state.gqaBayId)} (32Q / 2KV, NoPE)`;
-      this.syncGqaMathDock(state, activeCutaway);
+      this.syncMathDock(state, activeCutaway);
     }
 
     // Sync active TOC & mini-diagram highlight
@@ -532,7 +555,7 @@ export class MacroControls {
     // Middle editorial panel
     const activeBayId = isTower ? state.hoveredBay ?? state.selectedBay : null;
     const activePart = !isTower ? state.hoveredPart ?? state.selectedPart : null;
-    const editorialKey = `${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${state.mode}:${state.mambaBayId}:${state.gqaBayId}:${state.gqaActiveGroup0Head}:${state.gqaActiveGroup1Head}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
+    const editorialKey = `${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${state.mode}:${state.mambaBayId}:${state.mambaActiveHead}:${state.gqaBayId}:${state.gqaActiveGroup0Head}:${state.gqaActiveGroup1Head}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
 
     if (editorialKey !== this.lastEditorialKey) {
       this.lastEditorialKey = editorialKey;
@@ -552,9 +575,18 @@ export class MacroControls {
     }
   }
 
-  private syncGqaMathDock(state: SceneState, cutaway: CutawaySceneGeometry | null): void {
+  private syncMathDock(state: SceneState, cutaway: CutawaySceneGeometry | null): void {
+    const isMamba = state.mode === 'cutaway_mamba';
     const formula = cutaway?.activeFormula ?? null;
-    const isPinnedCell = state.gqaSelectedCell !== null;
+    const isPinnedCell = isMamba
+      ? state.mambaSelectedCell !== null
+      : state.gqaSelectedCell !== null;
+    const steps = isMamba ? MAMBA_STEPPER_STEPS : GQA_STEPPER_STEPS;
+
+    // Update honest miniature simulator disclaimer note
+    this.els.gqaFormulaNote.textContent = isMamba
+      ? 'Deterministic miniature Mamba-2 sim (d=8, 16H/8G, dₕ=4, dₛ=4; Float32 storage, rounded outputs) · Educational token labels · BF16/FP8 = production metadata'
+      : 'Deterministic miniature GQA sim (d=8, 32Q/2KV, dₕ=4; Float32 storage, rounded outputs) · Educational token labels · BF16/FP8 = production metadata';
 
     if (formula) {
       this.els.gqaFormulaTensor.textContent = formula.tensorLabel;
@@ -563,6 +595,7 @@ export class MacroControls {
         this.els.gqaFormulaHead.textContent = formula.headBadge;
         this.els.gqaFormulaHead.hidden = false;
       } else {
+        this.els.gqaFormulaHead.textContent = '';
         this.els.gqaFormulaHead.hidden = true;
       }
       this.els.gqaFormulaValue.textContent = formula.isMasked
@@ -574,36 +607,65 @@ export class MacroControls {
       this.els.gqaFormulaEq.textContent = formula.equation;
       this.els.gqaFormulaSub.textContent = formula.subEquation;
     } else {
-      const g0 = formatQueryHeadId(state.gqaActiveGroup0Head);
-      const g1 = formatQueryHeadId(state.gqaActiveGroup1Head);
-      this.els.gqaFormulaTensor.textContent = `Live Float32 GQA · Bay ${formatBayId(state.gqaBayId)}`;
-      this.els.gqaFormulaCoord.textContent = `Heads: ${g0}→KV₀ · ${g1}→KV₁`;
+      // Idle state: keep head badge and numeric value badge completely empty & hidden (Part 0 #2)
+      this.els.gqaFormulaHead.textContent = '';
       this.els.gqaFormulaHead.hidden = true;
+      this.els.gqaFormulaValue.textContent = '';
+      this.els.gqaFormulaValue.classList.remove('is-masked');
       this.els.gqaFormulaValue.hidden = true;
       this.els.gqaCellClear.hidden = true;
-      this.els.gqaFormulaEq.textContent =
-        'Hover or click any matrix cell for exact Float32 math, or press Play to step through causal attention.';
-      const tokPreview = cutaway?.gqaSim?.tokenLabels
-        ? cutaway.gqaSim.tokenLabels.map((tok, i) => `${i}:"${tok}"`).join(' ')
-        : '';
-      this.els.gqaFormulaSub.textContent = tokPreview
-        ? `Educational token labels (T=${state.tokens}): ${tokPreview}`
-        : '';
+
+      if (isMamba) {
+        const activeH = cutaway?.mambaStats?.activeHead ?? state.mambaActiveHead;
+        const activeG = mambaGroupForHead(activeH);
+        this.els.gqaFormulaTensor.textContent = `Miniature Mamba-2 · Bay ${formatBayId(state.mambaBayId)}`;
+        this.els.gqaFormulaCoord.textContent = `Active Head: ${formatMambaHeadId(activeH)} (G${activeG})`;
+        this.els.gqaFormulaEq.textContent =
+          'Hover or click any matrix cell for rounded numerical explanations, or press Play to step through Mamba-2 recurrence.';
+        const tokPreview = cutaway?.mambaSim?.tokenLabels
+          ? cutaway.mambaSim.tokenLabels.map((tok, i) => `${i}:"${tok}"`).join(' ')
+          : '';
+        this.els.gqaFormulaSub.textContent = tokPreview
+          ? `Educational token labels (T=${state.tokens}): ${tokPreview}`
+          : '';
+      } else {
+        const g0 = formatQueryHeadId(cutaway?.gqaStats?.activeGroup0Head ?? state.gqaActiveGroup0Head);
+        const g1 = formatQueryHeadId(cutaway?.gqaStats?.activeGroup1Head ?? state.gqaActiveGroup1Head);
+        this.els.gqaFormulaTensor.textContent = `Miniature GQA · Bay ${formatBayId(state.gqaBayId)}`;
+        this.els.gqaFormulaCoord.textContent = `Displayed: ${g0}→KV₀ · ${g1}→KV₁`;
+        this.els.gqaFormulaEq.textContent =
+          'Hover or click any matrix cell for rounded numerical explanations, or press Play to step through causal attention.';
+        const tokPreview = cutaway?.gqaSim?.tokenLabels
+          ? cutaway.gqaSim.tokenLabels.map((tok, i) => `${i}:"${tok}"`).join(' ')
+          : '';
+        this.els.gqaFormulaSub.textContent = tokPreview
+          ? `Educational token labels (T=${state.tokens}): ${tokPreview}`
+          : '';
+      }
     }
 
-    const playing = state.gqaStepperActive && state.gqaStepperPlaying;
+    const stepperActive = isMamba ? state.mambaStepperActive : state.gqaStepperActive;
+    const stepperPlaying = isMamba ? state.mambaStepperPlaying : state.gqaStepperPlaying;
+    const stepperStep = isMamba ? state.mambaStepperStep : state.gqaStepperStep;
+    const stepperSub = isMamba ? state.mambaStepperSubProgress : state.gqaStepperSubProgress;
+
+    const playing = stepperActive && stepperPlaying;
     this.els.gqaStepPlay.textContent = playing ? '❚❚ Pause' : '▶ Play';
     this.els.gqaStepPlay.classList.toggle('is-playing', playing);
     this.els.gqaStepPlay.setAttribute('aria-pressed', String(playing));
 
-    for (const btn of this.els.gqaStepPills) {
-      const idx = Number.parseInt(btn.dataset.gqaStep ?? '-1', 10);
-      const isAct = state.gqaStepperActive && idx === state.gqaStepperStep;
+    for (let i = 0; i < this.els.gqaStepPills.length; i++) {
+      const btn = this.els.gqaStepPills[i];
+      if (steps[i]) {
+        btn.textContent = steps[i].shortLabel;
+        btn.title = steps[i].summary;
+      }
+      const isAct = stepperActive && i === stepperStep;
       btn.classList.toggle('is-active', isAct);
       btn.setAttribute('aria-selected', String(isAct));
     }
 
-    const pct = String(Math.round(state.gqaStepperSubProgress * 100));
+    const pct = String(Math.round(stepperSub * 100));
     if (this.els.gqaStepScrub.value !== pct) {
       this.els.gqaStepScrub.value = pct;
     }
@@ -918,6 +980,10 @@ export class MacroControls {
       panel.append(header, p, list);
       if (state.mode === 'cutaway_gqa') {
         panel.appendChild(this.buildGqaHeadSelector(state.selectedPart, state.hoveredPart));
+      } else if (state.mode === 'cutaway_mamba') {
+        panel.appendChild(
+          this.buildMambaHeadSelector(state.mambaActiveHead, state.selectedPart, state.hoveredPart),
+        );
       }
       panel.appendChild(actions);
       return;
@@ -942,19 +1008,19 @@ export class MacroControls {
       title.textContent = isFeeder
         ? 'Mamba-2 Cutaway · Bay 42 (Feeder)'
         : 'Mamba-2 Cutaway · Bay 01';
-      badge.textContent = isFeeder && isFp8 ? 'BF16 Preserved §4.2' : '2.05 MiB Fixed';
+      badge.textContent = isFeeder && isFp8 ? 'BF16 Preserved §4.2' : '47.1 MiB Fixed';
       if (isFeeder && isFp8) badge.classList.add('ed-badge-gold');
 
       bodyText = isFeeder
-        ? 'Feeder preceding Bay 43 GQA — preserved in BF16 (NVIDIA §4.2). Every compute projection, 4-tap Causal Conv1D, and the 64-head FP32 SSM state stay vivid BF16/FP32 while scrubbing T updates the cyan state cells in place.'
-        : 'Input projection splits into three parallel paths: bypass gate z (4,096), Causal Conv1D (k=4, always BF16) → SiLU, and per-head decay Δt (64). Scrubbing T = 1 → 16 updates the 8×8 cyan SSM state array in place without growing physical memory.';
+        ? 'Feeder preceding Bay 43 GQA — preserved in BF16 under NVIDIA §4.2. Runs a deterministic miniature Mamba-2 simulator (d=8, 16H/8G, dₕ=4, dₛ=4; Float32 tensor storage, rounded outputs) where sequence tensors grow with T while H_{t−1} ⇄ H_t and the 64-head bank stay fixed.'
+        : 'Runs a deterministic miniature Mamba-2 simulator (d=8, 16H/8G, dₕ=4, dₛ=4; Float32 tensor storage, rounded outputs). Sequence tensors (xBC_pre, z, x, B, C, Δt) grow with T while the 4-tap Conv1D buffer and H_{t−1} ⇄ H_t SSM state remain strictly constant.';
 
       specs = [
+        'Persistent storage (23 bays): 46.0 MiB SSM (FP32) + ~1.08 MiB Conv1D (BF16) ≈ 47.1 MiB fixed · H_history is browser-only playback',
         isFeeder
-          ? 'Bay 42 Feeder: In-Proj, Out-Proj, Conv1D stay BF16 in FP8 Selective (gold rim)'
-          : `Bay 01 precision: In-Proj & Out-Proj ${isFp8 ? 'FP8 frosted' : 'BF16'} · Conv1D ALWAYS BF16 · SSM FP32`,
-        'Recurrence h_t = A·h_{t−1} + B·x_t · 2.05 MiB/layer (47.1 MiB across 23 bays)',
-        'Click any 3D tensor slab to inspect its exact dimensions and precision.',
+          ? 'Bay 42 Feeder metadata (§4.2): W_in, W_out, Conv1D preserved in BF16 (gold rim); live sim runs Float32'
+          : `Bay 01 metadata (§4.2): W_in & W_out ${isFp8 ? 'FP8' : 'BF16'} · Conv1D ALWAYS BF16 · SSM FP32 (live sim runs Float32)`,
+        'Gate FIRST (y·SiLU(z)) → 8-Group RMSNorm (ε=1e−5, norm_before_gate=False) · Select H00–H15 below.',
       ];
     } else if (state.mode === 'cutaway_moe') {
       const activeIds = cutaway?.moeStats?.activeExpertIds ?? [];
@@ -977,13 +1043,13 @@ export class MacroControls {
       if (isFp8) badge.classList.add('ed-badge-gold');
 
       bodyText =
-        'Thirty-two query heads (Group 0: Q00–Q15 → KV₀; Group 1: Q16–Q31 → KV₁) drive a live miniature Float32 GQA simulator (d=8, dₕ=4, NoPE) with educational token labels. Hover or click any cell to trace its exact operands and equation.';
+        'Thirty-two query heads (Group 0: Q00–Q15 → KV₀; Group 1: Q16–Q31 → KV₁) drive a deterministic miniature simulator with Float32 tensor storage and rounded outputs (d=8, dₕ=4, NoPE) using educational token labels. Hover or click any cell for rounded numerical explanations.';
 
       specs = [
         `Shared KV cache: 2 KV heads × ${state.tokens} tokens = ${perBayKiB} KiB (${isFp8 ? '+0.5 KiB/tok FP8 storage' : '+1 KiB/tok BF16 storage'})`,
         isFp8
-          ? 'Production precision metadata (§4.2): Q/K/V/O compute BF16; KV storage FP8 (live sim runs Float32)'
-          : 'Production precision metadata: BF16 weights/KV (toggle FP8 Selective for §4.2; live sim runs Float32)',
+          ? 'Production precision metadata (§4.2): Q/K/V/O compute BF16; KV storage FP8 (miniature sim uses Float32 storage)'
+          : 'Production precision metadata: BF16 weights/KV (toggle FP8 Selective for §4.2; miniature sim uses Float32 storage)',
         'Click any Q00–Q31 head below to switch its group’s live Scores & Softmax textures.',
       ];
     }
@@ -1014,6 +1080,10 @@ export class MacroControls {
     panel.append(header, p, list);
     if (state.mode === 'cutaway_gqa') {
       panel.appendChild(this.buildGqaHeadSelector(state.selectedPart, state.hoveredPart));
+    } else if (state.mode === 'cutaway_mamba') {
+      panel.appendChild(
+        this.buildMambaHeadSelector(state.mambaActiveHead, state.selectedPart, state.hoveredPart),
+      );
     }
     panel.appendChild(actions);
   }
@@ -1083,6 +1153,76 @@ export class MacroControls {
       wrap.appendChild(grpEl);
     }
 
+    return wrap;
+  }
+
+  /** Interactive H00..H15 head selector grouped into 8 B/C groups (G0..G7, 2 mini heads/group). */
+  private buildMambaHeadSelector(
+    activeMambaHead: number,
+    selectedPart: string | null,
+    hoveredPart: string | null,
+  ): HTMLDivElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'qhead-selector';
+    wrap.setAttribute('data-testid', 'mamba-head-selector');
+
+    const partHead = parseMambaHeadPartId(hoveredPart ?? selectedPart);
+    const activeHead = partHead ?? activeMambaHead;
+    const pinnedHead = parseMambaHeadPartId(selectedPart);
+
+    const topRow = document.createElement('div');
+    topRow.className = 'qhead-top-row';
+    const label = document.createElement('span');
+    label.className = 'qhead-heading';
+    label.textContent = `SSM Head ${formatMambaHeadId(activeHead)} · Group G${mambaGroupForHead(activeHead)} (16 mini / 64 prod)`;
+    topRow.appendChild(label);
+
+    if (pinnedHead !== null) {
+      const resetHead = document.createElement('button');
+      resetHead.type = 'button';
+      resetHead.className = 'qhead-clear-btn';
+      resetHead.textContent = 'Clear';
+      resetHead.addEventListener('click', () => this.cb.onSelectPart(null));
+      topRow.appendChild(resetHead);
+    }
+    wrap.appendChild(topRow);
+
+    const groupsGrid = document.createElement('div');
+    groupsGrid.className = 'mhead-groups-grid';
+
+    for (let g = 0; g < 8; g++) {
+      const pair = document.createElement('div');
+      pair.className = 'mhead-pair';
+
+      const pairLabel = document.createElement('div');
+      pairLabel.className = 'mhead-pair-label';
+      pairLabel.textContent = `G${g}`;
+      pair.appendChild(pairLabel);
+
+      const row = document.createElement('div');
+      row.className = 'mhead-pair-row';
+      for (let local = 0; local < 2; local++) {
+        const h = g * 2 + local;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'qhead-btn';
+        btn.dataset.mhead = String(h);
+        btn.textContent = formatMambaHeadId(h);
+        const isSel = pinnedHead === h || (pinnedHead === null && activeMambaHead === h);
+        const isActive = activeHead === h;
+        btn.classList.toggle('is-selected', isSel);
+        btn.classList.toggle('is-active', isActive);
+        btn.setAttribute('aria-pressed', String(isSel));
+        btn.addEventListener('click', () => {
+          this.cb.onSelectPart(pinnedHead === h ? null : `mamba-head-${h}`);
+        });
+        row.appendChild(btn);
+      }
+      pair.appendChild(row);
+      groupsGrid.appendChild(pair);
+    }
+
+    wrap.appendChild(groupsGrid);
     return wrap;
   }
 

@@ -1,4 +1,5 @@
 import type { GqaCellRef } from '../math/gqaSim';
+import type { MambaCellRef } from '../math/mambaSim';
 import type { PrecisionMode, Vec3 } from './spec';
 
 export interface CameraPose {
@@ -36,6 +37,14 @@ export interface SceneState {
   hoveredPart: string | null;
   selectedPart: string | null;
   mambaBayId: 1 | 42;
+  mambaViewAngle: GqaViewAngle;
+  mambaActiveHead: number;
+  mambaHoveredCell: MambaCellRef | null;
+  mambaSelectedCell: MambaCellRef | null;
+  mambaStepperActive: boolean;
+  mambaStepperPlaying: boolean;
+  mambaStepperStep: number;
+  mambaStepperSubProgress: number;
   gqaBayId: 6 | 43;
   gqaViewAngle: GqaViewAngle;
   gqaActiveGroup0Head: number;
@@ -109,6 +118,14 @@ export function createInitialState(defaultPose: CameraPose, reducedMotion = fals
     hoveredPart: null,
     selectedPart: null,
     mambaBayId: 1,
+    mambaViewAngle: 'three_quarter',
+    mambaActiveHead: 0,
+    mambaHoveredCell: null,
+    mambaSelectedCell: null,
+    mambaStepperActive: false,
+    mambaStepperPlaying: false,
+    mambaStepperStep: 0,
+    mambaStepperSubProgress: 0,
     gqaBayId: 6,
     gqaViewAngle: 'three_quarter',
     gqaActiveGroup0Head: 0,

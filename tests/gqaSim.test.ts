@@ -261,4 +261,93 @@ describe('Stage A+1 Increment 2: Deterministic Float32 GQA Live Mathematics', ()
       expect(stepFormula.equation.length).toBeGreaterThan(10);
     }
   });
+
+  it('Part 0 regression: synchronizes displayed Scores/Softmax head, atlas, and labels when inspecting a mismatched V_out or Concat head (Q19 while Q18 displayed)', () => {
+    // Baseline scene displaying Group 1 head Q18
+    const baseGqa = buildGqaCutaway({
+      bayId: 6,
+      tokens: 8,
+      precision: 'bf16',
+      selectedPart: 'q-head-18',
+      hoveredPart: null,
+      activeGroup0Head: 0,
+      activeGroup1Head: 18,
+    });
+
+    // Pick a V_out Group 1 cell belonging to head Q19 (local head 3 in Group 1: cols 12..15)
+    const vOutG1Box = baseGqa.solidPickBoxes.find(
+      (b) => b.tensorKey === 'v_out' && b.kvHeadIndex === 1,
+    );
+    expect(vOutG1Box).toBeDefined();
+    const vb = vOutG1Box!;
+    const q19LocalCol = (19 - 16) * 4 + 1; // col 13 => Q19, r=1
+    const wx = vb.min[0] + ((q19LocalCol + 0.5) / 64) * (vb.max[0] - vb.min[0]);
+    const wz = vb.min[2] + ((5 + 0.5) / 8) * (vb.max[2] - vb.min[2]);
+    const vOutHit = pickMacroBay(
+      { origin: [wx, 4.0, wz], direction: [0, -1, 0] },
+      baseGqa.solidPickBoxes,
+      [],
+    );
+    expect(vOutHit).not.toBeNull();
+    const vOutCell = pickHitToGqaCell(vOutHit!, 0, 18);
+    expect(vOutCell).not.toBeNull();
+    expect(vOutCell!.tensor).toBe('v_out');
+    expect(vOutCell!.headIndex).toBe(19);
+    expect(vOutCell!.kvHeadIndex).toBe(1);
+
+    // Rebuild GQA cutaway with activeGroup1Head STILL 18, but activeCell pointing at Q19's V_out cell
+    const syncedFromVOut = buildGqaCutaway({
+      bayId: 6,
+      tokens: 8,
+      precision: 'bf16',
+      selectedPart: 'q-head-18',
+      hoveredPart: null,
+      activeGroup0Head: 0,
+      activeGroup1Head: 18,
+      activeCell: vOutCell,
+    });
+
+    // Displayed Group 1 head, exterior Scores/Softmax labels, formula badge, and RG32F atlas must all sync to Q19
+    expect(syncedFromVOut.gqaStats?.activeGroup1Head).toBe(19);
+    expect(syncedFromVOut.landmarks.find((l) => l.id === 'g-scores-active')?.label).toContain('Q19');
+    expect(syncedFromVOut.landmarks.find((l) => l.id === 'g-softmax')?.label).toContain('Q19');
+    expect(syncedFromVOut.activeFormula?.headBadge).toBe('Q19 → KV1');
+
+    const expectedQ19Atlas = buildGqaValueAtlas(syncedFromVOut.gqaSim!, 0, 19);
+    expect(syncedFromVOut.valueAtlas?.data).toEqual(expectedQ19Atlas.data);
+
+    // Also verify Concat cell for Q19 (global col 19 * 4 + 2 = 78) synchronizes cleanly even when Q18 was displayed
+    const concatBox = baseGqa.solidPickBoxes.find((b) => b.tensorKey === 'concat');
+    expect(concatBox).toBeDefined();
+    const cb = concatBox!;
+    const concatCol = 19 * 4 + 2;
+    const cwx = cb.min[0] + ((concatCol + 0.5) / 128) * (cb.max[0] - cb.min[0]);
+    const cwz = cb.min[2] + ((4 + 0.5) / 8) * (cb.max[2] - cb.min[2]);
+    const concatHit = pickMacroBay(
+      { origin: [cwx, 4.0, cwz], direction: [0, -1, 0] },
+      baseGqa.solidPickBoxes,
+      [],
+    );
+    expect(concatHit).not.toBeNull();
+    const concatCell = pickHitToGqaCell(concatHit!, 0, 18);
+    expect(concatCell?.tensor).toBe('concat');
+    expect(concatCell?.headIndex).toBe(19);
+
+    const syncedFromConcat = buildGqaCutaway({
+      bayId: 6,
+      tokens: 8,
+      precision: 'bf16',
+      selectedPart: 'q-head-18',
+      hoveredPart: null,
+      activeGroup0Head: 0,
+      activeGroup1Head: 18,
+      activeCell: concatCell,
+    });
+    expect(syncedFromConcat.gqaStats?.activeGroup1Head).toBe(19);
+    expect(syncedFromConcat.landmarks.find((l) => l.id === 'g-softmax')?.label).toContain('Q19');
+    expect(syncedFromConcat.activeFormula?.headBadge).toBe('Q19 → KV1');
+    // Ensure dependency highlight ribbons were drawn (flowIndices increased relative to unfocused base)
+    expect(syncedFromConcat.flowIndices?.length ?? 0).toBeGreaterThan(baseGqa.flowIndices?.length ?? 0);
+  });
 });
+

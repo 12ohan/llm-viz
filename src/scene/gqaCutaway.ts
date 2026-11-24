@@ -1,5 +1,6 @@
 import {
   describeCellFormula,
+  inferGqaCellHead,
   runGqaSim,
   type GqaCellFormula,
   type GqaCellRef,
@@ -278,6 +279,7 @@ interface WorldSpanRect {
 function resolveSpanWorldRect(
   registry: ReadonlyMap<string, SheetGeomRecord>,
   span: GqaSheetSpan,
+  displayedHeads: readonly [number, number],
 ): WorldSpanRect | null {
   // Multi-token span on shared KV track (e.g. V_g slices 0..q)
   if (span.tensor === 'kv_k' || span.tensor === 'kv_v') {
@@ -305,7 +307,19 @@ function resolveSpanWorldRect(
   let key: string = span.tensor;
   if (span.tensor === 'q') {
     key = `q:${span.headIndex ?? 0}`;
-  } else if (span.tensor === 'scores' || span.tensor === 'softmax' || span.tensor === 'v_out') {
+  } else if (span.tensor === 'scores' || span.tensor === 'softmax') {
+    const grp: 0 | 1 =
+      span.headIndex !== undefined
+        ? kvHeadForQueryHead(span.headIndex)
+        : span.kvHeadIndex === 1
+          ? 1
+          : 0;
+    // Never highlight a head's Scores/Softmax row onto a sheet displaying a different head
+    if (span.headIndex !== undefined && displayedHeads[grp] !== span.headIndex) {
+      return null;
+    }
+    key = `${span.tensor}:${grp}`;
+  } else if (span.tensor === 'v_out') {
     key = `${span.tensor}:${span.kvHeadIndex ?? 0}`;
   }
 
@@ -329,10 +343,11 @@ function resolveSpanWorldRect(
 }
 
 /**
- * Stage A+1 Increment 2 GQA Cutaway (Bay 06 & Bay 43):
- * Thin dimension-aware flat matrix sheets backed by a live deterministic Float32 GQA simulator
- * (d=8, 32Q/2KV, d_h=4, NoPE), RG32F value atlas, cell-level picking, upstream operand highlights,
- * cell-to-cell dependency threads, and causal attention stepping.
+ * Stage A+1 Increment 2+ GQA Cutaway (Bay 06 & Bay 43):
+ * Thin dimension-aware flat matrix sheets backed by a deterministic miniature simulator
+ * with Float32 tensor storage and rounded outputs (d=8, 32Q/2KV, d_h=4, NoPE), RG32F value atlas,
+ * head-synchronized cell-level picking, upstream operand highlights, dependency threads,
+ * and causal attention stepping.
  */
 export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
   const { bayId, precision, selectedPart, hoveredPart } = opts;
@@ -344,8 +359,10 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
 
   const activePart = hoveredPart ?? selectedPart;
   const partHeadIdx = parseQueryHeadPartId(activePart);
-  const cellHeadIdx = opts.activeCell?.headIndex ?? null;
-  const activeHeadIdx = partHeadIdx ?? cellHeadIdx;
+  const cellHeadIdx = inferGqaCellHead(opts.activeCell);
+  // Inspected cell head takes precedence over stale part head so V_out/Concat cells for Q_h
+  // always synchronize their KV group's displayed Scores & Softmax sheets to Q_h.
+  const activeHeadIdx = cellHeadIdx ?? partHeadIdx;
 
   // Determine which query head's Scores/Softmax live Float32 matrices are displayed in each group
   const group0Head =
@@ -356,8 +373,9 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     activeHeadIdx !== null && activeHeadIdx >= 16
       ? activeHeadIdx
       : Math.max(16, Math.min(31, opts.activeGroup1Head ?? 16));
+  const displayedHeads: readonly [number, number] = [group0Head, group1Head];
 
-  // Run deterministic Float32 forward pass and pack live RG32F value texture atlas
+  // Run deterministic miniature simulator and pack live RG32F value texture atlas
   const sim = runGqaSim(clampedT);
   const atlas = buildGqaValueAtlas(sim, group0Head, group1Head);
   const activeFormula: GqaCellFormula | null = opts.activeCell
@@ -1199,7 +1217,7 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
   // 8. LIVE CELL-LEVEL HIGHLIGHTS & UPSTREAM DEPENDENCY THREADS (Increment 2)
   // ==========================================================================
   if (activeFormula) {
-    const targetRect = resolveSpanWorldRect(b.sheetRegistry, activeFormula.targetSpan);
+    const targetRect = resolveSpanWorldRect(b.sheetRegistry, activeFormula.targetSpan, displayedHeads);
     if (targetRect) {
       // Crisp oxide-red frame around the exact picked/stepped cell
       b.flow.addCellHighlightXZ(
@@ -1215,7 +1233,7 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
 
       // Highlight each upstream operand row/column/cell and connect with thin crisp dependency threads
       for (const upSpan of activeFormula.upstreamSpans) {
-        const upRect = resolveSpanWorldRect(b.sheetRegistry, upSpan);
+        const upRect = resolveSpanWorldRect(b.sheetRegistry, upSpan, displayedHeads);
         if (!upRect) continue;
 
         const isA = upSpan.role === 'operand_a';

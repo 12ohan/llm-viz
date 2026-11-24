@@ -69,6 +69,28 @@ export interface GqaCellRef {
   readonly tokenIndex?: number;
 }
 
+/**
+ * Resolve the exact query head index (0..31) owned by a GQA cell reference,
+ * including multi-head sheets (v_out, concat, w_q, w_o) where the head is
+ * encoded in the column index. Returns null for head-agnostic tensors.
+ */
+export function inferGqaCellHead(cell: GqaCellRef | null | undefined): number | null {
+  if (!cell) return null;
+  if (cell.headIndex !== undefined && Number.isInteger(cell.headIndex)) {
+    return Math.max(0, Math.min(GQA_SIM_CONFIG.nQ - 1, cell.headIndex));
+  }
+  const { dHead, nQ } = GQA_SIM_CONFIG;
+  if (cell.tensor === 'v_out') {
+    const g = cell.kvHeadIndex === 1 ? 1 : 0;
+    const localH = Math.max(0, Math.min(15, Math.floor(cell.col / dHead)));
+    return g * 16 + localH;
+  }
+  if (cell.tensor === 'concat' || cell.tensor === 'w_q' || cell.tensor === 'w_o') {
+    return Math.max(0, Math.min(nQ - 1, Math.floor(cell.col / dHead)));
+  }
+  return null;
+}
+
 export interface GqaSheetSpan {
   readonly tensor: GqaTensorKey;
   readonly headIndex?: number;

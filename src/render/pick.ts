@@ -1,4 +1,11 @@
-import type { GqaCellRef, GqaTensorKey } from '../math/gqaSim';
+import { inferGqaCellHead, type GqaCellRef, type GqaTensorKey } from '../math/gqaSim';
+import {
+  inferMambaCellHead,
+  MAMBA_SIM_CONFIG,
+  mambaGroupForHead,
+  type MambaCellRef,
+  type MambaTensorKey,
+} from '../math/mambaSim';
 import type { Vec3 } from '../model/spec';
 import {
   add3,
@@ -20,7 +27,8 @@ export interface PickBox {
   readonly partId?: string;
   readonly headIndex?: number;
   readonly kvHeadIndex?: 0 | 1;
-  readonly tensorKey?: GqaTensorKey;
+  readonly groupIndex?: number;
+  readonly tensorKey?: string;
   readonly gridCols?: number;
   readonly gridRows?: number;
   readonly tokenIndex?: number;
@@ -33,7 +41,8 @@ export interface PickHit {
   readonly partId?: string;
   readonly headIndex?: number;
   readonly kvHeadIndex?: 0 | 1;
-  readonly tensorKey?: GqaTensorKey;
+  readonly groupIndex?: number;
+  readonly tensorKey?: string;
   readonly tokenIndex?: number;
   readonly hitRow?: number;
   readonly hitCol?: number;
@@ -44,6 +53,16 @@ export interface PickHit {
 
 const PARALLEL_EPS = 1e-8;
 const TIE_EPS = 1e-6;
+
+const GQA_TENSOR_KEYS = new Set<string>([
+  'input', 'rmsnorm', 'w_q', 'w_k', 'w_v', 'q', 'kv_k', 'kv_v',
+  'scores', 'softmax', 'v_out', 'concat', 'w_o', 'residual',
+]);
+
+const MAMBA_TENSOR_KEYS = new Set<string>([
+  'input', 'rmsnorm', 'w_in', 'z', 'xbc_pre', 'conv_buf', 'x',
+  'b', 'c', 'dt', 'h_prev', 'h_curr', 'y', 'y_norm', 'w_out', 'residual',
+]);
 
 /**
  * Unproject client CSS coordinates through invViewProj at NDC z = -1 and z = +1.
@@ -157,6 +176,7 @@ function findNearestBoxHit(ray: Ray, boxes: readonly PickBox[], isFascia: boolea
     partId: bestBox.partId,
     headIndex: bestBox.headIndex,
     kvHeadIndex: bestBox.kvHeadIndex,
+    groupIndex: bestBox.groupIndex,
     tensorKey: bestBox.tensorKey,
     tokenIndex: bestBox.tokenIndex,
     hitRow,
@@ -173,10 +193,16 @@ export function pickHitToGqaCell(
   activeGroup0Head = 0,
   activeGroup1Head = 16,
 ): GqaCellRef | null {
-  if (!hit || !hit.tensorKey || hit.hitRow === undefined || hit.hitCol === undefined) {
+  if (
+    !hit ||
+    !hit.tensorKey ||
+    !GQA_TENSOR_KEYS.has(hit.tensorKey) ||
+    hit.hitRow === undefined ||
+    hit.hitCol === undefined
+  ) {
     return null;
   }
-  const tensor = hit.tensorKey;
+  const tensor = hit.tensorKey as GqaTensorKey;
   if (tensor === 'scores' || tensor === 'softmax') {
     const grp: 0 | 1 = hit.kvHeadIndex === 1 ? 1 : 0;
     const headIdx = grp === 0 ? activeGroup0Head : activeGroup1Head;
@@ -197,13 +223,85 @@ export function pickHitToGqaCell(
       tokenIndex: hit.tokenIndex ?? 0,
     };
   }
-  return {
+  const baseCell: GqaCellRef = {
     tensor,
     row: hit.hitRow,
     col: hit.hitCol,
     headIndex: hit.headIndex,
     kvHeadIndex: hit.kvHeadIndex,
   };
+  const inferredHead = inferGqaCellHead(baseCell);
+  if (inferredHead !== null && baseCell.headIndex === undefined) {
+    return {
+      ...baseCell,
+      headIndex: inferredHead,
+      kvHeadIndex: baseCell.kvHeadIndex ?? (inferredHead < 16 ? 0 : 1),
+    };
+  }
+  return baseCell;
+}
+
+/** Resolve a ray-cast PickHit on a live Mamba-2 sheet into an exact logical MambaCellRef. */
+export function pickHitToMambaCell(
+  hit: PickHit | null,
+  activeMambaHead = 0,
+  tokens = 8,
+): MambaCellRef | null {
+  if (
+    !hit ||
+    !hit.tensorKey ||
+    !MAMBA_TENSOR_KEYS.has(hit.tensorKey) ||
+    hit.hitRow === undefined ||
+    hit.hitCol === undefined
+  ) {
+    return null;
+  }
+  const tensor = hit.tensorKey as MambaTensorKey;
+  if (tensor === 'conv_buf') {
+    const slot = hit.tokenIndex ?? 0;
+    return {
+      tensor,
+      row: slot,
+      col: hit.hitCol,
+      tapIndex: slot,
+    };
+  }
+  if (tensor === 'h_prev' || tensor === 'h_curr') {
+    const headIdx = hit.headIndex ?? activeMambaHead;
+    return {
+      tensor,
+      row: hit.hitRow,
+      col: hit.hitCol,
+      headIndex: headIdx,
+      groupIndex: mambaGroupForHead(headIdx),
+      tokenIndex: hit.tokenIndex ?? Math.max(0, tokens - 1),
+    };
+  }
+  if (tensor === 'b' || tensor === 'c') {
+    const grp = Math.floor(hit.hitCol / MAMBA_SIM_CONFIG.dState);
+    return {
+      tensor,
+      row: hit.hitRow,
+      col: hit.hitCol,
+      groupIndex: grp,
+    };
+  }
+  const baseCell: MambaCellRef = {
+    tensor,
+    row: hit.hitRow,
+    col: hit.hitCol,
+    headIndex: hit.headIndex,
+    groupIndex: hit.groupIndex,
+  };
+  const inferredHead = inferMambaCellHead(baseCell);
+  if (inferredHead !== null && baseCell.headIndex === undefined) {
+    return {
+      ...baseCell,
+      headIndex: inferredHead,
+      groupIndex: baseCell.groupIndex ?? mambaGroupForHead(inferredHead),
+    };
+  }
+  return baseCell;
 }
 
 /** Test real solid AABBs first; fall back to fascia boxes only if solids miss. */

@@ -873,6 +873,37 @@ body {
   color: #FFFFFF;
 }
 
+.mhead-groups-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 3px;
+}
+
+.mhead-pair {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 2px;
+  border-radius: 4px;
+  background-color: #FFFFFF;
+  border: 1px solid #E2E8F0;
+}
+
+.mhead-pair-label {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 700;
+  color: #64748B;
+  text-align: center;
+  line-height: 9px;
+}
+
+.mhead-pair-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+}
+
 /* Floating Top Mode Switcher & Contextual Sub-bar on 3D Canvas */
 .floating-toolbar {
   position: absolute;

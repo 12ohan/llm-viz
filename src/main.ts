@@ -32,15 +32,24 @@ import {
 } from './render/camera';
 import {
   GQA_STEPPER_STEPS,
+  inferGqaCellHead,
   runGqaSim,
   stepperCellForState,
   type GqaCellRef,
 } from './math/gqaSim';
+import {
+  inferMambaCellHead,
+  MAMBA_STEPPER_STEPS,
+  mambaStepperCellForState,
+  runMambaSim,
+  type MambaCellRef,
+} from './math/mambaSim';
 import { RenderDevice } from './render/device';
 import { LinesPass } from './render/lines';
 import {
   clientPointToRay,
   pickHitToGqaCell,
+  pickHitToMambaCell,
   pickMacroBay,
   type PickHit,
 } from './render/pick';
@@ -51,6 +60,7 @@ import {
   buildGqaCutaway,
   buildMambaCutaway,
   buildMoECutaway,
+  parseMambaHeadPartId,
   parseQueryHeadPartId,
   type CutawaySceneGeometry,
 } from './scene/cutaways';
@@ -194,27 +204,35 @@ function sameGqaCell(a: GqaCellRef | null, b: GqaCellRef | null): boolean {
   );
 }
 
+function sameMambaCell(a: MambaCellRef | null, b: MambaCellRef | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.tensor === b.tensor &&
+    a.row === b.row &&
+    a.col === b.col &&
+    a.headIndex === b.headIndex &&
+    a.groupIndex === b.groupIndex &&
+    a.tapIndex === b.tapIndex &&
+    a.tokenIndex === b.tokenIndex
+  );
+}
+
 function cameraPoseForCutaway(
   mode: Exclude<ViewMode, 'tower'>,
   bounds: AABB,
   metrics: ViewportMetrics,
-  gqaViewAngle: GqaViewAngle = 'three_quarter',
+  sheetViewAngle: GqaViewAngle = 'three_quarter',
 ): CameraPose {
-  if (mode === 'cutaway_mamba') {
-    return fitPerspectiveToBounds(
-      bounds, 24, 20, metrics.innerWidth, metrics.innerHeight, DEFAULT_FOV_DEG, 0.88,
-    );
-  }
   if (mode === 'cutaway_moe') {
     return fitPerspectiveToBounds(
       bounds, 26, 28, metrics.innerWidth, metrics.innerHeight, DEFAULT_FOV_DEG, 0.88,
     );
   }
-  // cutaway_gqa: XZ drafting-table sheet schematic with consistent top-to-bottom orientation.
-  // Increment 2 polishes: ~6% breathing room in Near-Plan, safe narrow-viewport framing,
-  // and subtle +Z target lift on desktop so + Residual clears the docked Formula + Stepper bar.
+  // cutaway_gqa & cutaway_mamba: XZ drafting-table thin-sheet schematic with consistent orientation,
+  // safe narrow-viewport framing, and subtle +Z target lift so bottom row clears the docked Math bar.
   const isStackedNarrow = window.innerWidth <= 900 || metrics.innerWidth < 760;
-  if (gqaViewAngle === 'near_plan') {
+  if (sheetViewAngle === 'near_plan') {
     const pose = fitPerspectiveToBounds(
       bounds,
       1.5,
@@ -334,11 +352,20 @@ function boot(): void {
   };
 
   const applyHeadSelectionToGroupHeads = (partId: string | null) => {
-    const head = parseQueryHeadPartId(partId);
-    if (head === null) return;
-    if (head < 16) state.gqaActiveGroup0Head = head;
-    else state.gqaActiveGroup1Head = head;
+    const gqaHead = parseQueryHeadPartId(partId);
+    if (gqaHead !== null) {
+      if (gqaHead < 16) state.gqaActiveGroup0Head = gqaHead;
+      else state.gqaActiveGroup1Head = gqaHead;
+      return;
+    }
+    const mambaHead = parseMambaHeadPartId(partId);
+    if (mambaHead !== null) {
+      state.mambaActiveHead = mambaHead;
+    }
   };
+
+  const activeViewAngleForMode = (mode: Exclude<ViewMode, 'tower'>): GqaViewAngle =>
+    mode === 'cutaway_mamba' ? state.mambaViewAngle : state.gqaViewAngle;
 
   const activeStepperHead = (): number => {
     const sel = parseQueryHeadPartId(state.selectedPart);
@@ -361,6 +388,22 @@ function boot(): void {
     return null;
   };
 
+  const resolveActiveMambaCell = (): MambaCellRef | null => {
+    if (state.mode !== 'cutaway_mamba') return null;
+    if (state.mambaHoveredCell) return state.mambaHoveredCell;
+    if (state.mambaSelectedCell) return state.mambaSelectedCell;
+    if (state.mambaStepperActive) {
+      const sim = runMambaSim(state.tokens);
+      return mambaStepperCellForState(
+        sim,
+        state.mambaActiveHead,
+        state.mambaStepperStep,
+        state.mambaStepperSubProgress,
+      );
+    }
+    return null;
+  };
+
   const buildActiveCutaway = (): CutawaySceneGeometry | null => {
     if (state.mode === 'cutaway_mamba') {
       return buildMambaCutaway({
@@ -369,6 +412,8 @@ function boot(): void {
         precision: state.precision,
         selectedPart: state.selectedPart,
         hoveredPart: state.hoveredPart,
+        activeHead: state.mambaActiveHead,
+        activeCell: resolveActiveMambaCell(),
       });
     }
     if (state.mode === 'cutaway_moe') {
@@ -487,7 +532,7 @@ function boot(): void {
       flyToPose(cameraPoseForSection(ch.section, currentMetrics));
     } else if (currentCutawayScene) {
       flyToPose(
-        cameraPoseForCutaway(ch.mode, currentCutawayScene.fitBounds, currentMetrics, state.gqaViewAngle),
+        cameraPoseForCutaway(ch.mode, currentCutawayScene.fitBounds, currentMetrics, activeViewAngleForMode(ch.mode)),
       );
     }
 
@@ -511,13 +556,18 @@ function boot(): void {
     state.hoveredBay = null;
     state.hoveredPart = null;
     state.gqaHoveredCell = null;
+    state.mambaHoveredCell = null;
     if (modeChanged) {
       state.selectedPart = null;
       state.gqaSelectedCell = null;
+      state.mambaSelectedCell = null;
       if (nextMode !== 'cutaway_gqa') {
         state.gqaStepperPlaying = false;
-        lastStepperTickMs = null;
       }
+      if (nextMode !== 'cutaway_mamba') {
+        state.mambaStepperPlaying = false;
+      }
+      lastStepperTickMs = null;
     }
     if (nextMode === 'cutaway_mamba') state.section = 'mamba';
     else if (nextMode === 'cutaway_moe') state.section = 'moe';
@@ -532,7 +582,7 @@ function boot(): void {
       flyToPose(state.savedMacroCamera);
     } else if (currentCutawayScene) {
       flyToPose(
-        cameraPoseForCutaway(nextMode, currentCutawayScene.fitBounds, currentMetrics, state.gqaViewAngle),
+        cameraPoseForCutaway(nextMode, currentCutawayScene.fitBounds, currentMetrics, activeViewAngleForMode(nextMode)),
       );
     }
 
@@ -616,7 +666,7 @@ function boot(): void {
       syncUi();
     } else if (currentCutawayScene) {
       flyToPose(
-        cameraPoseForCutaway(state.mode, currentCutawayScene.fitBounds, currentMetrics, state.gqaViewAngle),
+        cameraPoseForCutaway(state.mode, currentCutawayScene.fitBounds, currentMetrics, activeViewAngleForMode(state.mode)),
       );
     }
   };
@@ -628,6 +678,13 @@ function boot(): void {
     state.hoveredBay = null;
     state.selectedPart = null;
     state.hoveredPart = null;
+    state.mambaHoveredCell = null;
+    state.mambaSelectedCell = null;
+    state.mambaActiveHead = 0;
+    state.mambaStepperActive = false;
+    state.mambaStepperPlaying = false;
+    state.mambaStepperStep = 0;
+    state.mambaStepperSubProgress = 0;
     state.gqaHoveredCell = null;
     state.gqaSelectedCell = null;
     state.gqaActiveGroup0Head = 0;
@@ -647,7 +704,7 @@ function boot(): void {
       rebuildSceneIfNeeded();
       if (currentCutawayScene) {
         flyToPose(
-          cameraPoseForCutaway(state.mode, currentCutawayScene.fitBounds, currentMetrics, state.gqaViewAngle),
+          cameraPoseForCutaway(state.mode, currentCutawayScene.fitBounds, currentMetrics, activeViewAngleForMode(state.mode)),
         );
       }
       syncUi();
@@ -692,7 +749,19 @@ function boot(): void {
       state.mambaBayId = bayId;
       state.selectedPart = null;
       state.hoveredPart = null;
+      state.mambaSelectedCell = null;
+      state.mambaHoveredCell = null;
       markDirtyAndSchedule(true);
+    },
+    onSelectMambaView: (view: GqaViewAngle) => {
+      if (state.mambaViewAngle === view && state.mode === 'cutaway_mamba') return;
+      state.mambaViewAngle = view;
+      if (state.mode === 'cutaway_mamba' && currentCutawayScene) {
+        flyToPose(
+          cameraPoseForCutaway('cutaway_mamba', currentCutawayScene.fitBounds, currentMetrics, view),
+        );
+      }
+      syncUi();
     },
     onSelectGqaBay: (bayId) => {
       state.tourActive = false;
@@ -700,6 +769,8 @@ function boot(): void {
       state.gqaBayId = bayId;
       state.selectedPart = null;
       state.hoveredPart = null;
+      state.gqaSelectedCell = null;
+      state.gqaHoveredCell = null;
       markDirtyAndSchedule(true);
     },
     onSelectGqaView: (view: GqaViewAngle) => {
@@ -719,9 +790,12 @@ function boot(): void {
       applyHeadSelectionToGroupHeads(partId);
       if (partId === null) {
         state.gqaSelectedCell = null;
+        state.mambaSelectedCell = null;
       } else if (parseQueryHeadPartId(partId) !== null && state.gqaSelectedCell) {
-        // Clear stale cell from a different head so the newly selected head's live Scores/Softmax shine clearly
+        // Clear stale cell from a different head so the newly selected head's live Scores/Softmax stay in sync
         state.gqaSelectedCell = null;
+      } else if (parseMambaHeadPartId(partId) !== null && state.mambaSelectedCell) {
+        state.mambaSelectedCell = null;
       }
       markDirtyAndSchedule(true);
     },
@@ -752,6 +826,8 @@ function boot(): void {
       state.hoveredPart = null;
       state.gqaSelectedCell = null;
       state.gqaHoveredCell = null;
+      state.mambaSelectedCell = null;
+      state.mambaHoveredCell = null;
       markDirtyAndSchedule(true);
     },
     onTourToggle: () => {
@@ -787,41 +863,91 @@ function boot(): void {
     },
     onGqaStepPrev: () => {
       state.tourActive = false;
-      state.gqaSelectedCell = null;
-      state.gqaHoveredCell = null;
-      state.gqaStepperPlaying = false;
       lastStepperTickMs = null;
-      if (!state.gqaStepperActive) {
-        state.gqaStepperActive = true;
-        state.gqaStepperStep = GQA_STEPPER_STEPS.length - 1;
+      if (state.mode === 'cutaway_mamba') {
+        state.mambaSelectedCell = null;
+        state.mambaHoveredCell = null;
+        state.mambaStepperPlaying = false;
+        if (!state.mambaStepperActive) {
+          state.mambaStepperActive = true;
+          state.mambaStepperStep = MAMBA_STEPPER_STEPS.length - 1;
+        } else {
+          state.mambaStepperStep =
+            (state.mambaStepperStep - 1 + MAMBA_STEPPER_STEPS.length) % MAMBA_STEPPER_STEPS.length;
+        }
+        state.mambaStepperSubProgress = 0;
       } else {
-        state.gqaStepperStep =
-          (state.gqaStepperStep - 1 + GQA_STEPPER_STEPS.length) % GQA_STEPPER_STEPS.length;
+        state.gqaSelectedCell = null;
+        state.gqaHoveredCell = null;
+        state.gqaStepperPlaying = false;
+        if (!state.gqaStepperActive) {
+          state.gqaStepperActive = true;
+          state.gqaStepperStep = GQA_STEPPER_STEPS.length - 1;
+        } else {
+          state.gqaStepperStep =
+            (state.gqaStepperStep - 1 + GQA_STEPPER_STEPS.length) % GQA_STEPPER_STEPS.length;
+        }
+        state.gqaStepperSubProgress = 0;
       }
-      state.gqaStepperSubProgress = 0;
       markDirtyAndSchedule(true);
     },
     onGqaStepNext: () => {
       state.tourActive = false;
-      state.gqaSelectedCell = null;
-      state.gqaHoveredCell = null;
-      state.gqaStepperPlaying = false;
       lastStepperTickMs = null;
-      if (!state.gqaStepperActive) {
-        state.gqaStepperActive = true;
-        state.gqaStepperStep = 0;
+      if (state.mode === 'cutaway_mamba') {
+        state.mambaSelectedCell = null;
+        state.mambaHoveredCell = null;
+        state.mambaStepperPlaying = false;
+        if (!state.mambaStepperActive) {
+          state.mambaStepperActive = true;
+          state.mambaStepperStep = 0;
+        } else {
+          state.mambaStepperStep = (state.mambaStepperStep + 1) % MAMBA_STEPPER_STEPS.length;
+        }
+        state.mambaStepperSubProgress = 0;
       } else {
-        state.gqaStepperStep = (state.gqaStepperStep + 1) % GQA_STEPPER_STEPS.length;
+        state.gqaSelectedCell = null;
+        state.gqaHoveredCell = null;
+        state.gqaStepperPlaying = false;
+        if (!state.gqaStepperActive) {
+          state.gqaStepperActive = true;
+          state.gqaStepperStep = 0;
+        } else {
+          state.gqaStepperStep = (state.gqaStepperStep + 1) % GQA_STEPPER_STEPS.length;
+        }
+        state.gqaStepperSubProgress = 0;
       }
-      state.gqaStepperSubProgress = 0;
       markDirtyAndSchedule(true);
     },
     onGqaStepTogglePlay: () => {
       state.tourActive = false;
+      if (state.mode === 'cutaway_mamba') {
+        state.mambaSelectedCell = null;
+        state.mambaHoveredCell = null;
+        if (state.reducedMotion) {
+          state.mambaStepperActive = true;
+          state.mambaStepperPlaying = false;
+          state.mambaStepperStep = (state.mambaStepperStep + 1) % MAMBA_STEPPER_STEPS.length;
+          state.mambaStepperSubProgress = 0;
+          markDirtyAndSchedule(true);
+          return;
+        }
+        if (state.mambaStepperActive && state.mambaStepperPlaying) {
+          state.mambaStepperPlaying = false;
+          lastStepperTickMs = null;
+          syncUi();
+        } else {
+          state.mambaStepperActive = true;
+          state.mambaStepperPlaying = true;
+          lastStepperTickMs = null;
+          markDirtyAndSchedule(true);
+        }
+        return;
+      }
+
       state.gqaSelectedCell = null;
       state.gqaHoveredCell = null;
       if (state.reducedMotion) {
-        // Respect prefers-reduced-motion: step deterministically without continuous RAF loop
         state.gqaStepperActive = true;
         state.gqaStepperPlaying = false;
         state.gqaStepperStep = (state.gqaStepperStep + 1) % GQA_STEPPER_STEPS.length;
@@ -842,28 +968,47 @@ function boot(): void {
     },
     onGqaStepSelect: (step: number) => {
       state.tourActive = false;
-      state.gqaSelectedCell = null;
-      state.gqaHoveredCell = null;
-      state.gqaStepperActive = true;
-      state.gqaStepperPlaying = false;
       lastStepperTickMs = null;
-      state.gqaStepperStep = Math.max(0, Math.min(GQA_STEPPER_STEPS.length - 1, step));
-      state.gqaStepperSubProgress = 0;
+      if (state.mode === 'cutaway_mamba') {
+        state.mambaSelectedCell = null;
+        state.mambaHoveredCell = null;
+        state.mambaStepperActive = true;
+        state.mambaStepperPlaying = false;
+        state.mambaStepperStep = Math.max(0, Math.min(MAMBA_STEPPER_STEPS.length - 1, step));
+        state.mambaStepperSubProgress = 0;
+      } else {
+        state.gqaSelectedCell = null;
+        state.gqaHoveredCell = null;
+        state.gqaStepperActive = true;
+        state.gqaStepperPlaying = false;
+        state.gqaStepperStep = Math.max(0, Math.min(GQA_STEPPER_STEPS.length - 1, step));
+        state.gqaStepperSubProgress = 0;
+      }
       markDirtyAndSchedule(true);
     },
     onGqaStepScrub: (progress01: number) => {
       state.tourActive = false;
-      state.gqaSelectedCell = null;
-      state.gqaHoveredCell = null;
-      state.gqaStepperActive = true;
-      state.gqaStepperPlaying = false;
       lastStepperTickMs = null;
-      state.gqaStepperSubProgress = Math.max(0, Math.min(0.9999, progress01));
+      if (state.mode === 'cutaway_mamba') {
+        state.mambaSelectedCell = null;
+        state.mambaHoveredCell = null;
+        state.mambaStepperActive = true;
+        state.mambaStepperPlaying = false;
+        state.mambaStepperSubProgress = Math.max(0, Math.min(0.9999, progress01));
+      } else {
+        state.gqaSelectedCell = null;
+        state.gqaHoveredCell = null;
+        state.gqaStepperActive = true;
+        state.gqaStepperPlaying = false;
+        state.gqaStepperSubProgress = Math.max(0, Math.min(0.9999, progress01));
+      }
       markDirtyAndSchedule(true);
     },
     onGqaClearCell: () => {
       state.gqaSelectedCell = null;
       state.gqaHoveredCell = null;
+      state.mambaSelectedCell = null;
+      state.mambaHoveredCell = null;
       markDirtyAndSchedule(true);
     },
   });
@@ -887,7 +1032,7 @@ function boot(): void {
       }
     }
 
-    // Live Causal Attention Stepper playback loop (GQA Cutaway only, respects reducedMotion)
+    // Live Math Stepper playback loop (GQA & Mamba-2 cutaways, respects reducedMotion)
     let stepperChangedUi = false;
     if (
       state.mode === 'cutaway_gqa' &&
@@ -907,7 +1052,33 @@ function boot(): void {
       }
       const cell = resolveActiveGqaCell();
       const key = cell
-        ? `${state.gqaStepperStep}:${cell.tensor}:${cell.row}:${cell.col}:${cell.headIndex ?? -1}`
+        ? `gqa:${state.gqaStepperStep}:${cell.tensor}:${cell.row}:${cell.col}:${cell.headIndex ?? -1}`
+        : '';
+      if (key !== lastStepperCellKey) {
+        lastStepperCellKey = key;
+        geometryDirty = true;
+      }
+      stepperChangedUi = true;
+      continueAnimating = true;
+    } else if (
+      state.mode === 'cutaway_mamba' &&
+      state.mambaStepperActive &&
+      state.mambaStepperPlaying &&
+      !state.reducedMotion
+    ) {
+      const dtSec =
+        lastStepperTickMs === null ? 0 : Math.max(0, Math.min(0.1, (nowMs - lastStepperTickMs) / 1000));
+      lastStepperTickMs = nowMs;
+      const nextProgress = state.mambaStepperSubProgress + dtSec / 2.2;
+      if (nextProgress >= 1) {
+        state.mambaStepperSubProgress = nextProgress % 1;
+        state.mambaStepperStep = (state.mambaStepperStep + 1) % MAMBA_STEPPER_STEPS.length;
+      } else {
+        state.mambaStepperSubProgress = nextProgress;
+      }
+      const cell = resolveActiveMambaCell();
+      const key = cell
+        ? `mamba:${state.mambaStepperStep}:${cell.tensor}:${cell.row}:${cell.col}:${cell.headIndex ?? -1}`
         : '';
       if (key !== lastStepperCellKey) {
         lastStepperCellKey = key;
@@ -985,9 +1156,10 @@ function boot(): void {
     } else if (currentCutawayScene) {
       const isMobileStack = window.innerWidth <= 900;
       const topInsetPx = isMobileStack ? 12 : 84;
+      const usesMathDock = state.mode === 'cutaway_gqa' || state.mode === 'cutaway_mamba';
       const bottomInsetPx = isMobileStack
         ? 12
-        : state.mode === 'cutaway_gqa' && !controlEls.gqaMathDock.hidden
+        : usesMathDock && !controlEls.gqaMathDock.hidden
           ? Math.max(102, controlEls.gqaMathDock.offsetHeight + 18)
           : 30;
       overlay.updateCutaway({
@@ -1045,7 +1217,7 @@ function boot(): void {
         state.mode,
         currentCutawayScene.fitBounds,
         next,
-        state.gqaViewAngle,
+        activeViewAngleForMode(state.mode),
       );
     }
     drawNow();
@@ -1231,9 +1403,23 @@ function boot(): void {
           state.gqaHoveredCell = hitCell;
           markDirtyAndSchedule(true);
         }
-      } else {
+      } else if (state.mode === 'cutaway_mamba') {
         const hitPart =
-          hit?.headIndex !== undefined ? `q-head-${hit.headIndex}` : hit?.partId ?? null;
+          hit?.partId === 'ssm-state'
+            ? 'ssm-state'
+            : hit?.headIndex !== undefined && hit.tensorKey === 'x'
+              ? `mamba-head-${hit.headIndex}`
+              : hit?.partId ?? null;
+        const hitCell = hit
+          ? pickHitToMambaCell(hit, state.mambaActiveHead, state.tokens)
+          : null;
+        if (hitPart !== state.hoveredPart || !sameMambaCell(hitCell, state.mambaHoveredCell)) {
+          state.hoveredPart = hitPart;
+          state.mambaHoveredCell = hitCell;
+          markDirtyAndSchedule(true);
+        }
+      } else {
+        const hitPart = hit?.partId ?? null;
         if (hitPart !== state.hoveredPart) {
           state.hoveredPart = hitPart;
           markDirtyAndSchedule(true);
@@ -1264,6 +1450,12 @@ function boot(): void {
         const hitCell = hit
           ? pickHitToGqaCell(hit, state.gqaActiveGroup0Head, state.gqaActiveGroup1Head)
           : null;
+        // Part 0 #1: Synchronize displayed KV group head to clicked cell's owning head (e.g. V_out/Concat Q19)
+        const cellHead = inferGqaCellHead(hitCell);
+        if (cellHead !== null) {
+          if (cellHead < 16) state.gqaActiveGroup0Head = cellHead;
+          else state.gqaActiveGroup1Head = cellHead;
+        }
         state.selectedPart = hitPart;
         state.hoveredPart = hitPart;
         state.gqaSelectedCell = hitCell;
@@ -1273,9 +1465,35 @@ function boot(): void {
           state.gqaStepperActive = false;
           lastStepperTickMs = null;
         }
-      } else {
+      } else if (state.mode === 'cutaway_mamba') {
         const hitPart =
-          hit?.headIndex !== undefined ? `q-head-${hit.headIndex}` : hit?.partId ?? null;
+          hit?.partId === 'ssm-state' && hit.headIndex !== undefined
+            ? `mamba-head-${hit.headIndex}`
+            : hit?.headIndex !== undefined && hit.tensorKey === 'x'
+              ? `mamba-head-${hit.headIndex}`
+              : hit?.partId ?? null;
+        if (hitPart !== null) state.tourActive = false;
+        applyHeadSelectionToGroupHeads(hitPart);
+        const hitCell = hit
+          ? pickHitToMambaCell(hit, state.mambaActiveHead, state.tokens)
+          : null;
+        const cellHead = inferMambaCellHead(hitCell);
+        if (cellHead !== null) {
+          state.mambaActiveHead = cellHead;
+        } else if (hit?.headIndex !== undefined) {
+          state.mambaActiveHead = hit.headIndex;
+        }
+        state.selectedPart = hitPart;
+        state.hoveredPart = hitPart;
+        state.mambaSelectedCell = hitCell;
+        state.mambaHoveredCell = hitCell;
+        if (hitCell !== null) {
+          state.mambaStepperPlaying = false;
+          state.mambaStepperActive = false;
+          lastStepperTickMs = null;
+        }
+      } else {
+        const hitPart = hit?.partId ?? null;
         if (hitPart !== null) state.tourActive = false;
         state.selectedPart = hitPart;
         state.hoveredPart = hitPart;
@@ -1305,10 +1523,16 @@ function boot(): void {
   });
 
   canvas.addEventListener('pointerleave', () => {
-    if (state.hoveredBay !== null || state.hoveredPart !== null || state.gqaHoveredCell !== null) {
+    if (
+      state.hoveredBay !== null ||
+      state.hoveredPart !== null ||
+      state.gqaHoveredCell !== null ||
+      state.mambaHoveredCell !== null
+    ) {
       state.hoveredBay = null;
       state.hoveredPart = null;
       state.gqaHoveredCell = null;
+      state.mambaHoveredCell = null;
       markDirtyAndSchedule(true);
     }
   });
@@ -1351,26 +1575,47 @@ function boot(): void {
       return;
     }
 
-    if (key === ' ' && state.mode === 'cutaway_gqa') {
+    if (key === ' ' && (state.mode === 'cutaway_gqa' || state.mode === 'cutaway_mamba')) {
       ev.preventDefault();
       state.tourActive = false;
-      state.gqaSelectedCell = null;
-      state.gqaHoveredCell = null;
-      if (state.reducedMotion) {
-        state.gqaStepperActive = true;
-        state.gqaStepperPlaying = false;
-        state.gqaStepperStep = (state.gqaStepperStep + 1) % GQA_STEPPER_STEPS.length;
-        state.gqaStepperSubProgress = 0;
-        markDirtyAndSchedule(true);
-      } else if (state.gqaStepperActive && state.gqaStepperPlaying) {
-        state.gqaStepperPlaying = false;
-        lastStepperTickMs = null;
-        syncUi();
+      if (state.mode === 'cutaway_mamba') {
+        state.mambaSelectedCell = null;
+        state.mambaHoveredCell = null;
+        if (state.reducedMotion) {
+          state.mambaStepperActive = true;
+          state.mambaStepperPlaying = false;
+          state.mambaStepperStep = (state.mambaStepperStep + 1) % MAMBA_STEPPER_STEPS.length;
+          state.mambaStepperSubProgress = 0;
+          markDirtyAndSchedule(true);
+        } else if (state.mambaStepperActive && state.mambaStepperPlaying) {
+          state.mambaStepperPlaying = false;
+          lastStepperTickMs = null;
+          syncUi();
+        } else {
+          state.mambaStepperActive = true;
+          state.mambaStepperPlaying = true;
+          lastStepperTickMs = null;
+          markDirtyAndSchedule(true);
+        }
       } else {
-        state.gqaStepperActive = true;
-        state.gqaStepperPlaying = true;
-        lastStepperTickMs = null;
-        markDirtyAndSchedule(true);
+        state.gqaSelectedCell = null;
+        state.gqaHoveredCell = null;
+        if (state.reducedMotion) {
+          state.gqaStepperActive = true;
+          state.gqaStepperPlaying = false;
+          state.gqaStepperStep = (state.gqaStepperStep + 1) % GQA_STEPPER_STEPS.length;
+          state.gqaStepperSubProgress = 0;
+          markDirtyAndSchedule(true);
+        } else if (state.gqaStepperActive && state.gqaStepperPlaying) {
+          state.gqaStepperPlaying = false;
+          lastStepperTickMs = null;
+          syncUi();
+        } else {
+          state.gqaStepperActive = true;
+          state.gqaStepperPlaying = true;
+          lastStepperTickMs = null;
+          markDirtyAndSchedule(true);
+        }
       }
       return;
     }
@@ -1384,12 +1629,21 @@ function boot(): void {
         ev.preventDefault();
         state.memoryChartOpen = false;
         syncUi();
-      } else if (state.gqaSelectedCell !== null || state.gqaStepperActive) {
+      } else if (
+        state.gqaSelectedCell !== null ||
+        state.gqaStepperActive ||
+        state.mambaSelectedCell !== null ||
+        state.mambaStepperActive
+      ) {
         ev.preventDefault();
         state.gqaSelectedCell = null;
         state.gqaHoveredCell = null;
         state.gqaStepperActive = false;
         state.gqaStepperPlaying = false;
+        state.mambaSelectedCell = null;
+        state.mambaHoveredCell = null;
+        state.mambaStepperActive = false;
+        state.mambaStepperPlaying = false;
         lastStepperTickMs = null;
         markDirtyAndSchedule(true);
       } else if (state.selectedPart !== null || state.hoveredPart !== null) {

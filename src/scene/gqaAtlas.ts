@@ -1,20 +1,16 @@
 import type { GqaSimResult } from '../math/gqaSim';
+import {
+  computeMaxAbs,
+  createRg32fAtlas,
+  type AtlasSlice,
+  type Rg32fValueAtlas,
+  type TexRect,
+} from './atlasPacker';
 
-export type TexRect = readonly [number, number, number, number];
+export type { TexRect };
+export type GqaAtlasSlice = AtlasSlice;
 
-export interface GqaAtlasSlice {
-  readonly rect: TexRect;
-  /** Normalization scale `1 / maxAbs` so shader maps `raw * scale` into [-1, +1] (or [0, 1] for softmax). */
-  readonly scale: number;
-  /** 0 = diverging signed palette, 1 = probability [0..1] palette */
-  readonly mode: 0 | 1;
-}
-
-export interface GqaValueAtlas {
-  readonly width: number;
-  readonly height: number;
-  /** Packed RG32F Float32Array (length = width * height * 2): R = value, G = 1 if -Inf masked else 0 */
-  readonly data: Float32Array;
+export interface GqaValueAtlas extends Rg32fValueAtlas {
   readonly group0Head: number;
   readonly group1Head: number;
   readonly input: GqaAtlasSlice;
@@ -35,18 +31,6 @@ export interface GqaValueAtlas {
 
 const ATLAS_W = 128;
 const ATLAS_H = 64;
-
-function computeMaxAbs(arr: Float32Array, minFloor = 0.25): number {
-  let m = minFloor;
-  for (let i = 0; i < arr.length; i++) {
-    const v = arr[i];
-    if (Number.isFinite(v)) {
-      const a = Math.abs(v);
-      if (a > m) m = a;
-    }
-  }
-  return m;
-}
 
 /**
  * Pack every live Float32 tensor from `GqaSimResult` for the active `T` and active
@@ -85,25 +69,8 @@ export function buildGqaValueAtlas(
   const T = sim.tokens;
   const { d, dHead, qConcatDim } = sim;
 
-  const data = new Float32Array(ATLAS_W * ATLAS_H * 2);
-
-  const setTexel = (x: number, y: number, val: number) => {
-    const idx = (y * ATLAS_W + x) * 2;
-    if (Number.isFinite(val)) {
-      data[idx] = val;
-      data[idx + 1] = 0.0;
-    } else {
-      data[idx] = 0.0;
-      data[idx + 1] = 1.0; // masked (-Infinity)
-    }
-  };
-
-  const makeRect = (x0: number, y0: number, cols: number, rows: number): TexRect => [
-    x0 / ATLAS_W,
-    y0 / ATLAS_H,
-    cols / ATLAS_W,
-    rows / ATLAS_H,
-  ];
+  const writer = createRg32fAtlas(ATLAS_W, ATLAS_H);
+  const { data, setTexel, makeRect } = writer;
 
   // 1. Input X [8, T] -> x=0..7, y=0..T-1 (col=i, row=t)
   for (let t = 0; t < T; t++) {
