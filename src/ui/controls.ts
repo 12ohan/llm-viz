@@ -53,6 +53,12 @@ export interface ControlsCallbacks {
   onToggleMemoryChart: () => void;
   onToggleShortcuts: () => void;
   onCloseShortcuts: () => void;
+  onGqaStepPrev: () => void;
+  onGqaStepNext: () => void;
+  onGqaStepTogglePlay: () => void;
+  onGqaStepSelect: (step: number) => void;
+  onGqaStepScrub: (progress01: number) => void;
+  onGqaClearCell: () => void;
 }
 
 interface SectionCopy {
@@ -163,6 +169,20 @@ export interface ControlsElements {
   moeSubbar: HTMLDivElement;
   gqaSubbar: HTMLDivElement;
   floatingBadge: HTMLDivElement;
+  orbitHint: HTMLDivElement;
+  gqaMathDock: HTMLElement;
+  gqaFormulaTensor: HTMLSpanElement;
+  gqaFormulaCoord: HTMLSpanElement;
+  gqaFormulaHead: HTMLSpanElement;
+  gqaFormulaValue: HTMLSpanElement;
+  gqaCellClear: HTMLButtonElement;
+  gqaFormulaEq: HTMLDivElement;
+  gqaFormulaSub: HTMLDivElement;
+  gqaStepPrev: HTMLButtonElement;
+  gqaStepPlay: HTMLButtonElement;
+  gqaStepNext: HTMLButtonElement;
+  gqaStepPills: HTMLButtonElement[];
+  gqaStepScrub: HTMLInputElement;
   editorialPanel: HTMLDivElement;
   tokenSlider: HTMLInputElement;
   tokenDec: HTMLButtonElement;
@@ -205,6 +225,20 @@ export function queryControlsElements(): ControlsElements {
     moeSubbar: get<HTMLDivElement>('moe-subbar'),
     gqaSubbar: get<HTMLDivElement>('gqa-subbar'),
     floatingBadge: get<HTMLDivElement>('floating-badge'),
+    orbitHint: get<HTMLDivElement>('orbit-hint'),
+    gqaMathDock: get<HTMLElement>('gqa-math-dock'),
+    gqaFormulaTensor: get<HTMLSpanElement>('gqa-formula-tensor'),
+    gqaFormulaCoord: get<HTMLSpanElement>('gqa-formula-coord'),
+    gqaFormulaHead: get<HTMLSpanElement>('gqa-formula-head'),
+    gqaFormulaValue: get<HTMLSpanElement>('gqa-formula-value'),
+    gqaCellClear: get<HTMLButtonElement>('gqa-cell-clear'),
+    gqaFormulaEq: get<HTMLDivElement>('gqa-formula-eq'),
+    gqaFormulaSub: get<HTMLDivElement>('gqa-formula-sub'),
+    gqaStepPrev: get<HTMLButtonElement>('gqa-step-prev'),
+    gqaStepPlay: get<HTMLButtonElement>('gqa-step-play'),
+    gqaStepNext: get<HTMLButtonElement>('gqa-step-next'),
+    gqaStepPills: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-gqa-step]')),
+    gqaStepScrub: get<HTMLInputElement>('gqa-step-scrub'),
     editorialPanel: get<HTMLDivElement>('editorial-panel'),
     tokenSlider: get<HTMLInputElement>('token-slider'),
     tokenDec: get<HTMLButtonElement>('token-dec'),
@@ -337,6 +371,23 @@ export class MacroControls {
     this.on(this.els.memoryChartBtn, 'click', () => this.cb.onToggleMemoryChart());
     this.on(this.els.shortcutsBtn, 'click', () => this.cb.onToggleShortcuts());
     this.on(this.els.shortcutsCloseBtn, 'click', () => this.cb.onCloseShortcuts());
+
+    this.on(this.els.gqaStepPrev, 'click', () => this.cb.onGqaStepPrev());
+    this.on(this.els.gqaStepPlay, 'click', () => this.cb.onGqaStepTogglePlay());
+    this.on(this.els.gqaStepNext, 'click', () => this.cb.onGqaStepNext());
+    this.on(this.els.gqaCellClear, 'click', () => this.cb.onGqaClearCell());
+    for (const btn of this.els.gqaStepPills) {
+      this.on(btn, 'click', () => {
+        const step = Number.parseInt(btn.dataset.gqaStep ?? '0', 10);
+        if (Number.isFinite(step)) this.cb.onGqaStepSelect(step);
+      });
+    }
+    this.on(this.els.gqaStepScrub, 'input', () => {
+      const val = Number.parseInt(this.els.gqaStepScrub.value, 10);
+      if (Number.isFinite(val)) {
+        this.cb.onGqaStepScrub(Math.max(0, Math.min(100, val)) / 100);
+      }
+    });
   }
 
   sync(state: SceneState, activeCutaway: CutawaySceneGeometry | null = null): void {
@@ -364,7 +415,12 @@ export class MacroControls {
       btn.classList.toggle('is-active', btn.dataset.gqaView === state.gqaViewAngle);
     }
 
-    // Floating corner badge reflects current mode clearly
+    // Floating corner badge & orbit hint (hidden in cutaway_gqa where docked math bar occupies bottom)
+    const isGqaCutaway = state.mode === 'cutaway_gqa';
+    this.els.floatingBadge.hidden = isGqaCutaway;
+    this.els.orbitHint.hidden = isGqaCutaway;
+    this.els.gqaMathDock.hidden = !isGqaCutaway;
+
     if (state.mode === 'tower') {
       this.els.floatingBadge.textContent = 'Nemotron 3 Nano 30B-A3B · 3.2B active';
     } else if (state.mode === 'cutaway_mamba') {
@@ -377,6 +433,7 @@ export class MacroControls {
         'Cutaway: MoE 128+1 · Bay 02 (6 Active + Shared 3,712)';
     } else {
       this.els.floatingBadge.textContent = `Cutaway: GQA Attention · Bay ${formatBayId(state.gqaBayId)} (32Q / 2KV, NoPE)`;
+      this.syncGqaMathDock(state, activeCutaway);
     }
 
     // Sync active TOC & mini-diagram highlight
@@ -475,7 +532,7 @@ export class MacroControls {
     // Middle editorial panel
     const activeBayId = isTower ? state.hoveredBay ?? state.selectedBay : null;
     const activePart = !isTower ? state.hoveredPart ?? state.selectedPart : null;
-    const editorialKey = `${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${state.mode}:${state.mambaBayId}:${state.gqaBayId}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
+    const editorialKey = `${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${state.mode}:${state.mambaBayId}:${state.gqaBayId}:${state.gqaActiveGroup0Head}:${state.gqaActiveGroup1Head}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
 
     if (editorialKey !== this.lastEditorialKey) {
       this.lastEditorialKey = editorialKey;
@@ -492,6 +549,63 @@ export class MacroControls {
       } else {
         this.renderCutawayEditorial(state, activePart, activeCutaway);
       }
+    }
+  }
+
+  private syncGqaMathDock(state: SceneState, cutaway: CutawaySceneGeometry | null): void {
+    const formula = cutaway?.activeFormula ?? null;
+    const isPinnedCell = state.gqaSelectedCell !== null;
+
+    if (formula) {
+      this.els.gqaFormulaTensor.textContent = formula.tensorLabel;
+      this.els.gqaFormulaCoord.textContent = formula.coordLabel;
+      if (formula.headBadge) {
+        this.els.gqaFormulaHead.textContent = formula.headBadge;
+        this.els.gqaFormulaHead.hidden = false;
+      } else {
+        this.els.gqaFormulaHead.hidden = true;
+      }
+      this.els.gqaFormulaValue.textContent = formula.isMasked
+        ? formula.valueText
+        : `= ${formula.valueText}`;
+      this.els.gqaFormulaValue.classList.toggle('is-masked', formula.isMasked);
+      this.els.gqaFormulaValue.hidden = false;
+      this.els.gqaCellClear.hidden = !isPinnedCell;
+      this.els.gqaFormulaEq.textContent = formula.equation;
+      this.els.gqaFormulaSub.textContent = formula.subEquation;
+    } else {
+      const g0 = formatQueryHeadId(state.gqaActiveGroup0Head);
+      const g1 = formatQueryHeadId(state.gqaActiveGroup1Head);
+      this.els.gqaFormulaTensor.textContent = `Live Float32 GQA · Bay ${formatBayId(state.gqaBayId)}`;
+      this.els.gqaFormulaCoord.textContent = `Heads: ${g0}→KV₀ · ${g1}→KV₁`;
+      this.els.gqaFormulaHead.hidden = true;
+      this.els.gqaFormulaValue.hidden = true;
+      this.els.gqaCellClear.hidden = true;
+      this.els.gqaFormulaEq.textContent =
+        'Hover or click any matrix cell for exact Float32 math, or press Play to step through causal attention.';
+      const tokPreview = cutaway?.gqaSim?.tokenLabels
+        ? cutaway.gqaSim.tokenLabels.map((tok, i) => `${i}:"${tok}"`).join(' ')
+        : '';
+      this.els.gqaFormulaSub.textContent = tokPreview
+        ? `Educational token labels (T=${state.tokens}): ${tokPreview}`
+        : '';
+    }
+
+    const playing = state.gqaStepperActive && state.gqaStepperPlaying;
+    this.els.gqaStepPlay.textContent = playing ? '❚❚ Pause' : '▶ Play';
+    this.els.gqaStepPlay.classList.toggle('is-playing', playing);
+    this.els.gqaStepPlay.setAttribute('aria-pressed', String(playing));
+
+    for (const btn of this.els.gqaStepPills) {
+      const idx = Number.parseInt(btn.dataset.gqaStep ?? '-1', 10);
+      const isAct = state.gqaStepperActive && idx === state.gqaStepperStep;
+      btn.classList.toggle('is-active', isAct);
+      btn.setAttribute('aria-selected', String(isAct));
+    }
+
+    const pct = String(Math.round(state.gqaStepperSubProgress * 100));
+    if (this.els.gqaStepScrub.value !== pct) {
+      this.els.gqaStepScrub.value = pct;
     }
   }
 
@@ -863,14 +977,14 @@ export class MacroControls {
       if (isFp8) badge.classList.add('ed-badge-gold');
 
       bodyText =
-        'Thirty-two individually selectable query heads (Group 0: Q00–Q15 → KV₀; Group 1: Q16–Q31 → KV₁) share two 16× narrower KV tracks with NoPE. Scrubbing T grows both KV tracks and the square T×T causal Scores & Softmax sheets.';
+        'Thirty-two query heads (Group 0: Q00–Q15 → KV₀; Group 1: Q16–Q31 → KV₁) drive a live miniature Float32 GQA simulator (d=8, dₕ=4, NoPE) with educational token labels. Hover or click any cell to trace its exact operands and equation.';
 
       specs = [
         `Shared KV cache: 2 KV heads × ${state.tokens} tokens = ${perBayKiB} KiB (${isFp8 ? '+0.5 KiB/tok FP8 storage' : '+1 KiB/tok BF16 storage'})`,
         isFp8
-          ? 'Production precision metadata (§4.2): Q/K/V/O compute stays BF16; KV-cache storage uses FP8'
-          : 'Toggle FP8 Selective to inspect NVIDIA §4.2 production precision (BF16 compute, FP8 KV storage)',
-        'Click any query head (Q00–Q31) in 3D or below to trace its exact 16:1 KV pathway.',
+          ? 'Production precision metadata (§4.2): Q/K/V/O compute BF16; KV storage FP8 (live sim runs Float32)'
+          : 'Production precision metadata: BF16 weights/KV (toggle FP8 Selective for §4.2; live sim runs Float32)',
+        'Click any Q00–Q31 head below to switch its group’s live Scores & Softmax textures.',
       ];
     }
 

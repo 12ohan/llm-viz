@@ -317,6 +317,7 @@
                 <div class="shortcut-row"><dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Step chapter (tour) or bay</dd></div>
                 <div class="shortcut-row"><dt><kbd>R</kbd></dt><dd>Reset view, T=8 &amp; BF16</dd></div>
                 <div class="shortcut-row"><dt><kbd>?</kbd></dt><dd>Toggle this help popover</dd></div>
+                <div class="shortcut-row"><dt><kbd>Space</kbd></dt><dd>Play / pause GQA math stepper</dd></div>
                 <div class="shortcut-row"><dt><kbd>Esc</kbd></dt><dd>Close overlay / Back to tower</dd></div>
               </dl>
             </div>
@@ -333,7 +334,7 @@
               Nemotron 3 Nano 30B-A3B · 3.2B active
             </div>
 
-            <div class="orbit-hint" aria-hidden="true">
+            <div id="orbit-hint" class="orbit-hint" aria-hidden="true">
               Left-drag: Orbit · Right/Shift-drag: Pan · Scroll: Zoom · Click: Inspect · ?: Keys
             </div>
 
@@ -345,6 +346,65 @@
               hidden
             ></div>
           </div>
+
+          <!-- Docked GQA Live Formula Inspector & Causal Attention Stepper (cutaway_gqa only) -->
+          <section
+            id="gqa-math-dock"
+            class="gqa-math-dock"
+            data-testid="gqa-math-dock"
+            aria-label="Live GQA Float32 formula inspector and causal attention stepper"
+            hidden
+          >
+            <div class="gqa-formula-row">
+              <div class="gqa-formula-meta">
+                <span id="gqa-formula-tensor" class="gqa-chip gqa-chip-tensor">Live Float32 GQA</span>
+                <span id="gqa-formula-coord" class="gqa-chip gqa-chip-coord">Hover or click any matrix cell</span>
+                <span id="gqa-formula-head" class="gqa-chip gqa-chip-head" hidden>Q00 → KV0</span>
+                <span id="gqa-formula-value" class="gqa-chip gqa-chip-val" hidden>+0.000</span>
+                <button
+                  type="button"
+                  id="gqa-cell-clear"
+                  class="gqa-clear-btn"
+                  title="Unpin cell (Esc)"
+                  hidden
+                >Unpin ×</button>
+              </div>
+              <div id="gqa-formula-note" class="gqa-formula-note">
+                Miniature Float32 sim (d=8, 32Q/2KV, dₕ=4) · Educational token labels · Precision toggle = production metadata
+              </div>
+            </div>
+            <div class="gqa-eq-block">
+              <div id="gqa-formula-eq" class="gqa-formula-eq" data-testid="gqa-formula-eq"></div>
+              <div id="gqa-formula-sub" class="gqa-formula-sub"></div>
+            </div>
+            <div class="gqa-stepper-row" role="group" aria-label="Causal attention step-through">
+              <div class="gqa-stepper-transport">
+                <button type="button" id="gqa-step-prev" class="gqa-step-icon" title="Previous math step" aria-label="Previous math step">◀</button>
+                <button type="button" id="gqa-step-play" class="gqa-step-play" data-testid="gqa-step-play" aria-pressed="false">▶ Play</button>
+                <button type="button" id="gqa-step-next" class="gqa-step-icon" title="Next math step" aria-label="Next math step">▶</button>
+              </div>
+              <div id="gqa-step-pills" class="gqa-step-pills" role="tablist" aria-label="GQA math stages">
+                <button type="button" class="gqa-step-pill" data-gqa-step="0">1. RMSNorm</button>
+                <button type="button" class="gqa-step-pill" data-gqa-step="1">2. Q/K/V</button>
+                <button type="button" class="gqa-step-pill" data-gqa-step="2">3. QKᵀ/√d</button>
+                <button type="button" class="gqa-step-pill" data-gqa-step="3">4. Softmax</button>
+                <button type="button" class="gqa-step-pill" data-gqa-step="4">5. Weighted V</button>
+                <button type="button" class="gqa-step-pill" data-gqa-step="5">6. W_O + Res</button>
+              </div>
+              <div class="gqa-step-scrub-wrap">
+                <input
+                  type="range"
+                  id="gqa-step-scrub"
+                  class="gqa-step-scrub"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value="0"
+                  aria-label="Scrub active cell within math step"
+                />
+              </div>
+            </div>
+          </section>
         </main>
       </div>
     </div>

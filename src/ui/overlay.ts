@@ -25,6 +25,8 @@ export interface CutawayOverlayUpdateInput {
   readonly tokens: number;
   readonly selectedPart: string | null;
   readonly hoveredPart: string | null;
+  readonly topInsetPx?: number;
+  readonly bottomInsetPx?: number;
 }
 
 interface PlacedRect {
@@ -406,8 +408,8 @@ export class MacroOverlay {
     const occupied: PlacedRect[] = [];
     const leaderSegs: string[] = [];
 
-    const minY = 84;
-    const maxY = Math.max(minY + 40, hostHeight - 30);
+    const minY = input.topInsetPx ?? 84;
+    const maxY = Math.max(minY + 40, hostHeight - (input.bottomInsetPx ?? 30));
 
     const pillFont = '600 11px system-ui, -apple-system, sans-serif';
     const monoFont = '500 10.5px ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -554,7 +556,7 @@ export class MacroOverlay {
       }
 
       const pt = projectWorldToHostCss(lm.world, snapshot);
-      if (!pt.visible || pt.x < -12 || pt.x > hostWidth + 12 || pt.y < minY - 12 || pt.y > maxY + 12) {
+      if (!pt.visible || pt.x < -36 || pt.x > hostWidth + 36 || pt.y < minY - 28 || pt.y > maxY + 28) {
         continue;
       }
 
@@ -580,15 +582,16 @@ export class MacroOverlay {
         ly = pt.y + gap;
       }
 
-      lx = clamp(lx, 8, hostWidth - w - 8);
-      ly = clamp(ly, minY, maxY - h);
+      const padX = hostWidth < 760 ? 6 : 8;
+      lx = clamp(lx, padX, Math.max(padX, hostWidth - w - padX));
+      ly = clamp(ly, minY, Math.max(minY, maxY - h));
 
       if (overlapsAny(occupied, lx, ly, lx + w, ly + h)) {
         const nudges: readonly [number, number][] = [
-          [lx, clamp(ly - (h + 3), minY, maxY - h)],
-          [lx, clamp(ly + (h + 3), minY, maxY - h)],
-          [clamp(lx - 14, 8, hostWidth - w - 8), ly],
-          [clamp(lx + 14, 8, hostWidth - w - 8), ly],
+          [lx, clamp(ly - (h + 3), minY, Math.max(minY, maxY - h))],
+          [lx, clamp(ly + (h + 3), minY, Math.max(minY, maxY - h))],
+          [clamp(lx - 14, padX, Math.max(padX, hostWidth - w - padX)), ly],
+          [clamp(lx + 14, padX, Math.max(padX, hostWidth - w - padX)), ly],
         ];
         let placed = false;
         for (const [cx, cy] of nudges) {

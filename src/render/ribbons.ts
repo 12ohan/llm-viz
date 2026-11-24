@@ -545,6 +545,46 @@ export class FlowRibbonBuilder {
     this.addPolylineXZ(pts, y, width, color, arrowHead);
   }
 
+  /**
+   * Draw a crisp flat cell or row/column span highlight frame on top of a thin sheet:
+   * a delicate translucent fill quad plus 4 sharp outer frame edges.
+   */
+  addCellHighlightXZ(
+    cx: number,
+    cz: number,
+    ex: number,
+    ez: number,
+    y: number,
+    fillColor: FlowRibbonColor,
+    frameColor: FlowRibbonColor,
+    frameThickness = 0.022,
+  ): void {
+    const hx = ex * 0.5;
+    const hz = ez * 0.5;
+    const x0 = cx - hx;
+    const x1 = cx + hx;
+    const z0 = cz - hz;
+    const z1 = cz + hz;
+
+    // 1. Subtle interior tint quad
+    if (fillColor.a > 0.004) {
+      const v0 = this.pushVertex(x0, y, z0, 0, 0, fillColor);
+      const v1 = this.pushVertex(x1, y, z0, 0, 0, fillColor);
+      const v2 = this.pushVertex(x1, y, z1, 0, 1, fillColor);
+      const v3 = this.pushVertex(x0, y, z1, 0, 1, fillColor);
+      this.indices.push(v0, v1, v2, v0, v2, v3);
+    }
+
+    // 2. Crisp 4-sided perimeter frame slightly elevated above the fill
+    const fy = y + 0.002;
+    const t = Math.min(frameThickness, Math.min(ex, ez) * 0.45 + 0.014);
+    const halfT = t * 0.5;
+    this.addPolylineXZ([{ x: x0 - halfT, z: z0 }, { x: x1 + halfT, z: z0 }], fy, t, frameColor, false);
+    this.addPolylineXZ([{ x: x0 - halfT, z: z1 }, { x: x1 + halfT, z: z1 }], fy, t, frameColor, false);
+    this.addPolylineXZ([{ x: x0, z: z0 - halfT }, { x: x0, z: z1 + halfT }], fy, t, frameColor, false);
+    this.addPolylineXZ([{ x: x1, z: z0 - halfT }, { x: x1, z: z1 + halfT }], fy, t, frameColor, false);
+  }
+
   pack(): { vertices: Float32Array; indices: Uint32Array } {
     return {
       vertices: new Float32Array(this.verts),

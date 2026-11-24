@@ -1,3 +1,4 @@
+import type { GqaCellRef, GqaTensorKey } from '../math/gqaSim';
 import type { Vec3 } from '../model/spec';
 import {
   add3,
@@ -19,6 +20,10 @@ export interface PickBox {
   readonly partId?: string;
   readonly headIndex?: number;
   readonly kvHeadIndex?: 0 | 1;
+  readonly tensorKey?: GqaTensorKey;
+  readonly gridCols?: number;
+  readonly gridRows?: number;
+  readonly tokenIndex?: number;
   readonly min: Vec3;
   readonly max: Vec3;
 }
@@ -28,6 +33,10 @@ export interface PickHit {
   readonly partId?: string;
   readonly headIndex?: number;
   readonly kvHeadIndex?: 0 | 1;
+  readonly tensorKey?: GqaTensorKey;
+  readonly tokenIndex?: number;
+  readonly hitRow?: number;
+  readonly hitCol?: number;
   readonly t: number;
   readonly point: Vec3;
   readonly isFascia: boolean;
@@ -109,6 +118,10 @@ export function pointToRayDistance(point: Vec3, ray: Ray): number {
   return Math.hypot(diff[0], diff[1], diff[2]);
 }
 
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
 function findNearestBoxHit(ray: Ray, boxes: readonly PickBox[], isFascia: boolean): PickHit | null {
   let bestT = Infinity;
   let bestBox: PickBox | null = null;
@@ -127,14 +140,69 @@ function findNearestBoxHit(ray: Ray, boxes: readonly PickBox[], isFascia: boolea
   }
 
   if (!bestBox) return null;
+  const point = add3(ray.origin, scale3(ray.direction, bestT));
+
+  let hitRow: number | undefined;
+  let hitCol: number | undefined;
+  if (bestBox.gridCols && bestBox.gridRows && bestBox.gridCols > 0 && bestBox.gridRows > 0) {
+    // Matches SheetsPass top-face UV: col 0 at min.x (-X), row 0 at min.z (-Z)
+    const u = clamp01((point[0] - bestBox.min[0]) / Math.max(1e-6, bestBox.max[0] - bestBox.min[0]));
+    const vFromTop = clamp01((point[2] - bestBox.min[2]) / Math.max(1e-6, bestBox.max[2] - bestBox.min[2]));
+    hitCol = Math.min(bestBox.gridCols - 1, Math.max(0, Math.floor(u * bestBox.gridCols)));
+    hitRow = Math.min(bestBox.gridRows - 1, Math.max(0, Math.floor(vFromTop * bestBox.gridRows)));
+  }
+
   return {
     bayId: bestBox.bayId,
     partId: bestBox.partId,
     headIndex: bestBox.headIndex,
     kvHeadIndex: bestBox.kvHeadIndex,
+    tensorKey: bestBox.tensorKey,
+    tokenIndex: bestBox.tokenIndex,
+    hitRow,
+    hitCol,
     t: bestT,
-    point: add3(ray.origin, scale3(ray.direction, bestT)),
+    point,
     isFascia,
+  };
+}
+
+/** Resolve a ray-cast PickHit on a live GQA sheet into an exact logical GqaCellRef. */
+export function pickHitToGqaCell(
+  hit: PickHit | null,
+  activeGroup0Head = 0,
+  activeGroup1Head = 16,
+): GqaCellRef | null {
+  if (!hit || !hit.tensorKey || hit.hitRow === undefined || hit.hitCol === undefined) {
+    return null;
+  }
+  const tensor = hit.tensorKey;
+  if (tensor === 'scores' || tensor === 'softmax') {
+    const grp: 0 | 1 = hit.kvHeadIndex === 1 ? 1 : 0;
+    const headIdx = grp === 0 ? activeGroup0Head : activeGroup1Head;
+    return {
+      tensor,
+      row: hit.hitRow,
+      col: hit.hitCol,
+      headIndex: headIdx,
+      kvHeadIndex: grp,
+    };
+  }
+  if (tensor === 'kv_k' || tensor === 'kv_v') {
+    return {
+      tensor,
+      row: 0,
+      col: hit.hitCol,
+      kvHeadIndex: hit.kvHeadIndex === 1 ? 1 : 0,
+      tokenIndex: hit.tokenIndex ?? 0,
+    };
+  }
+  return {
+    tensor,
+    row: hit.hitRow,
+    col: hit.hitCol,
+    headIndex: hit.headIndex,
+    kvHeadIndex: hit.kvHeadIndex,
   };
 }
 

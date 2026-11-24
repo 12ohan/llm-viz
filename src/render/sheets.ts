@@ -56,6 +56,7 @@ layout(location = 9) in float iHighlight;
 layout(location = 10) in float iSeed;
 layout(location = 11) in vec4 iTexRect;
 layout(location = 12) in float iValueScale;
+layout(location = 13) in vec2 iFlags;
 
 uniform mat4 uViewProj;
 
@@ -69,6 +70,7 @@ flat out int vHighlight;
 flat out float vSeed;
 flat out vec4 vTexRect;
 flat out float vValueScale;
+flat out vec2 vFlags;
 
 void main() {
   vec3 worldPos = iCenter + aPos * iExtent;
@@ -83,6 +85,7 @@ void main() {
   vSeed = iSeed;
   vTexRect = iTexRect;
   vValueScale = iValueScale;
+  vFlags = iFlags;
 }
 `;
 
@@ -90,6 +93,7 @@ void main() {
  * Adapted from bbycroft/llm-viz blockRender.ts adaptive cell-grid LOD + calm drafting-table
  * surface shader. Uses fwidth() on logical cell coordinates so fine matrix cells smoothly
  * emerge as you zoom in and stay completely clean/unaliased when pulled back.
+ * Samples live Float32 RG32F values (R = value, G = masked -inf flag) at exact cell centers.
  */
 const SHEETS_FS = `#version 300 es
 precision highp float;
@@ -104,9 +108,8 @@ flat in int vHighlight;
 flat in float vSeed;
 flat in vec4 vTexRect;
 flat in float vValueScale;
+flat in vec2 vFlags;
 
-// Bound to a 1x1 dummy texture in Increment 1; Increment 2 uploads real Float32 tensors here
-// without changing geometry or shader structure.
 uniform sampler2D uValueTex;
 
 out vec4 fragColor;
@@ -142,6 +145,19 @@ vec3 roleBaseColor(int role) {
   return vec3(0.875, 0.888, 0.906);                // neutral matte paper-slate
 }
 
+vec3 rolePositiveColor(int role) {
+  // Restrained, high-clarity semantic tints for positive live Float32 values
+  if (role == 1) return vec3(0.28, 0.37, 0.64); // weights: muted indigo-slate
+  if (role == 2) return vec3(0.16, 0.53, 0.43); // activations: muted emerald-teal
+  if (role == 3) return vec3(0.64, 0.47, 0.20); // rmsnorm: warm ochre-bronze
+  if (role == 4) return vec3(0.14, 0.52, 0.49); // kv_k: cool teal-slate
+  if (role == 5) return vec3(0.18, 0.45, 0.65); // kv_v: cool steel-blue
+  if (role == 6) return vec3(0.24, 0.36, 0.66); // scores: crisp indigo-slate
+  if (role == 7) return vec3(0.12, 0.54, 0.38); // softmax: clean mineral emerald
+  if (role == 8) return vec3(0.13, 0.54, 0.37); // residual: clean emerald
+  return vec3(0.30, 0.38, 0.52);
+}
+
 vec3 roleCellAccent(int role) {
   if (role == 1) return vec3(0.32, 0.42, 0.68);
   if (role == 2) return vec3(0.24, 0.47, 0.50);
@@ -158,6 +174,7 @@ void main() {
   const vec3 OXIDE_RED = vec3(0.863, 0.298, 0.204); // #DC4C34 single highlight accent
   const vec3 BF16_GOLD = vec3(0.765, 0.545, 0.145); // restrained warm bronze-gold
   const vec3 PAPER_BG  = vec3(0.969, 0.973, 0.980); // #F7F8FA
+  const vec3 CHARCOAL_NEG = vec3(0.23, 0.28, 0.36); // calm charcoal-slate for negative values
 
   // Side edges & bottom face: plain matte neutral rim — thin architectural card edge
   if (vNormal.y < 0.5) {
@@ -200,54 +217,68 @@ void main() {
   }
 
   vec3 base = roleBaseColor(vRole);
+  vec3 posTint = rolePositiveColor(vRole);
   vec3 accent = roleCellAccent(vRole);
 
-  // FP8 frosted KV storage indicator (honest metadata tint on KV cache tracks only)
+  // FP8 frosted KV storage indicator (honest production precision metadata on KV tracks only)
   if (vFp8 > 0.5) {
-    base = mix(base, vec3(0.915, 0.928, 0.948), 0.52);
-    accent = mix(accent, vec3(0.42, 0.48, 0.58), 0.45);
+    base = mix(base, vec3(0.922, 0.934, 0.952), 0.45);
+    posTint = mix(posTint, vec3(0.36, 0.44, 0.56), 0.34);
+    accent = mix(accent, vec3(0.42, 0.48, 0.58), 0.40);
   }
 
   vec2 gridCoords = vUv * vGridDims;
-  vec2 cellIdx = floor(gridCoords);
+  float cellCol = clamp(floor(vUv.x * vGridDims.x), 0.0, vGridDims.x - 1.0);
+  float cellRow = clamp(floor((1.0 - vUv.y) * vGridDims.y), 0.0, vGridDims.y - 1.0);
+  vec2 cellIdx = vec2(cellCol, cellRow);
 
-  // --- Value surface (Increment 2 live Float32 texture hook OR calm structural tone) ---
-  float valTone = 0.0;
-  if (vTexRect.z > 0.0 && vTexRect.w > 0.0) {
-    vec2 sampleUv = vTexRect.xy + vUv * vTexRect.zw;
-    float rawVal = texture(uValueTex, sampleUv).r;
-    valTone = clamp(rawVal * vValueScale, -1.0, 1.0);
-    // Diverging cool-slate <-> warm-oxide encoding ready for Increment 2
-    vec3 negCol = mix(base, vec3(0.24, 0.39, 0.66), abs(valTone) * 0.75);
-    vec3 posCol = mix(base, OXIDE_RED, abs(valTone) * 0.72);
-    base = valTone >= 0.0 ? posCol : negCol;
+  bool isCausal = (vSheetKind == 1 || vSheetKind == 2);
+  bool isMaskedUpper = isCausal && (cellCol > cellRow);
+  bool hasLiveTex = (vTexRect.z > 0.0 && vTexRect.w > 0.0);
+
+  // --- Value surface: Live Float32 RG32F texture OR fallback structural tone ---
+  if (hasLiveTex) {
+    vec2 sampleUv = vTexRect.xy + vec2((cellCol + 0.5) / vGridDims.x, (cellRow + 0.5) / vGridDims.y) * vTexRect.zw;
+    vec2 texVal = texture(uValueTex, sampleUv).rg;
+    if (texVal.g > 0.5) {
+      isMaskedUpper = true;
+    }
+
+    if (isMaskedUpper) {
+      // Distinct muted paper-slate + delicate 45-deg drafting hatch for masked (-inf / 0) future cells
+      base = vec3(0.948, 0.953, 0.964);
+      float hatchCoord = (vUv.x + vUv.y) * max(vGridDims.x, 4.0) * 1.45;
+      float hatchLine = gridAxisAlpha(hatchCoord, 0.55) * 0.22;
+      base = mix(base, vec3(0.72, 0.76, 0.82), hatchLine);
+    } else if (vFlags.x > 0.5) {
+      // Probability [0..1] encoding (Causal Softmax): calm near-zero slate -> crisp mineral emerald
+      float prob = clamp(texVal.r * vValueScale, 0.0, 1.0);
+      float shaped = pow(prob, 0.56);
+      vec3 zeroCol = mix(vec3(0.935, 0.946, 0.944), base, 0.35);
+      base = mix(zeroCol, posTint, shaped * 0.88);
+    } else {
+      // Restrained signed Float32 diverging encoding:
+      // near 0 -> calm light slate; positive -> muted semantic role tint; negative -> calm charcoal-slate
+      float normVal = clamp(texVal.r * vValueScale, -1.0, 1.0);
+      float mag = pow(abs(normVal), 0.76);
+      vec3 neutralZero = mix(vec3(0.922, 0.932, 0.946), base, 0.38);
+      vec3 negCol = mix(neutralZero, CHARCOAL_NEG, mag * 0.72);
+      vec3 posCol = mix(neutralZero, posTint, mag * 0.76);
+      base = normVal >= 0.0 ? posCol : negCol;
+    }
+  } else if (isMaskedUpper) {
+    base = vec3(0.946, 0.952, 0.964);
+    float hatchCoord = (vUv.x + vUv.y) * max(vGridDims.x, 4.0) * 1.5;
+    float hatchLine = gridAxisAlpha(hatchCoord, 0.55) * 0.16;
+    base = mix(base, vec3(0.76, 0.79, 0.84), hatchLine);
   } else {
-    // Increment 1: restrained, low-contrast structural micro-variation (never noisy checkerboard)
     float fwMax = max(fwidth(gridCoords.x), fwidth(gridCoords.y));
     float detailVis = smoothstep(3.5, 9.0, 1.0 / max(fwMax, 1e-5));
     float h = hash21(cellIdx + vec2(vSeed * 13.7, vSeed * 5.3));
     float subtle = (h - 0.5) * 0.065 * detailVis;
     base = mix(base, accent, max(0.0, subtle * 2.2)) + vec3(min(0.0, subtle));
-  }
-
-  // --- Causal Lower-Triangle vs Masked Upper-Triangle (-inf) for Scores & Softmax ---
-  bool isCausal = (vSheetKind == 1 || vSheetKind == 2);
-  bool isMaskedUpper = false;
-  if (isCausal) {
-    // Row 0 = top (vUv.y near 1 -> row = 0), Col 0 = left (vUv.x near 0 -> col = 0)
-    // Valid causal entries satisfy col <= row; upper triangle col > row is masked (-inf -> 0).
-    float col = floor(vUv.x * vGridDims.x);
-    float row = floor((1.0 - vUv.y) * vGridDims.y);
-    if (col > row) {
-      isMaskedUpper = true;
-      base = vec3(0.946, 0.952, 0.964);
-      // Very subtle 45-degree drafting hatch in masked upper triangle when zoomed enough
-      float hatchCoord = (vUv.x + vUv.y) * max(vGridDims.x, 4.0) * 1.5;
-      float hatchLine = gridAxisAlpha(hatchCoord, 0.55) * 0.16;
-      base = mix(base, vec3(0.76, 0.79, 0.84), hatchLine);
-    } else {
-      // Active causal lower triangle: softly emphasize diagonal & recent context
-      float diagProximity = 1.0 - clamp((row - col) / max(vGridDims.x, 1.0), 0.0, 1.0);
+    if (isCausal) {
+      float diagProximity = 1.0 - clamp((cellRow - cellCol) / max(vGridDims.x, 1.0), 0.0, 1.0);
       float strength = vSheetKind == 2 ? (0.14 + 0.24 * pow(diagProximity, 1.6)) : (0.08 + 0.14 * diagProximity);
       base = mix(base, accent, strength);
     }
@@ -406,6 +437,7 @@ export class SheetsPass {
   private quadIbo!: WebGLBuffer;
   private instanceVbo!: WebGLBuffer;
   private dummyValueTex!: WebGLTexture;
+  private liveValueTex: WebGLTexture | null = null;
   private boundValueTex: WebGLTexture | null = null;
   private uViewProj!: WebGLUniformLocation | null;
   private uValueTex!: WebGLUniformLocation | null;
@@ -428,7 +460,8 @@ export class SheetsPass {
     const quadIbo = gl.createBuffer();
     const instanceVbo = gl.createBuffer();
     const dummyTex = gl.createTexture();
-    if (!vao || !quadVbo || !quadIbo || !instanceVbo || !dummyTex) {
+    const liveTex = gl.createTexture();
+    if (!vao || !quadVbo || !quadIbo || !instanceVbo || !dummyTex || !liveTex) {
       throw new Error('Failed to allocate SheetsPass WebGL resources');
     }
 
@@ -437,14 +470,22 @@ export class SheetsPass {
     this.quadIbo = quadIbo;
     this.instanceVbo = instanceVbo;
     this.dummyValueTex = dummyTex;
+    this.liveValueTex = liveTex;
 
-    // 1x1 neutral zero texture so uValueTex is always valid even before Increment 2 binds live data
+    // 1x1 neutral zero texture fallback
     gl.bindTexture(gl.TEXTURE_2D, this.dummyValueTex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
+
+    // Live Float32 RG32F value atlas texture (NEAREST filtering is core WebGL2 — zero extensions needed)
+    gl.bindTexture(gl.TEXTURE_2D, this.liveValueTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.bindTexture(gl.TEXTURE_2D, null);
 
     gl.bindVertexArray(this.vao);
@@ -477,14 +518,26 @@ export class SheetsPass {
     bindInst(10, 1, 12); // iSeed
     bindInst(11, 4, 13); // iTexRect
     bindInst(12, 1, 17); // iValueScale
+    bindInst(13, 2, 18); // iFlags (x: 0=signed diverging, 1=probability [0..1])
 
     gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
   }
 
-  /** Increment 2 hook: bind a live Float32/R32F or RGBA texture for real activation/weight values. */
+  /** Bind a custom WebGLTexture for real activation/weight values. */
   setValueTexture(tex: WebGLTexture | null): void {
     this.boundValueTex = tex;
+  }
+
+  /** Upload a live Float32 RG32F value atlas (R = value, G = masked -inf flag) directly into uValueTex. */
+  uploadValueAtlas(width: number, height: number, rg32fData: Float32Array): void {
+    if (!this.liveValueTex) return;
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.liveValueTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, width, height, 0, gl.RG, gl.FLOAT, rg32fData);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    this.boundValueTex = this.liveValueTex;
   }
 
   upload(data: Float32Array, count: number): void {
@@ -531,5 +584,9 @@ export class SheetsPass {
     gl.deleteBuffer(this.quadIbo);
     gl.deleteBuffer(this.instanceVbo);
     gl.deleteTexture(this.dummyValueTex);
+    if (this.liveValueTex) {
+      gl.deleteTexture(this.liveValueTex);
+      this.liveValueTex = null;
+    }
   }
 }

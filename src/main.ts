@@ -30,9 +30,20 @@ import {
   type CameraSnapshot,
   type ViewportMetrics,
 } from './render/camera';
+import {
+  GQA_STEPPER_STEPS,
+  runGqaSim,
+  stepperCellForState,
+  type GqaCellRef,
+} from './math/gqaSim';
 import { RenderDevice } from './render/device';
 import { LinesPass } from './render/lines';
-import { clientPointToRay, pickMacroBay, type PickHit } from './render/pick';
+import {
+  clientPointToRay,
+  pickHitToGqaCell,
+  pickMacroBay,
+  type PickHit,
+} from './render/pick';
 import { FlatFlowRibbonsPass, RibbonsPass } from './render/ribbons';
 import { SheetsPass } from './render/sheets';
 import { SolidsPass } from './render/solids';
@@ -40,6 +51,7 @@ import {
   buildGqaCutaway,
   buildMambaCutaway,
   buildMoECutaway,
+  parseQueryHeadPartId,
   type CutawaySceneGeometry,
 } from './scene/cutaways';
 import {
@@ -169,6 +181,19 @@ function cameraPoseForSection(
   }
 }
 
+function sameGqaCell(a: GqaCellRef | null, b: GqaCellRef | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.tensor === b.tensor &&
+    a.row === b.row &&
+    a.col === b.col &&
+    a.headIndex === b.headIndex &&
+    a.kvHeadIndex === b.kvHeadIndex &&
+    a.tokenIndex === b.tokenIndex
+  );
+}
+
 function cameraPoseForCutaway(
   mode: Exclude<ViewMode, 'tower'>,
   bounds: AABB,
@@ -185,15 +210,38 @@ function cameraPoseForCutaway(
       bounds, 26, 28, metrics.innerWidth, metrics.innerHeight, DEFAULT_FOV_DEG, 0.88,
     );
   }
-  // cutaway_gqa: XZ drafting-table sheet schematic with consistent top-to-bottom orientation
+  // cutaway_gqa: XZ drafting-table sheet schematic with consistent top-to-bottom orientation.
+  // Increment 2 polishes: ~6% breathing room in Near-Plan, safe narrow-viewport framing,
+  // and subtle +Z target lift on desktop so + Residual clears the docked Formula + Stepper bar.
+  const isStackedNarrow = window.innerWidth <= 900 || metrics.innerWidth < 760;
   if (gqaViewAngle === 'near_plan') {
-    return fitPerspectiveToBounds(
-      bounds, 1.5, 78, metrics.innerWidth, metrics.innerHeight, DEFAULT_FOV_DEG, 0.85,
+    const pose = fitPerspectiveToBounds(
+      bounds,
+      1.5,
+      78,
+      metrics.innerWidth,
+      metrics.innerHeight,
+      DEFAULT_FOV_DEG,
+      isStackedNarrow ? 0.78 : 0.77,
     );
+    return {
+      ...pose,
+      target: [pose.target[0], pose.target[1], pose.target[2] + (isStackedNarrow ? 0.1 : 0.75)],
+    };
   }
-  return fitPerspectiveToBounds(
-    bounds, 9, 50, metrics.innerWidth, metrics.innerHeight, DEFAULT_FOV_DEG, 0.98,
+  const pose = fitPerspectiveToBounds(
+    bounds,
+    9,
+    50,
+    metrics.innerWidth,
+    metrics.innerHeight,
+    DEFAULT_FOV_DEG,
+    isStackedNarrow ? 0.80 : 0.87,
   );
+  return {
+    ...pose,
+    target: [pose.target[0], pose.target[1], pose.target[2] + (isStackedNarrow ? 0.1 : 0.55)],
+  };
 }
 
 interface FlyAnimation {
@@ -228,6 +276,8 @@ function boot(): void {
   let geometryDirty = true;
   let pendingRafId: number | null = null;
   let flyAnim: FlyAnimation | null = null;
+  let lastStepperTickMs: number | null = null;
+  let lastStepperCellKey = '';
 
   let device: RenderDevice | null = null;
   let solidsPass: SolidsPass | null = null;
@@ -283,6 +333,34 @@ function boot(): void {
     scheduleDraw();
   };
 
+  const applyHeadSelectionToGroupHeads = (partId: string | null) => {
+    const head = parseQueryHeadPartId(partId);
+    if (head === null) return;
+    if (head < 16) state.gqaActiveGroup0Head = head;
+    else state.gqaActiveGroup1Head = head;
+  };
+
+  const activeStepperHead = (): number => {
+    const sel = parseQueryHeadPartId(state.selectedPart);
+    return sel !== null ? sel : state.gqaActiveGroup0Head;
+  };
+
+  const resolveActiveGqaCell = (): GqaCellRef | null => {
+    if (state.mode !== 'cutaway_gqa') return null;
+    if (state.gqaHoveredCell) return state.gqaHoveredCell;
+    if (state.gqaSelectedCell) return state.gqaSelectedCell;
+    if (state.gqaStepperActive) {
+      const sim = runGqaSim(state.tokens);
+      return stepperCellForState(
+        sim,
+        activeStepperHead(),
+        state.gqaStepperStep,
+        state.gqaStepperSubProgress,
+      );
+    }
+    return null;
+  };
+
   const buildActiveCutaway = (): CutawaySceneGeometry | null => {
     if (state.mode === 'cutaway_mamba') {
       return buildMambaCutaway({
@@ -308,6 +386,9 @@ function boot(): void {
         precision: state.precision,
         selectedPart: state.selectedPart,
         hoveredPart: state.hoveredPart,
+        activeGroup0Head: state.gqaActiveGroup0Head,
+        activeGroup1Head: state.gqaActiveGroup1Head,
+        activeCell: resolveActiveGqaCell(),
       });
     }
     return null;
@@ -344,6 +425,13 @@ function boot(): void {
         flatFlowPass
       ) {
         if (currentCutawayScene.sheetData && currentCutawayScene.sheetCount && currentCutawayScene.sheetCount > 0) {
+          if (currentCutawayScene.valueAtlas) {
+            sheetsPass.uploadValueAtlas(
+              currentCutawayScene.valueAtlas.width,
+              currentCutawayScene.valueAtlas.height,
+              currentCutawayScene.valueAtlas.data,
+            );
+          }
           sheetsPass.upload(currentCutawayScene.sheetData, currentCutawayScene.sheetCount);
           linesPass.upload(currentCutawayScene.lineData, currentCutawayScene.lineCount);
           flatFlowPass.upload(
@@ -422,8 +510,14 @@ function boot(): void {
     state.mode = nextMode;
     state.hoveredBay = null;
     state.hoveredPart = null;
+    state.gqaHoveredCell = null;
     if (modeChanged) {
       state.selectedPart = null;
+      state.gqaSelectedCell = null;
+      if (nextMode !== 'cutaway_gqa') {
+        state.gqaStepperPlaying = false;
+        lastStepperTickMs = null;
+      }
     }
     if (nextMode === 'cutaway_mamba') state.section = 'mamba';
     else if (nextMode === 'cutaway_moe') state.section = 'moe';
@@ -534,6 +628,15 @@ function boot(): void {
     state.hoveredBay = null;
     state.selectedPart = null;
     state.hoveredPart = null;
+    state.gqaHoveredCell = null;
+    state.gqaSelectedCell = null;
+    state.gqaActiveGroup0Head = 0;
+    state.gqaActiveGroup1Head = 16;
+    state.gqaStepperActive = false;
+    state.gqaStepperPlaying = false;
+    state.gqaStepperStep = 0;
+    state.gqaStepperSubProgress = 0;
+    lastStepperTickMs = null;
 
     if (state.mode === 'tower') {
       state.section = 'overview';
@@ -613,6 +716,13 @@ function boot(): void {
       state.tourActive = false;
       state.selectedPart = partId;
       state.hoveredPart = null;
+      applyHeadSelectionToGroupHeads(partId);
+      if (partId === null) {
+        state.gqaSelectedCell = null;
+      } else if (parseQueryHeadPartId(partId) !== null && state.gqaSelectedCell) {
+        // Clear stale cell from a different head so the newly selected head's live Scores/Softmax shine clearly
+        state.gqaSelectedCell = null;
+      }
       markDirtyAndSchedule(true);
     },
     onInspectInternals: inspectInternals,
@@ -640,6 +750,8 @@ function boot(): void {
       state.hoveredBay = null;
       state.selectedPart = null;
       state.hoveredPart = null;
+      state.gqaSelectedCell = null;
+      state.gqaHoveredCell = null;
       markDirtyAndSchedule(true);
     },
     onTourToggle: () => {
@@ -673,6 +785,87 @@ function boot(): void {
       state.shortcutsOpen = false;
       syncUi();
     },
+    onGqaStepPrev: () => {
+      state.tourActive = false;
+      state.gqaSelectedCell = null;
+      state.gqaHoveredCell = null;
+      state.gqaStepperPlaying = false;
+      lastStepperTickMs = null;
+      if (!state.gqaStepperActive) {
+        state.gqaStepperActive = true;
+        state.gqaStepperStep = GQA_STEPPER_STEPS.length - 1;
+      } else {
+        state.gqaStepperStep =
+          (state.gqaStepperStep - 1 + GQA_STEPPER_STEPS.length) % GQA_STEPPER_STEPS.length;
+      }
+      state.gqaStepperSubProgress = 0;
+      markDirtyAndSchedule(true);
+    },
+    onGqaStepNext: () => {
+      state.tourActive = false;
+      state.gqaSelectedCell = null;
+      state.gqaHoveredCell = null;
+      state.gqaStepperPlaying = false;
+      lastStepperTickMs = null;
+      if (!state.gqaStepperActive) {
+        state.gqaStepperActive = true;
+        state.gqaStepperStep = 0;
+      } else {
+        state.gqaStepperStep = (state.gqaStepperStep + 1) % GQA_STEPPER_STEPS.length;
+      }
+      state.gqaStepperSubProgress = 0;
+      markDirtyAndSchedule(true);
+    },
+    onGqaStepTogglePlay: () => {
+      state.tourActive = false;
+      state.gqaSelectedCell = null;
+      state.gqaHoveredCell = null;
+      if (state.reducedMotion) {
+        // Respect prefers-reduced-motion: step deterministically without continuous RAF loop
+        state.gqaStepperActive = true;
+        state.gqaStepperPlaying = false;
+        state.gqaStepperStep = (state.gqaStepperStep + 1) % GQA_STEPPER_STEPS.length;
+        state.gqaStepperSubProgress = 0;
+        markDirtyAndSchedule(true);
+        return;
+      }
+      if (state.gqaStepperActive && state.gqaStepperPlaying) {
+        state.gqaStepperPlaying = false;
+        lastStepperTickMs = null;
+        syncUi();
+      } else {
+        state.gqaStepperActive = true;
+        state.gqaStepperPlaying = true;
+        lastStepperTickMs = null;
+        markDirtyAndSchedule(true);
+      }
+    },
+    onGqaStepSelect: (step: number) => {
+      state.tourActive = false;
+      state.gqaSelectedCell = null;
+      state.gqaHoveredCell = null;
+      state.gqaStepperActive = true;
+      state.gqaStepperPlaying = false;
+      lastStepperTickMs = null;
+      state.gqaStepperStep = Math.max(0, Math.min(GQA_STEPPER_STEPS.length - 1, step));
+      state.gqaStepperSubProgress = 0;
+      markDirtyAndSchedule(true);
+    },
+    onGqaStepScrub: (progress01: number) => {
+      state.tourActive = false;
+      state.gqaSelectedCell = null;
+      state.gqaHoveredCell = null;
+      state.gqaStepperActive = true;
+      state.gqaStepperPlaying = false;
+      lastStepperTickMs = null;
+      state.gqaStepperSubProgress = Math.max(0, Math.min(0.9999, progress01));
+      markDirtyAndSchedule(true);
+    },
+    onGqaClearCell: () => {
+      state.gqaSelectedCell = null;
+      state.gqaHoveredCell = null;
+      markDirtyAndSchedule(true);
+    },
   });
 
   const drawFrame = (nowMs: number) => {
@@ -694,7 +887,42 @@ function boot(): void {
       }
     }
 
+    // Live Causal Attention Stepper playback loop (GQA Cutaway only, respects reducedMotion)
+    let stepperChangedUi = false;
+    if (
+      state.mode === 'cutaway_gqa' &&
+      state.gqaStepperActive &&
+      state.gqaStepperPlaying &&
+      !state.reducedMotion
+    ) {
+      const dtSec =
+        lastStepperTickMs === null ? 0 : Math.max(0, Math.min(0.1, (nowMs - lastStepperTickMs) / 1000));
+      lastStepperTickMs = nowMs;
+      const nextProgress = state.gqaStepperSubProgress + dtSec / 2.2;
+      if (nextProgress >= 1) {
+        state.gqaStepperSubProgress = nextProgress % 1;
+        state.gqaStepperStep = (state.gqaStepperStep + 1) % GQA_STEPPER_STEPS.length;
+      } else {
+        state.gqaStepperSubProgress = nextProgress;
+      }
+      const cell = resolveActiveGqaCell();
+      const key = cell
+        ? `${state.gqaStepperStep}:${cell.tensor}:${cell.row}:${cell.col}:${cell.headIndex ?? -1}`
+        : '';
+      if (key !== lastStepperCellKey) {
+        lastStepperCellKey = key;
+        geometryDirty = true;
+      }
+      stepperChangedUi = true;
+      continueAnimating = true;
+    } else {
+      lastStepperTickMs = null;
+    }
+
     rebuildSceneIfNeeded();
+    if (stepperChangedUi) {
+      syncUi();
+    }
 
     const activeBounds =
       state.mode === 'tower'
@@ -755,12 +983,21 @@ function boot(): void {
         hoveredBay: state.hoveredBay,
       });
     } else if (currentCutawayScene) {
+      const isMobileStack = window.innerWidth <= 900;
+      const topInsetPx = isMobileStack ? 12 : 84;
+      const bottomInsetPx = isMobileStack
+        ? 12
+        : state.mode === 'cutaway_gqa' && !controlEls.gqaMathDock.hidden
+          ? Math.max(102, controlEls.gqaMathDock.offsetHeight + 18)
+          : 30;
       overlay.updateCutaway({
         scene: currentCutawayScene,
         snapshot: currentSnapshot,
         tokens: state.tokens,
         selectedPart: state.selectedPart,
         hoveredPart: state.hoveredPart,
+        topInsetPx,
+        bottomInsetPx,
       });
     }
 
@@ -983,6 +1220,17 @@ function boot(): void {
           state.hoveredBay = hitBay;
           markDirtyAndSchedule(true);
         }
+      } else if (state.mode === 'cutaway_gqa') {
+        const hitPart =
+          hit?.headIndex !== undefined ? `q-head-${hit.headIndex}` : hit?.partId ?? null;
+        const hitCell = hit
+          ? pickHitToGqaCell(hit, state.gqaActiveGroup0Head, state.gqaActiveGroup1Head)
+          : null;
+        if (hitPart !== state.hoveredPart || !sameGqaCell(hitCell, state.gqaHoveredCell)) {
+          state.hoveredPart = hitPart;
+          state.gqaHoveredCell = hitCell;
+          markDirtyAndSchedule(true);
+        }
       } else {
         const hitPart =
           hit?.headIndex !== undefined ? `q-head-${hit.headIndex}` : hit?.partId ?? null;
@@ -1008,6 +1256,23 @@ function boot(): void {
         if (hitBay !== null) state.tourActive = false;
         state.selectedBay = hitBay;
         state.hoveredBay = hitBay;
+      } else if (state.mode === 'cutaway_gqa') {
+        const hitPart =
+          hit?.headIndex !== undefined ? `q-head-${hit.headIndex}` : hit?.partId ?? null;
+        if (hitPart !== null) state.tourActive = false;
+        applyHeadSelectionToGroupHeads(hitPart);
+        const hitCell = hit
+          ? pickHitToGqaCell(hit, state.gqaActiveGroup0Head, state.gqaActiveGroup1Head)
+          : null;
+        state.selectedPart = hitPart;
+        state.hoveredPart = hitPart;
+        state.gqaSelectedCell = hitCell;
+        state.gqaHoveredCell = hitCell;
+        if (hitCell !== null) {
+          state.gqaStepperPlaying = false;
+          state.gqaStepperActive = false;
+          lastStepperTickMs = null;
+        }
       } else {
         const hitPart =
           hit?.headIndex !== undefined ? `q-head-${hit.headIndex}` : hit?.partId ?? null;
@@ -1040,9 +1305,10 @@ function boot(): void {
   });
 
   canvas.addEventListener('pointerleave', () => {
-    if (state.hoveredBay !== null || state.hoveredPart !== null) {
+    if (state.hoveredBay !== null || state.hoveredPart !== null || state.gqaHoveredCell !== null) {
       state.hoveredBay = null;
       state.hoveredPart = null;
+      state.gqaHoveredCell = null;
       markDirtyAndSchedule(true);
     }
   });
@@ -1085,6 +1351,30 @@ function boot(): void {
       return;
     }
 
+    if (key === ' ' && state.mode === 'cutaway_gqa') {
+      ev.preventDefault();
+      state.tourActive = false;
+      state.gqaSelectedCell = null;
+      state.gqaHoveredCell = null;
+      if (state.reducedMotion) {
+        state.gqaStepperActive = true;
+        state.gqaStepperPlaying = false;
+        state.gqaStepperStep = (state.gqaStepperStep + 1) % GQA_STEPPER_STEPS.length;
+        state.gqaStepperSubProgress = 0;
+        markDirtyAndSchedule(true);
+      } else if (state.gqaStepperActive && state.gqaStepperPlaying) {
+        state.gqaStepperPlaying = false;
+        lastStepperTickMs = null;
+        syncUi();
+      } else {
+        state.gqaStepperActive = true;
+        state.gqaStepperPlaying = true;
+        lastStepperTickMs = null;
+        markDirtyAndSchedule(true);
+      }
+      return;
+    }
+
     if (key === 'Escape') {
       if (state.shortcutsOpen) {
         ev.preventDefault();
@@ -1094,6 +1384,14 @@ function boot(): void {
         ev.preventDefault();
         state.memoryChartOpen = false;
         syncUi();
+      } else if (state.gqaSelectedCell !== null || state.gqaStepperActive) {
+        ev.preventDefault();
+        state.gqaSelectedCell = null;
+        state.gqaHoveredCell = null;
+        state.gqaStepperActive = false;
+        state.gqaStepperPlaying = false;
+        lastStepperTickMs = null;
+        markDirtyAndSchedule(true);
       } else if (state.selectedPart !== null || state.hoveredPart !== null) {
         ev.preventDefault();
         state.selectedPart = null;

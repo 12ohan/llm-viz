@@ -1,3 +1,4 @@
+import type { GqaCellRef } from '../math/gqaSim';
 import type { PrecisionMode, Vec3 } from './spec';
 
 export interface CameraPose {
@@ -37,6 +38,14 @@ export interface SceneState {
   mambaBayId: 1 | 42;
   gqaBayId: 6 | 43;
   gqaViewAngle: GqaViewAngle;
+  gqaActiveGroup0Head: number;
+  gqaActiveGroup1Head: number;
+  gqaHoveredCell: GqaCellRef | null;
+  gqaSelectedCell: GqaCellRef | null;
+  gqaStepperActive: boolean;
+  gqaStepperPlaying: boolean;
+  gqaStepperStep: number;
+  gqaStepperSubProgress: number;
   camera: CameraPose;
   savedMacroCamera: CameraPose;
   reducedMotion: boolean;
@@ -102,6 +111,14 @@ export function createInitialState(defaultPose: CameraPose, reducedMotion = fals
     mambaBayId: 1,
     gqaBayId: 6,
     gqaViewAngle: 'three_quarter',
+    gqaActiveGroup0Head: 0,
+    gqaActiveGroup1Head: 16,
+    gqaHoveredCell: null,
+    gqaSelectedCell: null,
+    gqaStepperActive: false,
+    gqaStepperPlaying: false,
+    gqaStepperStep: 0,
+    gqaStepperSubProgress: 0,
     camera: cloneCameraPose(defaultPose),
     savedMacroCamera: cloneCameraPose(defaultPose),
     reducedMotion,

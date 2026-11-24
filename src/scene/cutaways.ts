@@ -1,3 +1,4 @@
+import type { GqaCellFormula, GqaSimResult } from '../math/gqaSim';
 import {
   formatBayId,
   NEMOTRON_SPEC,
@@ -6,6 +7,7 @@ import {
 } from '../model/spec';
 import type { AABB } from '../render/camera';
 import type { PickBox } from '../render/pick';
+import type { GqaValueAtlas } from './gqaAtlas';
 import {
   CELL_ACTIVATION_GREEN,
   CELL_MOE_AMBER,
@@ -84,6 +86,8 @@ export interface GqaCutawayStats {
   readonly usesSmoothRibbons?: boolean;
   readonly voxelArrowCount?: number;
   readonly selectedQueryHead?: number | null;
+  readonly activeGroup0Head?: number;
+  readonly activeGroup1Head?: number;
 }
 
 export interface CutawaySceneGeometry {
@@ -100,6 +104,9 @@ export interface CutawaySceneGeometry {
   readonly flowVertices?: Float32Array;
   readonly flowIndices?: Uint32Array;
   readonly calipers?: readonly DimensionCaliper[];
+  readonly valueAtlas?: GqaValueAtlas;
+  readonly gqaSim?: GqaSimResult;
+  readonly activeFormula?: GqaCellFormula | null;
   readonly fitBounds: AABB;
   readonly landmarks: readonly LandmarkAnchor[];
   readonly kvDepthTicks: readonly KvDepthTickAnchor[];
