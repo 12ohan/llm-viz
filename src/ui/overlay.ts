@@ -51,6 +51,10 @@ export interface ActiveSheetCellGrid {
   readonly rowLabels?: readonly string[];
   readonly colDimLabel?: string; // e.g. "K = 6"
   readonly rowDimLabel?: string; // e.g. "Q = 1"
+  /** When true, keeps `colLabels` data intact while omitting exterior col header pills (e.g. twin adjacent strips). */
+  readonly suppressColHeaders?: boolean;
+  /** When true, keeps `rowLabels` data intact while omitting exterior row header pills (e.g. beside Softmax Agg). */
+  readonly suppressRowHeaders?: boolean;
 }
 
 export interface CutawayOverlayUpdateInput {
@@ -681,28 +685,34 @@ function ensureOverlayV3Styles(): void {
     border: 1px solid rgba(255, 255, 255, 0.14);
     color: #F8FAFC;
     box-shadow: 0 6px 18px rgba(15, 23, 42, 0.24);
+    overflow: hidden; box-sizing: border-box;
     will-change: transform;
   }
   .ov-cell-popover-head {
     display: flex; align-items: center; gap: 5px;
+    min-width: 0; max-width: 100%; overflow: hidden;
     font-size: 10px; line-height: 13px; white-space: nowrap;
   }
   .ov-cell-popover-tensor {
+    flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
     font-family: var(--font-sans, system-ui, -apple-system, sans-serif);
     font-weight: 700; color: #FFFFFF;
   }
   .ov-cell-popover-coord {
+    flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
     font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
     font-weight: 600; color: #94A3B8; font-variant-numeric: tabular-nums;
   }
   .ov-cell-popover-badge {
+    flex: 0 1 auto; max-width: 112px; min-width: 0; overflow: hidden; text-overflow: ellipsis;
     margin-left: auto; padding: 0 4px; border-radius: 3px;
     background-color: rgba(255, 255, 255, 0.12); color: #E2E8F0;
     font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
     font-size: 9px; font-weight: 600;
   }
   .ov-cell-popover-body {
-    display: flex; align-items: center; gap: 6px; white-space: nowrap;
+    display: flex; align-items: center; gap: 6px;
+    min-width: 0; max-width: 100%; overflow: hidden; white-space: nowrap;
   }
   .ov-cell-popover-dots {
     display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0;
@@ -711,6 +721,7 @@ function ensureOverlayV3Styles(): void {
     width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
   }
   .ov-cell-popover-eq {
+    flex: 1 1 auto; min-width: 0;
     font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
     font-size: 10.5px; line-height: 14px; color: #E2E8F0;
     overflow: hidden; text-overflow: ellipsis;
@@ -1807,6 +1818,7 @@ export class MacroOverlay {
 
     // --- 1. On-Cell Numeric Readouts (strict 64-node hard cap across all grids) ---
     let cellNumCursor = 0;
+    const cellNumRects: PlacedRect[] = [];
 
     const placeCellNum = (pg: PreparedGrid, col: number, row: number): boolean => {
       if (cellNumCursor >= MAX_OVERLAY_CELL_NUM_NODES) return false;
@@ -1856,6 +1868,7 @@ export class MacroOverlay {
       el.classList.toggle('is-masked', isMasked);
       el.style.display = 'inline-flex';
       el.style.transform = `translate3d(${lx.toFixed(1)}px, ${ly.toFixed(1)}px, 0)`;
+      cellNumRects.push({ x0: lx, y0: ly, x1: lx + w, y1: ly + h });
       return true;
     };
 
@@ -1952,6 +1965,7 @@ export class MacroOverlay {
       ly = clamp(ly, minY, Math.max(minY, maxY - h));
 
       if (overlapsAny(occupied, lx, ly, lx + w, ly + h)) return;
+      if (overlapsAny(cellNumRects, lx, ly, lx + w, ly + h)) return;
 
       const el = this.axisHeaderNodes[headerCursor++];
       el.textContent = text;
@@ -1967,9 +1981,12 @@ export class MacroOverlay {
       const { grid, frame, faceLy } = pg;
       const safeCols = Math.max(1, grid.cols);
       const safeRows = Math.max(1, grid.rows);
+      const showColLabels = !grid.suppressColHeaders && Boolean(grid.colLabels && grid.colLabels.length > 0);
+      const showRowLabels = !grid.suppressRowHeaders && Boolean(grid.rowLabels && grid.rowLabels.length > 0);
 
       // Prioritize active row & active column headers first
       if (
+        showRowLabels &&
         grid.rowLabels &&
         grid.activeRow !== undefined &&
         grid.activeRow >= 0 &&
@@ -1986,6 +2003,7 @@ export class MacroOverlay {
       }
 
       if (
+        showColLabels &&
         grid.colLabels &&
         grid.activeCol !== undefined &&
         grid.activeCol >= 0 &&
@@ -2025,7 +2043,7 @@ export class MacroOverlay {
       }
 
       // Remaining row labels (left edge)
-      if (grid.rowLabels) {
+      if (showRowLabels && grid.rowLabels) {
         const count = Math.min(grid.rows, grid.rowLabels.length);
         for (let r = 0; r < count && headerCursor < MAX_OVERLAY_AXIS_HEADER_NODES; r++) {
           if (r === grid.activeRow) continue;
@@ -2040,7 +2058,7 @@ export class MacroOverlay {
       }
 
       // Remaining column labels (top edge)
-      if (grid.colLabels) {
+      if (showColLabels && grid.colLabels) {
         const count = Math.min(grid.cols, grid.colLabels.length);
         for (let c = 0; c < count && headerCursor < MAX_OVERLAY_AXIS_HEADER_NODES; c++) {
           if (c === grid.activeCol) continue;

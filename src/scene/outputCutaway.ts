@@ -1649,12 +1649,53 @@ export function buildOutputCutaway(
       if (hasOpA) operandColors.push('indigo');
       if (hasOpB) operandColors.push('teal');
       operandColors.push('red');
+      const c = activeFormula.cell;
+      const cTok = Math.max(0, Math.min(T - 1, c.tokenIndex ?? focusTok));
+      const cAbsT = offset + cTok;
+      const cVocab = Math.max(0, Math.min(vocabSize - 1, c.vocabId ?? c.row));
+      const cWord = model.vocab[cVocab] ?? `id:${cVocab}`;
+      const popTensorLabel =
+        c.tensor === 'residual_in'
+          ? 'Bay 52 Y'
+          : c.tensor === 'final_norm'
+            ? 'Final RMSNorm'
+            : c.tensor === 'w_lm_head'
+              ? 'Untied W_lm_head'
+              : c.tensor === 'logits'
+                ? 'Output Logits'
+                : 'Output Probs';
+      const popCoordLabel =
+        c.tensor === 'residual_in' || c.tensor === 'final_norm'
+          ? `[t${cAbsT}, ch=${c.col}]`
+          : c.tensor === 'w_lm_head'
+            ? `[v=${cVocab} "${cWord}", ch=${c.col}]`
+            : `[v=${cVocab} "${cWord}" | t${cAbsT}]`;
+      const popBadge =
+        c.tensor === 'residual_in'
+          ? 'Bay 52'
+          : c.tensor === 'final_norm'
+            ? `ε=${epsLabel}`
+            : c.tensor === 'w_lm_head'
+              ? 'Untied ≠ W_emb'
+              : c.tensor === 'logits'
+                ? 'W_lm · U'
+                : `Rank #${smSummary.ranks[cVocab] ?? 1}`;
+      const popEq =
+        c.tensor === 'residual_in'
+          ? `Y₅₂[ch${c.col}, t${cAbsT}] · rms=${finalNorm.rms[cTok].toFixed(2)}`
+          : c.tensor === 'final_norm'
+            ? `(${fmtSigned(residualIn[c.col * T + cTok], 2)} / ${finalNorm.rms[cTok].toFixed(2)}) · γ[${c.col}]`
+            : c.tensor === 'w_lm_head'
+              ? `W_lm_head[${cVocab}, ch${c.col}] (≠ W_embed)`
+              : c.tensor === 'logits'
+                ? `Σ_{i=0..${d - 1}} W_lm_head[${cVocab}, i] · U_final[i, t${cAbsT}]`
+                : `exp(${fmtSigned(lmHead.logits[cVocab * T + cTok], 2)} − ${fmtSigned(smSummary.maxLogit, 2)}) / Σexp`;
       cellPopover = {
         world: targetSpan.frontPoint,
-        tensorLabel: activeFormula.tensorLabel,
-        coordLabel: activeFormula.coordLabel,
-        badge: activeFormula.headBadge ?? undefined,
-        equation: activeFormula.equation,
+        tensorLabel: popTensorLabel,
+        coordLabel: popCoordLabel,
+        badge: popBadge,
+        equation: popEq,
         valueText: `= ${activeFormula.valueText}`,
         operandColors,
         sourceWorlds: sourceWorlds.length > 0 ? sourceWorlds : undefined,
@@ -1688,6 +1729,7 @@ export function buildOutputCutaway(
       readonly rowLabels?: readonly string[];
       readonly colDimLabel?: string;
       readonly rowDimLabel?: string;
+      readonly suppressRowHeaders?: boolean;
     },
   ): void => {
     const rec = b.sheetRegistry.get(regKey);
@@ -1710,6 +1752,7 @@ export function buildOutputCutaway(
       rowLabels: optsGrid.rowLabels,
       colDimLabel: optsGrid.colDimLabel,
       rowDimLabel: optsGrid.rowDimLabel,
+      ...(optsGrid.suppressRowHeaders ? { suppressRowHeaders: true } : {}),
     });
   };
 
@@ -1725,6 +1768,7 @@ export function buildOutputCutaway(
     activeRow: activeFormula?.cell.tensor === 'probs' ? activeFormula.cell.row : (top5[0]?.tokenId ?? 0),
     colLabels: [`t${absFocusT} ${focusWord}`],
     rowLabels: vocabLabels,
+    suppressRowHeaders: true,
     colDimLabel: 'P',
     rowDimLabel: `V = ${vocabSize}`,
   });

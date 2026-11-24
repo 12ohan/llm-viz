@@ -782,6 +782,7 @@ export function buildMoeActiveCellGrids(params: {
   const grids: { readonly key: string; readonly grid: ActiveSheetCellGrid }[] = [];
 
   // 1. Top-6 Normalized Weights [cols=6, rows=1] with expert IDs E031..
+  const hasUnbiasedTwin = sheetRegistry.has('topk_unbiased');
   const topkRec = sheetRegistry.get('topk_weights');
   if (topkRec) {
     const base = frameAxes(topkRec);
@@ -806,6 +807,7 @@ export function buildMoeActiveCellGrids(params: {
         colLabels: expertLabels,
         rowLabels: [`t${absFocusToken}`],
         colDimLabel: 'Top-6 (×2.5)',
+        ...(hasUnbiasedTwin ? { suppressColHeaders: true } : {}),
       },
     });
   }

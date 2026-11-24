@@ -574,10 +574,16 @@ export function buildMambaCellPopover(
   if (hasOpB) operandColors.push('teal');
   operandColors.push('red');
 
+  // Keep popover header concise so tensorLabel + coordLabel + badge fit cleanly inside max-width 360px
+  const compactTensorLabel = activeFormula.tensorLabel.replace(/\s*\(H\d{2}\)\s*$/, '');
+  const compactCoordLabel = activeFormula.coordLabel
+    .replace(/^[A-Za-z_]+\[/, '[')
+    .replace(/\("[^"]*"\)/g, '');
+
   return {
     world: targetWorld,
-    tensorLabel: activeFormula.tensorLabel,
-    coordLabel: activeFormula.coordLabel,
+    tensorLabel: compactTensorLabel,
+    coordLabel: compactCoordLabel,
     ...(activeFormula.headBadge ? { badge: activeFormula.headBadge } : {}),
     equation: formatConciseMambaPopoverEquation(activeFormula),
     valueText: `= ${activeFormula.valueText}`,

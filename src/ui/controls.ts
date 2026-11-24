@@ -976,7 +976,7 @@ export class MacroControls {
     if (editorialKey !== this.lastEditorialKey) {
       this.lastEditorialKey = editorialKey;
       if (state.tourActive) {
-        this.renderWalkthroughPanel(state, decodeSession);
+        this.renderWalkthroughPanel(state, activeCutaway, activeExecution, decodeSession);
       } else if (isTower) {
         this.renderTowerEditorial(
           state.section,
@@ -1289,6 +1289,8 @@ export class MacroControls {
 
   private renderWalkthroughPanel(
     state: SceneState,
+    cutaway: CutawaySceneGeometry | null = null,
+    activeExecution: HybridExecutionResult | null = null,
     decodeSession: HybridDecodeSession | null = null,
   ): void {
     const beat = getWalkthroughBeat(state.tourBeat);
@@ -1603,7 +1605,13 @@ export class MacroControls {
     exitBtn.addEventListener('click', () => this.cb.onTourExit());
     actions.appendChild(exitBtn);
 
+    const breadcrumb =
+      state.mode !== 'tower'
+        ? this.buildCrossBayBreadcrumb(state, cutaway, activeExecution, decodeSession)
+        : null;
+
     panel.append(navBar, subRow);
+    if (breadcrumb) panel.appendChild(breadcrumb);
     if (exploringPill) panel.appendChild(exploringPill);
     panel.append(bodyRow, actions);
   }

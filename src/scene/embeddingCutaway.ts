@@ -1184,14 +1184,35 @@ export function buildEmbeddingCutaway(
       if (hasOpA) operandColors.push('indigo');
       if (hasOpB) operandColors.push('teal');
       operandColors.push('red');
+      const c = activeFormula.cell;
+      const popTensorLabel =
+        c.tensor === 'w_embed'
+          ? 'Embedding W_embed'
+          : c.tensor === 'x_embed'
+            ? 'Embedding X₀'
+            : 'Embedding Tokens';
+      const popCoordLabel =
+        c.tensor === 'w_embed'
+          ? `[v=${c.row} "${model.vocab[c.row] ?? ''}", ch=${c.col}]`
+          : c.tensor === 'x_embed'
+            ? `[ch=${c.row}, t${offset + c.col}]`
+            : `t${offset + c.row} "${tokenLabels[c.row] ?? ''}"`;
+      const popBadge =
+        c.tensor === 'w_embed' ? 'Untied' : c.tensor === 'x_embed' ? 'NoPE Copy' : 'NoPE';
+      const popEq =
+        c.tensor === 'w_embed'
+          ? `W_embed[${c.row} ("${model.vocab[c.row] ?? ''}"), ch${c.col}]`
+          : c.tensor === 'x_embed'
+            ? `X₀[ch${c.row}, t${offset + c.col}] ← W_embed[#${c.vocabId ?? tokenIds[c.col] ?? 0}, ch${c.row}]`
+            : `Lookup row #${c.vocabId ?? tokenIds[c.row] ?? 0} in W_embed`;
       cellPopover = {
         world: targetSpan.frontPoint,
-        tensorLabel: activeFormula.tensorLabel,
-        coordLabel: activeFormula.coordLabel,
-        badge: activeFormula.headBadge ?? undefined,
-        equation: activeFormula.equation,
+        tensorLabel: popTensorLabel,
+        coordLabel: popCoordLabel,
+        badge: popBadge,
+        equation: popEq,
         valueText:
-          activeFormula.cell.tensor === 'token_strip'
+          c.tensor === 'token_strip'
             ? activeFormula.valueText
             : `= ${activeFormula.valueText}`,
         operandColors,
