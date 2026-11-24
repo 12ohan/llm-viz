@@ -1,6 +1,8 @@
 import {
   formatMambaHeadId,
   mambaGroupForHead,
+  readMambaConvTapValue,
+  readMambaPriorSsmValue,
   type MambaCellFormula,
   type MambaCellRef,
   type MambaSheetSpan,
@@ -46,6 +48,10 @@ import {
   SHEET_INSTANCE_FLOATS,
   SHEET_KIND_GHOST_RAIL,
   SHEET_KIND_STANDARD,
+  SHEET_REVEAL_FLOATS,
+  SHEET_REVEAL_NONE,
+  SHEET_REVEAL_ROW_MAJOR,
+  SHEET_REVEAL_UNCOMPUTED,
   SHEET_ROLE_ACTIVATION,
   SHEET_ROLE_KV_K,
   SHEET_ROLE_KV_V,
@@ -56,7 +62,12 @@ import {
   SHEET_ROLE_WEIGHT,
 } from '../render/sheets';
 import type { AtlasSlice } from './atlasPacker';
-import type { CutawayPartInfo, CutawaySceneGeometry } from './cutaways';
+import type {
+  ActiveSheetCellGrid,
+  CellPopoverSpec,
+  CutawayPartInfo,
+  CutawaySceneGeometry,
+} from './cutaways';
 import type { MambaValueAtlas } from './mambaAtlas';
 import {
   CELL_OP_A_FILL,
@@ -258,9 +269,729 @@ interface SpatialMambaSheetSpec {
   readonly cellFamily: number;
 }
 
+export interface MambaRevealParams {
+  readonly stepperStep: number;
+  readonly subProgress: number;
+  readonly clampedT: number;
+  readonly activeHead: number;
+  readonly activeGroup: number;
+  readonly stateTokIdx: number;
+  readonly activeCell: MambaCellRef | null;
+  readonly sim: MambaSimResult;
+}
+
+/**
+ * Compute per-sheet V2 progressive accumulation reveal tuple
+ * `[revealMode, colFrontier, rowFrontier, pulsePhase]` for Mamba-2 Math Stepper steps 0..5.
+ *
+ * Critical architectural invariants:
+ * - Learned weights (`w_in`, `w_out`), `input`, and carried prior state `H_{t-1}` (`h_prev`)
+ *   ALWAYS stay `SHEET_REVEAL_NONE` (never ghosted as uncomputed, even in Step 1 or seeded AR Decode).
+ * - Step 4 (`stepperStep === 3`, SSM Update) sweeps `H_t` (`h_curr`, 4×4) with `SHEET_REVEAL_ROW_MAJOR`
+ *   at `(col = activeCell.col, row = activeCell.row)` while downstream `y`, `y_norm`, `residual`
+ *   render as `SHEET_REVEAL_UNCOMPUTED`.
+ */
+export function computeMambaSheetReveal(
+  params: MambaRevealParams,
+  sheet: {
+    readonly tensorKey?: MambaTensorKey;
+    readonly partId: string;
+    readonly headIndex?: number;
+    readonly sheetKind?: number;
+  },
+): readonly [number, number, number, number] {
+  if (sheet.sheetKind === SHEET_KIND_GHOST_RAIL || sheet.partId === 'seq-rail') {
+    return [SHEET_REVEAL_NONE, 0, 0, 0];
+  }
+
+  const key = sheet.tensorKey;
+  // Input X, learned weights (W_in, W_out), and carried prior SSM state H_{t-1} are always revealed
+  if (key === 'input' || key === 'w_in' || key === 'w_out' || key === 'h_prev') {
+    return [SHEET_REVEAL_NONE, 0, 0, 0];
+  }
+
+  const { stepperStep, subProgress, clampedT, activeHead, activeGroup, stateTokIdx, activeCell, sim } =
+    params;
+  const step = Math.max(0, Math.min(5, Math.round(stepperStep)));
+  const cT = Math.max(1, clampedT);
+  const p01 = Number.isFinite(subProgress) ? Math.max(0, Math.min(0.9999, subProgress)) : 0.25;
+  const pulse = Number.isFinite(subProgress) ? ((subProgress * 4) % 1 + 1) % 1 : 0.25;
+  const clampIdx = (v: number, max: number) => Math.max(0, Math.min(max - 1, Math.trunc(v)));
+
+  // Step 1 (stepperStep === 0): Pre-Layer RMSNorm
+  if (step === 0) {
+    if (key === 'rmsnorm') {
+      const col =
+        activeCell?.tensor === 'rmsnorm'
+          ? clampIdx(activeCell.col, sim.d)
+          : clampIdx(Math.floor(p01 * sim.d), sim.d);
+      const row =
+        activeCell?.tensor === 'rmsnorm'
+          ? clampIdx(activeCell.row, cT)
+          : clampIdx(stateTokIdx, cT);
+      return [SHEET_REVEAL_ROW_MAJOR, col, row, pulse];
+    }
+    return [SHEET_REVEAL_UNCOMPUTED, 0, 0, 0];
+  }
+
+  // Step 2 (stepperStep === 1): Fused In-Proj -> z, xBC_pre, Δt
+  if (step === 1) {
+    if (key === 'rmsnorm') return [SHEET_REVEAL_NONE, 0, 0, 0];
+    if (key === 'z') {
+      if (activeCell?.tensor === 'z') {
+        return [
+          SHEET_REVEAL_ROW_MAJOR,
+          clampIdx(activeCell.col, sim.dInner),
+          clampIdx(activeCell.row, cT),
+          pulse,
+        ];
+      }
+      if (activeCell?.tensor === 'xbc_pre' || activeCell?.tensor === 'dt') {
+        return [SHEET_REVEAL_NONE, 0, 0, 0];
+      }
+      return [
+        SHEET_REVEAL_ROW_MAJOR,
+        clampIdx(Math.floor(p01 * sim.dInner), sim.dInner),
+        clampIdx(stateTokIdx, cT),
+        pulse,
+      ];
+    }
+    if (key === 'xbc_pre') {
+      if (activeCell?.tensor === 'xbc_pre') {
+        return [
+          SHEET_REVEAL_ROW_MAJOR,
+          clampIdx(activeCell.col, sim.convDim),
+          clampIdx(activeCell.row, cT),
+          pulse,
+        ];
+      }
+      if (activeCell?.tensor === 'dt') {
+        return [SHEET_REVEAL_NONE, 0, 0, 0];
+      }
+      if (activeCell?.tensor === 'z') {
+        const scaledCol = Math.floor((activeCell.col / Math.max(1, sim.dInner)) * sim.convDim);
+        return [
+          SHEET_REVEAL_ROW_MAJOR,
+          clampIdx(scaledCol, sim.convDim),
+          clampIdx(activeCell.row, cT),
+          pulse,
+        ];
+      }
+      return [
+        SHEET_REVEAL_ROW_MAJOR,
+        clampIdx(Math.floor(p01 * sim.convDim), sim.convDim),
+        clampIdx(stateTokIdx, cT),
+        pulse,
+      ];
+    }
+    if (key === 'dt') {
+      if (activeCell?.tensor === 'dt') {
+        return [
+          SHEET_REVEAL_ROW_MAJOR,
+          clampIdx(activeCell.headIndex ?? activeCell.col, sim.nHeads),
+          clampIdx(activeCell.row, cT),
+          pulse,
+        ];
+      }
+      const row =
+        activeCell && (activeCell.tensor === 'z' || activeCell.tensor === 'xbc_pre')
+          ? clampIdx(activeCell.row, cT)
+          : clampIdx(stateTokIdx, cT);
+      return [SHEET_REVEAL_ROW_MAJOR, clampIdx(activeHead, sim.nHeads), row, pulse];
+    }
+    // Downstream Conv1D, x/B/C, H_t, 64-head bank, y, y_norm, residual are uncomputed
+    return [SHEET_REVEAL_UNCOMPUTED, 0, 0, 0];
+  }
+
+  // Step 3 (stepperStep === 2): Depthwise Causal Conv1D (k=4) + SiLU -> x, B, C
+  if (step === 2) {
+    if (key === 'rmsnorm' || key === 'z' || key === 'xbc_pre' || key === 'dt' || key === 'conv_buf') {
+      return [SHEET_REVEAL_NONE, 0, 0, 0];
+    }
+    const rowF =
+      activeCell && (activeCell.tensor === 'x' || activeCell.tensor === 'b' || activeCell.tensor === 'c')
+        ? clampIdx(activeCell.row, cT)
+        : clampIdx(stateTokIdx, cT);
+    const pF =
+      activeCell?.tensor === 'x'
+        ? clampIdx(activeCell.col, sim.dHead)
+        : activeCell?.tensor === 'conv_buf'
+          ? clampIdx(activeCell.tapIndex ?? activeCell.row, sim.dHead)
+          : clampIdx(Math.floor(p01 * sim.dHead), sim.dHead);
+
+    if (key === 'x') {
+      return [SHEET_REVEAL_ROW_MAJOR, pF, rowF, pulse];
+    }
+    if (key === 'b') {
+      const colF =
+        activeCell?.tensor === 'b'
+          ? clampIdx(activeCell.col, sim.nGroups * sim.dState)
+          : clampIdx(activeGroup * sim.dState + pF, sim.nGroups * sim.dState);
+      return [SHEET_REVEAL_ROW_MAJOR, colF, rowF, pulse];
+    }
+    if (key === 'c') {
+      const colF =
+        activeCell?.tensor === 'c'
+          ? clampIdx(activeCell.col, sim.nGroups * sim.dState)
+          : clampIdx(activeGroup * sim.dState + pF, sim.nGroups * sim.dState);
+      return [SHEET_REVEAL_ROW_MAJOR, colF, rowF, pulse];
+    }
+    // Downstream H_t, 64-head bank, y, y_norm, residual are uncomputed
+    return [SHEET_REVEAL_UNCOMPUTED, 0, 0, 0];
+  }
+
+  // Step 4 (stepperStep === 3): In-Place FP32 SSM State Recurrence H_t = dA·H_{t-1} + Δt·x·B
+  if (step === 3) {
+    if (
+      key === 'rmsnorm' ||
+      key === 'z' ||
+      key === 'xbc_pre' ||
+      key === 'dt' ||
+      key === 'conv_buf' ||
+      key === 'x' ||
+      key === 'b' ||
+      key === 'c'
+    ) {
+      return [SHEET_REVEAL_NONE, 0, 0, 0];
+    }
+    if (key === 'h_curr') {
+      if (activeCell?.tensor === 'h_curr') {
+        return [
+          SHEET_REVEAL_ROW_MAJOR,
+          clampIdx(activeCell.col, sim.dState),
+          clampIdx(activeCell.row, sim.dHead),
+          pulse,
+        ];
+      }
+      const total = sim.dHead * sim.dState;
+      const idx = clampIdx(Math.floor(p01 * total), total);
+      const rowF = Math.floor(idx / sim.dState);
+      const colF = idx % sim.dState;
+      return [SHEET_REVEAL_ROW_MAJOR, colF, rowF, pulse];
+    }
+    if (sheet.partId === 'ssm-state') {
+      if (sheet.headIndex !== undefined && sheet.headIndex > activeHead) {
+        return [SHEET_REVEAL_UNCOMPUTED, 0, 0, 0];
+      }
+      return [SHEET_REVEAL_NONE, 0, 0, 0];
+    }
+    // Downstream y, y_norm, residual are uncomputed
+    return [SHEET_REVEAL_UNCOMPUTED, 0, 0, 0];
+  }
+
+  // Step 5 (stepperStep === 4): State Readout + Skip D·x -> y
+  if (step === 4) {
+    if (key === 'y') {
+      if (activeCell?.tensor === 'y') {
+        return [
+          SHEET_REVEAL_ROW_MAJOR,
+          clampIdx(activeCell.col, sim.dInner),
+          clampIdx(activeCell.row, cT),
+          pulse,
+        ];
+      }
+      const pF = clampIdx(Math.floor(p01 * sim.dHead), sim.dHead);
+      return [
+        SHEET_REVEAL_ROW_MAJOR,
+        clampIdx(activeHead * sim.dHead + pF, sim.dInner),
+        clampIdx(stateTokIdx, cT),
+        pulse,
+      ];
+    }
+    if (key === 'y_norm' || key === 'residual') {
+      return [SHEET_REVEAL_UNCOMPUTED, 0, 0, 0];
+    }
+    return [SHEET_REVEAL_NONE, 0, 0, 0];
+  }
+
+  // Step 6 (stepperStep === 5): Gate FIRST -> 8-Group RMSNorm -> W_out -> + Residual
+  if (key === 'y_norm') {
+    if (activeCell?.tensor === 'y_norm') {
+      return [
+        SHEET_REVEAL_ROW_MAJOR,
+        clampIdx(activeCell.col, sim.dInner),
+        clampIdx(activeCell.row, cT),
+        pulse,
+      ];
+    }
+    return [SHEET_REVEAL_NONE, 0, 0, 0];
+  }
+  if (key === 'residual') {
+    if (activeCell?.tensor === 'y_norm') {
+      return [SHEET_REVEAL_UNCOMPUTED, 0, 0, 0];
+    }
+    if (activeCell?.tensor === 'residual') {
+      return [
+        SHEET_REVEAL_ROW_MAJOR,
+        clampIdx(activeCell.col, sim.d),
+        clampIdx(activeCell.row, cT),
+        pulse,
+      ];
+    }
+    return [
+      SHEET_REVEAL_ROW_MAJOR,
+      clampIdx(Math.floor(p01 * sim.d), sim.d),
+      clampIdx(stateTokIdx, cT),
+      pulse,
+    ];
+  }
+  return [SHEET_REVEAL_NONE, 0, 0, 0];
+}
+
+function formatConciseMambaPopoverEquation(formula: MambaCellFormula): string {
+  let eq = formula.equation.trim();
+  // Strip verbose double-spaced parenthetical metadata notes so floating cards stay crisp
+  const parenMetaIdx = eq.indexOf('  (');
+  if (parenMetaIdx > 0) {
+    eq = eq.slice(0, parenMetaIdx).trim();
+  }
+  // Avoid repeating the final `= valueText` already displayed in the oxide-red value pill
+  const valSuffix = ` = ${formula.valueText}`;
+  if (eq.endsWith(valSuffix) && eq.length > valSuffix.length + 2) {
+    eq = eq.slice(0, eq.length - valSuffix.length).trim();
+  }
+  return eq;
+}
+
+/**
+ * Build a V3 floating contextual cell formula popover anchored at the active/hovered cell's
+ * 3D world center with concise formula, formatted value, operand swatches, and provenance targets.
+ */
+export function buildMambaCellPopover(
+  activeFormula: MambaCellFormula | null,
+  targetWorld: Vec3 | null,
+  sourceWorlds: readonly {
+    readonly world: readonly [number, number, number];
+    readonly role: 'indigo' | 'teal';
+  }[],
+): CellPopoverSpec | null {
+  if (!activeFormula || !targetWorld) return null;
+
+  const hasOpA = activeFormula.upstreamSpans.some((s) => s.role === 'operand_a');
+  const hasOpB = activeFormula.upstreamSpans.some((s) => s.role === 'operand_b');
+  const operandColors: ('indigo' | 'teal' | 'red')[] = [];
+  if (hasOpA) operandColors.push('indigo');
+  if (hasOpB) operandColors.push('teal');
+  operandColors.push('red');
+
+  return {
+    world: targetWorld,
+    tensorLabel: activeFormula.tensorLabel,
+    coordLabel: activeFormula.coordLabel,
+    ...(activeFormula.headBadge ? { badge: activeFormula.headBadge } : {}),
+    equation: formatConciseMambaPopoverEquation(activeFormula),
+    valueText: `= ${activeFormula.valueText}`,
+    operandColors,
+    ...(sourceWorlds.length > 0 ? { sourceWorlds } : {}),
+  };
+}
+
+function sheetGeomToGridBasis(rec: SheetGeomRecord): {
+  readonly originWorld: readonly [number, number, number];
+  readonly extent: readonly [number, number, number];
+  readonly axisU: readonly [number, number, number];
+  readonly axisN: readonly [number, number, number];
+} {
+  if (rec.frame) {
+    return {
+      originWorld: rec.frame.center,
+      extent: rec.frame.extent,
+      axisU: rec.frame.axisU,
+      axisN: rec.frame.axisN,
+    };
+  }
+  return {
+    originWorld: [rec.cx, rec.cy, rec.cz],
+    extent: [rec.ex, rec.ey, rec.ez],
+    axisU: FRAME_XZ_AXES.axisU,
+    axisN: FRAME_XZ_AXES.axisN,
+  };
+}
+
+/**
+ * Build V3 zoom-adaptive `ActiveSheetCellGrid[]` directly from live `sim` Float32 arrays
+ * for active `H_t` (`4×4`, `p0..p3` × `n0..n3`), `H_{t-1}` (`4×4`, carried/prior state),
+ * and the active target sheet (e.g. `y`, `RMSNorm`, `Δt`, `x`, `Residual`) with absolute
+ * token labels (`t${absTok} ${label}`).
+ */
+export function buildMambaActiveCellGrids(
+  registry: ReadonlyMap<string, SheetGeomRecord>,
+  sim: MambaSimResult,
+  clampedT: number,
+  activeHead: number,
+  stateTokIdx: number,
+  activeFormula: MambaCellFormula | null,
+): readonly ActiveSheetCellGrid[] {
+  const { d, nHeads, nGroups, dHead, dInner, dState, convDim, inProjDim, tokens: T } = sim;
+  const rowsT = Math.min(clampedT, T);
+  const headTag = formatMambaHeadId(activeHead);
+  const stateStride = nHeads * dHead * dState;
+
+  const absTokLabel = (t: number): string => {
+    const clamped = Math.max(0, Math.min(T - 1, t));
+    const absTok = sim.startTokenOffset + clamped;
+    const lbl = sim.tokenLabels[clamped] ?? '';
+    return lbl ? `t${absTok} ${lbl}` : `t${absTok}`;
+  };
+  const tokenRowLabels: readonly string[] = Array.from({ length: rowsT }, (_, t) => absTokLabel(t));
+  const pLabels: readonly string[] = Array.from({ length: dHead }, (_, p) => `p${p}`);
+  const nLabels: readonly string[] = Array.from({ length: dState }, (_, n) => `n${n}`);
+  const chLabels: readonly string[] = Array.from({ length: d }, (_, i) => `ch${i}`);
+
+  const buildHCurrGrid = (): ActiveSheetCellGrid | null => {
+    const rec = registry.get('h_curr');
+    if (!rec) return null;
+    const values = new Float32Array(dHead * dState);
+    for (let p = 0; p < dHead; p++) {
+      for (let n = 0; n < dState; n++) {
+        const localIdx = (activeHead * dHead + p) * dState + n;
+        values[p * dState + n] = sim.H_history[stateTokIdx * stateStride + localIdx];
+      }
+    }
+    let activeCol: number | undefined;
+    let activeRow: number | undefined;
+    if (activeFormula?.targetSpan.tensor === 'h_curr') {
+      activeCol = activeFormula.targetSpan.colStart;
+      activeRow = activeFormula.targetSpan.rowStart;
+    } else {
+      const upH = activeFormula?.upstreamSpans.find((s) => s.tensor === 'h_curr');
+      if (upH) {
+        activeRow = upH.rowStart;
+        if (upH.colStart === upH.colEnd) activeCol = upH.colStart;
+      }
+    }
+    return {
+      ...sheetGeomToGridBasis(rec),
+      cols: dState,
+      rows: dHead,
+      values,
+      format: 'signed',
+      activeCol,
+      activeRow,
+      colLabels: nLabels,
+      rowLabels: pLabels,
+      colDimLabel: `H_t ${headTag}`,
+      rowDimLabel: absTokLabel(stateTokIdx),
+    };
+  };
+
+  const buildHPrevGrid = (): ActiveSheetCellGrid | null => {
+    const rec = registry.get('h_prev');
+    if (!rec) return null;
+    const values = new Float32Array(dHead * dState);
+    for (let p = 0; p < dHead; p++) {
+      for (let n = 0; n < dState; n++) {
+        const localIdx = (activeHead * dHead + p) * dState + n;
+        values[p * dState + n] = readMambaPriorSsmValue(sim, stateTokIdx, localIdx).value;
+      }
+    }
+    let activeCol: number | undefined;
+    let activeRow: number | undefined;
+    if (activeFormula?.targetSpan.tensor === 'h_prev') {
+      activeCol = activeFormula.targetSpan.colStart;
+      activeRow = activeFormula.targetSpan.rowStart;
+    } else {
+      const upPrev = activeFormula?.upstreamSpans.find((s) => s.tensor === 'h_prev');
+      if (upPrev) {
+        activeRow = upPrev.rowStart;
+        activeCol = upPrev.colStart;
+      }
+    }
+    const isSeededPrior = sim.hasInitialState && stateTokIdx === 0;
+    const prevTokLabel =
+      stateTokIdx > 0
+        ? absTokLabel(stateTokIdx - 1)
+        : isSeededPrior
+          ? `t${Math.max(0, sim.startTokenOffset - 1)} carried`
+          : 't−1 zero';
+    return {
+      ...sheetGeomToGridBasis(rec),
+      cols: dState,
+      rows: dHead,
+      values,
+      format: 'signed',
+      activeCol,
+      activeRow,
+      colLabels: nLabels,
+      rowLabels: pLabels,
+      colDimLabel: isSeededPrior ? `H_{t−1} ${headTag} · Carried` : `H_{t−1} ${headTag}`,
+      rowDimLabel: prevTokLabel,
+    };
+  };
+
+  const buildXHeadGrid = (
+    headIdx: number,
+    activeCol?: number,
+    activeRow?: number,
+  ): ActiveSheetCellGrid | null => {
+    const rec = registry.get(`x:${headIdx}`);
+    if (!rec) return null;
+    const values = new Float32Array(rowsT * dHead);
+    for (let t = 0; t < rowsT; t++) {
+      for (let p = 0; p < dHead; p++) {
+        values[t * dHead + p] = sim.x[(headIdx * dHead + p) * T + t];
+      }
+    }
+    return {
+      ...sheetGeomToGridBasis(rec),
+      cols: dHead,
+      rows: rowsT,
+      values,
+      format: 'signed',
+      activeCol,
+      activeRow,
+      colLabels: pLabels,
+      rowLabels: tokenRowLabels,
+      colDimLabel: `x ${formatMambaHeadId(headIdx)}`,
+      rowDimLabel: `T = ${rowsT}`,
+    };
+  };
+
+  const buildTargetTensorGrid = (span: MambaSheetSpan): ActiveSheetCellGrid | null => {
+    const ac = span.colStart;
+    const ar = span.rowStart;
+    switch (span.tensor) {
+      case 'h_curr':
+      case 'h_prev':
+        return null;
+      case 'x':
+        return buildXHeadGrid(span.headIndex ?? activeHead, ac, ar);
+      case 'input':
+      case 'rmsnorm':
+      case 'residual': {
+        const rec = registry.get(span.tensor);
+        if (!rec) return null;
+        const src =
+          span.tensor === 'input' ? sim.X : span.tensor === 'rmsnorm' ? sim.U : sim.Y;
+        const values = new Float32Array(rowsT * d);
+        for (let t = 0; t < rowsT; t++) {
+          for (let i = 0; i < d; i++) {
+            values[t * d + i] = src[i * T + t];
+          }
+        }
+        return {
+          ...sheetGeomToGridBasis(rec),
+          cols: d,
+          rows: rowsT,
+          values,
+          format: 'signed',
+          activeCol: ac,
+          activeRow: ar,
+          colLabels: chLabels,
+          rowLabels: tokenRowLabels,
+          colDimLabel: `d = ${d}`,
+          rowDimLabel: `T = ${rowsT}`,
+        };
+      }
+      case 'dt': {
+        const rec = registry.get('dt');
+        if (!rec) return null;
+        const values = new Float32Array(rowsT * nHeads);
+        for (let t = 0; t < rowsT; t++) {
+          for (let h = 0; h < nHeads; h++) {
+            values[t * nHeads + h] = sim.dt[h * T + t];
+          }
+        }
+        return {
+          ...sheetGeomToGridBasis(rec),
+          cols: nHeads,
+          rows: rowsT,
+          values,
+          format: 'signed',
+          activeCol: ac,
+          activeRow: ar,
+          colLabels: Array.from({ length: nHeads }, (_, h) => formatMambaHeadId(h)),
+          rowLabels: tokenRowLabels,
+          colDimLabel: `Δt (${nHeads}h)`,
+          rowDimLabel: `T = ${rowsT}`,
+        };
+      }
+      case 'b':
+      case 'c': {
+        const rec = registry.get(span.tensor);
+        if (!rec) return null;
+        const cols = nGroups * dState;
+        const src = span.tensor === 'b' ? sim.B : sim.C;
+        const values = new Float32Array(rowsT * cols);
+        for (let t = 0; t < rowsT; t++) {
+          for (let k = 0; k < cols; k++) {
+            values[t * cols + k] = src[k * T + t];
+          }
+        }
+        return {
+          ...sheetGeomToGridBasis(rec),
+          cols,
+          rows: rowsT,
+          values,
+          format: 'signed',
+          activeCol: ac,
+          activeRow: ar,
+          colLabels: Array.from({ length: cols }, (_, k) => `G${Math.floor(k / dState)}·n${k % dState}`),
+          rowLabels: tokenRowLabels,
+          colDimLabel: `${span.tensor.toUpperCase()} (${nGroups}×${dState})`,
+          rowDimLabel: `T = ${rowsT}`,
+        };
+      }
+      case 'z':
+      case 'y':
+      case 'y_norm': {
+        const rec = registry.get(span.tensor);
+        if (!rec) return null;
+        const src =
+          span.tensor === 'z' ? sim.z : span.tensor === 'y' ? sim.y : sim.y_norm;
+        const values = new Float32Array(rowsT * dInner);
+        for (let t = 0; t < rowsT; t++) {
+          for (let c = 0; c < dInner; c++) {
+            values[t * dInner + c] = src[c * T + t];
+          }
+        }
+        return {
+          ...sheetGeomToGridBasis(rec),
+          cols: dInner,
+          rows: rowsT,
+          values,
+          format: 'signed',
+          activeCol: ac,
+          activeRow: ar,
+          colLabels: Array.from(
+            { length: dInner },
+            (_, c) => `${formatMambaHeadId(Math.floor(c / dHead))}·p${c % dHead}`,
+          ),
+          rowLabels: tokenRowLabels,
+          colDimLabel: `${span.tensor === 'y_norm' ? 'y_norm' : span.tensor} (${dInner})`,
+          rowDimLabel: `T = ${rowsT}`,
+        };
+      }
+      case 'xbc_pre': {
+        const rec = registry.get('xbc_pre');
+        if (!rec) return null;
+        const values = new Float32Array(rowsT * convDim);
+        for (let t = 0; t < rowsT; t++) {
+          for (let c = 0; c < convDim; c++) {
+            values[t * convDim + c] = sim.xBC_pre[c * T + t];
+          }
+        }
+        return {
+          ...sheetGeomToGridBasis(rec),
+          cols: convDim,
+          rows: rowsT,
+          values,
+          format: 'signed',
+          activeCol: ac,
+          activeRow: ar,
+          colLabels: Array.from({ length: convDim }, (_, c) => `c${c}`),
+          rowLabels: tokenRowLabels,
+          colDimLabel: `xBC_pre (${convDim})`,
+          rowDimLabel: `T = ${rowsT}`,
+        };
+      }
+      case 'conv_buf': {
+        const slot = Math.max(0, Math.min(sim.convKernel - 1, span.tapStart ?? 0));
+        const rec = registry.get(`conv_buf:${slot}`);
+        if (!rec) return null;
+        const values = new Float32Array(convDim);
+        for (let c = 0; c < convDim; c++) {
+          values[c] = readMambaConvTapValue(sim, c, stateTokIdx, slot).value;
+        }
+        const lag = sim.convKernel - 1 - slot;
+        return {
+          ...sheetGeomToGridBasis(rec),
+          cols: convDim,
+          rows: 1,
+          values,
+          format: 'signed',
+          activeCol: ac,
+          activeRow: 0,
+          colLabels: Array.from({ length: convDim }, (_, c) => `c${c}`),
+          rowLabels: [`slot ${slot} (t${sim.startTokenOffset + stateTokIdx - lag})`],
+          colDimLabel: `Conv1D (${convDim})`,
+          rowDimLabel: absTokLabel(stateTokIdx),
+        };
+      }
+      case 'w_in': {
+        const rec = registry.get('w_in');
+        if (!rec) return null;
+        const values = new Float32Array(d * inProjDim);
+        for (let r = 0; r < d; r++) {
+          for (let c = 0; c < inProjDim; c++) {
+            values[r * inProjDim + c] = sim.W_in[c * d + r];
+          }
+        }
+        return {
+          ...sheetGeomToGridBasis(rec),
+          cols: inProjDim,
+          rows: d,
+          values,
+          format: 'signed',
+          activeCol: ac,
+          activeRow: ar,
+          colLabels: Array.from({ length: inProjDim }, (_, c) => `o${c}`),
+          rowLabels: chLabels,
+          colDimLabel: `W_in (${inProjDim}×${d})`,
+        };
+      }
+      case 'w_out': {
+        const rec = registry.get('w_out');
+        if (!rec) return null;
+        const values = new Float32Array(d * dInner);
+        for (let r = 0; r < d; r++) {
+          for (let c = 0; c < dInner; c++) {
+            values[r * dInner + c] = sim.W_out[r * dInner + c];
+          }
+        }
+        return {
+          ...sheetGeomToGridBasis(rec),
+          cols: dInner,
+          rows: d,
+          values,
+          format: 'signed',
+          activeCol: ac,
+          activeRow: ar,
+          colLabels: Array.from({ length: dInner }, (_, c) => `c${c}`),
+          rowLabels: chLabels,
+          colDimLabel: `W_out (${d}×${dInner})`,
+        };
+      }
+    }
+  };
+
+  const grids: ActiveSheetCellGrid[] = [];
+  const hCurrGrid = buildHCurrGrid();
+  const hPrevGrid = buildHPrevGrid();
+
+  if (activeFormula) {
+    const tgt = activeFormula.targetSpan.tensor;
+    if (tgt === 'h_curr') {
+      if (hCurrGrid) grids.push(hCurrGrid);
+      if (hPrevGrid) grids.push(hPrevGrid);
+      const upX = activeFormula.upstreamSpans.find((s) => s.tensor === 'x');
+      const xGrid = buildXHeadGrid(
+        activeHead,
+        upX?.colStart,
+        upX?.rowStart ?? stateTokIdx,
+      );
+      if (xGrid) grids.push(xGrid);
+    } else if (tgt === 'h_prev') {
+      if (hPrevGrid) grids.push(hPrevGrid);
+      if (hCurrGrid) grids.push(hCurrGrid);
+    } else {
+      const targetGrid = buildTargetTensorGrid(activeFormula.targetSpan);
+      if (targetGrid) grids.push(targetGrid);
+      if (hCurrGrid) grids.push(hCurrGrid);
+      if (hPrevGrid) grids.push(hPrevGrid);
+    }
+  } else {
+    if (hCurrGrid) grids.push(hCurrGrid);
+    if (hPrevGrid) grids.push(hPrevGrid);
+  }
+
+  return grids;
+}
+
 class SpatialMambaBuilder {
   readonly sheetFloats: number[] = [];
   readonly basisFloats: number[] = [];
+  readonly revealFloats: number[] = [];
   readonly solidFloats: number[] = [];
   readonly lineFloats: number[] = [];
   readonly pickBoxes: PickBox[] = [];
@@ -268,10 +999,19 @@ class SpatialMambaBuilder {
   readonly calipers: DimensionCaliper[] = [];
   readonly flow = new FlowRibbonBuilder();
   readonly sheetRegistry = new Map<string, SheetGeomRecord>();
+  readonly activeOpPartIds = new Set<string>();
   private readonly bayId: number;
+  private readonly revealParams: MambaRevealParams | null;
+  private readonly collectActiveOpParts: boolean;
 
-  constructor(bayId: number) {
+  constructor(
+    bayId: number,
+    revealParams: MambaRevealParams | null = null,
+    collectActiveOpParts = false,
+  ) {
     this.bayId = bayId;
+    this.revealParams = revealParams;
+    this.collectActiveOpParts = collectActiveOpParts;
   }
 
   addSheet(s: SpatialMambaSheetSpec): SheetFrame3D {
@@ -306,6 +1046,23 @@ class SpatialMambaBuilder {
       frame.axisU[0], frame.axisU[1], frame.axisU[2],
       frame.axisN[0], frame.axisN[1], frame.axisN[2],
     );
+
+    // 2b. Optional parallel V2 progressive reveal buffer (4 floats/sheet)
+    if (this.revealParams !== null) {
+      const [mode, colF, rowF, pulse] = computeMambaSheetReveal(this.revealParams, s);
+      this.revealFloats.push(mode, colF, rowF, pulse);
+    }
+
+    // 2c. Track participating target & operand partIds for V1/V3 label dimming
+    if (
+      this.collectActiveOpParts &&
+      s.partId !== 'seq-rail' &&
+      (s.highlight === SHEET_HL_ACTIVE ||
+        s.highlight === SHEET_HL_OPERAND_A ||
+        s.highlight === SHEET_HL_OPERAND_B)
+    ) {
+      this.activeOpPartIds.add(s.partId);
+    }
 
     // 3. 1-to-1 mirror in solidData (12 floats: fp8Flag at +7, seed/phase at +8)
     this.solidFloats.push(
@@ -397,10 +1154,16 @@ class SpatialMambaBuilder {
 
   pack() {
     const flowPacked = this.flow.pack();
+    const sheetCount = this.sheetFloats.length / SHEET_INSTANCE_FLOATS;
+    const sheetRevealData =
+      this.revealParams !== null && this.revealFloats.length === sheetCount * SHEET_REVEAL_FLOATS
+        ? new Float32Array(this.revealFloats)
+        : undefined;
     return {
       sheetData: new Float32Array(this.sheetFloats),
-      sheetCount: this.sheetFloats.length / SHEET_INSTANCE_FLOATS,
+      sheetCount,
       sheetBasisData: new Float32Array(this.basisFloats),
+      ...(sheetRevealData ? { sheetRevealData } : {}),
       solidData: new Float32Array(this.solidFloats),
       solidCount: this.solidFloats.length / SOLID_INSTANCE_FLOATS,
       lineData: new Float32Array(this.lineFloats),
@@ -429,6 +1192,10 @@ export interface BuildMambaSpatialContext {
   readonly activeCell: MambaCellRef | null;
   readonly activeFormula: MambaCellFormula | null;
   readonly focusSet: SheetFocusSet;
+  readonly stepperStep?: number | null;
+  readonly stepperActive?: boolean;
+  readonly stepperSubProgress?: number;
+  readonly reducedMotion?: boolean;
   readonly sim: MambaSimResult;
   readonly atlas: MambaValueAtlas;
   readonly partCatalog: Readonly<Record<string, CutawayPartInfo>>;
@@ -500,14 +1267,33 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
     activeGroup,
     stateTokIdx,
     explicitTokenPlayback,
+    activeCell,
     activeFormula,
     focusSet,
+    stepperStep,
+    stepperActive = false,
+    stepperSubProgress = 0.25,
+    reducedMotion = false,
     sim,
     atlas,
     partCatalog,
   } = ctx;
 
-  const b = new SpatialMambaBuilder(bayId);
+  const revealParams: MambaRevealParams | null =
+    stepperActive && !reducedMotion && stepperStep !== undefined && stepperStep !== null
+      ? {
+          stepperStep,
+          subProgress: stepperSubProgress,
+          clampedT,
+          activeHead,
+          activeGroup,
+          stateTokIdx,
+          activeCell,
+          sim,
+        }
+      : null;
+
+  const b = new SpatialMambaBuilder(bayId, revealParams, focusSet.active);
   const hasCellTrace = focusSet.active;
   const hasFocus = activePart !== null || hasCellTrace;
   const partHeadFocus = partHeadIdx !== null && !hasCellTrace;
@@ -1674,6 +2460,12 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
   }
 
   let residualCarryInfo: { readonly ch: number; readonly tok: number; readonly val: number } | null = null;
+  let popoverTargetWorld: Vec3 | null = null;
+  const popoverSources: {
+    readonly world: readonly [number, number, number];
+    readonly role: 'indigo' | 'teal';
+  }[] = [];
+
   if (activeFormula) {
     const targetSpans = resolveSpatialMambaSpans(
       b.sheetRegistry,
@@ -1684,6 +2476,7 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
     const primaryTarget = targetSpans[0];
 
     if (primaryTarget) {
+      popoverTargetWorld = primaryTarget.frontPoint;
       for (const ts of targetSpans) {
         drawCellHighlight3D(b.flow, ts, CELL_TARGET_FILL, CELL_TARGET_FRAME, 0.024, true);
       }
@@ -1692,9 +2485,12 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
         const upSpans = resolveSpatialMambaSpans(b.sheetRegistry, up, activeHead, stateTokIdx);
         if (upSpans.length === 0) continue;
 
+        const srcRole: 'indigo' | 'teal' = up.role === 'operand_a' ? 'indigo' : 'teal';
+
         // Focused visual routing for Input X -> + Residual Y along the overhead Residual Highway bridge!
         if (activeFormula.cell.tensor === 'residual' && up.tensor === 'input') {
           const upSpan = upSpans[0];
+          popoverSources.push({ world: upSpan.frontPoint, role: srcRole });
           drawCellHighlight3D(b.flow, upSpan, CELL_OP_A_FILL, CELL_OP_A_FRAME, 0.022, true);
           const threadBridgeY = bridgeY + 0.09;
           b.flow.addCubic3D(
@@ -1744,6 +2540,7 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
 
         // For multi-tap Conv1D spans (e.g. 4 causal taps -> post-SiLU x), highlight all 4 taps and thread from newest tap
         if (upSpans.length > 1) {
+          popoverSources.push({ world: upSpans[upSpans.length - 1].frontPoint, role: srcRole });
           const isA = up.role === 'operand_a';
           for (let i = 0; i < upSpans.length; i++) {
             if (i === upSpans.length - 1) {
@@ -1762,10 +2559,21 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
           continue;
         }
 
+        popoverSources.push({ world: upSpans[0].frontPoint, role: srcRole });
         drawOperandDependency3D(b.flow, upSpans[0], primaryTarget, up.role === 'operand_a');
       }
     }
   }
+
+  const cellPopover = buildMambaCellPopover(activeFormula, popoverTargetWorld, popoverSources);
+  const activeCellGrids = buildMambaActiveCellGrids(
+    b.sheetRegistry,
+    sim,
+    clampedT,
+    activeHead,
+    stateTokIdx,
+    activeFormula,
+  );
 
   // ==========================================================================
   // 8. 3D EXTERIOR LABELS & ARCHITECTURAL DIMENSION CALIPERS
@@ -1778,9 +2586,12 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
       ? ` · t${absTokIdx} "${tokLabel}"`
       : '';
 
+  // V1 Label Hygiene: anchor Conv1D (+Z front exterior), Δt (-X left exterior), x: H00–H15
+  // (cleanly above lifted active fin), RMSNorm (-Z rear), and H_{t-1} / H_t / 64-Head Bank
+  // around separate exterior perimeters with zero overlap across T=1..16 and H00..H15.
   b.landmarks.push(
     { id: 'm-res-in', label: `Input (2,688 · T=${clampedT})`, world: [xInput, 0.16, ioMaxZ * 0.5 + 0.24], partId: 'residual-in', align: 'bottom', tier: 'primary' },
-    { id: 'm-rmsnorm', label: 'RMSNorm', world: [xRms, 0.16, ioMaxZ * 0.5 + 0.24], partId: 'rmsnorm', align: 'bottom', tier: 'primary', tone: feederPreservedBf16 ? 'gold' : 'default' },
+    { id: 'm-rmsnorm', label: 'RMSNorm', world: [xRms, 0.16, -ioMaxZ * 0.5 - 0.26], partId: 'rmsnorm', align: 'top', tier: 'primary', tone: feederPreservedBf16 ? 'gold' : 'default' },
     {
       id: 'm-in-proj',
       label: computeIsFp8 ? 'W_in · FP8' : 'W_in (10,304)',
@@ -1794,17 +2605,17 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
     {
       id: 'm-conv1d',
       label: isFp8Mode ? `Conv1D (k=4 Fixed · BF16${tokTag})` : `Conv1D (k=4 Fixed${tokTag})`,
-      world: [convCenterX, convShelfBaseY + 3 * convShelfStepY + 0.26, -convSpanZ * 0.5 - 0.14],
+      world: [convCenterX - 0.04, 0.16, convSpanZ * 0.5 + 0.32],
       partId: 'conv1d',
-      align: 'top',
+      align: 'bottom',
       tier: 'primary',
       tone: isFp8Mode ? 'gold' : 'cyan',
     },
-    { id: 'm-dt', label: `Δt (T=${clampedT})`, world: [dtX - 0.10, 0.22, dtZ - branchMaxZ * 0.5 - 0.36], partId: 'dt-branch', align: 'top', tier: 'primary' },
+    { id: 'm-dt', label: `Δt (T=${clampedT})`, world: [dtX - dtW * 0.5 - 0.16, 0.18, dtZ], partId: 'dt-branch', align: 'left', tier: 'primary' },
     {
       id: 'm-x-heads',
       label: `x: H00–H15 (${headTag}·G${activeGroup})`,
-      world: [activeXPos.x - 0.08, xLiftY + xActiveH * 0.5 + 0.36, activeXPos.z],
+      world: [activeXPos.x + 0.06, Math.max(2.38, xLiftY + xActiveH * 0.5 + 0.44), activeXPos.z],
       partId: `mamba-head-${activeHead}`,
       align: 'top',
       tier: 'primary',
@@ -1814,7 +2625,7 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
     {
       id: 'm-hprev',
       label: sim.hasInitialState ? `Hₜ₋₁ (${headTag} · Carried)` : `Hₜ₋₁ (${headTag})`,
-      world: [xHPrev, PEDESTAL_Y + 0.14, hZ + hSize * 0.5 + 0.18],
+      world: [xHPrev - 0.23, PEDESTAL_Y + 0.14, hZ + hSize * 0.5 + 0.18],
       partId: 'ssm-state-prev',
       align: 'bottom',
       tier: 'primary',
@@ -1823,16 +2634,16 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
     {
       id: 'm-hcurr',
       label: `Hₜ (${headTag} · Fixed${tokTag})`,
-      world: [xHCurr, PEDESTAL_Y + 0.94, hZ - 0.18],
+      world: [xHCurr + 0.26, PEDESTAL_Y + 0.14, hZ + hSize * 0.5 + 0.23],
       partId: 'ssm-state-curr',
-      align: 'top',
+      align: 'bottom',
       tier: 'primary',
       tone: 'cyan',
     },
     {
       id: 'm-ssm-bank',
       label: '64-Head Bank (46.0 MiB FP32)',
-      world: [bankCenterX, PEDESTAL_Y + 0.16, bankCenterZ - 0.58],
+      world: [bankCenterX + 0.10, PEDESTAL_Y + 0.24, bankCenterZ - 0.62],
       partId: 'ssm-state',
       align: 'top',
       tier: 'primary',
@@ -1865,7 +2676,7 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
         ]
       : []),
     // Progressive detail labels (revealed on hover, selection, or close zoom)
-    { id: 'm-xbc-pre-sec', label: `xBC_pre (T=${clampedT})`, world: [xXbcPre, 0.16, convSpanZ * 0.5 + 0.22], partId: 'xbc-pre', align: 'bottom', tier: 'detail', tone: 'muted' },
+    { id: 'm-xbc-pre-sec', label: `xBC_pre (T=${clampedT})`, world: [xXbcPre - 0.10, 0.16, -convSpanZ * 0.5 - 0.24], partId: 'xbc-pre', align: 'top', tier: 'detail', tone: 'muted' },
     { id: 'm-loop-sec', label: 'In-place: Hₜ = dA·Hₜ₋₁ + Δt·x·B', world: [(xHPrev + xHCurr) * 0.5, PEDESTAL_Y + 0.96, hZ - 0.18], partId: 'ssm-state-curr', align: 'top', tier: 'detail', tone: 'cyan' },
     { id: 'm-wout-shape', label: computeIsFp8 ? '4,096 → 2,688 · FP8' : '4,096 → 2,688', world: [xWout, woutY - woutHeightY * 0.5 - 0.14, 0], partId: 'out-proj', align: 'bottom', tier: 'detail', tone: feederPreservedBf16 ? 'gold' : 'default' },
   );
@@ -1942,6 +2753,9 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
     valueAtlas: atlas,
     mambaSim: sim,
     activeFormula,
+    ...(focusSet.active ? { activeOpPartIds: b.activeOpPartIds } : {}),
+    cellPopover,
+    activeCellGrids,
     fitBounds: MAMBA_SPATIAL_FIT_BOUNDS,
     opFocusBounds,
     landmarks: b.landmarks,

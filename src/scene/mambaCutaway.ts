@@ -45,6 +45,7 @@ import {
   SHEET_HL_PATHWAY,
   SHEET_INSTANCE_FLOATS,
   SHEET_KIND_STANDARD,
+  SHEET_REVEAL_FLOATS,
   SHEET_ROLE_ACTIVATION,
   SHEET_ROLE_KV_K,
   SHEET_ROLE_KV_V,
@@ -58,9 +59,13 @@ import type { AtlasSlice } from './atlasPacker';
 import type { CutawayPartInfo, CutawaySceneGeometry } from './cutaways';
 import { buildMambaValueAtlas } from './mambaAtlas';
 import {
+  buildMambaActiveCellGrids,
+  buildMambaCellPopover,
   buildMambaSpatialScene,
+  computeMambaSheetReveal,
   fitSpatialMambaCamera,
   MAMBA_SPATIAL_FIT_BOUNDS,
+  type MambaRevealParams,
 } from './mambaSpatial';
 import {
   CELL_TARGET_FILL,
@@ -115,6 +120,14 @@ export interface MambaCutawayOptions {
   readonly hoveredPart: string | null;
   readonly activeHead?: number;
   readonly activeCell?: MambaCellRef | null;
+  /** Optional active Math Stepper stage index `0..5` (used for V2 progressive accumulation reveal). */
+  readonly stepperStep?: number | null;
+  /** When true (and `!reducedMotion` with a valid `stepperStep`), emits V2 progressive `sheetRevealData`. Defaults to false. */
+  readonly stepperActive?: boolean;
+  /** Optional stepper sub-progress `0..1` for active frontier cell pulse animation. */
+  readonly stepperSubProgress?: number;
+  /** Honors `prefers-reduced-motion`: omits `sheetRevealData` so sheets remain 100% revealed statically. Defaults to false. */
+  readonly reducedMotion?: boolean;
   /** Layout mode: `'three_quarter'` builds the 3D Spatial Mamba-2 architecture; `'near_plan'` (default) keeps the coplanar XZ schematic. */
   readonly viewAngle?: GqaViewAngle;
   /** Optional explicit recurrence token index `0..T-1` for temporal playback (overridden when activeCell specifies a token). */
@@ -151,6 +164,7 @@ interface MambaSheetSpec {
 class MambaSheetBuilder {
   private readonly bayId: number;
   private readonly sheetFloats: number[] = [];
+  private readonly revealFloats: number[] = [];
   private readonly solidFloats: number[] = [];
   private readonly lineFloats: number[] = [];
   readonly pickBoxes: PickBox[] = [];
@@ -158,9 +172,18 @@ class MambaSheetBuilder {
   readonly calipers: DimensionCaliper[] = [];
   readonly flow = new FlowRibbonBuilder();
   readonly sheetRegistry = new Map<string, SheetGeomRecord>();
+  readonly activeOpPartIds = new Set<string>();
+  private readonly revealParams: MambaRevealParams | null;
+  private readonly collectActiveOpParts: boolean;
 
-  constructor(bayId: number) {
+  constructor(
+    bayId: number,
+    revealParams: MambaRevealParams | null = null,
+    collectActiveOpParts = false,
+  ) {
     this.bayId = bayId;
+    this.revealParams = revealParams;
+    this.collectActiveOpParts = collectActiveOpParts;
   }
 
   addSheet(s: MambaSheetSpec): void {
@@ -182,6 +205,21 @@ class MambaSheetBuilder {
       scale,
       modeFlag, 0,
     );
+
+    if (this.revealParams !== null) {
+      const [mode, colF, rowF, pulse] = computeMambaSheetReveal(this.revealParams, s);
+      this.revealFloats.push(mode, colF, rowF, pulse);
+    }
+
+    if (
+      this.collectActiveOpParts &&
+      s.partId !== 'seq-rail' &&
+      (s.highlight === SHEET_HL_ACTIVE ||
+        s.highlight === SHEET_HL_OPERAND_A ||
+        s.highlight === SHEET_HL_OPERAND_B)
+    ) {
+      this.activeOpPartIds.add(s.partId);
+    }
 
     // 2. 1-to-1 mirror in solidData (12 floats: fp8Flag at +7, phase/seed at +8)
     this.solidFloats.push(
@@ -249,9 +287,15 @@ class MambaSheetBuilder {
 
   pack() {
     const flowPacked = this.flow.pack();
+    const sheetCount = this.sheetFloats.length / SHEET_INSTANCE_FLOATS;
+    const sheetRevealData =
+      this.revealParams !== null && this.revealFloats.length === sheetCount * SHEET_REVEAL_FLOATS
+        ? new Float32Array(this.revealFloats)
+        : undefined;
     return {
       sheetData: new Float32Array(this.sheetFloats),
-      sheetCount: this.sheetFloats.length / SHEET_INSTANCE_FLOATS,
+      sheetCount,
+      ...(sheetRevealData ? { sheetRevealData } : {}),
       solidData: new Float32Array(this.solidFloats),
       solidCount: this.solidFloats.length / SOLID_INSTANCE_FLOATS,
       lineData: new Float32Array(this.lineFloats),
@@ -653,13 +697,34 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
       activeCell: opts.activeCell ?? null,
       activeFormula,
       focusSet,
+      stepperStep: opts.stepperStep,
+      stepperActive: opts.stepperActive ?? false,
+      stepperSubProgress: opts.stepperSubProgress,
+      reducedMotion: opts.reducedMotion ?? false,
       sim,
       atlas,
       partCatalog,
     });
   }
 
-  const b = new MambaSheetBuilder(bayId);
+  const revealParams: MambaRevealParams | null =
+    opts.stepperActive &&
+    !opts.reducedMotion &&
+    opts.stepperStep !== undefined &&
+    opts.stepperStep !== null
+      ? {
+          stepperStep: opts.stepperStep,
+          subProgress: opts.stepperSubProgress ?? 0.25,
+          clampedT,
+          activeHead,
+          activeGroup,
+          stateTokIdx,
+          activeCell: opts.activeCell ?? null,
+          sim,
+        }
+      : null;
+
+  const b = new MambaSheetBuilder(bayId, revealParams, focusSet.active);
   const hasCellTrace = focusSet.active;
   const hasFocus = activePart !== null || hasCellTrace;
   // Part-only head selection (no cell trace) highlights only that head's SSM recurrence pathway
@@ -1604,9 +1669,16 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   // ==========================================================================
   // 9. LIVE CELL-LEVEL HIGHLIGHTS & UPSTREAM DEPENDENCY THREADS
   // ==========================================================================
+  let popoverTargetWorld: [number, number, number] | null = null;
+  const popoverSources: {
+    readonly world: readonly [number, number, number];
+    readonly role: 'indigo' | 'teal';
+  }[] = [];
+
   if (activeFormula) {
     const targetRect = resolveMambaSpanRect(b.sheetRegistry, activeFormula.targetSpan, activeHead, stateTokIdx);
     if (targetRect) {
+      popoverTargetWorld = [targetRect.cx, targetRect.topY + 0.01, targetRect.cz];
       b.flow.addCellHighlightXZ(
         targetRect.cx,
         targetRect.cz,
@@ -1620,10 +1692,24 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
       for (const upSpan of activeFormula.upstreamSpans) {
         const upRect = resolveMambaSpanRect(b.sheetRegistry, upSpan, activeHead, stateTokIdx);
         if (!upRect) continue;
+        popoverSources.push({
+          world: [upRect.cx, upRect.topY + 0.01, upRect.cz],
+          role: upSpan.role === 'operand_a' ? 'indigo' : 'teal',
+        });
         drawOperandDependencyXZ(b.flow, upRect, targetRect, upSpan.role === 'operand_a');
       }
     }
   }
+
+  const cellPopover = buildMambaCellPopover(activeFormula, popoverTargetWorld, popoverSources);
+  const activeCellGrids = buildMambaActiveCellGrids(
+    b.sheetRegistry,
+    sim,
+    clampedT,
+    activeHead,
+    stateTokIdx,
+    activeFormula,
+  );
 
   // ==========================================================================
   // 10. EXTERIOR PROGRESSIVE LABELS (strictly outside sheet faces, zero clutter)
@@ -1766,6 +1852,9 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     valueAtlas: atlas,
     mambaSim: sim,
     activeFormula,
+    ...(focusSet.active ? { activeOpPartIds: b.activeOpPartIds } : {}),
+    cellPopover,
+    activeCellGrids,
     fitBounds: MAMBA_FIT_BOUNDS,
     opFocusBounds,
     landmarks: b.landmarks,
