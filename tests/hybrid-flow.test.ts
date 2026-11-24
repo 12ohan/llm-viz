@@ -10,12 +10,10 @@ import {
   runHybridExecution,
 } from '../src/math/hybridFlow';
 import { HYBRID_OVERRIDE_PATTERN } from '../src/model/spec';
+import { assertBitExactFiniteArray } from './helpers/parityAssert';
 
 function expectBitExactArrays(a: Float32Array, b: Float32Array, label: string): void {
-  expect(a.length, `${label} length`).toBe(b.length);
-  for (let i = 0; i < a.length; i++) {
-    expect(a[i], `${label}[${i}]`).toBe(b[i]);
-  }
+  assertBitExactFiniteArray(a, b, label);
 }
 
 describe('Gate A: Unified 52-Layer Miniature Forward Pass (hybridFlow.ts)', () => {
@@ -276,5 +274,75 @@ describe('Gate A: Unified 52-Layer Miniature Forward Pass (hybridFlow.ts)', () =
     expect(boundedCache.size).toBe(6);
     expect(boundedCache.totalRetainedTypedArrayBytes()).toBeGreaterThan(0);
     expect(model.retainedWeightBytes()).toBeGreaterThan(0);
+  });
+
+  it('6. prevents execution-cache collisions across different patterns, residualOutputScale, eps, and explicitly duplicated display modelIds', () => {
+    // 6A. Default modelId distinguishes same-length different patterns & different residualOutputScale
+    const patA = createHybridModelParameters({ seed: 0xabcdef01, pattern: 'MEM*' });
+    const patB = createHybridModelParameters({ seed: 0xabcdef01, pattern: 'M*EM' });
+    const scaleAlt = createHybridModelParameters({
+      seed: 0xabcdef01,
+      pattern: 'MEM*',
+      residualOutputScale: 0.42,
+    });
+    const epsAlt = createHybridModelParameters({
+      seed: 0xabcdef01,
+      pattern: 'MEM*',
+      rmsNormEps: 1e-6,
+    });
+    const patAClone = createHybridModelParameters({ seed: 0xabcdef01, pattern: 'MEM*' });
+
+    expect(patA.modelId).toBe(patAClone.modelId);
+    expect(patA.parameterFingerprint).toBe(patAClone.parameterFingerprint);
+    expect(new Set([patA.modelId, patB.modelId, scaleAlt.modelId, epsAlt.modelId]).size).toBe(4);
+    expect(
+      new Set([
+        patA.parameterFingerprint,
+        patB.parameterFingerprint,
+        scaleAlt.parameterFingerprint,
+        epsAlt.parameterFingerprint,
+      ]).size,
+    ).toBe(4);
+
+    // 6B. Shared execution cache with EXPLICITLY DUPLICATED display modelId never collides!
+    const sharedDisplayId = 'nemotron-shared-display-label';
+    const dupModels = [
+      createHybridModelParameters({ modelId: sharedDisplayId, seed: 0x55551111, pattern: 'MEM*' }),
+      createHybridModelParameters({ modelId: sharedDisplayId, seed: 0x55551111, pattern: 'M*EM' }),
+      createHybridModelParameters({
+        modelId: sharedDisplayId,
+        seed: 0x55551111,
+        pattern: 'MEM*',
+        residualOutputScale: 0.35,
+      }),
+      createHybridModelParameters({
+        modelId: sharedDisplayId,
+        seed: 0x55551111,
+        pattern: 'MEM*',
+        rmsNormEps: 1e-4,
+      }),
+      createHybridModelParameters({ modelId: sharedDisplayId, seed: 0x99992222, pattern: 'MEM*' }),
+    ];
+
+    const sharedCache = new HybridExecutionCache(16);
+    const tokens = [2, 5, 2, 7];
+    const execs = dupModels.map((m) => getOrRunHybridExecution(m, sharedCache, { tokenIds: tokens }));
+
+    // Every differently parameterized model retains its own cache slot despite identical modelId & tokenIds
+    expect(sharedCache.size).toBe(dupModels.length);
+    expect(new Set(execs.map((e) => e.executionId)).size).toBe(dupModels.length);
+
+    // Cache hits return the exact matching model's execution (never another model's logits)
+    for (let i = 0; i < dupModels.length; i++) {
+      const hit = getOrRunHybridExecution(dupModels[i], sharedCache, { tokenIds: tokens });
+      expect(hit.executionId).toBe(execs[i].executionId);
+      expect(hit.parameterFingerprint).toBe(dupModels[i].parameterFingerprint);
+      expectBitExactArrays(hit.lmHead.logits, execs[i].lmHead.logits, `dupModel[${i}] cache hit`);
+    }
+    // Verify outputs are genuinely distinct across the 5 parameterizations
+    expect(execs[0].lmHead.logits[0]).not.toBe(execs[1].lmHead.logits[0]);
+    expect(execs[0].lmHead.logits[0]).not.toBe(execs[2].lmHead.logits[0]);
+    expect(execs[0].lmHead.logits[0]).not.toBe(execs[3].lmHead.logits[0]);
+    expect(execs[0].lmHead.logits[0]).not.toBe(execs[4].lmHead.logits[0]);
   });
 });

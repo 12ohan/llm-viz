@@ -110,12 +110,74 @@ function mixSeed(baseSeed: number, bayId: number, salt: number): number {
   return (h ^ (h >>> 16)) >>> 0;
 }
 
+/**
+ * Compute a deterministic 64-bit hex fingerprint over the COMPLETE model parameterization:
+ * seed, full layer pattern, dimensions, vocab, exact IEEE-754 float64 bits of rmsNormEps and
+ * residualOutputScale. Guarantees distinct fingerprints even if two differently parameterized
+ * models are given the same explicit display `modelId`.
+ */
+export function computeModelParameterFingerprint(params: {
+  readonly seed: number;
+  readonly pattern: string;
+  readonly d: number;
+  readonly vocabSize: number;
+  readonly rmsNormEps: number;
+  readonly residualOutputScale: number;
+  readonly vocab: readonly string[];
+}): string {
+  let h1 = 0x811c9dc5 >>> 0;
+  let h2 = 0x9e3779b9 >>> 0;
+  const feedByte = (b: number) => {
+    const byte = b & 0xff;
+    h1 ^= byte;
+    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    h2 ^= (byte + 0x5a) & 0xff;
+    h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
+  };
+  const feedU32 = (v: number) => {
+    const u = v >>> 0;
+    feedByte(u);
+    feedByte(u >>> 8);
+    feedByte(u >>> 16);
+    feedByte(u >>> 24);
+  };
+  const dv = new DataView(new ArrayBuffer(8));
+  const feedF64 = (v: number) => {
+    dv.setFloat64(0, Object.is(v, -0) ? 0 : v, true);
+    feedU32(dv.getUint32(0, true));
+    feedU32(dv.getUint32(4, true));
+  };
+  const feedStr = (s: string) => {
+    feedU32(s.length);
+    for (let i = 0; i < s.length; i++) {
+      const code = s.charCodeAt(i);
+      feedByte(code);
+      feedByte(code >>> 8);
+    }
+  };
+
+  feedU32(params.seed);
+  feedStr(params.pattern);
+  feedU32(params.d);
+  feedU32(params.vocabSize);
+  feedF64(params.rmsNormEps);
+  feedF64(params.residualOutputScale);
+  feedU32(params.vocab.length);
+  for (const w of params.vocab) {
+    feedStr(w);
+  }
+
+  return `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
+}
+
 // ============================================================================
 // 1. STABLE MODEL PARAMETERS (Separated from Execution & Independent of T / tokenIds)
 // ============================================================================
 
 export interface HybridModelConfig {
   readonly modelId: string;
+  /** Canonical 64-bit fingerprint covering seed, full layer pattern, rmsNormEps, residualOutputScale, and vocab. */
+  readonly parameterFingerprint: string;
   readonly seed: number;
   readonly pattern: string;
   readonly d: 8;
@@ -167,6 +229,8 @@ export type HybridBayWeights = MambaBayWeights | MoeBayWeights | GqaBayWeights;
 
 export interface HybridModelParameters {
   readonly modelId: string;
+  /** Canonical fingerprint over all model parameters; used in cache keys even if display `modelId` is duplicated. */
+  readonly parameterFingerprint: string;
   readonly config: HybridModelConfig;
   readonly vocab: readonly string[];
   /** Untied token embedding table [vocabSize, d] (NoPE: zero positional embedding). */
@@ -432,16 +496,35 @@ export function createHybridModelParameters(
   const seed = (options?.seed ?? DEFAULT_HYBRID_MODEL_SEED) >>> 0;
   const pattern = options?.pattern ?? HYBRID_OVERRIDE_PATTERN;
   const numLayers = pattern.length;
+  if (numLayers < 1) {
+    throw new RangeError('Hybrid model pattern must contain at least 1 layer');
+  }
+  for (let i = 0; i < numLayers; i++) {
+    const ch = pattern[i];
+    if (ch !== 'M' && ch !== 'E' && ch !== '*') {
+      throw new RangeError(`Unexpected layer kind "${ch}" at pattern index ${i}`);
+    }
+  }
   const rmsNormEps = options?.rmsNormEps ?? HYBRID_UNIFIED_RMS_EPS;
   const residualOutputScale =
     options?.residualOutputScale ?? 1.42 / Math.sqrt(Math.max(2, 2 * numLayers));
   const maxRetainedWeightBays = Math.max(1, options?.maxRetainedWeightBays ?? 8);
+  const parameterFingerprint = computeModelParameterFingerprint({
+    seed,
+    pattern,
+    d: HYBRID_MINI_D,
+    vocabSize: HYBRID_MINI_VOCAB_SIZE,
+    rmsNormEps,
+    residualOutputScale,
+    vocab: MINI_VOCAB,
+  });
   const modelId =
     options?.modelId ??
-    `nemotron-nano-mini:s${seed.toString(16)}:L${numLayers}:e${rmsNormEps}`;
+    `nemotron-nano-mini:s${seed.toString(16)}:L${numLayers}:fp${parameterFingerprint}`;
 
   const config: HybridModelConfig = Object.freeze({
     modelId,
+    parameterFingerprint,
     seed,
     pattern,
     d: HYBRID_MINI_D,
@@ -538,6 +621,7 @@ export function createHybridModelParameters(
 
   return {
     modelId,
+    parameterFingerprint,
     config,
     vocab: MINI_VOCAB,
     W_embed,
@@ -611,6 +695,7 @@ export interface HybridLmHeadResult {
 
 export interface HybridExecutionResult {
   readonly modelId: string;
+  readonly parameterFingerprint: string;
   readonly executionId: string;
   readonly tokens: number;
   readonly d: 8;
@@ -650,11 +735,15 @@ export function defaultTokenIdsForLength(tokens: number): number[] {
   return ids;
 }
 
-/** Build canonical deterministic execution ID distinguishing model, token IDs, and custom labels. */
+/**
+ * Build canonical deterministic execution ID distinguishing model display ID, complete parameter
+ * fingerprint (prevents collisions even when display `modelId` is duplicated), token IDs, and labels.
+ */
 export function computeHybridExecutionId(
   modelId: string,
   tokenIds: readonly number[] | Int32Array,
   tokenLabels: readonly string[],
+  parameterFingerprint?: string,
 ): string {
   const idPart = Array.from(tokenIds).join(',');
   const labelPart = tokenLabels.join('\u001f');
@@ -664,7 +753,8 @@ export function computeHybridExecutionId(
     h ^= labelPart.charCodeAt(i);
     h = Math.imul(h, 16777619) >>> 0;
   }
-  return `${modelId}|t[${idPart}]|l:${h.toString(16)}`;
+  const fpPart = parameterFingerprint ? `|fp:${parameterFingerprint}` : '';
+  return `${modelId}${fpPart}|t[${idPart}]|l:${h.toString(16)}`;
 }
 
 function computeStreamRms(stream: Float32Array, d: number, T: number): Float32Array {
@@ -968,7 +1058,12 @@ export function runHybridExecution(
     tokenLabels.push(input.tokenLabels?.[t] ?? model.vocab[id] ?? `id:${id}`);
   }
   const frozenLabels = Object.freeze(tokenLabels);
-  const executionId = computeHybridExecutionId(model.modelId, tokenIds, frozenLabels);
+  const executionId = computeHybridExecutionId(
+    model.modelId,
+    tokenIds,
+    frozenLabels,
+    model.parameterFingerprint,
+  );
 
   // Stage 0: Untied Token Embedding Lookup (strictly NoPE — zero positional embedding added)
   const X_embed = embedTokens(tokenIds, model.W_embed, d);
@@ -1129,6 +1224,7 @@ export function runHybridExecution(
 
   return {
     modelId: model.modelId,
+    parameterFingerprint: model.parameterFingerprint,
     executionId,
     tokens: T,
     d,
@@ -1236,7 +1332,12 @@ export function getOrRunHybridExecution(
     normalizedIds.push(id);
     resolvedLabels.push(input.tokenLabels?.[t] ?? model.vocab[id] ?? `id:${id}`);
   }
-  const key = computeHybridExecutionId(model.modelId, normalizedIds, resolvedLabels);
+  const key = computeHybridExecutionId(
+    model.modelId,
+    normalizedIds,
+    resolvedLabels,
+    model.parameterFingerprint,
+  );
   const hit = cache.get(key);
   if (hit) return hit;
 

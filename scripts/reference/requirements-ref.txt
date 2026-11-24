@@ -1,0 +1,4 @@
+# Pinned development/reference dependency for independent PyTorch numerical parity fixtures.
+# NOT a browser or production runtime dependency.
+# Python: 3.12.x (PEP 723 metadata also pinned inside generate_pytorch_parity_fixtures.py)
+torch==2.15.0
