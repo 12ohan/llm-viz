@@ -38,6 +38,8 @@ import {
   SHEET_HL_BF16_GOLD,
   SHEET_HL_DIMMED,
   SHEET_HL_NORMAL,
+  SHEET_HL_OPERAND_A,
+  SHEET_HL_OPERAND_B,
   SHEET_HL_PATHWAY,
   SHEET_INSTANCE_FLOATS,
   SHEET_KIND_STANDARD,
@@ -56,8 +58,13 @@ import { buildMambaValueAtlas } from './mambaAtlas';
 import {
   CELL_TARGET_FILL,
   CELL_TARGET_FRAME,
+  computeSheetGroupBounds,
+  createSheetFocusSet,
   drawOperandDependencyXZ,
+  EMPTY_SHEET_FOCUS_SET,
   rectFromSheetGrid,
+  resolveSheetFocusRole,
+  resolveSheetHighlight,
   RIBBON_ACTIVE,
   RIBBON_DIMMED,
   RIBBON_PATHWAY_SOFT,
@@ -65,6 +72,8 @@ import {
   RIBBON_RESIDUAL,
   RIBBON_RESIDUAL_ACTIVE,
   RIBBON_SSM_LOOP,
+  type SheetFocusEntry,
+  type SheetFocusSet,
   type SheetGeomRecord,
   type WorldSpanRect,
 } from './sheetInspector';
@@ -293,6 +302,28 @@ function resolveMambaSpanRect(
   return rectFromSheetGrid(sheet, span.rowStart, span.rowEnd, span.colStart, span.colEnd);
 }
 
+function buildMambaFocusSet(formula: MambaCellFormula | null): SheetFocusSet {
+  if (!formula) return EMPTY_SHEET_FOCUS_SET;
+  const toEntry = (span: MambaSheetSpan): SheetFocusEntry => ({
+    tensor: span.tensor,
+    headIndex: span.headIndex,
+    groupIndex: span.groupIndex,
+    tokenStart: span.tokenIndex,
+    tokenEnd: span.tokenIndex,
+    tapStart: span.tapStart,
+    tapEnd: span.tapEnd,
+    rowStart: span.rowStart,
+    rowEnd: span.rowEnd,
+    colStart: span.colStart,
+    colEnd: span.colEnd,
+    role: span.role,
+  });
+  return createSheetFocusSet([
+    toEntry(formula.targetSpan),
+    ...formula.upstreamSpans.map(toEntry),
+  ]);
+}
+
 /**
  * Builds the Stage A+1 Increment 3 thin-sheet Mamba-2 cutaway for Bay 01 (Ordinary) or Bay 42 (Feeder).
  */
@@ -319,7 +350,6 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     ),
   );
   const activeGroup = mambaGroupForHead(activeHead);
-  const explicitHeadSelected = cellHeadIdx !== null || partHeadIdx !== null;
 
   const sim = runMambaSim(clampedT);
   const stateTokIdx = inferMambaCellToken(opts.activeCell, clampedT) ?? clampedT - 1;
@@ -327,28 +357,45 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   const activeFormula: MambaCellFormula | null = opts.activeCell
     ? describeMambaCellFormula(sim, opts.activeCell)
     : null;
+  const focusSet = buildMambaFocusSet(activeFormula);
 
   const b = new MambaSheetBuilder(bayId);
-  const hasFocus = activePart !== null || activeFormula !== null;
-  const hasCellTrace = activeFormula !== null;
+  const hasCellTrace = focusSet.active;
+  const hasFocus = activePart !== null || hasCellTrace;
+  // Part-only head selection (no cell trace) highlights only that head's SSM recurrence pathway
+  const partHeadFocus = partHeadIdx !== null && !hasCellTrace;
 
   const BASE_Y = 0.035;
+  const OPERAND_LIFT_Y = 0.052;
   const LIFT_Y = 0.068;
   const SHEET_THICK = 0.070;
   const RIBBON_Y_BG = 0.022;
   const RIBBON_Y_ACT = 0.052;
-  const dimLevel = hasCellTrace ? SHEET_HL_NORMAL : SHEET_HL_DIMMED;
+
+  const sheetY = (hl: number): number =>
+    hl === SHEET_HL_ACTIVE
+      ? LIFT_Y
+      : hl === SHEET_HL_OPERAND_A || hl === SHEET_HL_OPERAND_B
+        ? OPERAND_LIFT_Y
+        : BASE_Y;
 
   const stageHighlight = (
+    tensor: MambaTensorKey,
     partId: string,
-    onPathway: boolean,
+    onPartPathway: boolean,
     goldWhenFp8Mode: boolean,
   ): number => {
-    if (activePart === partId) return SHEET_HL_ACTIVE;
-    if (explicitHeadSelected && onPathway) return SHEET_HL_PATHWAY;
-    if (isFp8Mode && goldWhenFp8Mode && !hasFocus) return SHEET_HL_BF16_GOLD;
-    if (hasFocus && !onPathway) return dimLevel;
-    return SHEET_HL_NORMAL;
+    const fallback =
+      activePart === partId
+        ? SHEET_HL_ACTIVE
+        : partHeadFocus && onPartPathway
+          ? SHEET_HL_PATHWAY
+          : isFp8Mode && goldWhenFp8Mode && !hasFocus
+            ? SHEET_HL_BF16_GOLD
+            : hasFocus && !onPartPathway
+              ? SHEET_HL_DIMMED
+              : SHEET_HL_NORMAL;
+    return resolveSheetHighlight(focusSet, { tensor }, fallback);
   };
 
   // --- Spatial Anchors (XZ drafting table, top -Z to bottom +Z) ---
@@ -376,15 +423,20 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   // ==========================================================================
   // 1. RIGHT RESIDUAL HIGHWAY: Input (X) ---> + Residual (Y)
   // ==========================================================================
-  const resInHl =
+  const resInHl = resolveSheetHighlight(
+    focusSet,
+    { tensor: 'input' },
     activePart === 'residual-in'
       ? SHEET_HL_ACTIVE
       : activePart === 'residual-out'
         ? SHEET_HL_PATHWAY
-        : SHEET_HL_NORMAL;
+        : hasFocus
+          ? SHEET_HL_DIMMED
+          : SHEET_HL_NORMAL,
+  );
   b.addSheet({
     cx: resX,
-    cy: resInHl === SHEET_HL_ACTIVE ? LIFT_Y : BASE_Y,
+    cy: sheetY(resInHl),
     cz: zRow0,
     ex: 0.72,
     ey: SHEET_THICK,
@@ -402,15 +454,20 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     cellFamily: CELL_ACTIVATION_GREEN,
   });
 
-  const resOutHl =
+  const resOutHl = resolveSheetHighlight(
+    focusSet,
+    { tensor: 'residual' },
     activePart === 'residual-out'
       ? SHEET_HL_ACTIVE
-      : activePart === 'out-proj' || explicitHeadSelected
+      : activePart === 'out-proj'
         ? SHEET_HL_PATHWAY
-        : SHEET_HL_NORMAL;
+        : hasFocus
+          ? SHEET_HL_DIMMED
+          : SHEET_HL_NORMAL,
+  );
   b.addSheet({
     cx: resX,
-    cy: resOutHl === SHEET_HL_ACTIVE ? LIFT_Y : BASE_Y,
+    cy: sheetY(resOutHl),
     cz: zOut,
     ex: 0.72,
     ey: SHEET_THICK,
@@ -428,10 +485,15 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     cellFamily: CELL_ACTIVATION_GREEN,
   });
 
-  const resRibbonCol =
-    activePart === 'residual-in' || activePart === 'residual-out'
+  const resRibbonCol = hasCellTrace
+    ? resOutHl === SHEET_HL_ACTIVE || resInHl === SHEET_HL_ACTIVE
+      ? RIBBON_RESIDUAL
+      : RIBBON_DIMMED
+    : activePart === 'residual-in' || activePart === 'residual-out'
       ? RIBBON_RESIDUAL_ACTIVE
-      : RIBBON_RESIDUAL;
+      : hasFocus
+        ? RIBBON_DIMMED
+        : RIBBON_RESIDUAL;
   b.flow.addPolylineXZ(
     [
       { x: resX, z: zRow0 + 0.54 },
@@ -453,12 +515,13 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   const rmsD = 0.48;
   const rmsHl = stageHighlight(
     'rmsnorm',
-    activePart === 'in-proj' || explicitHeadSelected,
+    'rmsnorm',
+    activePart === 'in-proj',
     feederPreservedBf16,
   );
   b.addSheet({
     cx: rmsX,
-    cy: rmsHl === SHEET_HL_ACTIVE ? LIFT_Y : BASE_Y,
+    cy: sheetY(rmsHl),
     cz: zRow0,
     ex: rmsW,
     ey: SHEET_THICK,
@@ -476,14 +539,15 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     cellFamily: CELL_MOE_AMBER,
   });
 
+  const inToRmsActive = !hasCellTrace && (rmsHl === SHEET_HL_ACTIVE || activePart === 'residual-in');
   b.flow.addPolylineXZ(
     [
       { x: resX - 0.38, z: zRow0 },
       { x: rmsX + rmsW * 0.5 + 0.04, z: zRow0 },
     ],
-    rmsHl === SHEET_HL_ACTIVE || activePart === 'residual-in' ? RIBBON_Y_ACT : RIBBON_Y_BG,
+    inToRmsActive ? RIBBON_Y_ACT : RIBBON_Y_BG,
     0.13,
-    rmsHl === SHEET_HL_ACTIVE || activePart === 'residual-in' ? RIBBON_ACTIVE : RIBBON_RESIDUAL,
+    inToRmsActive ? RIBBON_ACTIVE : hasFocus ? RIBBON_DIMMED : RIBBON_RESIDUAL,
     true,
   );
 
@@ -493,10 +557,10 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   const winX = -0.35;
   const winW = 6.20;
   const winD = 0.78;
-  const winHl = stageHighlight('in-proj', explicitHeadSelected, feederPreservedBf16);
+  const winHl = stageHighlight('w_in', 'in-proj', false, feederPreservedBf16);
   b.addSheet({
     cx: winX,
-    cy: winHl === SHEET_HL_ACTIVE ? LIFT_Y : BASE_Y,
+    cy: sheetY(winHl),
     cz: zRow1,
     ex: winW,
     ey: SHEET_THICK,
@@ -536,11 +600,11 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   const gateZ = -0.20;
   const gateW = 1.68;
   const gateD = seqDepthTall;
-  const gateOnPath = activePart === 'gate-branch' || activePart === 'group-norm' || explicitHeadSelected;
-  const gateHl = stageHighlight('gate-branch', gateOnPath, feederPreservedBf16);
+  const gateOnPath = activePart === 'gate-branch' || activePart === 'group-norm';
+  const gateHl = stageHighlight('z', 'gate-branch', gateOnPath, feederPreservedBf16);
   b.addSheet({
     cx: gateX,
-    cy: gateHl === SHEET_HL_ACTIVE ? LIFT_Y : BASE_Y,
+    cy: sheetY(gateHl),
     cz: gateZ,
     ex: gateW,
     ey: SHEET_THICK,
@@ -574,13 +638,14 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   const convX = -0.55;
   const convW = 4.40;
   const xbcPreHl = stageHighlight(
+    'xbc_pre',
     'xbc-pre',
-    activePart === 'conv1d' || activePart === 'in-proj' || explicitHeadSelected,
+    activePart === 'conv1d' || activePart === 'in-proj',
     feederPreservedBf16,
   );
   b.addSheet({
     cx: convX,
-    cy: xbcPreHl === SHEET_HL_ACTIVE ? LIFT_Y : BASE_Y,
+    cy: sheetY(xbcPreHl),
     cz: zXbcPre,
     ex: convW,
     ey: SHEET_THICK,
@@ -606,17 +671,29 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     ],
     !hasCellTrace && (activePart === 'xbc-pre' || activePart === 'conv1d') ? RIBBON_Y_ACT : RIBBON_Y_BG,
     0.10,
-    branchColor(activePart === 'xbc-pre' || activePart === 'conv1d' || explicitHeadSelected),
+    branchColor(activePart === 'xbc-pre' || activePart === 'conv1d'),
     true,
   );
 
   // Fixed 4-Tap Rolling Causal Conv1D Buffer (ALWAYS BF16 — gold rim in FP8 Selective!)
-  const convHl = stageHighlight('conv1d', explicitHeadSelected, true);
+  const convFallbackHl =
+    activePart === 'conv1d'
+      ? SHEET_HL_ACTIVE
+      : isFp8Mode && !hasFocus
+        ? SHEET_HL_BF16_GOLD
+        : hasFocus
+          ? SHEET_HL_DIMMED
+          : SHEET_HL_NORMAL;
   for (let slot = 0; slot < sim.convKernel; slot++) {
     const cz = convTapZ(slot);
+    const tapHl = resolveSheetHighlight(
+      focusSet,
+      { tensor: 'conv_buf', tapIndex: slot, tokenIndex: stateTokIdx },
+      convFallbackHl,
+    );
     b.addSheet({
       cx: convX,
-      cy: convHl === SHEET_HL_ACTIVE ? LIFT_Y : BASE_Y,
+      cy: sheetY(tapHl),
       cz,
       ex: convW,
       ey: 0.062,
@@ -625,7 +702,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
       gridRows: 1,
       role: SHEET_ROLE_KV_K,
       fp8Flag: 0, // NEVER switches to FP8 (NVIDIA §4.2)
-      highlight: convHl,
+      highlight: tapHl,
       seed: 12.0 + slot * 0.7 + clampedT * 0.35,
       partId: 'conv1d',
       tensorKey: 'conv_buf',
@@ -646,7 +723,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     ],
     !hasCellTrace && activePart === 'conv1d' ? RIBBON_Y_ACT : RIBBON_Y_BG,
     0.10,
-    branchColor(activePart === 'conv1d' || explicitHeadSelected),
+    branchColor(activePart === 'conv1d'),
     true,
   );
 
@@ -655,11 +732,11 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   const dtZ = -2.25;
   const dtW = 1.62;
   const dtD = seqDepthMed;
-  const dtOnPath = activePart === 'dt-branch' || activePart === 'ssm-state-curr' || explicitHeadSelected;
-  const dtHl = stageHighlight('dt-branch', dtOnPath, feederPreservedBf16);
+  const dtOnPath = activePart === 'dt-branch' || activePart === 'ssm-state-curr' || partHeadFocus;
+  const dtHl = stageHighlight('dt', 'dt-branch', dtOnPath, feederPreservedBf16);
   b.addSheet({
     cx: dtX,
-    cy: dtHl === SHEET_HL_ACTIVE ? LIFT_Y : BASE_Y,
+    cy: sheetY(dtHl),
     cz: dtZ,
     ex: dtW,
     ey: SHEET_THICK,
@@ -708,20 +785,23 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   for (let h = 0; h < sim.nHeads; h++) {
     const g = mambaGroupForHead(h);
     const hx = headCenterX(h);
-    let hl = SHEET_HL_NORMAL;
-    if (h === activeHead && (explicitHeadSelected || activePart === 'ssm-state-curr' || activePart === 'ssm-state-prev')) {
-      hl = SHEET_HL_ACTIVE;
-    } else if (g === activeGroup && explicitHeadSelected) {
-      hl = SHEET_HL_PATHWAY;
-    } else if (hasFocus && !hasCellTrace) {
-      hl = dimLevel;
+    let fallbackHl = SHEET_HL_NORMAL;
+    if (h === activeHead && (partHeadFocus || activePart === 'ssm-state-curr' || activePart === 'ssm-state-prev')) {
+      fallbackHl = SHEET_HL_ACTIVE;
+    } else if (hasFocus) {
+      fallbackHl = SHEET_HL_DIMMED;
     } else if (feederPreservedBf16) {
-      hl = SHEET_HL_BF16_GOLD;
+      fallbackHl = SHEET_HL_BF16_GOLD;
     }
+    const hl = resolveSheetHighlight(
+      focusSet,
+      { tensor: 'x', headIndex: h, groupIndex: g },
+      fallbackHl,
+    );
 
     b.addSheet({
       cx: hx,
-      cy: hl === SHEET_HL_ACTIVE ? LIFT_Y : BASE_Y,
+      cy: sheetY(hl),
       cz: zSplit,
       ex: headWidth,
       ey: SHEET_THICK,
@@ -747,7 +827,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     const x0 = headCenterX(g * 2) - headWidth * 0.5;
     const x1 = headCenterX(g * 2 + 1) + headWidth * 0.5;
     const bz = zSplit - splitDepth * 0.5 - 0.11;
-    const isActG = g === activeGroup && explicitHeadSelected;
+    const isActG = g === activeGroup && (partHeadFocus || hasCellTrace);
     b.addGuideLine(
       x0, 0.02, bz,
       x1, 0.02, bz,
@@ -762,11 +842,11 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   const bX = 1.62;
   const cX = 3.38;
   const bcW = 1.46;
-  const bOnPath = activePart === 'b-proj' || activePart === 'ssm-state-curr' || explicitHeadSelected;
-  const bHl = stageHighlight('b-proj', bOnPath, feederPreservedBf16);
+  const bOnPath = activePart === 'b-proj' || activePart === 'ssm-state-curr' || partHeadFocus;
+  const bHl = stageHighlight('b', 'b-proj', bOnPath, feederPreservedBf16);
   b.addSheet({
     cx: bX,
-    cy: bHl === SHEET_HL_ACTIVE ? LIFT_Y : BASE_Y,
+    cy: sheetY(bHl),
     cz: zSplit,
     ex: bcW,
     ey: SHEET_THICK,
@@ -784,11 +864,11 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     cellFamily: CELL_ACTIVATION_GREEN,
   });
 
-  const cOnPath = activePart === 'c-proj' || activePart === 'ssm-readout' || explicitHeadSelected;
-  const cHl = stageHighlight('c-proj', cOnPath, feederPreservedBf16);
+  const cOnPath = activePart === 'c-proj' || activePart === 'ssm-readout' || partHeadFocus;
+  const cHl = stageHighlight('c', 'c-proj', cOnPath, feederPreservedBf16);
   b.addSheet({
     cx: cX,
-    cy: cHl === SHEET_HL_ACTIVE ? LIFT_Y : BASE_Y,
+    cy: sheetY(cHl),
     cz: zSplit,
     ex: bcW,
     ey: SHEET_THICK,
@@ -807,15 +887,15 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   });
 
   // Conv1D + SiLU -> x, B, C fan-out ribbons
-  const xTargetX = explicitHeadSelected ? headCenterX(activeHead) : xBankCenterX;
+  const xTargetX = partHeadFocus || hasCellTrace ? headCenterX(activeHead) : xBankCenterX;
   b.flow.addCubicXZ(
     { x: convX - 1.05, z: zConvBottom + 0.02 },
     { x: convX - 1.05, z: -1.16 },
     { x: xTargetX, z: -1.16 },
     { x: xTargetX, z: zSplit - splitDepth * 0.5 - 0.05 },
-    !hasCellTrace && explicitHeadSelected ? RIBBON_Y_ACT : RIBBON_Y_BG,
+    !hasCellTrace && partHeadFocus ? RIBBON_Y_ACT : RIBBON_Y_BG,
     0.095,
-    branchColor(activePart === 'conv1d' || explicitHeadSelected),
+    branchColor(activePart === 'conv1d' || partHeadFocus),
     true,
   );
   b.flow.addCubicXZ(
@@ -846,10 +926,22 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   const hCurrX = -0.35;
   const hSize = 1.38; // STRICTLY CONSTANT from T = 1 to T = 16!
 
-  const hPrevHl = stageHighlight('ssm-state-prev', activePart === 'ssm-state-curr' || explicitHeadSelected, false);
+  const hPrevFallback =
+    activePart === 'ssm-state-prev'
+      ? SHEET_HL_ACTIVE
+      : partHeadFocus || activePart === 'ssm-state-curr'
+        ? SHEET_HL_PATHWAY
+        : hasFocus
+          ? SHEET_HL_DIMMED
+          : SHEET_HL_NORMAL;
+  const hPrevHl = resolveSheetHighlight(
+    focusSet,
+    { tensor: 'h_prev', headIndex: activeHead, groupIndex: activeGroup, tokenIndex: stateTokIdx },
+    hPrevFallback,
+  );
   b.addSheet({
     cx: hPrevX,
-    cy: hPrevHl === SHEET_HL_ACTIVE ? LIFT_Y : BASE_Y,
+    cy: sheetY(hPrevHl),
     cz: zSsm,
     ex: hSize,
     ey: SHEET_THICK,
@@ -870,17 +962,22 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     cellFamily: CELL_SSM_CYAN,
   });
 
-  const hCurrHl =
+  const hCurrFallback =
     activePart === 'ssm-state-curr'
       ? SHEET_HL_ACTIVE
-      : explicitHeadSelected || activePart === 'ssm-state' || activePart === 'ssm-readout'
+      : partHeadFocus || activePart === 'ssm-state' || activePart === 'ssm-readout'
         ? SHEET_HL_PATHWAY
         : hasFocus
-          ? dimLevel
+          ? SHEET_HL_DIMMED
           : SHEET_HL_NORMAL;
+  const hCurrHl = resolveSheetHighlight(
+    focusSet,
+    { tensor: 'h_curr', headIndex: activeHead, groupIndex: activeGroup, tokenIndex: stateTokIdx },
+    hCurrFallback,
+  );
   b.addSheet({
     cx: hCurrX,
-    cy: hCurrHl === SHEET_HL_ACTIVE || hCurrHl === SHEET_HL_PATHWAY ? LIFT_Y : BASE_Y,
+    cy: sheetY(hCurrHl) === BASE_Y && hCurrHl === SHEET_HL_PATHWAY ? LIFT_Y : sheetY(hCurrHl),
     cz: zSsm,
     ex: hSize,
     ey: SHEET_THICK,
@@ -907,9 +1004,9 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
       { x: hPrevX + hSize * 0.5 + 0.04, z: zSsm },
       { x: hCurrX - hSize * 0.5 - 0.05, z: zSsm },
     ],
-    !hasCellTrace ? RIBBON_Y_ACT : RIBBON_Y_BG,
+    !hasCellTrace && (!hasFocus || partHeadFocus || activePart === 'ssm-state-curr') ? RIBBON_Y_ACT : RIBBON_Y_BG,
     0.115,
-    !hasCellTrace ? RIBBON_ACTIVE : RIBBON_QUIET,
+    !hasCellTrace && (!hasFocus || partHeadFocus || activePart === 'ssm-state-curr') ? RIBBON_ACTIVE : RIBBON_DIMMED,
     true,
   );
 
@@ -921,7 +1018,13 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     { x: hPrevX, z: zSsm + hSize * 0.5 + 0.06 },
     RIBBON_Y_BG + 0.008,
     0.095,
-    RIBBON_SSM_LOOP,
+    hasCellTrace
+      ? hCurrHl !== SHEET_HL_DIMMED || hPrevHl !== SHEET_HL_DIMMED
+        ? RIBBON_SSM_LOOP
+        : RIBBON_DIMMED
+      : hasFocus && !partHeadFocus && activePart !== 'ssm-state-curr' && activePart !== 'ssm-state-prev'
+        ? RIBBON_DIMMED
+        : RIBBON_SSM_LOOP,
     true,
     24,
   );
@@ -932,9 +1035,9 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     { x: xTargetX, z: 0.58 },
     { x: hCurrX - 0.28, z: 0.58 },
     { x: hCurrX - 0.28, z: zSsm - hSize * 0.5 - 0.05 },
-    !hasCellTrace && explicitHeadSelected ? RIBBON_Y_ACT : RIBBON_Y_BG,
-    explicitHeadSelected && !hasCellTrace ? 0.11 : 0.085,
-    explicitHeadSelected && !hasCellTrace ? RIBBON_ACTIVE : branchColor(false),
+    !hasCellTrace && partHeadFocus ? RIBBON_Y_ACT : RIBBON_Y_BG,
+    partHeadFocus && !hasCellTrace ? 0.11 : 0.085,
+    partHeadFocus && !hasCellTrace ? RIBBON_ACTIVE : branchColor(false),
     true,
   );
   b.flow.addCubicXZ(
@@ -977,15 +1080,30 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     for (let r = 0; r < bankRows; r++) {
       const tileIdx = g * 8 + r;
       const miniHead = g * 2 + Math.floor(r / 4);
-      const isTileActive = activePart === 'ssm-state' || (explicitHeadSelected && miniHead === activeHead);
-      const isTileGroup = explicitHeadSelected && g === activeGroup;
-      const tileHl = isTileActive
-        ? SHEET_HL_ACTIVE
-        : isTileGroup
-          ? SHEET_HL_PATHWAY
-          : hasFocus && !hasCellTrace
-            ? dimLevel
+      let tileHl: number;
+      if (hasCellTrace) {
+        const matchesStateHead =
+          resolveSheetFocusRole(focusSet, {
+            tensor: 'h_curr',
+            headIndex: miniHead,
+            groupIndex: g,
+            tokenIndex: stateTokIdx,
+          }) !== null ||
+          resolveSheetFocusRole(focusSet, {
+            tensor: 'h_prev',
+            headIndex: miniHead,
+            groupIndex: g,
+            tokenIndex: stateTokIdx,
+          }) !== null;
+        tileHl = matchesStateHead ? SHEET_HL_PATHWAY : SHEET_HL_DIMMED;
+      } else {
+        const isTileActive = activePart === 'ssm-state' || (partHeadFocus && miniHead === activeHead);
+        tileHl = isTileActive
+          ? SHEET_HL_ACTIVE
+          : hasFocus
+            ? SHEET_HL_DIMMED
             : SHEET_HL_NORMAL;
+      }
 
       b.addSheet({
         cx: bankStartX + g * bankPitchX,
@@ -1025,11 +1143,11 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   const yX = -0.35;
   const yW = 4.40;
   const yD = 0.44;
-  const yOnPath = activePart === 'ssm-readout' || activePart === 'group-norm' || explicitHeadSelected;
-  const yHl = stageHighlight('ssm-readout', yOnPath, feederPreservedBf16);
+  const yOnPath = activePart === 'ssm-readout' || activePart === 'group-norm' || partHeadFocus;
+  const yHl = stageHighlight('y', 'ssm-readout', yOnPath, feederPreservedBf16);
   b.addSheet({
     cx: yX,
-    cy: yHl === SHEET_HL_ACTIVE ? LIFT_Y : BASE_Y,
+    cy: sheetY(yHl),
     cz: zY,
     ex: yW,
     ey: SHEET_THICK,
@@ -1080,11 +1198,11 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   const normX = -0.85;
   const normW = 4.80;
   const normD = 0.48;
-  const normOnPath = activePart === 'group-norm' || activePart === 'out-proj' || explicitHeadSelected;
-  const normHl = stageHighlight('group-norm', normOnPath, feederPreservedBf16);
+  const normOnPath = activePart === 'group-norm' || activePart === 'out-proj';
+  const normHl = stageHighlight('y_norm', 'group-norm', normOnPath, feederPreservedBf16);
   b.addSheet({
     cx: normX,
-    cy: normHl === SHEET_HL_ACTIVE ? LIFT_Y : BASE_Y,
+    cy: sheetY(normHl),
     cz: zNorm,
     ex: normW,
     ey: SHEET_THICK,
@@ -1134,11 +1252,11 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   const woutX = 1.60;
   const woutW = 3.60;
   const woutD = 0.78;
-  const woutOnPath = activePart === 'out-proj' || activePart === 'residual-out' || explicitHeadSelected;
-  const woutHl = stageHighlight('out-proj', woutOnPath, feederPreservedBf16);
+  const woutOnPath = activePart === 'out-proj' || activePart === 'residual-out';
+  const woutHl = stageHighlight('w_out', 'out-proj', woutOnPath, feederPreservedBf16);
   b.addSheet({
     cx: woutX,
-    cy: woutHl === SHEET_HL_ACTIVE ? LIFT_Y : BASE_Y,
+    cy: sheetY(woutHl),
     cz: zOut,
     ex: woutW,
     ey: SHEET_THICK,
@@ -1169,7 +1287,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   );
 
   // W_out -> + Residual
-  const o2rActive = !hasCellTrace && (activePart === 'out-proj' || activePart === 'residual-out' || explicitHeadSelected);
+  const o2rActive = !hasCellTrace && (activePart === 'out-proj' || activePart === 'residual-out');
   b.flow.addPolylineXZ(
     [
       { x: woutX + woutW * 0.5 + 0.04, z: zOut },
@@ -1177,7 +1295,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     ],
     o2rActive ? RIBBON_Y_ACT : RIBBON_Y_BG,
     o2rActive ? 0.135 : 0.105,
-    o2rActive ? RIBBON_ACTIVE : RIBBON_RESIDUAL,
+    o2rActive ? RIBBON_ACTIVE : hasFocus ? RIBBON_DIMMED : RIBBON_RESIDUAL,
     true,
   );
 
@@ -1514,6 +1632,17 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   }
 
   const packed = b.pack();
+  const reg = (k: string) => b.sheetRegistry.get(k);
+  const convTaps = [0, 1, 2, 3].map((slot) => reg(`conv_buf:${slot}`));
+  const opFocusBounds: Record<number, AABB> = {
+    0: computeSheetGroupBounds([reg('input'), reg('rmsnorm')], 0.50, 0.10, 0.50, MAMBA_FIT_BOUNDS),
+    1: computeSheetGroupBounds([reg('rmsnorm'), reg('w_in'), reg('z'), reg('xbc_pre'), reg('dt')], 0.50, 0.10, 0.50, MAMBA_FIT_BOUNDS),
+    2: computeSheetGroupBounds([reg('xbc_pre'), ...convTaps, reg(`x:${activeHead}`), reg('b'), reg('c')], 0.50, 0.10, 0.50, MAMBA_FIT_BOUNDS),
+    3: computeSheetGroupBounds([reg('h_prev'), reg('h_curr'), reg(`x:${activeHead}`), reg('b'), reg('dt')], 0.50, 0.10, 0.50, MAMBA_FIT_BOUNDS),
+    4: computeSheetGroupBounds([reg('h_curr'), reg('c'), reg(`x:${activeHead}`), reg('y')], 0.50, 0.10, 0.50, MAMBA_FIT_BOUNDS),
+    5: computeSheetGroupBounds([reg('y'), reg('z'), reg('y_norm'), reg('w_out'), reg('residual')], 0.50, 0.10, 0.50, MAMBA_FIT_BOUNDS),
+  };
+
   const mambaLayerCount = NEMOTRON_SPEC.bays.filter((x) => x.kind === 'M').length;
   const prodConvDim =
     NEMOTRON_SPEC.mamba.heads * NEMOTRON_SPEC.mamba.channels +
@@ -1539,6 +1668,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     mambaSim: sim,
     activeFormula,
     fitBounds: MAMBA_FIT_BOUNDS,
+    opFocusBounds,
     landmarks: b.landmarks,
     kvDepthTicks: [],
     solidPickBoxes: b.pickBoxes,

@@ -113,6 +113,8 @@ export interface CutawaySceneGeometry {
   /** Live formula readout for the currently inspected (hovered/pinned/stepped) cell. */
   readonly activeFormula?: LayerFormulaReadout | null;
   readonly fitBounds: AABB;
+  /** Per-operation camera focus AABBs keyed by stepper step index 0..5. */
+  readonly opFocusBounds?: Readonly<Record<number, AABB>>;
   readonly landmarks: readonly LandmarkAnchor[];
   readonly kvDepthTicks: readonly KvDepthTickAnchor[];
   readonly calipers?: readonly DimensionCaliper[];

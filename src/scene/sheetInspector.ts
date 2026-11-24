@@ -3,13 +3,20 @@
  * geometry helpers reused across GQA and Mamba-2 live cutaways (Stage A+1 · Increment 3).
  */
 import type { Vec3 } from '../model/spec';
-import { add3, dot3, scale3, sub3 } from '../render/camera';
+import { add3, dot3, scale3, sub3, type AABB } from '../render/camera';
 import type { FlowRibbonBuilder, FlowRibbonColor } from '../render/ribbons';
 import {
   localToWorldOnFrame,
   makeSheetFrame3D,
+  sheetFrameWorldAabb,
   type SheetFrame3D,
 } from '../render/sheetFrame';
+import {
+  SHEET_HL_ACTIVE,
+  SHEET_HL_DIMMED,
+  SHEET_HL_OPERAND_A,
+  SHEET_HL_OPERAND_B,
+} from '../render/sheets';
 
 /** Layer-agnostic readout contract consumed by the docked Formula Inspector bar. */
 export interface LayerFormulaReadout {
@@ -80,15 +87,283 @@ export const RIBBON_ACTIVE: FlowRibbonColor = { r: 0.863, g: 0.298, b: 0.204, a:
 export const RIBBON_PATHWAY_SOFT: FlowRibbonColor = { r: 0.863, g: 0.298, b: 0.204, a: 0.48, borderAlpha: 0.28 };
 export const RIBBON_SSM_LOOP: FlowRibbonColor = { r: 0.12, g: 0.52, b: 0.68, a: 0.58, borderAlpha: 0.34 };
 
-// Cell-level highlight & dependency thread colors
-export const CELL_TARGET_FILL: FlowRibbonColor = { r: 0.863, g: 0.298, b: 0.204, a: 0.24, borderAlpha: 0.0 };
-export const CELL_TARGET_FRAME: FlowRibbonColor = { r: 0.863, g: 0.298, b: 0.204, a: 0.98, borderAlpha: 0.25 };
-export const CELL_OP_A_FILL: FlowRibbonColor = { r: 0.22, g: 0.38, b: 0.74, a: 0.18, borderAlpha: 0.0 };
-export const CELL_OP_A_FRAME: FlowRibbonColor = { r: 0.22, g: 0.38, b: 0.74, a: 0.92, borderAlpha: 0.25 };
-export const CELL_OP_B_FILL: FlowRibbonColor = { r: 0.10, g: 0.54, b: 0.48, a: 0.18, borderAlpha: 0.0 };
-export const CELL_OP_B_FRAME: FlowRibbonColor = { r: 0.10, g: 0.54, b: 0.48, a: 0.92, borderAlpha: 0.25 };
-export const THREAD_OP_A: FlowRibbonColor = { r: 0.22, g: 0.38, b: 0.74, a: 0.88, borderAlpha: 0.35 };
-export const THREAD_OP_B: FlowRibbonColor = { r: 0.10, g: 0.54, b: 0.48, a: 0.88, borderAlpha: 0.35 };
+// Cell-level highlight & dependency thread colors (exact match with SheetsPass shader accents)
+export const CELL_TARGET_FILL: FlowRibbonColor = { r: 0.863, g: 0.298, b: 0.204, a: 0.28, borderAlpha: 0.0 };
+export const CELL_TARGET_FRAME: FlowRibbonColor = { r: 0.863, g: 0.298, b: 0.204, a: 1.0, borderAlpha: 0.30 };
+export const CELL_OP_A_FILL: FlowRibbonColor = { r: 0.220, g: 0.380, b: 0.741, a: 0.22, borderAlpha: 0.0 };
+export const CELL_OP_A_FRAME: FlowRibbonColor = { r: 0.220, g: 0.380, b: 0.741, a: 0.96, borderAlpha: 0.30 };
+export const CELL_OP_B_FILL: FlowRibbonColor = { r: 0.102, g: 0.541, b: 0.478, a: 0.22, borderAlpha: 0.0 };
+export const CELL_OP_B_FRAME: FlowRibbonColor = { r: 0.102, g: 0.541, b: 0.478, a: 0.96, borderAlpha: 0.30 };
+export const THREAD_OP_A: FlowRibbonColor = { r: 0.220, g: 0.380, b: 0.741, a: 0.92, borderAlpha: 0.42 };
+export const THREAD_OP_B: FlowRibbonColor = { r: 0.102, g: 0.541, b: 0.478, a: 0.92, borderAlpha: 0.42 };
+
+// ============================================================================
+// SHARED FULL-IDENTITY FOCUS ENGINE (exact tensor + head/kv/group/expert/token/tap matching)
+// ============================================================================
+
+export type FocusRole = 'target' | 'operand_a' | 'operand_b';
+
+/**
+ * Full tensor identity descriptor for exact operand-aware highlighting and dimming.
+ * Preserves tensor key, headIndex, kvHeadIndex, groupIndex, expertId, token range,
+ * Conv1D tap range, and logical cell/span coordinates where applicable.
+ */
+export interface SheetFocusIdentity {
+  readonly tensor: string;
+  readonly headIndex?: number;
+  readonly kvHeadIndex?: 0 | 1;
+  readonly groupIndex?: number;
+  readonly expertId?: number;
+  /** Inclusive token range (single token when tokenStart === tokenEnd). */
+  readonly tokenStart?: number;
+  readonly tokenEnd?: number;
+  /** Inclusive Conv1D tap range (0..3). */
+  readonly tapStart?: number;
+  readonly tapEnd?: number;
+  /** Optional logical cell/span coordinates. */
+  readonly rowStart?: number;
+  readonly rowEnd?: number;
+  readonly colStart?: number;
+  readonly colEnd?: number;
+}
+
+export interface SheetFocusEntry extends SheetFocusIdentity {
+  readonly role: FocusRole;
+}
+
+export interface SheetCandidateIdentity {
+  readonly tensor: string;
+  readonly headIndex?: number;
+  readonly kvHeadIndex?: 0 | 1;
+  readonly groupIndex?: number;
+  readonly expertId?: number;
+  readonly tokenIndex?: number;
+  readonly tapIndex?: number;
+  readonly rowStart?: number;
+  readonly rowEnd?: number;
+  readonly colStart?: number;
+  readonly colEnd?: number;
+}
+
+export interface SheetFocusSet {
+  readonly active: boolean;
+  readonly entries: readonly SheetFocusEntry[];
+}
+
+export const EMPTY_SHEET_FOCUS_SET: SheetFocusSet = {
+  active: false,
+  entries: [],
+};
+
+export function createSheetFocusSet(entries: readonly SheetFocusEntry[]): SheetFocusSet {
+  return {
+    active: entries.length > 0,
+    entries,
+  };
+}
+
+/**
+ * Exact full-identity match between a focus entry and a candidate sheet/tile.
+ * Never matches by tensor key alone whenever finer-grained identity selectors are present.
+ */
+export function matchesFocusEntry(
+  entry: SheetFocusEntry,
+  candidate: SheetCandidateIdentity,
+): boolean {
+  if (entry.tensor !== candidate.tensor) return false;
+  if (
+    entry.headIndex !== undefined &&
+    candidate.headIndex !== undefined &&
+    entry.headIndex !== candidate.headIndex
+  ) {
+    return false;
+  }
+  if (
+    entry.kvHeadIndex !== undefined &&
+    candidate.kvHeadIndex !== undefined &&
+    entry.kvHeadIndex !== candidate.kvHeadIndex
+  ) {
+    return false;
+  }
+  if (
+    entry.groupIndex !== undefined &&
+    candidate.groupIndex !== undefined &&
+    entry.groupIndex !== candidate.groupIndex
+  ) {
+    return false;
+  }
+  if (
+    entry.expertId !== undefined &&
+    candidate.expertId !== undefined &&
+    entry.expertId !== candidate.expertId
+  ) {
+    return false;
+  }
+  if (
+    candidate.tokenIndex !== undefined &&
+    (entry.tokenStart !== undefined || entry.tokenEnd !== undefined)
+  ) {
+    const t0 = entry.tokenStart ?? entry.tokenEnd!;
+    const t1 = entry.tokenEnd ?? entry.tokenStart!;
+    if (candidate.tokenIndex < t0 || candidate.tokenIndex > t1) {
+      return false;
+    }
+  }
+  if (
+    candidate.tapIndex !== undefined &&
+    (entry.tapStart !== undefined || entry.tapEnd !== undefined)
+  ) {
+    const s0 = entry.tapStart ?? entry.tapEnd!;
+    const s1 = entry.tapEnd ?? entry.tapStart!;
+    if (candidate.tapIndex < s0 || candidate.tapIndex > s1) {
+      return false;
+    }
+  }
+  if (
+    candidate.rowStart !== undefined &&
+    candidate.rowEnd !== undefined &&
+    entry.rowStart !== undefined &&
+    entry.rowEnd !== undefined
+  ) {
+    if (candidate.rowEnd < entry.rowStart || candidate.rowStart > entry.rowEnd) {
+      return false;
+    }
+  }
+  if (
+    candidate.colStart !== undefined &&
+    candidate.colEnd !== undefined &&
+    entry.colStart !== undefined &&
+    entry.colEnd !== undefined
+  ) {
+    if (candidate.colEnd < entry.colStart || candidate.colStart > entry.colEnd) {
+      return false;
+    }
+  }
+  return true;
+}
+
+const ROLE_PRIORITY: Record<FocusRole, number> = {
+  target: 3,
+  operand_a: 2,
+  operand_b: 1,
+};
+
+/** Resolve the highest-priority focus role for a candidate sheet/tile, or null if unrelated. */
+export function resolveSheetFocusRole(
+  focus: SheetFocusSet,
+  candidate: SheetCandidateIdentity,
+): FocusRole | null {
+  if (!focus.active) return null;
+  let best: FocusRole | null = null;
+  for (const entry of focus.entries) {
+    if (!matchesFocusEntry(entry, candidate)) continue;
+    if (best === null || ROLE_PRIORITY[entry.role] > ROLE_PRIORITY[best]) {
+      best = entry.role;
+      if (best === 'target') return best;
+    }
+  }
+  return best;
+}
+
+/** Map a focus role to its SheetsPass highlight code. */
+export function focusRoleToHighlight(role: FocusRole): number {
+  if (role === 'target') return SHEET_HL_ACTIVE;
+  if (role === 'operand_a') return SHEET_HL_OPERAND_A;
+  return SHEET_HL_OPERAND_B;
+}
+
+/**
+ * Resolve final SheetsPass highlight code for a sheet/tile:
+ *  - When a cell/operation focus set is active, ONLY exact full-identity matches highlight
+ *    (target -> ACTIVE, operand_a -> OPERAND_A, operand_b -> OPERAND_B) and ALL unrelated
+ *    sheets/tiles dim cleanly to SHEET_HL_DIMMED.
+ *  - When no focus set is active, falls back to idle/part/BF16-gold highlighting.
+ */
+export function resolveSheetHighlight(
+  focus: SheetFocusSet,
+  candidate: SheetCandidateIdentity,
+  fallbackHighlight: number,
+): number {
+  if (!focus.active) return fallbackHighlight;
+  const role = resolveSheetFocusRole(focus, candidate);
+  return role !== null ? focusRoleToHighlight(role) : SHEET_HL_DIMMED;
+}
+
+/** Compute world-space AABB for a SheetGeomRecord (handling both XZ and arbitrary 3D frames). */
+export function sheetRecordWorldAabb(sheet: SheetGeomRecord): AABB {
+  if (sheet.frame) {
+    return sheetFrameWorldAabb(sheet.frame);
+  }
+  const hx = sheet.ex * 0.5;
+  const hy = sheet.ey * 0.5;
+  const hz = sheet.ez * 0.5;
+  return {
+    min: [sheet.cx - hx, sheet.cy - hy, sheet.cz - hz],
+    max: [sheet.cx + hx, sheet.cy + hy, sheet.cz + hz],
+  };
+}
+
+/**
+ * Compute a tight, finite, non-degenerate world-space AABB enclosing a set of sheets
+ * (typically an operation's inputs + weights + outputs), modestly padded for labels/ribbons
+ * and optionally clamped to the scene's outer fitBounds.
+ */
+export function computeSheetGroupBounds(
+  sheets: readonly (SheetGeomRecord | undefined | null)[],
+  padX: number,
+  padY: number,
+  padZ: number,
+  clampTo?: AABB,
+): AABB {
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+  let count = 0;
+
+  for (const s of sheets) {
+    if (!s) continue;
+    const b = sheetRecordWorldAabb(s);
+    if (b.min[0] < minX) minX = b.min[0];
+    if (b.min[1] < minY) minY = b.min[1];
+    if (b.min[2] < minZ) minZ = b.min[2];
+    if (b.max[0] > maxX) maxX = b.max[0];
+    if (b.max[1] > maxY) maxY = b.max[1];
+    if (b.max[2] > maxZ) maxZ = b.max[2];
+    count++;
+  }
+
+  if (count === 0) {
+    return clampTo ?? { min: [-1, -0.1, -1], max: [1, 0.2, 1] };
+  }
+
+  minX -= padX;
+  minY -= padY;
+  minZ -= padZ;
+  maxX += padX;
+  maxY += padY;
+  maxZ += padZ;
+
+  if (clampTo) {
+    minX = Math.max(clampTo.min[0], minX);
+    minY = Math.max(clampTo.min[1], minY);
+    minZ = Math.max(clampTo.min[2], minZ);
+    maxX = Math.min(clampTo.max[0], maxX);
+    maxY = Math.min(clampTo.max[1], maxY);
+    maxZ = Math.min(clampTo.max[2], maxZ);
+  }
+
+  if (maxX <= minX) maxX = minX + 0.1;
+  if (maxY <= minY) maxY = minY + 0.05;
+  if (maxZ <= minZ) maxZ = minZ + 0.1;
+
+  return {
+    min: [minX, minY, minZ],
+    max: [maxX, maxY, maxZ],
+  };
+}
 
 /** Compute world-space XZ bounding rect for an inclusive [rowStart..rowEnd] × [colStart..colEnd] cell span. */
 export function rectFromSheetGrid(
@@ -222,7 +497,7 @@ export function drawOperandDependency3D(
   const p2 = add3(add3(p3, scale3(tgtN, lift)), scale3(horizPull, -1));
 
   const threadCol = isOperandA ? THREAD_OP_A : THREAD_OP_B;
-  flow.addCubic3D(p0, p1, p2, p3, [0, 1, 0], 0.044, threadCol, true, 24, true, 0.14, 0.14);
+  flow.addCubic3D(p0, p1, p2, p3, [0, 1, 0], 0.050, threadCol, true, 24, true, 0.15, 0.15);
 }
 
 /** Draw target cell highlight + upstream operand highlight + crisp curved dependency thread. */
@@ -237,13 +512,13 @@ export function drawOperandDependencyXZ(
     upRect.cz,
     upRect.ex,
     upRect.ez,
-    upRect.topY + 0.007,
+    upRect.topY + 0.008,
     isOperandA ? CELL_OP_A_FILL : CELL_OP_B_FILL,
     isOperandA ? CELL_OP_A_FRAME : CELL_OP_B_FRAME,
-    0.022,
+    0.025,
   );
 
-  const threadY = Math.max(targetRect.topY, upRect.topY) + 0.018;
+  const threadY = Math.max(targetRect.topY, upRect.topY) + 0.020;
   const dz = targetRect.cz - upRect.cz;
   const dx = targetRect.cx - upRect.cx;
   const threadCol = isOperandA ? THREAD_OP_A : THREAD_OP_B;
@@ -257,11 +532,11 @@ export function drawOperandDependencyXZ(
         { x: endX, z: targetRect.cz },
       ],
       threadY,
-      0.044,
+      0.050,
       threadCol,
       true,
-      0.14,
-      0.14,
+      0.15,
+      0.15,
     );
   } else {
     const dirZ = Math.sign(dz || 1);
@@ -274,7 +549,7 @@ export function drawOperandDependencyXZ(
       { x: targetRect.cx, z: midZ },
       { x: targetRect.cx, z: endZ },
       threadY,
-      0.042,
+      0.048,
       threadCol,
       true,
       20,

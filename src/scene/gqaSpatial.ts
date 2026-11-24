@@ -34,6 +34,8 @@ import {
   SHEET_HL_BF16_GOLD,
   SHEET_HL_DIMMED,
   SHEET_HL_NORMAL,
+  SHEET_HL_OPERAND_A,
+  SHEET_HL_OPERAND_B,
   SHEET_HL_PATHWAY,
   SHEET_INSTANCE_FLOATS,
   SHEET_KIND_CAUSAL_SCORES,
@@ -58,8 +60,13 @@ import type { GqaValueAtlas } from './gqaAtlas';
 import {
   CELL_TARGET_FILL,
   CELL_TARGET_FRAME,
+  computeSheetGroupBounds,
+  createSheetFocusSet,
   drawCellHighlight3D,
   drawOperandDependency3D,
+  EMPTY_SHEET_FOCUS_SET,
+  resolveSheetFocusRole,
+  resolveSheetHighlight,
   RIBBON_ACTIVE,
   RIBBON_DIMMED,
   RIBBON_PATHWAY_SOFT,
@@ -67,6 +74,8 @@ import {
   RIBBON_RESIDUAL,
   RIBBON_RESIDUAL_ACTIVE,
   spanFromSheetGrid,
+  type SheetFocusEntry,
+  type SheetFocusSet,
   type SheetGeomRecord,
   type WorldSpan3D,
 } from './sheetInspector';
@@ -434,6 +443,27 @@ function resolveSpatialSpan(
   return spanFromSheetGrid(sheet, span.rowStart, span.rowEnd, span.colStart, span.colEnd);
 }
 
+/** Build exact full-identity SheetFocusSet from a live GQA cell formula (shared by Spatial 3/4 and Near-Plan). */
+export function buildGqaFocusSet(formula: GqaCellFormula | null): SheetFocusSet {
+  if (!formula) return EMPTY_SHEET_FOCUS_SET;
+  const toEntry = (span: GqaSheetSpan): SheetFocusEntry => ({
+    tensor: span.tensor,
+    headIndex: span.headIndex,
+    kvHeadIndex: span.kvHeadIndex,
+    tokenStart: span.tokenStart,
+    tokenEnd: span.tokenEnd,
+    rowStart: span.rowStart,
+    rowEnd: span.rowEnd,
+    colStart: span.colStart,
+    colEnd: span.colEnd,
+    role: span.role,
+  });
+  return createSheetFocusSet([
+    toEntry(formula.targetSpan),
+    ...formula.upstreamSpans.map(toEntry),
+  ]);
+}
+
 export interface BuildGqaSpatialContext {
   readonly bayId: number;
   readonly clampedT: number;
@@ -474,7 +504,6 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     activeKvGroup,
     group0Head,
     group1Head,
-    activeCell,
     activeFormula,
     sim,
     atlas,
@@ -483,19 +512,26 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
 
   const b = new SpatialGqaBuilder(bayId);
 
-  const hasFocus = activePart !== null || activeCell !== null;
-  const hasCellTrace = activeCell !== null;
-  const dimLevel = hasCellTrace ? SHEET_HL_NORMAL : SHEET_HL_DIMMED;
+  const focusSet = buildGqaFocusSet(activeFormula);
+  const hasCellTrace = focusSet.active;
+  const hasFocus = activePart !== null || hasCellTrace;
 
   const SHEET_THICK = 0.056;
   const BASE_Y = 0.04;
   const DECK_Y = 0.32;
 
-  const stageHighlight = (partId: string, onPath: boolean): number => {
-    if (activePart === partId) return SHEET_HL_ACTIVE;
-    if (onPath && hasFocus) return SHEET_HL_PATHWAY;
-    if (hasFocus) return dimLevel;
-    return isFp8Mode ? SHEET_HL_BF16_GOLD : SHEET_HL_NORMAL;
+  const stageHighlight = (tensor: string, partId: string, onPath: boolean): number => {
+    const fallback =
+      activePart === partId
+        ? SHEET_HL_ACTIVE
+        : onPath && hasFocus
+          ? SHEET_HL_PATHWAY
+          : hasFocus
+            ? SHEET_HL_DIMMED
+            : isFp8Mode
+              ? SHEET_HL_BF16_GOLD
+              : SHEET_HL_NORMAL;
+    return resolveSheetHighlight(focusSet, { tensor }, fallback);
   };
 
   // X stage coordinates (left -> right)
@@ -543,7 +579,17 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
   const ioW = 1.05;
   const ioD = 1.70;
 
-  const resInHl = activePart === 'residual-in' ? SHEET_HL_ACTIVE : SHEET_HL_NORMAL;
+  const resInHl = resolveSheetHighlight(
+    focusSet,
+    { tensor: 'input' },
+    activePart === 'residual-in'
+      ? SHEET_HL_ACTIVE
+      : activePart === 'residual-out'
+        ? SHEET_HL_PATHWAY
+        : hasFocus
+          ? SHEET_HL_DIMMED
+          : SHEET_HL_NORMAL,
+  );
   b.addSheet({
     cx: xInput,
     cy: BASE_Y,
@@ -566,12 +612,17 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     cellFamily: CELL_ACTIVATION_GREEN,
   });
 
-  const resOutHl =
+  const resOutHl = resolveSheetHighlight(
+    focusSet,
+    { tensor: 'residual' },
     activePart === 'residual-out'
       ? SHEET_HL_ACTIVE
       : activeHeadIdx !== null
         ? SHEET_HL_PATHWAY
-        : SHEET_HL_NORMAL;
+        : hasFocus
+          ? SHEET_HL_DIMMED
+          : SHEET_HL_NORMAL,
+  );
   b.addSheet({
     cx: xResOut,
     cy: BASE_Y,
@@ -597,10 +648,15 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
   // Elevated Emerald Residual Bypass Bridge (arches cleanly over the rear of the attention assembly)
   const bridgeY = 3.16;
   const bridgeZ = -3.68;
-  const resCol =
-    activePart === 'residual-in' || activePart === 'residual-out'
+  const resCol = hasCellTrace
+    ? resInHl !== SHEET_HL_DIMMED || resOutHl !== SHEET_HL_DIMMED
+      ? RIBBON_RESIDUAL
+      : RIBBON_DIMMED
+    : activePart === 'residual-in' || activePart === 'residual-out'
       ? RIBBON_RESIDUAL_ACTIVE
-      : RIBBON_RESIDUAL;
+      : hasFocus
+        ? RIBBON_DIMMED
+        : RIBBON_RESIDUAL;
   b.flow.addCubic3D(
     [xInput, BASE_Y + 0.04, -ioD * 0.5],
     [xInput, bridgeY * 0.85, -ioD * 0.5 - 0.8],
@@ -647,6 +703,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
 
   const rmsHl = stageHighlight(
     'rmsnorm',
+    'rmsnorm',
     activeHeadIdx !== null || activePart === 'w-q' || activePart === 'k-proj' || activePart === 'v-proj',
   );
   b.addSheet({
@@ -679,7 +736,11 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     ],
     [0, 1, 0],
     0.11,
-    rmsHl === SHEET_HL_ACTIVE || activePart === 'residual-in' ? RIBBON_ACTIVE : RIBBON_RESIDUAL,
+    !hasCellTrace && (rmsHl === SHEET_HL_ACTIVE || activePart === 'residual-in')
+      ? RIBBON_ACTIVE
+      : hasFocus
+        ? RIBBON_DIMMED
+        : RIBBON_RESIDUAL,
     true,
     0.18,
     0.18,
@@ -693,7 +754,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
   const wqSpanZ = 5.40; // spans across both Group 0 & Group 1 -> 16:1 visual contrast vs W_K/W_V
   const wqHeightY = 0.96;
   const wqOnPath = activeHeadIdx !== null || activePart === 'w-q';
-  const wqHl = stageHighlight('w-q', wqOnPath);
+  const wqHl = stageHighlight('w_q', 'w-q', wqOnPath);
 
   b.addSheet({
     cx: xWeightsIn,
@@ -724,7 +785,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
   const wvZ = 1.65;
 
   const wkOnPath = activeHeadIdx !== null || activeKvGroup !== null || activePart === 'k-proj';
-  const wkHl = stageHighlight('k-proj', wkOnPath);
+  const wkHl = stageHighlight('w_k', 'k-proj', wkOnPath);
   b.addSheet({
     cx: xWeightsIn,
     cy: wkvY,
@@ -748,7 +809,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
   });
 
   const wvOnPath = activeHeadIdx !== null || activeKvGroup !== null || activePart === 'v-proj';
-  const wvHl = stageHighlight('v-proj', wvOnPath);
+  const wvHl = stageHighlight('w_v', 'v-proj', wvOnPath);
   b.addSheet({
     cx: xWeightsIn,
     cy: wkvY,
@@ -832,20 +893,23 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     const isActiveSelected = activeHeadIdx === qIdx;
     const isDisplayedRep = (grp === 0 && group0Head === qIdx) || (grp === 1 && group1Head === qIdx);
 
-    let hl = SHEET_HL_NORMAL;
+    let fallbackHl = SHEET_HL_NORMAL;
     if (isActiveSelected) {
-      hl = SHEET_HL_ACTIVE;
+      fallbackHl = SHEET_HL_ACTIVE;
     } else if (activePart === 'q-proj' || activePart === 'w-q') {
-      hl = SHEET_HL_ACTIVE;
+      fallbackHl = SHEET_HL_ACTIVE;
     } else if (activePart === `kv-head-${grp}`) {
-      hl = SHEET_HL_PATHWAY;
-    } else if (activeHeadIdx !== null && kvHeadForQuery(activeHeadIdx) === grp) {
-      hl = SHEET_HL_NORMAL;
+      fallbackHl = SHEET_HL_PATHWAY;
     } else if (hasFocus) {
-      hl = dimLevel;
+      fallbackHl = SHEET_HL_DIMMED;
     } else if (isFp8Mode) {
-      hl = SHEET_HL_BF16_GOLD;
+      fallbackHl = SHEET_HL_BF16_GOLD;
     }
+    const hl = resolveSheetHighlight(
+      focusSet,
+      { tensor: 'q', headIndex: qIdx, kvHeadIndex: grp },
+      fallbackHl,
+    );
 
     const cy = isActiveSelected ? qActiveLiftY : isDisplayedRep ? qRepLiftY : qRestY;
     const ex = isActiveSelected ? qActiveW : qRestW;
@@ -939,14 +1003,28 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     const isSharedForHead = activeHeadIdx !== null && kvHeadForQuery(activeHeadIdx) === grp;
     const isKvRelevant = isDirectKv || isSharedForHead || activePart === 'k-proj' || activePart === 'v-proj';
 
-    const railHl = isDirectKv
+    const railFallbackHl = isDirectKv
       ? SHEET_HL_ACTIVE
       : isSharedForHead
         ? SHEET_HL_PATHWAY
-        : SHEET_HL_NORMAL;
+        : hasFocus
+          ? SHEET_HL_DIMMED
+          : SHEET_HL_NORMAL;
 
     // Ghost 16-slot capacity rails for Shared K_g and Shared V_g
-    for (const trackX of [xKTrack, xVTrack]) {
+    const kRailHasFocus =
+      hasCellTrace && resolveSheetFocusRole(focusSet, { tensor: 'kv_k', kvHeadIndex: grp }) !== null;
+    const vRailHasFocus =
+      hasCellTrace && resolveSheetFocusRole(focusSet, { tensor: 'kv_v', kvHeadIndex: grp }) !== null;
+    for (const [trackX, railHasFocus] of [
+      [xKTrack, kRailHasFocus],
+      [xVTrack, vRailHasFocus],
+    ] as const) {
+      const railHl = hasCellTrace
+        ? railHasFocus
+          ? SHEET_HL_NORMAL
+          : SHEET_HL_DIMMED
+        : railFallbackHl;
       b.addSheet({
         cx: trackX,
         cy: 0.015,
@@ -972,19 +1050,33 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     for (let t = 1; t <= clampedT; t++) {
       const tokIdx = t - 1;
       const sz = kvSliceZ(grp, t);
-      const sliceHl = isDirectKv
+      const sliceFallbackHl = isDirectKv
         ? SHEET_HL_ACTIVE
         : isSharedForHead
           ? SHEET_HL_PATHWAY
           : hasFocus && !isKvRelevant
-            ? dimLevel
+            ? SHEET_HL_DIMMED
             : SHEET_HL_NORMAL;
-      const sliceY = sliceHl === SHEET_HL_ACTIVE || sliceHl === SHEET_HL_PATHWAY ? 0.072 : 0.056;
+      const kSliceHl = resolveSheetHighlight(
+        focusSet,
+        { tensor: 'kv_k', kvHeadIndex: grp, tokenIndex: tokIdx },
+        sliceFallbackHl,
+      );
+      const vSliceHl = resolveSheetHighlight(
+        focusSet,
+        { tensor: 'kv_v', kvHeadIndex: grp, tokenIndex: tokIdx },
+        sliceFallbackHl,
+      );
+      const isElevated = (h: number) =>
+        h === SHEET_HL_ACTIVE ||
+        h === SHEET_HL_OPERAND_A ||
+        h === SHEET_HL_OPERAND_B ||
+        h === SHEET_HL_PATHWAY;
 
       // Shared K_g slice (teal-sage)
       b.addSheet({
         cx: xKTrack,
-        cy: sliceY,
+        cy: isElevated(kSliceHl) ? 0.072 : 0.056,
         cz: sz,
         ex: kvSliceWidth,
         ey: 0.058,
@@ -995,7 +1087,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
         sheetKind: SHEET_KIND_STANDARD,
         role: SHEET_ROLE_KV_K,
         fp8Flag: kvCacheFp8 ? 1 : 0,
-        highlight: sliceHl,
+        highlight: kSliceHl,
         seed: t * 1.13 + grp * 4.3 + bayId * 0.1,
         partId: kvPartId,
         kvHeadIndex: grp,
@@ -1009,7 +1101,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
       // Shared V_g slice (steel-cyan)
       b.addSheet({
         cx: xVTrack,
-        cy: sliceY,
+        cy: isElevated(vSliceHl) ? 0.072 : 0.056,
         cz: sz,
         ex: kvSliceWidth,
         ey: 0.058,
@@ -1020,7 +1112,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
         sheetKind: SHEET_KIND_STANDARD,
         role: SHEET_ROLE_KV_V,
         fp8Flag: kvCacheFp8 ? 1 : 0,
-        highlight: sliceHl,
+        highlight: vSliceHl,
         seed: t * 1.29 + grp * 4.7 + bayId * 0.1,
         partId: kvPartId,
         kvHeadIndex: grp,
@@ -1094,16 +1186,21 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     const repY = isSelHead ? qActiveLiftY : qRepLiftY;
     const repW = isSelHead ? qActiveW : qRestW;
 
-    const scoresHl =
+    const scoresFallbackHl =
       activePart === 'attn-scores'
         ? SHEET_HL_ACTIVE
         : isGrpActive
           ? SHEET_HL_PATHWAY
           : hasFocus
-            ? dimLevel
+            ? SHEET_HL_DIMMED
             : isFp8Mode
               ? SHEET_HL_BF16_GOLD
               : SHEET_HL_NORMAL;
+    const scoresHl = resolveSheetHighlight(
+      focusSet,
+      { tensor: 'scores', headIndex: repHead, kvHeadIndex: grp },
+      scoresFallbackHl,
+    );
 
     // Causal Scores = Q_h * K_g^T / sqrt(d_h)
     b.addSheet({
@@ -1122,6 +1219,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
       highlight: scoresHl,
       seed: 10.2 + grp * 3.1 + clampedT * 0.2,
       partId: 'attn-scores',
+      headIndex: repHead,
       kvHeadIndex: grp,
       tensorKey: 'scores',
       atlasSlice: atlas.scores[grp],
@@ -1129,16 +1227,21 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
       cellFamily: CELL_WEIGHT_BLUE,
     });
 
-    const smHl =
+    const smFallbackHl =
       activePart === 'softmax'
         ? SHEET_HL_ACTIVE
         : isGrpActive
           ? SHEET_HL_PATHWAY
           : hasFocus
-            ? dimLevel
+            ? SHEET_HL_DIMMED
             : isFp8Mode
               ? SHEET_HL_BF16_GOLD
               : SHEET_HL_NORMAL;
+    const smHl = resolveSheetHighlight(
+      focusSet,
+      { tensor: 'softmax', headIndex: repHead, kvHeadIndex: grp },
+      smFallbackHl,
+    );
 
     // Causal Softmax (row-wise probabilities)
     b.addSheet({
@@ -1157,6 +1260,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
       highlight: smHl,
       seed: 14.5 + grp * 2.7 + clampedT * 0.2,
       partId: 'softmax',
+      headIndex: repHead,
       kvHeadIndex: grp,
       tensorKey: 'softmax',
       atlasSlice: atlas.softmax[grp],
@@ -1165,16 +1269,21 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     });
 
     // Weighted Value Output V_out (cols = 16 heads along +Z, rows = T along -X)
-    const vOutHl =
+    const vOutFallbackHl =
       activePart === 'weighted-v'
         ? SHEET_HL_ACTIVE
         : isGrpActive
           ? SHEET_HL_PATHWAY
           : hasFocus
-            ? dimLevel
+            ? SHEET_HL_DIMMED
             : isFp8Mode
               ? SHEET_HL_BF16_GOLD
               : SHEET_HL_NORMAL;
+    const vOutHl = resolveSheetHighlight(
+      focusSet,
+      { tensor: 'v_out', kvHeadIndex: grp },
+      vOutFallbackHl,
+    );
 
     b.addSheet({
       cx: xVOut,
@@ -1282,7 +1391,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
   // ==========================================================================
   const concatDepthZ = 5.20;
   const concatWidthX = 0.86;
-  const concatHl = stageHighlight('concat', activeHeadIdx !== null || activeKvGroup !== null);
+  const concatHl = stageHighlight('concat', 'concat', activeHeadIdx !== null || activeKvGroup !== null);
 
   b.addSheet({
     cx: xConcat,
@@ -1328,7 +1437,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
   const woY = 1.48;
   const woSpanZ = 4.80;
   const woHeightY = 1.00;
-  const woHl = stageHighlight('o-proj', activeHeadIdx !== null || activeKvGroup !== null);
+  const woHl = stageHighlight('w_o', 'o-proj', activeHeadIdx !== null || activeKvGroup !== null);
 
   b.addSheet({
     cx: xWO,
@@ -1374,8 +1483,12 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     [xResOut - ioW * 0.5 - 0.35, BASE_Y + 0.15, 0],
     [xResOut - ioW * 0.5 - 0.05, BASE_Y + 0.05, 0],
     [0, 1, 0],
-    outAct || activePart === 'residual-out' ? 0.105 : 0.08,
-    outAct || activePart === 'residual-out' ? RIBBON_RESIDUAL_ACTIVE : RIBBON_RESIDUAL,
+    outAct || (!hasCellTrace && activePart === 'residual-out') ? 0.105 : 0.08,
+    outAct || (!hasCellTrace && activePart === 'residual-out')
+      ? RIBBON_RESIDUAL_ACTIVE
+      : hasFocus
+        ? RIBBON_DIMMED
+        : RIBBON_RESIDUAL,
     true,
     16,
     true,
@@ -1555,12 +1668,27 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
   );
 
   const packed = b.pack();
+  const reg = (k: string) => b.sheetRegistry.get(k);
+  const focusGrp: 0 | 1 = activeKvGroup ?? (activeHeadIdx !== null ? kvHeadForQuery(activeHeadIdx) : 0);
+  const focusHead = activeHeadIdx ?? (focusGrp === 0 ? group0Head : group1Head);
+  const kvKSlices = Array.from({ length: clampedT }, (_, t) => reg(`kv_k:${focusGrp}:${t}`));
+  const kvVSlices = Array.from({ length: clampedT }, (_, t) => reg(`kv_v:${focusGrp}:${t}`));
+
+  const opFocusBounds: Record<number, AABB> = {
+    0: computeSheetGroupBounds([reg('input'), reg('rmsnorm')], 0.48, 0.28, 0.48, GQA_SPATIAL_FIT_BOUNDS),
+    1: computeSheetGroupBounds([reg('rmsnorm'), reg('w_q'), reg('w_k'), reg('w_v'), reg(`q:${focusHead}`)], 0.48, 0.28, 0.48, GQA_SPATIAL_FIT_BOUNDS),
+    2: computeSheetGroupBounds([reg(`q:${focusHead}`), ...kvKSlices, reg(`scores:${focusGrp}`)], 0.48, 0.28, 0.48, GQA_SPATIAL_FIT_BOUNDS),
+    3: computeSheetGroupBounds([reg(`scores:${focusGrp}`), reg(`softmax:${focusGrp}`)], 0.48, 0.28, 0.48, GQA_SPATIAL_FIT_BOUNDS),
+    4: computeSheetGroupBounds([reg(`softmax:${focusGrp}`), ...kvVSlices, reg(`v_out:${focusGrp}`)], 0.48, 0.28, 0.48, GQA_SPATIAL_FIT_BOUNDS),
+    5: computeSheetGroupBounds([reg('concat'), reg('w_o'), reg('residual')], 0.48, 0.28, 0.48, GQA_SPATIAL_FIT_BOUNDS),
+  };
 
   return {
     kind: 'cutaway_gqa',
     bayId,
     ...packed,
     fitBounds: GQA_SPATIAL_FIT_BOUNDS,
+    opFocusBounds,
     landmarks: b.landmarks,
     kvDepthTicks: b.kvDepthTicks,
     calipers: b.calipers,

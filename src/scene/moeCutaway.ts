@@ -42,6 +42,8 @@ import {
   SHEET_HL_BF16_GOLD,
   SHEET_HL_DIMMED,
   SHEET_HL_NORMAL,
+  SHEET_HL_OPERAND_A,
+  SHEET_HL_OPERAND_B,
   SHEET_HL_PATHWAY,
   SHEET_INSTANCE_FLOATS,
   SHEET_KIND_STANDARD,
@@ -60,8 +62,12 @@ import { buildMoeValueAtlas } from './moeAtlas';
 import {
   CELL_TARGET_FILL,
   CELL_TARGET_FRAME,
+  computeSheetGroupBounds,
+  createSheetFocusSet,
   drawOperandDependencyXZ,
+  EMPTY_SHEET_FOCUS_SET,
   rectFromSheetGrid,
+  resolveSheetHighlight,
   RIBBON_ACTIVE,
   RIBBON_DIMMED,
   RIBBON_PATHWAY_SOFT,
@@ -69,6 +75,9 @@ import {
   RIBBON_RESIDUAL,
   RIBBON_RESIDUAL_ACTIVE,
   RIBBON_SSM_LOOP,
+  type SheetCandidateIdentity,
+  type SheetFocusEntry,
+  type SheetFocusSet,
   type SheetGeomRecord,
   type WorldSpanRect,
 } from './sheetInspector';
@@ -288,6 +297,34 @@ class MoeSheetBuilder {
   }
 }
 
+function buildMoeFocusSet(formula: MoeCellFormula | null): SheetFocusSet {
+  if (!formula) return EMPTY_SHEET_FOCUS_SET;
+  const c = formula.cell;
+  const targetEntry: SheetFocusEntry = {
+    tensor: c.tensor,
+    expertId: c.expertId,
+    tokenStart: c.tokenIndex,
+    tokenEnd: c.tokenIndex,
+    rowStart: c.row,
+    rowEnd: c.row,
+    colStart: c.col,
+    colEnd: c.col,
+    role: 'target',
+  };
+  const upEntries: SheetFocusEntry[] = formula.upstreamSpans.map((up, idx) => ({
+    tensor: up.tensor,
+    expertId: up.expertId,
+    tokenStart: up.tokenIndex,
+    tokenEnd: up.tokenIndex,
+    rowStart: up.rowStart,
+    rowEnd: up.rowEnd,
+    colStart: up.colStart,
+    colEnd: up.colEnd,
+    role: idx === 0 ? 'operand_a' : 'operand_b',
+  }));
+  return createSheetFocusSet([targetEntry, ...upEntries]);
+}
+
 export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeometry {
   const bayId: 2 | 52 = opts.bayId === 52 ? 52 : 2;
   const clampedT = Math.max(1, Math.min(MOE_SIM_CONFIG.maxTokens, Math.round(opts.tokens)));
@@ -330,19 +367,34 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   const activeFormula: MoeCellFormula | null = opts.activeCell
     ? describeMoeCellFormula(sim, opts.activeCell, focusToken, focusExpert)
     : null;
+  const focusSet = buildMoeFocusSet(activeFormula);
+  const hasCellTrace = focusSet.active;
+  const step = hasCellTrace ? null : (opts.stepperStep ?? null);
+  const hasPartFocus = activePart !== null || step !== null;
+  const hasAnyFocus = hasCellTrace || hasPartFocus;
 
-  const inspectedTensor = activeFormula?.cell.tensor ?? null;
-  const step = opts.stepperStep ?? null;
+  const sheetY = (hl: number): number =>
+    hl === SHEET_HL_ACTIVE
+      ? LIFT_Y
+      : hl === SHEET_HL_OPERAND_A || hl === SHEET_HL_OPERAND_B
+        ? LIFT_Y * 0.55
+        : 0;
 
-  const isHighlighted = (
+  const sheetHighlight = (
+    candidate: SheetCandidateIdentity,
     partIds: readonly string[],
-    tensorKeys: readonly string[],
     stepStages: readonly number[],
-  ): boolean => {
-    if (activePart && partIds.includes(activePart)) return true;
-    if (inspectedTensor && tensorKeys.includes(inspectedTensor)) return true;
-    if (step !== null && stepStages.includes(step)) return true;
-    return false;
+    idleHighlight = SHEET_HL_NORMAL,
+  ): number => {
+    const isPartMatch =
+      (activePart !== null && partIds.includes(activePart)) ||
+      (step !== null && stepStages.includes(step));
+    const fallback = isPartMatch
+      ? SHEET_HL_ACTIVE
+      : hasPartFocus
+        ? SHEET_HL_DIMMED
+        : idleHighlight;
+    return resolveSheetHighlight(focusSet, candidate, fallback);
   };
 
   // Layout anchors (XZ architectural drafting table)
@@ -364,10 +416,10 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   // ==========================================================================
   // 1. RIGHT RESIDUAL HIGHWAY: Input X (2,688) ──────────────► + Residual
   // ==========================================================================
-  const resInActive = isHighlighted(['residual-in'], ['input'], [0, 5]);
+  const resInHl = sheetHighlight({ tensor: 'input' }, ['residual-in'], [0, 5]);
   b.addSheet({
     cx: resX,
-    cy: resInActive ? LIFT_Y : 0,
+    cy: sheetY(resInHl),
     cz: zTop,
     ex: 1.44,
     ey: SHEET_T,
@@ -376,7 +428,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     gridRows: clampedT,
     role: SHEET_ROLE_RESIDUAL,
     fp8Flag: 0,
-    highlight: resInActive ? SHEET_HL_ACTIVE : SHEET_HL_NORMAL,
+    highlight: resInHl,
     seed: 11,
     partId: 'residual-in',
     tensorKey: 'input',
@@ -385,10 +437,10 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     cellFamily: CELL_ACTIVATION_GREEN,
   });
 
-  const resOutActive = isHighlighted(['residual-out'], ['residual'], [5]);
+  const resOutHl = sheetHighlight({ tensor: 'residual' }, ['residual-out'], [5]);
   b.addSheet({
     cx: resX,
-    cy: resOutActive ? LIFT_Y : 0,
+    cy: sheetY(resOutHl),
     cz: zBottom,
     ex: 1.44,
     ey: SHEET_T,
@@ -397,7 +449,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     gridRows: clampedT,
     role: SHEET_ROLE_RESIDUAL,
     fp8Flag: 0,
-    highlight: resOutActive ? SHEET_HL_ACTIVE : SHEET_HL_NORMAL,
+    highlight: resOutHl,
     seed: 19,
     partId: 'residual-out',
     tensorKey: 'residual',
@@ -407,6 +459,15 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   });
 
   // Straight emerald residual highway ribbon on the right
+  const resRibbonCol = hasCellTrace
+    ? resInHl !== SHEET_HL_DIMMED || resOutHl !== SHEET_HL_DIMMED
+      ? RIBBON_RESIDUAL
+      : RIBBON_DIMMED
+    : resInHl === SHEET_HL_ACTIVE || resOutHl === SHEET_HL_ACTIVE
+      ? RIBBON_RESIDUAL_ACTIVE
+      : hasAnyFocus
+        ? RIBBON_DIMMED
+        : RIBBON_RESIDUAL;
   b.flow.addPolylineXZ(
     [
       { x: resX, z: zTop + seqDepth * 0.5 + 0.08 },
@@ -414,7 +475,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     ],
     0.008,
     0.16,
-    resInActive || resOutActive ? RIBBON_RESIDUAL_ACTIVE : RIBBON_RESIDUAL,
+    resRibbonCol,
     true,
     0.26,
     0.26,
@@ -423,10 +484,10 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   // ==========================================================================
   // 2. TOP PRE-NORM: RMSNorm (U) ──► Parallel Fork
   // ==========================================================================
-  const rmsActive = isHighlighted(['rmsnorm'], ['rmsnorm'], [0]);
+  const rmsHl = sheetHighlight({ tensor: 'rmsnorm' }, ['rmsnorm'], [0]);
   b.addSheet({
     cx: rmsX,
-    cy: rmsActive ? LIFT_Y : 0,
+    cy: sheetY(rmsHl),
     cz: zTop,
     ex: 1.72,
     ey: SHEET_T,
@@ -435,7 +496,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     gridRows: clampedT,
     role: SHEET_ROLE_NORM,
     fp8Flag: 0,
-    highlight: rmsActive ? SHEET_HL_ACTIVE : SHEET_HL_NORMAL,
+    highlight: rmsHl,
     seed: 23,
     partId: 'rmsnorm',
     tensorKey: 'rmsnorm',
@@ -452,7 +513,11 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     ],
     0.008,
     0.13,
-    rmsActive ? RIBBON_ACTIVE : RIBBON_QUIET,
+    !hasCellTrace && rmsHl === SHEET_HL_ACTIVE
+      ? RIBBON_ACTIVE
+      : hasAnyFocus
+        ? RIBBON_DIMMED
+        : RIBBON_QUIET,
     true,
     0.22,
     0.22,
@@ -464,10 +529,15 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   const wRouterX = -5.75;
   const wRouterW = 1.24;
   const wRouterD = 2.56;
-  const routerWeightActive = isHighlighted(['w-router', 'router'], ['w_router'], [1]);
+  const wRouterHl = sheetHighlight(
+    { tensor: 'w_router' },
+    ['w-router', 'router'],
+    [1],
+    isFp8Mode ? SHEET_HL_BF16_GOLD : SHEET_HL_NORMAL,
+  );
   b.addSheet({
     cx: wRouterX,
-    cy: routerWeightActive ? LIFT_Y : 0,
+    cy: sheetY(wRouterHl),
     cz: zRouter,
     ex: wRouterW,
     ey: SHEET_T,
@@ -476,11 +546,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     gridRows: sim.nRoutedExperts,
     role: SHEET_ROLE_WEIGHT,
     fp8Flag: 0, // Strictly FP32 metadata even under FP8 Selective (NVIDIA §4.2)
-    highlight: routerWeightActive
-      ? SHEET_HL_ACTIVE
-      : isFp8Mode
-        ? SHEET_HL_BF16_GOLD
-        : SHEET_HL_NORMAL,
+    highlight: wRouterHl,
     seed: 31,
     partId: 'w-router',
     tensorKey: 'w_router',
@@ -501,6 +567,16 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   const bankD = bankRows * cellStepZ; // 2.72
   const bankLeft = routedCenterX - bankW * 0.5;
   const bankTop = zRouter - bankD * 0.5;
+  const bankEnvelope: SheetGeomRecord = {
+    cx: routedCenterX,
+    cy: 0,
+    cz: zRouter,
+    ex: bankW,
+    ey: SHEET_T,
+    ez: bankD,
+    gridCols: bankCols,
+    gridRows: bankRows,
+  };
 
   b.addDashedFrameXZ(
     bankLeft - 0.12,
@@ -521,12 +597,30 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     const isFocused = e === focusExpert;
     const tileW = cellStepX - 0.048;
     const tileD = cellStepZ - 0.048;
+    const tileCandidate: SheetCandidateIdentity = {
+      tensor: 'router_bank',
+      expertId: e,
+      tokenIndex: focusToken,
+    };
 
     if (isActiveWinner) {
       // Paired 2-matrix micro-plates (W_up + W_down, non-gated ReLU²)
       const halfD = (tileD - 0.022) * 0.5;
-      const plateY = isFocused ? LIFT_Y + 0.014 : LIFT_Y * 0.72;
-      const hl = isFocused || step === 1 || step === 2 ? SHEET_HL_ACTIVE : SHEET_HL_PATHWAY;
+      const fallbackHl =
+        activePart === 'routed-bank' || activePart === `moe-expert-${e}` || step === 1 || step === 2
+          ? SHEET_HL_ACTIVE
+          : hasPartFocus
+            ? SHEET_HL_DIMMED
+            : isFocused
+              ? SHEET_HL_ACTIVE
+              : SHEET_HL_PATHWAY;
+      const hl = resolveSheetHighlight(focusSet, tileCandidate, fallbackHl);
+      const plateY =
+        hl === SHEET_HL_ACTIVE
+          ? LIFT_Y + 0.014
+          : hl === SHEET_HL_OPERAND_A || hl === SHEET_HL_OPERAND_B || hl === SHEET_HL_PATHWAY
+            ? LIFT_Y * 0.72
+            : 0;
 
       const topPlate = b.addSheet({
         cx,
@@ -581,9 +675,16 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
         gridRows: 1,
       });
     } else {
+      const idleFallbackHl =
+        activePart === 'inactive-experts' || activePart === `moe-expert-${e}`
+          ? SHEET_HL_ACTIVE
+          : !hasPartFocus && isFocused
+            ? SHEET_HL_ACTIVE
+            : SHEET_HL_DIMMED;
+      const idleHl = resolveSheetHighlight(focusSet, tileCandidate, idleFallbackHl);
       const idleGeom = b.addSheet({
         cx,
-        cy: isFocused ? LIFT_Y * 0.8 : 0,
+        cy: idleHl === SHEET_HL_ACTIVE ? LIFT_Y * 0.8 : idleHl === SHEET_HL_OPERAND_A || idleHl === SHEET_HL_OPERAND_B ? LIFT_Y * 0.5 : 0,
         cz,
         ex: tileW,
         ey: SHEET_T * 0.72,
@@ -592,7 +693,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
         gridRows: 1,
         role: SHEET_ROLE_SCORES,
         fp8Flag: isFp8Mode ? 1 : 0,
-        highlight: isFocused ? SHEET_HL_ACTIVE : SHEET_HL_DIMMED,
+        highlight: idleHl,
         seed: 400 + e,
         partId: 'inactive-experts',
         headIndex: e,
@@ -606,8 +707,13 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   }
 
   // Parallel Fork Ribbons from RMSNorm U -> Left Routed Path
-  const routedForkColor =
-    step === 1 || step === 2 || routerWeightActive ? RIBBON_ACTIVE : RIBBON_PATHWAY_SOFT;
+  const routedForkColor = hasCellTrace
+    ? RIBBON_DIMMED
+    : step === 1 || step === 2 || wRouterHl === SHEET_HL_ACTIVE
+      ? RIBBON_ACTIVE
+      : hasPartFocus
+        ? RIBBON_DIMMED
+        : RIBBON_PATHWAY_SOFT;
   b.flow.addCubicXZ(
     { x: rmsX - 0.42, z: zTop + seqDepth * 0.5 + 0.06 },
     { x: rmsX - 0.80, z: (zTop + zRouter - bankD * 0.5) * 0.5 },
@@ -626,7 +732,11 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     ],
     0.008,
     0.12,
-    routerWeightActive || step === 1 ? RIBBON_ACTIVE : RIBBON_QUIET,
+    !hasCellTrace && (wRouterHl === SHEET_HL_ACTIVE || step === 1)
+      ? RIBBON_ACTIVE
+      : hasAnyFocus
+        ? RIBBON_DIMMED
+        : RIBBON_QUIET,
     true,
     0.20,
     0.20,
@@ -637,10 +747,15 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   // ==========================================================================
   const topkW = 4.32;
   const topkD = 0.66;
-  const topkActive = isHighlighted(['router', 'topk-weights'], ['topk_weights'], [2]);
+  const topkHl = sheetHighlight(
+    { tensor: 'topk_weights', tokenIndex: focusToken },
+    ['router', 'topk-weights'],
+    [2],
+    isFp8Mode ? SHEET_HL_BF16_GOLD : SHEET_HL_NORMAL,
+  );
   b.addSheet({
     cx: routedCenterX,
-    cy: topkActive ? LIFT_Y : 0,
+    cy: sheetY(topkHl),
     cz: zTopk,
     ex: topkW,
     ey: SHEET_T,
@@ -649,7 +764,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     gridRows: 1,
     role: SHEET_ROLE_SOFTMAX,
     fp8Flag: 0, // Always FP32 router weights/probs
-    highlight: topkActive ? SHEET_HL_ACTIVE : isFp8Mode ? SHEET_HL_BF16_GOLD : SHEET_HL_NORMAL,
+    highlight: topkHl,
     seed: 41,
     partId: 'router',
     tensorKey: 'topk_weights',
@@ -665,7 +780,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     const tile = bankTileGeom.get(eid);
     if (!tile) continue;
     const slotX = routedCenterX - topkW * 0.5 + (j + 0.5) * (topkW / sim.topK);
-    const isSlotFocused = eid === focusExpert || step === 2;
+    const isSlotFocused = !hasCellTrace && (eid === focusExpert || step === 2);
     b.flow.addCubicXZ(
       { x: tile.cx, z: tile.cz + tile.ez * 0.5 + 0.04 },
       { x: tile.cx, z: (tile.cz + zTopk) * 0.5 + 0.18 },
@@ -673,7 +788,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
       { x: slotX, z: zTopk - topkD * 0.5 - 0.05 },
       isSlotFocused ? 0.014 : 0.008,
       isSlotFocused ? 0.072 : 0.044,
-      isSlotFocused ? RIBBON_ACTIVE : RIBBON_PATHWAY_SOFT,
+      isSlotFocused ? RIBBON_ACTIVE : hasAnyFocus ? RIBBON_DIMMED : RIBBON_PATHWAY_SOFT,
       true,
       18,
     );
@@ -694,11 +809,32 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   const wDownW = 1.04; // proportional to d_exp = 4 (shared W_down is 2.08 = exact 2×!)
   const wDownD = 1.68;
 
-  const wUpActive = isHighlighted(['routed-w-up'], ['routed_w_up'], [3]);
-  const preActive = isHighlighted(['routed-pre'], ['routed_pre'], [3]);
-  const actActive = isHighlighted(['routed-act'], ['routed_act'], [3]);
-  const wDownActive = isHighlighted(['routed-w-down'], ['routed_w_down'], [3]);
-  const detailBaseHl = focusedEval.isActive ? SHEET_HL_NORMAL : SHEET_HL_DIMMED;
+  const detailIdleHl = focusedEval.isActive ? SHEET_HL_NORMAL : SHEET_HL_DIMMED;
+  const expertPartMatch = activePart === `moe-expert-${focusExpert}`;
+  const wUpHl = sheetHighlight(
+    { tensor: 'routed_w_up', expertId: focusExpert, tokenIndex: focusToken },
+    expertPartMatch ? ['routed-w-up', activePart!] : ['routed-w-up'],
+    [3],
+    detailIdleHl,
+  );
+  const preHl = sheetHighlight(
+    { tensor: 'routed_pre', expertId: focusExpert, tokenIndex: focusToken },
+    expertPartMatch ? ['routed-pre', activePart!] : ['routed-pre'],
+    [3],
+    detailIdleHl,
+  );
+  const actHl = sheetHighlight(
+    { tensor: 'routed_act', expertId: focusExpert, tokenIndex: focusToken },
+    expertPartMatch ? ['routed-act', activePart!] : ['routed-act'],
+    [3],
+    detailIdleHl,
+  );
+  const wDownHl = sheetHighlight(
+    { tensor: 'routed_w_down', expertId: focusExpert, tokenIndex: focusToken },
+    expertPartMatch ? ['routed-w-down', activePart!] : ['routed-w-down'],
+    [3],
+    detailIdleHl,
+  );
 
   b.addDashedFrameXZ(
     wUpX - wUpW * 0.5 - 0.20,
@@ -712,7 +848,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
 
   b.addSheet({
     cx: wUpX,
-    cy: wUpActive ? LIFT_Y : 0,
+    cy: sheetY(wUpHl),
     cz: zDetail,
     ex: wUpW,
     ey: SHEET_T,
@@ -721,7 +857,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     gridRows: sim.dExp,
     role: SHEET_ROLE_WEIGHT,
     fp8Flag: isFp8Mode ? 1 : 0,
-    highlight: wUpActive ? SHEET_HL_ACTIVE : detailBaseHl,
+    highlight: wUpHl,
     seed: 51,
     partId: 'routed-w-up',
     headIndex: focusExpert,
@@ -734,7 +870,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
 
   b.addSheet({
     cx: preX,
-    cy: preActive ? LIFT_Y : 0,
+    cy: sheetY(preHl),
     cz: zDetail,
     ex: vecW,
     ey: SHEET_T,
@@ -743,7 +879,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     gridRows: sim.dExp,
     role: SHEET_ROLE_ACTIVATION,
     fp8Flag: 0,
-    highlight: preActive ? SHEET_HL_ACTIVE : detailBaseHl,
+    highlight: preHl,
     seed: 53,
     partId: 'routed-pre',
     headIndex: focusExpert,
@@ -756,7 +892,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
 
   b.addSheet({
     cx: actX,
-    cy: actActive ? LIFT_Y : 0,
+    cy: sheetY(actHl),
     cz: zDetail,
     ex: vecW,
     ey: SHEET_T,
@@ -765,7 +901,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     gridRows: sim.dExp,
     role: SHEET_ROLE_SOFTMAX,
     fp8Flag: 0,
-    highlight: actActive ? SHEET_HL_ACTIVE : detailBaseHl,
+    highlight: actHl,
     seed: 57,
     partId: 'routed-act',
     headIndex: focusExpert,
@@ -778,7 +914,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
 
   b.addSheet({
     cx: wDownX,
-    cy: wDownActive ? LIFT_Y : 0,
+    cy: sheetY(wDownHl),
     cz: zDetail,
     ex: wDownW,
     ey: SHEET_T,
@@ -787,7 +923,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     gridRows: sim.d,
     role: SHEET_ROLE_WEIGHT,
     fp8Flag: isFp8Mode ? 1 : 0,
-    highlight: wDownActive ? SHEET_HL_ACTIVE : detailBaseHl,
+    highlight: wDownHl,
     seed: 59,
     partId: 'routed-w-down',
     headIndex: focusExpert,
@@ -799,11 +935,18 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   });
 
   // Horizontal chain ribbons inside Focused Routed Expert: W_up -> Pre-Act h -> ReLU² -> W_down
-  const chainCol = !focusedEval.isActive
-    ? RIBBON_DIMMED
-    : step === 3 || wUpActive || preActive || actActive || wDownActive
-      ? RIBBON_ACTIVE
-      : RIBBON_PATHWAY_SOFT;
+  const chainCol =
+    hasCellTrace || !focusedEval.isActive
+      ? RIBBON_DIMMED
+      : step === 3 ||
+          wUpHl === SHEET_HL_ACTIVE ||
+          preHl === SHEET_HL_ACTIVE ||
+          actHl === SHEET_HL_ACTIVE ||
+          wDownHl === SHEET_HL_ACTIVE
+        ? RIBBON_ACTIVE
+        : hasPartFocus
+          ? RIBBON_DIMMED
+          : RIBBON_PATHWAY_SOFT;
   b.flow.addPolylineXZ(
     [
       { x: wUpX + wUpW * 0.5 + 0.05, z: zDetail },
@@ -849,7 +992,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     { x: wUpX, z: zDetail - wUpD * 0.5 - 0.10 },
     0.008,
     0.09,
-    step === 2 || step === 3 ? RIBBON_ACTIVE : RIBBON_QUIET,
+    !hasCellTrace && (step === 2 || step === 3) ? RIBBON_ACTIVE : hasAnyFocus ? RIBBON_DIMMED : RIBBON_QUIET,
     true,
     18,
   );
@@ -857,10 +1000,10 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   // ==========================================================================
   // 6. ROUTED SUM (Σ_{j=1..6} wⱼ·yⱼ)
   // ==========================================================================
-  const routedSumActive = isHighlighted(['routed-sum'], ['routed_sum'], [3, 5]);
+  const routedSumHl = sheetHighlight({ tensor: 'routed_sum' }, ['routed-sum'], [3, 5]);
   b.addSheet({
     cx: routedCenterX,
-    cy: routedSumActive ? LIFT_Y : 0,
+    cy: sheetY(routedSumHl),
     cz: zBranchOut,
     ex: 1.92,
     ey: SHEET_T,
@@ -869,7 +1012,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     gridRows: clampedT,
     role: SHEET_ROLE_ACTIVATION,
     fp8Flag: 0,
-    highlight: routedSumActive ? SHEET_HL_ACTIVE : SHEET_HL_NORMAL,
+    highlight: routedSumHl,
     seed: 67,
     partId: 'routed-sum',
     tensorKey: 'routed_sum',
@@ -885,7 +1028,11 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     { x: routedCenterX + 0.30, z: zBranchOut - seqDepth * 0.5 - 0.08 },
     0.009,
     0.12,
-    routedSumActive || step === 3 ? RIBBON_ACTIVE : RIBBON_PATHWAY_SOFT,
+    !hasCellTrace && (routedSumHl === SHEET_HL_ACTIVE || step === 3)
+      ? RIBBON_ACTIVE
+      : hasAnyFocus
+        ? RIBBON_DIMMED
+        : RIBBON_PATHWAY_SOFT,
     true,
     18,
   );
@@ -914,14 +1061,18 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     0.48,
   );
 
-  const sharedUpActive = isHighlighted(['shared-expert'], ['shared_w_up'], [4]);
-  const sharedActActive = isHighlighted(['shared-act', 'shared-expert'], ['shared_act'], [4]);
-  const sharedDownActive = isHighlighted(['shared-w-down', 'shared-expert'], ['shared_w_down'], [4]);
-  const sharedOutActive = isHighlighted(['shared-out', 'shared-expert'], ['shared_out'], [4, 5]);
+  const sharedUpHl = sheetHighlight({ tensor: 'shared_w_up' }, ['shared-expert'], [4]);
+  const sharedActHl = sheetHighlight(
+    { tensor: 'shared_act', tokenIndex: focusToken },
+    ['shared-act', 'shared-expert'],
+    [4],
+  );
+  const sharedDownHl = sheetHighlight({ tensor: 'shared_w_down' }, ['shared-w-down', 'shared-expert'], [4]);
+  const sharedOutHl = sheetHighlight({ tensor: 'shared_out' }, ['shared-out', 'shared-expert'], [4, 5]);
 
   b.addSheet({
     cx: sharedX,
-    cy: sharedUpActive ? LIFT_Y : 0,
+    cy: sheetY(sharedUpHl),
     cz: zSharedUp,
     ex: sharedWUpW,
     ey: SHEET_T,
@@ -930,7 +1081,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     gridRows: sim.dShared,
     role: SHEET_ROLE_KV_K,
     fp8Flag: isFp8Mode ? 1 : 0,
-    highlight: sharedUpActive ? SHEET_HL_ACTIVE : SHEET_HL_NORMAL,
+    highlight: sharedUpHl,
     seed: 71,
     partId: 'shared-expert',
     tensorKey: 'shared_w_up',
@@ -942,7 +1093,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
 
   b.addSheet({
     cx: sharedX,
-    cy: sharedActActive ? LIFT_Y : 0,
+    cy: sheetY(sharedActHl),
     cz: zSharedAct,
     ex: sharedActW,
     ey: SHEET_T,
@@ -951,7 +1102,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     gridRows: sim.dShared,
     role: SHEET_ROLE_KV_V,
     fp8Flag: 0,
-    highlight: sharedActActive ? SHEET_HL_ACTIVE : SHEET_HL_NORMAL,
+    highlight: sharedActHl,
     seed: 73,
     partId: 'shared-act',
     tensorKey: 'shared_act',
@@ -963,7 +1114,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
 
   b.addSheet({
     cx: sharedX,
-    cy: sharedDownActive ? LIFT_Y : 0,
+    cy: sheetY(sharedDownHl),
     cz: zSharedDown,
     ex: sharedWDownW,
     ey: SHEET_T,
@@ -972,7 +1123,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     gridRows: sim.d,
     role: SHEET_ROLE_KV_K,
     fp8Flag: isFp8Mode ? 1 : 0,
-    highlight: sharedDownActive ? SHEET_HL_ACTIVE : SHEET_HL_NORMAL,
+    highlight: sharedDownHl,
     seed: 79,
     partId: 'shared-w-down',
     tensorKey: 'shared_w_down',
@@ -984,7 +1135,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
 
   b.addSheet({
     cx: sharedX,
-    cy: sharedOutActive ? LIFT_Y : 0,
+    cy: sheetY(sharedOutHl),
     cz: zBranchOut,
     ex: 1.92,
     ey: SHEET_T,
@@ -993,7 +1144,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     gridRows: clampedT,
     role: SHEET_ROLE_KV_V,
     fp8Flag: 0,
-    highlight: sharedOutActive ? SHEET_HL_ACTIVE : SHEET_HL_NORMAL,
+    highlight: sharedOutHl,
     seed: 83,
     partId: 'shared-out',
     tensorKey: 'shared_out',
@@ -1003,10 +1154,17 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   });
 
   // Right parallel fork from RMSNorm U -> Shared W_up -> Shared ReLU² -> Shared W_down -> Shared Out
-  const sharedFlowCol =
-    step === 4 || sharedUpActive || sharedActActive || sharedDownActive || sharedOutActive
+  const sharedFlowCol = hasCellTrace
+    ? RIBBON_DIMMED
+    : step === 4 ||
+        sharedUpHl === SHEET_HL_ACTIVE ||
+        sharedActHl === SHEET_HL_ACTIVE ||
+        sharedDownHl === SHEET_HL_ACTIVE ||
+        sharedOutHl === SHEET_HL_ACTIVE
       ? RIBBON_ACTIVE
-      : RIBBON_SSM_LOOP;
+      : hasPartFocus
+        ? RIBBON_DIMMED
+        : RIBBON_SSM_LOOP;
 
   b.flow.addCubicXZ(
     { x: rmsX + 0.42, z: zTop + seqDepth * 0.5 + 0.06 },
@@ -1060,10 +1218,10 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   // 8. BOTTOM PARALLEL MERGE: Routed Sum + Shared Out -> MoE Out -> + Residual
   // ==========================================================================
   const moeOutX = 1.65;
-  const moeOutActive = isHighlighted(['moe-out', 'merge-sum'], ['moe_out'], [5]);
+  const moeOutHl = sheetHighlight({ tensor: 'moe_out' }, ['moe-out', 'merge-sum'], [5]);
   b.addSheet({
     cx: moeOutX,
-    cy: moeOutActive ? LIFT_Y : 0,
+    cy: sheetY(moeOutHl),
     cz: zBottom,
     ex: 1.92,
     ey: SHEET_T,
@@ -1072,7 +1230,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     gridRows: clampedT,
     role: SHEET_ROLE_ACTIVATION,
     fp8Flag: 0,
-    highlight: moeOutActive ? SHEET_HL_ACTIVE : SHEET_HL_NORMAL,
+    highlight: moeOutHl,
     seed: 89,
     partId: 'moe-out',
     tensorKey: 'moe_out',
@@ -1081,7 +1239,13 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     cellFamily: CELL_ACTIVATION_GREEN,
   });
 
-  const mergeCol = moeOutActive || resOutActive || step === 5 ? RIBBON_ACTIVE : RIBBON_PATHWAY_SOFT;
+  const mergeCol = hasCellTrace
+    ? RIBBON_DIMMED
+    : moeOutHl === SHEET_HL_ACTIVE || resOutHl === SHEET_HL_ACTIVE || step === 5
+      ? RIBBON_ACTIVE
+      : hasPartFocus
+        ? RIBBON_DIMMED
+        : RIBBON_PATHWAY_SOFT;
   b.flow.addCubicXZ(
     { x: routedCenterX, z: zBranchOut + seqDepth * 0.5 + 0.06 },
     { x: routedCenterX, z: (zBranchOut + zBottom) * 0.5 + 0.25 },
@@ -1100,7 +1264,13 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     { x: moeOutX + 0.40, z: zBottom - seqDepth * 0.5 - 0.08 },
     0.008,
     0.13,
-    moeOutActive || step === 5 ? RIBBON_ACTIVE : RIBBON_SSM_LOOP,
+    hasCellTrace
+      ? RIBBON_DIMMED
+      : moeOutHl === SHEET_HL_ACTIVE || step === 5
+        ? RIBBON_ACTIVE
+        : hasPartFocus
+          ? RIBBON_DIMMED
+          : RIBBON_SSM_LOOP,
     true,
     20,
   );
@@ -1113,7 +1283,13 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     ],
     0.009,
     0.14,
-    resOutActive || step === 5 ? RIBBON_RESIDUAL_ACTIVE : RIBBON_RESIDUAL,
+    hasCellTrace
+      ? RIBBON_DIMMED
+      : resOutHl === SHEET_HL_ACTIVE || step === 5
+        ? RIBBON_RESIDUAL_ACTIVE
+        : hasPartFocus
+          ? RIBBON_DIMMED
+          : RIBBON_RESIDUAL,
     true,
     0.22,
     0.22,
@@ -1545,6 +1721,16 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   };
 
   const packed = b.pack();
+  const reg = (k: string) => b.sheetRegistry.get(k);
+  const opFocusBounds: Record<number, AABB> = {
+    0: computeSheetGroupBounds([reg('input'), reg('rmsnorm')], 0.50, 0.12, 0.50, MOE_FIT_BOUNDS),
+    1: computeSheetGroupBounds([reg('rmsnorm'), reg('w_router'), bankEnvelope], 0.50, 0.12, 0.50, MOE_FIT_BOUNDS),
+    2: computeSheetGroupBounds([bankEnvelope, reg('topk_weights')], 0.50, 0.12, 0.50, MOE_FIT_BOUNDS),
+    3: computeSheetGroupBounds([reg('routed_w_up'), reg('routed_pre'), reg('routed_act'), reg('routed_w_down'), reg('routed_sum')], 0.50, 0.12, 0.50, MOE_FIT_BOUNDS),
+    4: computeSheetGroupBounds([reg('shared_w_up'), reg('shared_act'), reg('shared_w_down'), reg('shared_out')], 0.50, 0.12, 0.50, MOE_FIT_BOUNDS),
+    5: computeSheetGroupBounds([reg('routed_sum'), reg('shared_out'), reg('moe_out'), reg('residual')], 0.50, 0.12, 0.50, MOE_FIT_BOUNDS),
+  };
+
   const moeStats: MoECutawayStats = {
     bayId,
     routedTotal: sim.nRoutedExperts,
@@ -1573,6 +1759,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     moeSim: sim,
     activeFormula,
     fitBounds: MOE_FIT_BOUNDS,
+    opFocusBounds,
     landmarks: b.landmarks,
     kvDepthTicks: [],
     solidPickBoxes: b.pickBoxes,

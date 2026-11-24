@@ -9,7 +9,7 @@ import { linkProgram } from './device';
  *   [8]      iSheetKind  float 0=standard, 1=causal_scores, 2=causal_softmax, 3=ghost_rail
  *   [9]      iRole       float 0=neutral, 1=weight, 2=activation, 3=norm, 4=kv_k, 5=kv_v, 6=scores, 7=softmax, 8=residual
  *   [10]     iFp8        float 0=BF16/FP32, 1=FP8 frosted KV storage
- *   [11]     iHighlight  float 0=normal, 1=active (oxide-red), 2=pathway (soft accent), 3=dimmed, 4=bf16_gold
+ *   [11]     iHighlight  float 0=normal, 1=active (oxide-red), 2=pathway (soft accent), 3=dimmed, 4=bf16_gold, 5=operand_a (indigo), 6=operand_b (teal)
  *   [12]     iSeed       float deterministic subtle value variation seed (until Increment 2 live Float32 texture)
  *   [13..16] iTexRect    vec4  (u0, v0, uWidth, vHeight) in uValueTex — uWidth <= 0 uses calm structural fill
  *   [17]     iValueScale float normalization scale for Float32 value texture (Increment 2)
@@ -48,6 +48,8 @@ export const SHEET_HL_ACTIVE = 1;
 export const SHEET_HL_PATHWAY = 2;
 export const SHEET_HL_DIMMED = 3;
 export const SHEET_HL_BF16_GOLD = 4;
+export const SHEET_HL_OPERAND_A = 5;
+export const SHEET_HL_OPERAND_B = 6;
 
 const SHEETS_VS = `#version 300 es
 precision highp float;
@@ -201,7 +203,9 @@ vec3 roleCellAccent(int role) {
 }
 
 void main() {
-  const vec3 OXIDE_RED = vec3(0.863, 0.298, 0.204); // #DC4C34 single highlight accent
+  const vec3 OXIDE_RED = vec3(0.863, 0.298, 0.204); // #DC4C34 target highlight accent
+  const vec3 OPERAND_A = vec3(0.220, 0.380, 0.741); // #3861BD indigo upstream operand A
+  const vec3 OPERAND_B = vec3(0.102, 0.541, 0.478); // #1A8A7A teal upstream operand B
   const vec3 BF16_GOLD = vec3(0.765, 0.545, 0.145); // restrained warm bronze-gold
   const vec3 PAPER_BG  = vec3(0.969, 0.973, 0.980); // #F7F8FA
   const vec3 CHARCOAL_NEG = vec3(0.23, 0.28, 0.36); // calm charcoal-slate for negative values
@@ -217,14 +221,21 @@ void main() {
     vec3 sideCol = vec3(0.64, 0.69, 0.76);
     if (vSheetKind == 3) {
       sideCol = vec3(0.84, 0.87, 0.91);
+      if (vHighlight == 3) {
+        sideCol = mix(sideCol, PAPER_BG, 0.60);
+      }
     } else if (vHighlight == 1) {
       sideCol = mix(sideCol, OXIDE_RED, 0.72);
+    } else if (vHighlight == 5) {
+      sideCol = mix(sideCol, OPERAND_A, 0.65);
+    } else if (vHighlight == 6) {
+      sideCol = mix(sideCol, OPERAND_B, 0.65);
     } else if (vHighlight == 2) {
       sideCol = mix(sideCol, OXIDE_RED, 0.32);
     } else if (vHighlight == 4) {
       sideCol = mix(sideCol, BF16_GOLD, 0.55);
     } else if (vHighlight == 3) {
-      sideCol = mix(sideCol, PAPER_BG, 0.45);
+      sideCol = mix(sideCol, PAPER_BG, 0.60);
     }
     float sideShade = 0.84 + 0.14 * (0.5 + 0.5 * ndl);
     fragColor = vec4(sideCol * sideShade, 1.0);
@@ -246,6 +257,13 @@ void main() {
     vec3 lineCol = vec3(0.75, 0.79, 0.86);
     if (vHighlight == 1 || vHighlight == 2) {
       lineCol = mix(lineCol, OXIDE_RED, vHighlight == 1 ? 0.55 : 0.30);
+    } else if (vHighlight == 5) {
+      lineCol = mix(lineCol, OPERAND_A, 0.50);
+    } else if (vHighlight == 6) {
+      lineCol = mix(lineCol, OPERAND_B, 0.50);
+    } else if (vHighlight == 3) {
+      fill = mix(fill, PAPER_BG, 0.60);
+      lineCol = mix(lineCol, PAPER_BG, 0.55);
     }
     vec3 col = mix(fill, lineCol, clamp(max(grid * 0.55, border * 0.85), 0.0, 1.0));
     fragColor = vec4(col * faceShade, 1.0);
@@ -348,7 +366,12 @@ void main() {
   vec2 edgePx = edgeDist / max(fwidth(vUv), vec2(1e-5));
   float minEdgePx = min(edgePx.x, edgePx.y);
 
-  float borderPx = vHighlight == 1 ? 2.2 : (vHighlight == 2 || vHighlight == 4 ? 1.55 : 1.05);
+  float borderPx =
+    vHighlight == 1
+      ? 2.25
+      : (vHighlight == 5 || vHighlight == 6
+          ? 1.95
+          : (vHighlight == 2 || vHighlight == 4 ? 1.55 : 1.05));
   float borderMask = 1.0 - smoothstep(borderPx - 0.5, borderPx + 0.6, minEdgePx);
 
   vec3 borderCol = vec3(0.46, 0.52, 0.60);
@@ -356,11 +379,19 @@ void main() {
     borderCol = vec3(0.56, 0.62, 0.70);
   }
 
-  // Apply selection / pathway / dimming hierarchy
+  // Apply selection / operand / pathway / dimming hierarchy
   if (vHighlight == 1) {
-    // Active hovered/selected sheet: crisp oxide-red border + delicate warm face lift
+    // Active hovered/selected/target sheet: crisp oxide-red border + delicate warm face lift
     col = mix(col, OXIDE_RED, isMaskedUpper ? 0.04 : 0.14);
     borderCol = OXIDE_RED;
+  } else if (vHighlight == 5) {
+    // Upstream Operand A sheet: crisp indigo border (#3861BD) + subtle cool lift
+    col = mix(col, OPERAND_A, isMaskedUpper ? 0.03 : 0.09);
+    borderCol = OPERAND_A;
+  } else if (vHighlight == 6) {
+    // Upstream Operand B sheet: crisp teal border (#1A8A7A) + subtle mineral lift
+    col = mix(col, OPERAND_B, isMaskedUpper ? 0.03 : 0.09);
+    borderCol = OPERAND_B;
   } else if (vHighlight == 2) {
     // Connected pathway sheet (e.g., shared KV head, causal scores, V out for selected Q_i)
     col = mix(col, OXIDE_RED, isMaskedUpper ? 0.02 : 0.07);
@@ -369,9 +400,9 @@ void main() {
     // BF16 preserved border in FP8 Selective mode (quiet restrained gold-bronze edge)
     borderCol = BF16_GOLD;
   } else if (vHighlight == 3) {
-    // Non-selected background head/lane gently recedes so active pathway reads instantaneously
-    col = mix(col, PAPER_BG, 0.46);
-    borderCol = mix(borderCol, PAPER_BG, 0.42);
+    // Unrelated sheets clearly recede toward paper background while remaining readable
+    col = mix(col, PAPER_BG, 0.60);
+    borderCol = mix(borderCol, PAPER_BG, 0.55);
   }
 
   // Subtle FP8 diagonal corner tick in top-right of KV cache sheets
