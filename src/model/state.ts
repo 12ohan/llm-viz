@@ -40,6 +40,9 @@ export interface SceneState {
   mambaBayId: 1 | 42;
   mambaViewAngle: GqaViewAngle;
   mambaActiveHead: number;
+  /** null means follow latest token (T - 1); integer 0..T-1 pins temporal recurrence snapshot t. */
+  mambaStateToken: number | null;
+  mambaTemporalPlaying: boolean;
   mambaHoveredCell: MambaCellRef | null;
   mambaSelectedCell: MambaCellRef | null;
   mambaStepperActive: boolean;
@@ -134,6 +137,8 @@ export function createInitialState(defaultPose: CameraPose, reducedMotion = fals
     mambaBayId: 1,
     mambaViewAngle: 'three_quarter',
     mambaActiveHead: 0,
+    mambaStateToken: null,
+    mambaTemporalPlaying: false,
     mambaHoveredCell: null,
     mambaSelectedCell: null,
     mambaStepperActive: false,

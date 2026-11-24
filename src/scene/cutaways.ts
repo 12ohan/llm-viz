@@ -16,7 +16,13 @@ export {
   GQA_FIT_BOUNDS,
   GQA_SPATIAL_FIT_BOUNDS,
 } from './gqaCutaway';
-export { buildMambaCutaway, parseMambaHeadPartId, MAMBA_FIT_BOUNDS } from './mambaCutaway';
+export {
+  buildMambaCutaway,
+  fitSpatialMambaCamera,
+  parseMambaHeadPartId,
+  MAMBA_FIT_BOUNDS,
+  MAMBA_SPATIAL_FIT_BOUNDS,
+} from './mambaCutaway';
 export { formatMambaHeadId, mambaGroupForHead } from '../math/mambaSim';
 export { buildMoECutaway, parseMoeExpertPartId, MOE_FIT_BOUNDS } from './moeCutaway';
 export { activeRoutedExpertIndices, formatExpertId } from '../math/moeSim';

@@ -23,6 +23,7 @@ import {
   type MambaCellFormula,
   type MambaCellRef,
   type MambaSheetSpan,
+  type MambaSimResult,
   type MambaTensorKey,
 } from '../math/mambaSim';
 import {
@@ -30,6 +31,7 @@ import {
   NEMOTRON_SPEC,
   type PrecisionMode,
 } from '../model/spec';
+import type { GqaViewAngle } from '../model/state';
 import type { AABB } from '../render/camera';
 import type { PickBox } from '../render/pick';
 import { FlowRibbonBuilder, type FlowRibbonColor } from '../render/ribbons';
@@ -55,6 +57,11 @@ import {
 import type { AtlasSlice } from './atlasPacker';
 import type { CutawayPartInfo, CutawaySceneGeometry } from './cutaways';
 import { buildMambaValueAtlas } from './mambaAtlas';
+import {
+  buildMambaSpatialScene,
+  fitSpatialMambaCamera,
+  MAMBA_SPATIAL_FIT_BOUNDS,
+} from './mambaSpatial';
 import {
   CELL_TARGET_FILL,
   CELL_TARGET_FRAME,
@@ -90,6 +97,8 @@ import {
   type LandmarkAnchor,
 } from './spine';
 
+export { fitSpatialMambaCamera, MAMBA_SPATIAL_FIT_BOUNDS };
+
 /** Parse `'mamba-head-0'` .. `'mamba-head-15'` into integer head index `0..15`, or `null`. */
 export function parseMambaHeadPartId(partId: string | null | undefined): number | null {
   if (!partId || !partId.startsWith('mamba-head-')) return null;
@@ -106,6 +115,10 @@ export interface MambaCutawayOptions {
   readonly hoveredPart: string | null;
   readonly activeHead?: number;
   readonly activeCell?: MambaCellRef | null;
+  /** Layout mode: `'three_quarter'` builds the 3D Spatial Mamba-2 architecture; `'near_plan'` (default) keeps the coplanar XZ schematic. */
+  readonly viewAngle?: GqaViewAngle;
+  /** Optional explicit recurrence token index `0..T-1` for temporal playback (overridden when activeCell specifies a token). */
+  readonly stateTokenIndex?: number | null;
 }
 
 interface MambaSheetSpec {
@@ -324,8 +337,239 @@ function buildMambaFocusSet(formula: MambaCellFormula | null): SheetFocusSet {
   ]);
 }
 
+function buildMambaPartCatalog(params: {
+  readonly bayId: 1 | 42;
+  readonly clampedT: number;
+  readonly isFeeder: boolean;
+  readonly computeIsFp8: boolean;
+  readonly feederPreservedBf16: boolean;
+  readonly activeHead: number;
+  readonly activeGroup: number;
+  readonly stateTokIdx: number;
+  readonly sim: MambaSimResult;
+}): Record<string, CutawayPartInfo> {
+  const {
+    bayId,
+    clampedT,
+    isFeeder,
+    computeIsFp8,
+    feederPreservedBf16,
+    activeHead,
+    activeGroup,
+    stateTokIdx,
+    sim,
+  } = params;
+  const headTag = formatMambaHeadId(activeHead);
+  const tokLabel = sim.tokenLabels[stateTokIdx] ?? `t${stateTokIdx}`;
+  const partCatalog: Record<string, CutawayPartInfo> = {
+    'residual-in': {
+      id: 'residual-in',
+      title: 'Residual Stream Input (2,688)',
+      badge: 'Activation · Emerald',
+      summary:
+        'Incoming hidden state from the continuous 2,688-channel emerald residual spine (miniature d=8). Taps left into Pre-RMSNorm while the untouched residual passes straight to the final + merge.',
+      specs: [
+        'Production shape: [T, 2,688] · Miniature live sim: [T, 8] (Float32 storage)',
+        'Hover or click any cell to inspect its value and RMS magnitude.',
+      ],
+    },
+    rmsnorm: {
+      id: 'rmsnorm',
+      title: 'Pre-Layer RMSNorm (ε = 1e−5)',
+      badge: computeIsFp8 ? 'FP8 Selective (prod)' : feederPreservedBf16 ? 'BF16 Preserved §4.2' : 'BF16 (prod)',
+      summary:
+        'Normalizes each token vector by √(mean(X²) + 1e−5) and multiplies by learned non-unit scale γ_in before the fused Mamba-2 input projection.',
+      specs: [
+        'Matches NVIDIA NemotronH rms_norm_eps = 1e−5 (no bias, no mean shift)',
+        `Bay ${formatBayId(bayId)} production metadata: ${computeIsFp8 ? 'FP8 compute' : feederPreservedBf16 ? 'BF16 preserved (Feeder §4.2)' : 'BF16'}`,
+      ],
+    },
+    'in-proj': {
+      id: 'in-proj',
+      title: 'Fused Mamba-2 Input Projection (W_in)',
+      badge: computeIsFp8 ? 'FP8 Weights (prod)' : feederPreservedBf16 ? 'BF16 Preserved §4.2' : 'BF16 Weights (prod)',
+      summary:
+        'Single fused projection splitting into three parallel branches: bypass gate z (4,096), Conv1D stream xBC_pre (6,144), and per-head discretization step logits Δt_raw (64).',
+      specs: [
+        'Production: 2,688 → 4,096(z) + 6,144(xBC) + 64(Δt) = 10,304 · Miniature: 8 → 64 + 128 + 16 = 208',
+        isFeeder
+          ? 'Bay 42 Feeder (before Bay 43 GQA): preserved in BF16 under NVIDIA §4.2 (gold rim).'
+          : 'Bay 01 (ordinary Mamba-2): switches to FP8 metadata in FP8 Selective mode (live sim stays Float32).',
+      ],
+    },
+    'gate-branch': {
+      id: 'gate-branch',
+      title: 'Bypass Gate Branch (z · 4,096)',
+      badge: 'Gate FIRST (norm_before_gate=False)',
+      summary:
+        'Bypasses Conv1D and SSM recurrence completely, entering MambaRMSNormGated where y · SiLU(z) is applied FIRST before 8-group RMSNorm.',
+      specs: [
+        'Production width: 4,096 (64 × 64) · Miniature: 64 (16 × 4) × T rows',
+        'Matches NemotronH MambaRMSNormGated(norm_before_gate=False)',
+      ],
+    },
+    'xbc-pre': {
+      id: 'xbc-pre',
+      title: 'Pre-Conv xBC Stream (6,144 × T)',
+      badge: `Sequence Tensor · T=${clampedT}`,
+      summary:
+        'Sequence activation stream feeding the depthwise causal Conv1D kernel. Unlike the fixed 4-tap rolling inference buffer beside it, this sequence activation strip scales with token count T.',
+      specs: [
+        'Production channels: 4,096(x) + 1,024(B) + 1,024(C) = 6,144 · Miniature: 128',
+        'Each token column is pushed into the 4-slot rolling Conv1D buffer.',
+      ],
+    },
+    conv1d: {
+      id: 'conv1d',
+      title: 'Causal Conv1D Rolling Buffer (k = 4)',
+      badge: 'Always BF16 · ~1.08 MiB / 23 bays',
+      summary:
+        'Fixed 4-tap depthwise causal convolution buffer holding the last four token vectors (t−3, t−2, t−1, t; zero-padded for t−lag < 0) followed by SiLU. Supplies local ordering and NEVER quantizes to FP8.',
+      specs: [
+        `Active recurrence snapshot: t${stateTokIdx} "${tokLabel}" (${Math.max(0, 3 - stateTokIdx)} zero-padded tap${Math.max(0, 3 - stateTokIdx) === 1 ? '' : 's'})`,
+        'Persistent Conv1D storage: 6,144 × 4 × 2 B = 48 KiB/bay (~1.08 MiB BF16 across 23 bays)',
+        'Precision override: ALWAYS BF16 even on FP8 bays (NVIDIA §4.2 gold rim)',
+      ],
+    },
+    'dt-branch': {
+      id: 'dt-branch',
+      title: 'Step / Decay Branch (Δt = softplus)',
+      badge: '16 mini / 64 prod heads',
+      summary:
+        'Per-head discretization step Δt = softplus(Δt_raw + Δt_bias) > 0 controlling continuous decay A = −exp(A_log) < 0 via dA = exp(Δt · A) ∈ (0, 1).',
+      specs: [
+        'Uses numerically stable softplus: max(v, 0) + log1p(exp(−|v|))',
+        'Balances retention (dA · Hₜ₋₁) against new write energy (Δt · x · B)',
+      ],
+    },
+    'b-proj': {
+      id: 'b-proj',
+      title: 'Grouped Input Projection B (8 Groups)',
+      badge: '8 Groups · Shared across heads',
+      summary:
+        'Post-Conv1D+SiLU write keys shared across the 8 Mamba-2 groups (2 miniature heads/group; 8 production heads/group). Outer-products with Δt · x to write into Hₜ.',
+      specs: [
+        'Production: 8 groups × 128 state dim = 1,024 · Miniature: 8 × 4 = 32',
+        `Active head ${headTag} reads group G${activeGroup} columns.`,
+      ],
+    },
+    'c-proj': {
+      id: 'c-proj',
+      title: 'Grouped Readout Projection C (8 Groups)',
+      badge: '8 Groups · Shared across heads',
+      summary:
+        'Post-Conv1D+SiLU readout queries shared across the 8 Mamba-2 groups. Contracts the updated SSM state Hₜ along state dimension n to produce y_ssm.',
+      specs: [
+        'Production: 8 groups × 128 state dim = 1,024 · Miniature: 8 × 4 = 32',
+        `Active head ${headTag} contracts Hₜ with C[G${activeGroup}].`,
+      ],
+    },
+    'ssm-state-prev': {
+      id: 'ssm-state-prev',
+      title: `Prior SSM State Hₜ₋₁ (${headTag} · G${activeGroup})`,
+      badge: 'Fixed Size · FP32',
+      summary:
+        'State matrix carried from the previous token (all zeros at t = 0). In production inference only the single active state buffer is kept and overwritten in place; H_history is browser-only playback history.',
+      specs: [
+        `Active miniature head: ${headTag} (4×4) at t${stateTokIdx} "${tokLabel}" · Production head: 64×128 FP32`,
+        'Decays elementwise by dA = exp(Δt · A) ∈ (0, 1) into Hₜ.',
+      ],
+    },
+    'ssm-state-curr': {
+      id: 'ssm-state-curr',
+      title: `SSM State Hₜ (${headTag} · G${activeGroup})`,
+      badge: 'Fixed Size · 46.0 MiB FP32 / 23 bays',
+      summary:
+        'Updated recurrent state Hₜ = dA · Hₜ₋₁ + Δt · x · B. Stepping t = 0 → T−1 or scrubbing T = 1 → 16 refreshes values inside this exact fixed-size matrix without allocating a single extra byte of SSM memory.',
+      specs: [
+        'Persistent SSM state: 64×64×128×4 B = 2.00 MiB/bay (46.0 MiB FP32 across 23 bays)',
+        'Combined persistent Mamba state: 46.0 MiB SSM + ~1.08 MiB Conv1D ≈ 47.1 MiB fixed (T=1 → 1M)',
+        'H_history is browser-only educational playback history (NOT stored in production inference).',
+      ],
+    },
+    'ssm-state': {
+      id: 'ssm-state',
+      title: '64-Head Production SSM State Bank (FP32)',
+      badge: '46.0 MiB SSM + 1.08 MiB Conv1D',
+      summary:
+        'All 64 production SSM heads (8 groups × 8 heads, each 64×128 FP32) remain strictly fixed in size from 1 to 1M tokens. Click any tile to inspect its mapped miniature head H00–H15 in Hₜ₋₁ ⇄ Hₜ.',
+      specs: [
+        'Persistent SSM storage: 2.00 MiB/layer × 23 = 46.0 MiB FP32 (NEVER FP8)',
+        'Persistent Conv1D storage: 48 KiB/layer × 23 = ~1.08 MiB BF16 → ~47.1 MiB total fixed',
+        'H_history is browser-only educational playback history.',
+      ],
+    },
+    'ssm-readout': {
+      id: 'ssm-readout',
+      title: 'SSM State Readout + Skip (y = Hₜ·C + D·x)',
+      badge: 'State Readout + Per-Head D',
+      summary:
+        'Contracts each head’s updated state Hₜ with its group’s C vector and adds the learned per-head skip connection D[h] · x.',
+      specs: [
+        'Equation: y[h, p, t] = Σₙ Hₜ[h, p, n] · C[g, n, t] + D[h] · x[h, p, t]',
+        'Feeds directly into MambaRMSNormGated.',
+      ],
+    },
+    'group-norm': {
+      id: 'group-norm',
+      title: 'MambaRMSNormGated (Gate FIRST → 8-Group Norm)',
+      badge: 'norm_before_gate = False · ε = 1e−5',
+      summary:
+        'Applies multiplicative SiLU(z) gating FIRST (gated = y · SiLU(z)), then normalizes independently across 8 groups with ε = 1e−5, and scales by learned γ_gate.',
+      specs: [
+        'Production: 8 groups × 512 channels = 4,096 · Miniature: 8 groups × 8 channels = 64',
+        'Verified against NVIDIA NemotronH MambaRMSNormGated(norm_before_gate=False).',
+      ],
+    },
+    'out-proj': {
+      id: 'out-proj',
+      title: 'Mamba-2 Output Projection (W_out)',
+      badge: computeIsFp8 ? 'FP8 Weights (prod)' : feederPreservedBf16 ? 'BF16 Preserved §4.2' : 'BF16 Weights (prod)',
+      summary:
+        'Projects the gated-and-normalized 4,096-channel vector back to the 2,688-channel residual stream width (miniature 64 → 8).',
+      specs: [
+        'Production matrix: 4,096 × 2,688 (~11.0M params) · Miniature: 64 × 8',
+        isFeeder
+          ? 'Bay 42 Feeder: preserved in BF16 alongside Bay 43 GQA (NVIDIA §4.2).'
+          : 'Bay 01: FP8 production metadata in FP8 Selective mode (live sim stays Float32).',
+      ],
+    },
+    'residual-out': {
+      id: 'residual-out',
+      title: 'Residual Stream Merge (+ 2,688)',
+      badge: 'Activation · Emerald',
+      summary:
+        'Adds the Mamba-2 output delta back into the untouched emerald residual stream: Y = X + Mamba2(RMSNorm(X)).',
+      specs: [
+        'Hover or click any cell to see exact X + Mamba_out = Y values.',
+      ],
+    },
+  };
+
+  for (let h = 0; h < sim.nHeads; h++) {
+    const g = mambaGroupForHead(h);
+    const hId = formatMambaHeadId(h);
+    partCatalog[`mamba-head-${h}`] = {
+      id: `mamba-head-${h}`,
+      title: `Mamba-2 Head ${hId} (Group G${g})`,
+      badge: `A = ${sim.A[h].toFixed(2)} · D = ${sim.D[h].toFixed(2)}`,
+      summary:
+        `Miniature head ${hId} shares B/C group G${g} with ${formatMambaHeadId(g * 2)}–${formatMambaHeadId(g * 2 + 1)} (mirroring 8 production heads per group across 64 heads). Selecting ${hId} updates the live Hₜ₋₁ ⇄ Hₜ state sheets.`,
+      specs: [
+        `Continuous decay A[${hId}] = −exp(${sim.A_log[h].toFixed(2)}) = ${sim.A[h].toFixed(3)} · t${stateTokIdx} dA = ${sim.dA[h * clampedT + stateTokIdx].toFixed(3)}`,
+        `Per-head skip D[${hId}] = ${sim.D[h].toFixed(3)} · t${stateTokIdx} Δt = ${sim.dt[h * clampedT + stateTokIdx].toFixed(3)}`,
+        'Persistent storage: 46.0 MiB SSM (FP32) + ~1.08 MiB Conv1D (BF16) across 23 bays.',
+      ],
+    };
+  }
+
+  return partCatalog;
+}
+
 /**
- * Builds the Stage A+1 Increment 3 thin-sheet Mamba-2 cutaway for Bay 01 (Ordinary) or Bay 42 (Feeder).
+ * Builds the Mamba-2 cutaway for Bay 01 (Ordinary) or Bay 42 (Feeder):
+ *   - `viewAngle === 'three_quarter'`: true 3D multi-plane Spatial Mamba-2 architecture (`mambaSpatial.ts`)
+ *   - `viewAngle === 'near_plan'` (default): preserved coplanar XZ drafting-table schematic
  */
 export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeometry {
   const { bayId, precision, selectedPart, hoveredPart } = opts;
@@ -352,12 +596,54 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   const activeGroup = mambaGroupForHead(activeHead);
 
   const sim = runMambaSim(clampedT);
-  const stateTokIdx = inferMambaCellToken(opts.activeCell, clampedT) ?? clampedT - 1;
+  const cellTokIdx = inferMambaCellToken(opts.activeCell, clampedT);
+  const explicitTokIdx =
+    opts.stateTokenIndex !== undefined && opts.stateTokenIndex !== null
+      ? Math.max(0, Math.min(clampedT - 1, Math.round(opts.stateTokenIndex)))
+      : null;
+  const stateTokIdx = cellTokIdx ?? explicitTokIdx ?? clampedT - 1;
+  const explicitTokenPlayback = explicitTokIdx !== null;
+
   const atlas = buildMambaValueAtlas(sim, activeHead, stateTokIdx);
   const activeFormula: MambaCellFormula | null = opts.activeCell
     ? describeMambaCellFormula(sim, opts.activeCell)
     : null;
   const focusSet = buildMambaFocusSet(activeFormula);
+
+  const partCatalog = buildMambaPartCatalog({
+    bayId,
+    clampedT,
+    isFeeder,
+    computeIsFp8,
+    feederPreservedBf16,
+    activeHead,
+    activeGroup,
+    stateTokIdx,
+    sim,
+  });
+
+  if (opts.viewAngle === 'three_quarter') {
+    return buildMambaSpatialScene({
+      bayId,
+      clampedT,
+      isFeeder,
+      isFp8Mode,
+      computeIsFp8,
+      feederPreservedBf16,
+      activePart,
+      partHeadIdx,
+      activeHead,
+      activeGroup,
+      stateTokIdx,
+      explicitTokenPlayback,
+      activeCell: opts.activeCell ?? null,
+      activeFormula,
+      focusSet,
+      sim,
+      atlas,
+      partCatalog,
+    });
+  }
 
   const b = new MambaSheetBuilder(bayId);
   const hasCellTrace = focusSet.active;
@@ -395,7 +681,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
             : hasFocus && !onPartPathway
               ? SHEET_HL_DIMMED
               : SHEET_HL_NORMAL;
-    return resolveSheetHighlight(focusSet, { tensor }, fallback);
+    return resolveSheetHighlight(focusSet, { tensor, isAggregate: true }, fallback);
   };
 
   // --- Spatial Anchors (XZ drafting table, top -Z to bottom +Z) ---
@@ -425,7 +711,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   // ==========================================================================
   const resInHl = resolveSheetHighlight(
     focusSet,
-    { tensor: 'input' },
+    { tensor: 'input', isAggregate: true },
     activePart === 'residual-in'
       ? SHEET_HL_ACTIVE
       : activePart === 'residual-out'
@@ -456,7 +742,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
 
   const resOutHl = resolveSheetHighlight(
     focusSet,
-    { tensor: 'residual' },
+    { tensor: 'residual', isAggregate: true },
     activePart === 'residual-out'
       ? SHEET_HL_ACTIVE
       : activePart === 'out-proj'
@@ -688,7 +974,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     const cz = convTapZ(slot);
     const tapHl = resolveSheetHighlight(
       focusSet,
-      { tensor: 'conv_buf', tapIndex: slot, tokenIndex: stateTokIdx },
+      { tensor: 'conv_buf', tapIndex: slot, tokenIndex: stateTokIdx, isAggregate: false },
       convFallbackHl,
     );
     b.addSheet({
@@ -795,7 +1081,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     }
     const hl = resolveSheetHighlight(
       focusSet,
-      { tensor: 'x', headIndex: h, groupIndex: g },
+      { tensor: 'x', headIndex: h, groupIndex: g, isAggregate: false },
       fallbackHl,
     );
 
@@ -936,7 +1222,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
           : SHEET_HL_NORMAL;
   const hPrevHl = resolveSheetHighlight(
     focusSet,
-    { tensor: 'h_prev', headIndex: activeHead, groupIndex: activeGroup, tokenIndex: stateTokIdx },
+    { tensor: 'h_prev', headIndex: activeHead, groupIndex: activeGroup, tokenIndex: stateTokIdx, isAggregate: false },
     hPrevFallback,
   );
   b.addSheet({
@@ -972,7 +1258,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
           : SHEET_HL_NORMAL;
   const hCurrHl = resolveSheetHighlight(
     focusSet,
-    { tensor: 'h_curr', headIndex: activeHead, groupIndex: activeGroup, tokenIndex: stateTokIdx },
+    { tensor: 'h_curr', headIndex: activeHead, groupIndex: activeGroup, tokenIndex: stateTokIdx, isAggregate: false },
     hCurrFallback,
   );
   b.addSheet({
@@ -1088,12 +1374,14 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
             headIndex: miniHead,
             groupIndex: g,
             tokenIndex: stateTokIdx,
+            isAggregate: false,
           }) !== null ||
           resolveSheetFocusRole(focusSet, {
             tensor: 'h_prev',
             headIndex: miniHead,
             groupIndex: g,
             tokenIndex: stateTokIdx,
+            isAggregate: false,
           }) !== null;
         tileHl = matchesStateHead ? SHEET_HL_PATHWAY : SHEET_HL_DIMMED;
       } else {
@@ -1117,8 +1405,8 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
         role: SHEET_ROLE_KV_V,
         fp8Flag: 0, // ALWAYS FP32!
         highlight: tileHl,
-        // Live token-dependent phase updates IN PLACE as T steps 1 -> 16 while geometry stays fixed
-        seed: clampedT * 1.73 + tileIdx * 0.29 + bayId * 0.11,
+        // Live token-dependent phase updates IN PLACE as T or temporal playback t steps while geometry stays fixed
+        seed: clampedT * 1.73 + stateTokIdx * 0.41 + tileIdx * 0.29 + bayId * 0.11,
         partId: 'ssm-state',
         headIndex: miniHead,
         groupIndex: g,
@@ -1327,7 +1615,8 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
   // 10. EXTERIOR PROGRESSIVE LABELS (strictly outside sheet faces, zero clutter)
   // ==========================================================================
   const headTag = formatMambaHeadId(activeHead);
-  const histTokTag = stateTokIdx < clampedT - 1 ? ` · t${stateTokIdx}` : '';
+  const histTokTag =
+    stateTokIdx < clampedT - 1 || explicitTokenPlayback ? ` · t${stateTokIdx}` : '';
   b.landmarks.push(
     { id: 'm-res-in', label: 'Input (2,688)', world: [resX, 0.08, zRow0 - 0.66], partId: 'residual-in', align: 'top', tier: 'primary' },
     { id: 'm-rmsnorm', label: 'RMSNorm', world: [rmsX, 0.08, zRow0 - 0.36], partId: 'rmsnorm', align: 'top', tier: 'primary', tone: feederPreservedBf16 ? 'gold' : 'default' },
@@ -1426,210 +1715,6 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
       partIds: ['ssm-state-prev', 'ssm-state-curr', 'ssm-state'],
     },
   );
-
-  // ==========================================================================
-  // 11. PART CATALOG (with individual H00..H15 entries & honest 3-way storage copy)
-  // ==========================================================================
-  const partCatalog: Record<string, CutawayPartInfo> = {
-    'residual-in': {
-      id: 'residual-in',
-      title: 'Residual Stream Input (2,688)',
-      badge: 'Activation · Emerald',
-      summary:
-        'Incoming hidden state from the continuous 2,688-channel emerald residual spine (miniature d=8). Taps left into Pre-RMSNorm while the untouched residual passes straight to the final + merge.',
-      specs: [
-        'Production shape: [T, 2,688] · Miniature live sim: [T, 8] (Float32 storage)',
-        'Hover or click any cell to inspect its value and RMS magnitude.',
-      ],
-    },
-    rmsnorm: {
-      id: 'rmsnorm',
-      title: 'Pre-Layer RMSNorm (ε = 1e−5)',
-      badge: computeIsFp8 ? 'FP8 Selective (prod)' : feederPreservedBf16 ? 'BF16 Preserved §4.2' : 'BF16 (prod)',
-      summary:
-        'Normalizes each token vector by √(mean(X²) + 1e−5) and multiplies by learned non-unit scale γ_in before the fused Mamba-2 input projection.',
-      specs: [
-        'Matches NVIDIA NemotronH rms_norm_eps = 1e−5 (no bias, no mean shift)',
-        `Bay ${formatBayId(bayId)} production metadata: ${computeIsFp8 ? 'FP8 compute' : feederPreservedBf16 ? 'BF16 preserved (Feeder §4.2)' : 'BF16'}`,
-      ],
-    },
-    'in-proj': {
-      id: 'in-proj',
-      title: 'Fused Mamba-2 Input Projection (W_in)',
-      badge: computeIsFp8 ? 'FP8 Weights (prod)' : feederPreservedBf16 ? 'BF16 Preserved §4.2' : 'BF16 Weights (prod)',
-      summary:
-        'Single fused projection splitting into three parallel branches: bypass gate z (4,096), Conv1D stream xBC_pre (6,144), and per-head discretization step logits Δt_raw (64).',
-      specs: [
-        'Production: 2,688 → 4,096(z) + 6,144(xBC) + 64(Δt) = 10,304 · Miniature: 8 → 64 + 128 + 16 = 208',
-        isFeeder
-          ? 'Bay 42 Feeder (before Bay 43 GQA): preserved in BF16 under NVIDIA §4.2 (gold rim).'
-          : 'Bay 01 (ordinary Mamba-2): switches to FP8 metadata in FP8 Selective mode (live sim stays Float32).',
-      ],
-    },
-    'gate-branch': {
-      id: 'gate-branch',
-      title: 'Bypass Gate Branch (z · 4,096)',
-      badge: 'Gate FIRST (norm_before_gate=False)',
-      summary:
-        'Bypasses Conv1D and SSM recurrence completely, entering MambaRMSNormGated where y · SiLU(z) is applied FIRST before 8-group RMSNorm.',
-      specs: [
-        'Production width: 4,096 (64 × 64) · Miniature: 64 (16 × 4) × T rows',
-        'Matches NemotronH MambaRMSNormGated(norm_before_gate=False)',
-      ],
-    },
-    'xbc-pre': {
-      id: 'xbc-pre',
-      title: 'Pre-Conv xBC Stream (6,144 × T)',
-      badge: `Sequence Tensor · T=${clampedT}`,
-      summary:
-        'Sequence activation stream feeding the depthwise causal Conv1D kernel. Unlike the fixed 4-tap rolling inference buffer below it, this sequence activation strip scales with token count T.',
-      specs: [
-        'Production channels: 4,096(x) + 1,024(B) + 1,024(C) = 6,144 · Miniature: 128',
-        'Each token column is pushed into the 4-slot rolling Conv1D buffer.',
-      ],
-    },
-    conv1d: {
-      id: 'conv1d',
-      title: 'Causal Conv1D Rolling Buffer (k = 4)',
-      badge: 'Always BF16 · ~1.08 MiB / 23 bays',
-      summary:
-        'Fixed 4-tap depthwise causal convolution buffer holding the last four token vectors (t−3, t−2, t−1, t; zero-padded for t−lag < 0) followed by SiLU. Supplies local ordering and NEVER quantizes to FP8.',
-      specs: [
-        'Persistent Conv1D storage: 6,144 × 4 × 2 B = 48 KiB/bay (~1.08 MiB BF16 across 23 bays)',
-        'Precision override: ALWAYS BF16 even on FP8 bays (NVIDIA §4.2 gold rim)',
-      ],
-    },
-    'dt-branch': {
-      id: 'dt-branch',
-      title: 'Step / Decay Branch (Δt = softplus)',
-      badge: '16 mini / 64 prod heads',
-      summary:
-        'Per-head discretization step Δt = softplus(Δt_raw + Δt_bias) > 0 controlling continuous decay A = −exp(A_log) < 0 via dA = exp(Δt · A) ∈ (0, 1).',
-      specs: [
-        'Uses numerically stable softplus: max(v, 0) + log1p(exp(−|v|))',
-        'Balances retention (dA · Hₜ₋₁) against new write energy (Δt · x · B)',
-      ],
-    },
-    'b-proj': {
-      id: 'b-proj',
-      title: 'Grouped Input Projection B (8 Groups)',
-      badge: '8 Groups · Shared across heads',
-      summary:
-        'Post-Conv1D+SiLU write keys shared across the 8 Mamba-2 groups (2 miniature heads/group; 8 production heads/group). Outer-products with Δt · x to write into Hₜ.',
-      specs: [
-        'Production: 8 groups × 128 state dim = 1,024 · Miniature: 8 × 4 = 32',
-        `Active head ${headTag} reads group G${activeGroup} columns.`,
-      ],
-    },
-    'c-proj': {
-      id: 'c-proj',
-      title: 'Grouped Readout Projection C (8 Groups)',
-      badge: '8 Groups · Shared across heads',
-      summary:
-        'Post-Conv1D+SiLU readout queries shared across the 8 Mamba-2 groups. Contracts the updated SSM state Hₜ along state dimension n to produce y_ssm.',
-      specs: [
-        'Production: 8 groups × 128 state dim = 1,024 · Miniature: 8 × 4 = 32',
-        `Active head ${headTag} contracts Hₜ with C[G${activeGroup}].`,
-      ],
-    },
-    'ssm-state-prev': {
-      id: 'ssm-state-prev',
-      title: `Prior SSM State Hₜ₋₁ (${headTag} · G${activeGroup})`,
-      badge: 'Fixed Size · FP32',
-      summary:
-        'State matrix carried from the previous token (all zeros at T = 1). In production inference only the single active state buffer is kept and overwritten in place; H_history is browser-only playback history.',
-      specs: [
-        `Active miniature head: ${headTag} (4×4) · Production head: 64×128 FP32`,
-        'Decays elementwise by dA = exp(Δt · A) ∈ (0, 1) into Hₜ.',
-      ],
-    },
-    'ssm-state-curr': {
-      id: 'ssm-state-curr',
-      title: `SSM State Hₜ (${headTag} · G${activeGroup})`,
-      badge: 'Fixed Size · 46.0 MiB FP32 / 23 bays',
-      summary:
-        'Updated recurrent state Hₜ = dA · Hₜ₋₁ + Δt · x · B. Scrubbing T = 1 → 16 refreshes values inside this exact fixed-size matrix without allocating a single extra byte of SSM memory.',
-      specs: [
-        'Persistent SSM state: 64×64×128×4 B = 2.00 MiB/bay (46.0 MiB FP32 across 23 bays)',
-        'Combined persistent Mamba state: 46.0 MiB SSM + ~1.08 MiB Conv1D ≈ 47.1 MiB fixed (T=1 → 1M)',
-        'H_history is browser-only educational playback history (NOT stored in production inference).',
-      ],
-    },
-    'ssm-state': {
-      id: 'ssm-state',
-      title: '64-Head Production SSM State Bank (FP32)',
-      badge: '46.0 MiB SSM + 1.08 MiB Conv1D',
-      summary:
-        'All 64 production SSM heads (8 groups × 8 heads, each 64×128 FP32) remain strictly fixed in size from 1 to 1M tokens. Click any tile to inspect its mapped miniature head H00–H15 in Hₜ₋₁ ⇄ Hₜ.',
-      specs: [
-        'Persistent SSM storage: 2.00 MiB/layer × 23 = 46.0 MiB FP32 (NEVER FP8)',
-        'Persistent Conv1D storage: 48 KiB/layer × 23 = ~1.08 MiB BF16 → ~47.1 MiB total fixed',
-        'H_history is browser-only educational playback history.',
-      ],
-    },
-    'ssm-readout': {
-      id: 'ssm-readout',
-      title: 'SSM State Readout + Skip (y = Hₜ·C + D·x)',
-      badge: 'State Readout + Per-Head D',
-      summary:
-        'Contracts each head’s updated state Hₜ with its group’s C vector and adds the learned per-head skip connection D[h] · x.',
-      specs: [
-        'Equation: y[h, p, t] = Σₙ Hₜ[h, p, n] · C[g, n, t] + D[h] · x[h, p, t]',
-        'Feeds directly into MambaRMSNormGated.',
-      ],
-    },
-    'group-norm': {
-      id: 'group-norm',
-      title: 'MambaRMSNormGated (Gate FIRST → 8-Group Norm)',
-      badge: 'norm_before_gate = False · ε = 1e−5',
-      summary:
-        'Applies multiplicative SiLU(z) gating FIRST (gated = y · SiLU(z)), then normalizes independently across 8 groups with ε = 1e−5, and scales by learned γ_gate.',
-      specs: [
-        'Production: 8 groups × 512 channels = 4,096 · Miniature: 8 groups × 8 channels = 64',
-        'Verified against NVIDIA NemotronH MambaRMSNormGated(norm_before_gate=False).',
-      ],
-    },
-    'out-proj': {
-      id: 'out-proj',
-      title: 'Mamba-2 Output Projection (W_out)',
-      badge: computeIsFp8 ? 'FP8 Weights (prod)' : feederPreservedBf16 ? 'BF16 Preserved §4.2' : 'BF16 Weights (prod)',
-      summary:
-        'Projects the gated-and-normalized 4,096-channel vector back to the 2,688-channel residual stream width (miniature 64 → 8).',
-      specs: [
-        'Production matrix: 4,096 × 2,688 (~11.0M params) · Miniature: 64 × 8',
-        isFeeder
-          ? 'Bay 42 Feeder: preserved in BF16 alongside Bay 43 GQA (NVIDIA §4.2).'
-          : 'Bay 01: FP8 production metadata in FP8 Selective mode (live sim stays Float32).',
-      ],
-    },
-    'residual-out': {
-      id: 'residual-out',
-      title: 'Residual Stream Merge (+ 2,688)',
-      badge: 'Activation · Emerald',
-      summary:
-        'Adds the Mamba-2 output delta back into the untouched emerald residual stream: Y = X + Mamba2(RMSNorm(X)).',
-      specs: [
-        'Hover or click any cell to see exact X + Mamba_out = Y values.',
-      ],
-    },
-  };
-
-  for (let h = 0; h < sim.nHeads; h++) {
-    const g = mambaGroupForHead(h);
-    const hId = formatMambaHeadId(h);
-    partCatalog[`mamba-head-${h}`] = {
-      id: `mamba-head-${h}`,
-      title: `Mamba-2 Head ${hId} (Group G${g})`,
-      badge: `A = ${sim.A[h].toFixed(2)} · D = ${sim.D[h].toFixed(2)}`,
-      summary:
-        `Miniature head ${hId} shares B/C group G${g} with ${formatMambaHeadId(g * 2)}–${formatMambaHeadId(g * 2 + 1)} (mirroring 8 production heads per group across 64 heads). Selecting ${hId} updates the live Hₜ₋₁ ⇄ Hₜ state sheets.`,
-      specs: [
-        `Continuous decay A[${hId}] = −exp(${sim.A_log[h].toFixed(2)}) = ${sim.A[h].toFixed(3)} · Latest dA = ${sim.dA[h * clampedT + (clampedT - 1)].toFixed(3)}`,
-        `Per-head skip D[${hId}] = ${sim.D[h].toFixed(3)} · Latest Δt = ${sim.dt[h * clampedT + (clampedT - 1)].toFixed(3)}`,
-        'Persistent storage: 46.0 MiB SSM (FP32) + ~1.08 MiB Conv1D (BF16) across 23 bays.',
-      ],
-    };
-  }
 
   const packed = b.pack();
   const reg = (k: string) => b.sheetRegistry.get(k);

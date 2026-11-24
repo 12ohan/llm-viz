@@ -912,6 +912,112 @@ body {
   gap: 2px;
 }
 
+/* Mamba-2 Recurrence Time (t = 0..T-1) Playback Control inside Left Inspector */
+.mamba-temporal-box {
+  gap: 4px;
+}
+
+.mtemp-pad-pill {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 700;
+  line-height: 11px;
+  padding: 1.5px 5px;
+  border-radius: 3px;
+  background-color: #E0F2FE;
+  color: #0369A1;
+  border: 1px solid #BAE6FD;
+}
+
+.mtemp-pad-pill.is-padded {
+  background-color: #FEF3C7;
+  color: #92400E;
+  border-color: #FCD34D;
+}
+
+.mtemp-controls-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mtemp-btn {
+  appearance: none;
+  border: 1px solid #CBD5E1;
+  border-radius: 4px;
+  background-color: #FFFFFF;
+  color: #1E293B;
+  padding: 2.5px 7px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mtemp-btn:hover:not(:disabled) {
+  border-color: #0284C7;
+  color: #0369A1;
+  background-color: #F0F9FF;
+}
+
+.mtemp-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.mtemp-play-btn {
+  flex: 1 1 auto;
+}
+
+.mtemp-play-btn.is-playing {
+  background-color: #0369A1;
+  border-color: #0369A1;
+  color: #FFFFFF;
+}
+
+.mtemp-token-grid {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 2.5px;
+}
+
+.mtemp-tok-btn {
+  appearance: none;
+  border: 1px solid #CBD5E1;
+  border-radius: 3px;
+  background-color: #FFFFFF;
+  color: #334155;
+  padding: 2px 0;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  line-height: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  cursor: pointer;
+}
+
+.mtemp-tok-btn:hover {
+  border-color: #0284C7;
+  color: #0369A1;
+  background-color: #F0F9FF;
+}
+
+.mtemp-tok-btn.is-selected {
+  background-color: #0369A1;
+  border-color: #0369A1;
+  color: #FFFFFF;
+}
+
+.mtemp-note {
+  font-family: var(--font-mono);
+  font-size: 8.8px;
+  line-height: 11.5px;
+  color: #64748B;
+}
+
 /* MoE Focused Token & Top-6 Active Expert Selector inside Left Inspector */
 .moe-token-grid {
   display: grid;

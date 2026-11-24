@@ -41,6 +41,9 @@ export interface ControlsCallbacks {
   onSelectSection: (section: TocSectionId) => void;
   onSelectMambaBay: (bayId: 1 | 42) => void;
   onSelectMambaView: (view: GqaViewAngle) => void;
+  onSelectMambaStateToken: (tokenIdx: number | null) => void;
+  onStepMambaStateToken: (delta: -1 | 1) => void;
+  onToggleMambaTemporalPlay: () => void;
   onSelectMoeBay: (bayId: 2 | 52) => void;
   onSelectMoeView: (view: GqaViewAngle) => void;
   onSelectMoeFocusToken: (tokenIdx: number) => void;
@@ -636,7 +639,7 @@ export class MacroControls {
     // Middle editorial panel
     const activeBayId = isTower ? state.hoveredBay ?? state.selectedBay : null;
     const activePart = !isTower ? state.hoveredPart ?? state.selectedPart : null;
-    const editorialKey = `${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${state.mode}:${state.mambaBayId}:${state.mambaActiveHead}:${state.moeBayId}:${state.moeFocusToken ?? 'last'}:${state.moeActiveExpert ?? 'top0'}:${state.gqaBayId}:${state.gqaActiveGroup0Head}:${state.gqaActiveGroup1Head}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
+    const editorialKey = `${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${state.mode}:${state.mambaBayId}:${state.mambaActiveHead}:${state.mambaStateToken ?? 'last'}:${state.mambaTemporalPlaying ? 'tplay' : 'tpause'}:${state.moeBayId}:${state.moeFocusToken ?? 'last'}:${state.moeActiveExpert ?? 'top0'}:${state.gqaBayId}:${state.gqaActiveGroup0Head}:${state.gqaActiveGroup1Head}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
 
     if (editorialKey !== this.lastEditorialKey) {
       this.lastEditorialKey = editorialKey;
@@ -714,10 +717,16 @@ export class MacroControls {
       if (isMamba) {
         const activeH = cutaway?.mambaStats?.activeHead ?? state.mambaActiveHead;
         const activeG = mambaGroupForHead(activeH);
+        const activeT =
+          cutaway?.mambaStats?.stateTokenIndex ?? state.mambaStateToken ?? Math.max(0, state.tokens - 1);
+        const tokLbl = cutaway?.mambaSim?.tokenLabels[activeT] ?? `t${activeT}`;
+        const zeroPads = Math.max(0, 3 - activeT);
         this.els.gqaFormulaTensor.textContent = `Miniature Mamba-2 · Bay ${formatBayId(state.mambaBayId)}`;
-        this.els.gqaFormulaCoord.textContent = `Active Head: ${formatMambaHeadId(activeH)} (G${activeG})`;
+        this.els.gqaFormulaCoord.textContent = `Active: ${formatMambaHeadId(activeH)} (G${activeG}) · t${activeT} "${tokLbl}"`;
         this.els.gqaFormulaEq.textContent =
-          'Hover or click any matrix cell for rounded numerical explanations, or press Play to step through Mamba-2 recurrence.';
+          zeroPads > 0
+            ? `Recurrence at t${activeT} "${tokLbl}": Conv1D left-pads ${zeroPads} tap${zeroPads === 1 ? '' : 's'} with 0; Hₜ updates in place inside fixed 47.1 MiB state.`
+            : 'Hover or click any matrix cell for rounded numerical explanations, step Recurrence t in the sidebar, or press Play.';
         const tokPreview = cutaway?.mambaSim?.tokenLabels
           ? cutaway.mambaSim.tokenLabels.map((tok, i) => `${i}:"${tok}"`).join(' ')
           : '';
@@ -1116,6 +1125,7 @@ export class MacroControls {
       if (state.mode === 'cutaway_gqa') {
         panel.appendChild(this.buildGqaHeadSelector(state.selectedPart, state.hoveredPart));
       } else if (state.mode === 'cutaway_mamba') {
+        panel.appendChild(this.buildMambaTemporalControls(state, cutaway));
         panel.appendChild(
           this.buildMambaHeadSelector(state.mambaActiveHead, state.selectedPart, state.hoveredPart),
         );
@@ -1149,8 +1159,8 @@ export class MacroControls {
       if (isFeeder && isFp8) badge.classList.add('ed-badge-gold');
 
       bodyText = isFeeder
-        ? 'Feeder preceding Bay 43 GQA — preserved in BF16 under NVIDIA §4.2. Runs a deterministic miniature Mamba-2 simulator (d=8, 16H/8G, dₕ=4, dₛ=4; Float32 tensor storage, rounded outputs) where sequence tensors grow with T while Hₜ₋₁ ⇄ Hₜ and the 64-head bank stay fixed.'
-        : 'Runs a deterministic miniature Mamba-2 simulator (d=8, 16H/8G, dₕ=4, dₛ=4; Float32 tensor storage, rounded outputs). Sequence tensors (xBC_pre, z, x, B, C, Δt) grow with T while the 4-tap Conv1D buffer and Hₜ₋₁ ⇄ Hₜ SSM state remain strictly constant.';
+        ? 'Feeder before Bay 43 GQA — preserved in BF16 (§4.2). Deterministic miniature sim (d=8, 16H/8G, dₕ=4, dₛ=4; Float32, rounded): sequence decks grow with T while Conv1D & Hₜ stay fixed.'
+        : 'Deterministic miniature Mamba-2 sim (d=8, 16H/8G, dₕ=4, dₛ=4; Float32, rounded). Sequence decks grow with T while the 4-tap Conv1D buffer and Hₜ₋₁ ⇄ Hₜ pedestal stay fixed.';
 
       specs = [
         'Persistent storage (23 bays): 46.0 MiB SSM (FP32) + ~1.08 MiB Conv1D (BF16) ≈ 47.1 MiB fixed · H_history is browser-only playback',
@@ -1220,14 +1230,18 @@ export class MacroControls {
 
     if (state.mode === 'cutaway_moe') {
       panel.append(header, p, this.buildMoeInspectorControls(state, cutaway), list);
+    } else if (state.mode === 'cutaway_mamba') {
+      panel.append(
+        header,
+        p,
+        this.buildMambaTemporalControls(state, cutaway),
+        this.buildMambaHeadSelector(state.mambaActiveHead, state.selectedPart, state.hoveredPart),
+        list,
+      );
     } else {
       panel.append(header, p, list);
       if (state.mode === 'cutaway_gqa') {
         panel.appendChild(this.buildGqaHeadSelector(state.selectedPart, state.hoveredPart));
-      } else if (state.mode === 'cutaway_mamba') {
-        panel.appendChild(
-          this.buildMambaHeadSelector(state.mambaActiveHead, state.selectedPart, state.hoveredPart),
-        );
       }
     }
     panel.appendChild(actions);
@@ -1367,6 +1381,117 @@ export class MacroControls {
       grpEl.appendChild(grid);
       wrap.appendChild(grpEl);
     }
+
+    return wrap;
+  }
+
+  /** Compact Recurrence Time (t = 0..T-1) playback & zero-padding control inside Mamba-2 inspector. */
+  private buildMambaTemporalControls(
+    state: SceneState,
+    cutaway: CutawaySceneGeometry | null,
+  ): HTMLDivElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'qhead-selector mamba-temporal-box';
+    wrap.setAttribute('data-testid', 'mamba-temporal-controls');
+
+    const sim = cutaway?.mambaSim ?? null;
+    const tok = Math.max(
+      0,
+      Math.min(
+        state.tokens - 1,
+        cutaway?.mambaStats?.stateTokenIndex ?? state.mambaStateToken ?? state.tokens - 1,
+      ),
+    );
+    const tokLabel = sim?.tokenLabels[tok] ?? `t${tok}`;
+    const zeroPads = Math.max(0, 3 - tok);
+
+    const topRow = document.createElement('div');
+    topRow.className = 'qhead-top-row';
+    const heading = document.createElement('span');
+    heading.className = 'qhead-heading';
+    heading.textContent = `Recurrence t${tok} "${tokLabel}" (${tok + 1}/${state.tokens})`;
+    topRow.appendChild(heading);
+
+    const padPill = document.createElement('span');
+    padPill.className = zeroPads > 0 ? 'mtemp-pad-pill is-padded' : 'mtemp-pad-pill';
+    padPill.textContent = zeroPads > 0 ? `${zeroPads} zero-pad` : 'full 4-tap';
+    padPill.title =
+      zeroPads > 0
+        ? `Causal Conv1D left-pads ${zeroPads} slot${zeroPads === 1 ? '' : 's'} with 0 at t=${tok}`
+        : 'All 4 causal Conv1D taps hold live token inputs (t−3..t)';
+    topRow.appendChild(padPill);
+    wrap.appendChild(topRow);
+
+    const ctrlRow = document.createElement('div');
+    ctrlRow.className = 'mtemp-controls-row';
+
+    const prevBtn = document.createElement('button');
+    prevBtn.type = 'button';
+    prevBtn.className = 'mtemp-btn';
+    prevBtn.dataset.testid = 'mamba-t-prev';
+    prevBtn.textContent = '◀';
+    prevBtn.title = 'Previous recurrence token (t − 1)';
+    prevBtn.disabled = state.tokens <= 1;
+    prevBtn.addEventListener('click', () => this.cb.onStepMambaStateToken(-1));
+
+    const playBtn = document.createElement('button');
+    playBtn.type = 'button';
+    playBtn.className = state.mambaTemporalPlaying
+      ? 'mtemp-btn mtemp-play-btn is-playing'
+      : 'mtemp-btn mtemp-play-btn';
+    playBtn.dataset.testid = 'mamba-t-play';
+    playBtn.textContent = state.mambaTemporalPlaying ? '❚❚ Pause t' : '▶ Step t';
+    playBtn.title =
+      'Play token recurrence t = 0 → T−1 to watch Conv1D shift & Hₜ overwrite in place';
+    playBtn.disabled = state.tokens <= 1;
+    playBtn.setAttribute('aria-pressed', String(state.mambaTemporalPlaying));
+    playBtn.addEventListener('click', () => this.cb.onToggleMambaTemporalPlay());
+
+    const nextBtn = document.createElement('button');
+    nextBtn.type = 'button';
+    nextBtn.className = 'mtemp-btn';
+    nextBtn.dataset.testid = 'mamba-t-next';
+    nextBtn.textContent = '▶';
+    nextBtn.title = 'Next recurrence token (t + 1)';
+    nextBtn.disabled = state.tokens <= 1;
+    nextBtn.addEventListener('click', () => this.cb.onStepMambaStateToken(1));
+
+    ctrlRow.append(prevBtn, playBtn, nextBtn);
+
+    if (state.mambaStateToken !== null) {
+      const latestBtn = document.createElement('button');
+      latestBtn.type = 'button';
+      latestBtn.className = 'qhead-clear-btn';
+      latestBtn.dataset.testid = 'mamba-t-latest';
+      latestBtn.textContent = 'Latest';
+      latestBtn.title = 'Follow latest sequence token (T − 1)';
+      latestBtn.addEventListener('click', () => this.cb.onSelectMambaStateToken(null));
+      ctrlRow.appendChild(latestBtn);
+    }
+    wrap.appendChild(ctrlRow);
+
+    const tokGrid = document.createElement('div');
+    tokGrid.className = 'mtemp-token-grid';
+    for (let t = 0; t < state.tokens; t++) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'mtemp-tok-btn';
+      btn.dataset.mambaToken = String(t);
+      const lbl = sim?.tokenLabels[t] ?? '';
+      btn.textContent = `t${t}`;
+      btn.title = `Inspect recurrence at t${t} "${lbl}"`;
+      const isSel = t === tok;
+      btn.classList.toggle('is-selected', isSel);
+      btn.setAttribute('aria-pressed', String(isSel));
+      btn.addEventListener('click', () => this.cb.onSelectMambaStateToken(t));
+      tokGrid.appendChild(btn);
+    }
+    wrap.appendChild(tokGrid);
+
+    const note = document.createElement('div');
+    note.className = 'mtemp-note';
+    note.textContent = 'Browser-only H_history playback · Prod keeps 1 fixed buffer (47.1 MiB)';
+    wrap.appendChild(note);
 
     return wrap;
   }
