@@ -1,8 +1,11 @@
-import type {
-  GqaCellFormula,
-  GqaCellRef,
-  GqaSheetSpan,
-  GqaSimResult,
+import {
+  clampCellToSim,
+  fmtProb,
+  type GqaCellFormula,
+  type GqaCellRef,
+  type GqaSheetSpan,
+  type GqaSimResult,
+  type GqaTensorKey,
 } from '../math/gqaSim';
 import type { Vec3 } from '../model/spec';
 import {
@@ -42,6 +45,10 @@ import {
   SHEET_KIND_CAUSAL_SOFTMAX,
   SHEET_KIND_GHOST_RAIL,
   SHEET_KIND_STANDARD,
+  SHEET_REVEAL_FLOATS,
+  SHEET_REVEAL_NONE,
+  SHEET_REVEAL_ROW_MAJOR,
+  SHEET_REVEAL_UNCOMPUTED,
   SHEET_ROLE_ACTIVATION,
   SHEET_ROLE_KV_K,
   SHEET_ROLE_KV_V,
@@ -51,6 +58,7 @@ import {
   SHEET_ROLE_SOFTMAX,
   SHEET_ROLE_WEIGHT,
 } from '../render/sheets';
+import type { ActiveSheetCellGrid, CellPopoverSpec } from '../ui/overlay';
 import type { AtlasSlice } from './atlasPacker';
 import type {
   CutawayPartInfo,
@@ -236,16 +244,197 @@ interface SpatialSheetSpec {
   readonly partId: string;
   readonly headIndex?: number;
   readonly kvHeadIndex?: 0 | 1;
-  readonly tensorKey?: string;
+  readonly tensorKey?: GqaTensorKey;
   readonly tokenIndex?: number;
   readonly atlasSlice?: AtlasSlice;
   readonly registryKey?: string;
   readonly cellFamily: number;
 }
 
+export interface GqaRevealContext {
+  readonly enabled: boolean;
+  readonly step: number;
+  readonly sim: GqaSimResult;
+  readonly activeCell: GqaCellRef | null;
+  readonly activeHead: number;
+  readonly activeGroup: 0 | 1;
+  readonly pulsePhase: number;
+}
+
+export interface GqaRevealSheetInfo {
+  readonly sheetKind: number;
+  readonly tensorKey?: GqaTensorKey;
+  readonly headIndex?: number;
+  readonly kvHeadIndex?: 0 | 1;
+  readonly tokenIndex?: number;
+}
+
+/**
+ * Compute per-sheet V2 progressive accumulation reveal parameters `[revealMode, colFrontier, rowFrontier, pulsePhase]`
+ * for any GQA sheet across Steps 0..5 (shared identically by Spatial 3/4 and Near-Plan views).
+ *
+ * Critical guarantees:
+ *  - Input X, static weight matrices (W_Q, W_K, W_V, W_O), and ghost capacity rails stay 100% revealed.
+ *  - In AR Decode (`prefixTokens > 0`), reused cached prefix KV slices (`k < prefixTokens`) ALWAYS stay
+ *    `SHEET_REVEAL_NONE` (100% revealed — never ghost reused cached prefix KV!).
+ *  - Works seamlessly for both square `[T×T]` Full Sequence and rectangular `[1×(P+1)]` AR Decode.
+ */
+export function computeGqaSheetReveal(
+  ctx: GqaRevealContext,
+  s: GqaRevealSheetInfo,
+): readonly [number, number, number, number] {
+  if (!ctx.enabled || s.sheetKind === SHEET_KIND_GHOST_RAIL || !s.tensorKey) {
+    return [SHEET_REVEAL_NONE, 0, 0, 0];
+  }
+
+  const tensor = s.tensorKey;
+  if (
+    tensor === 'input' ||
+    tensor === 'w_q' ||
+    tensor === 'w_k' ||
+    tensor === 'w_v' ||
+    tensor === 'w_o'
+  ) {
+    return [SHEET_REVEAL_NONE, 0, 0, 0];
+  }
+
+  const T = ctx.sim.tokens;
+  const P = ctx.sim.prefixTokens;
+  const dHead = ctx.sim.dHead;
+  const lastRow = Math.max(0, T - 1);
+  const clampedCell = ctx.activeCell ? clampCellToSim(ctx.sim, ctx.activeCell) : null;
+  const step = Math.max(0, Math.min(5, Math.round(ctx.step)));
+  const pulse = Math.max(0, Math.min(1, ctx.pulsePhase));
+
+  switch (step) {
+    case 0: {
+      // Step 1: RMSNorm reveals row-major; downstream Q, new KV, Scores, Softmax, V_out, Concat, Residual uncomputed
+      if (tensor === 'rmsnorm') {
+        const row = clampedCell?.tensor === 'rmsnorm' ? clampedCell.row : lastRow;
+        const col = clampedCell?.tensor === 'rmsnorm' ? clampedCell.col : 0;
+        return [SHEET_REVEAL_ROW_MAJOR, col, row, pulse];
+      }
+      if (tensor === 'kv_k' || tensor === 'kv_v') {
+        const tok = s.tokenIndex ?? 0;
+        if (tok < P) return [SHEET_REVEAL_NONE, 0, 0, 0];
+        return [SHEET_REVEAL_UNCOMPUTED, 0, 0, 0];
+      }
+      return [SHEET_REVEAL_UNCOMPUTED, 0, 0, 0];
+    }
+
+    case 1: {
+      // Step 2: Q & new KV slices reveal progressively (reused prefix KV k < P stays 100% revealed!);
+      // downstream Scores, Softmax, V_out, Concat, Residual uncomputed
+      if (tensor === 'rmsnorm') {
+        return [SHEET_REVEAL_NONE, 0, 0, 0];
+      }
+      if (tensor === 'q') {
+        const row = clampedCell?.tensor === 'q' ? clampedCell.row : lastRow;
+        const col = clampedCell?.tensor === 'q' ? clampedCell.col : 0;
+        return [SHEET_REVEAL_ROW_MAJOR, col, row, s.headIndex === ctx.activeHead ? pulse : 0];
+      }
+      if (tensor === 'kv_k' || tensor === 'kv_v') {
+        const tok = s.tokenIndex ?? 0;
+        if (tok < P) return [SHEET_REVEAL_NONE, 0, 0, 0];
+        const tLocal = tok - P;
+        const activeRow =
+          clampedCell?.tensor === 'q'
+            ? clampedCell.row
+            : clampedCell?.tensor === 'kv_k' || clampedCell?.tensor === 'kv_v'
+              ? Math.max(0, (clampedCell.tokenIndex ?? P) - P)
+              : lastRow;
+        const activeCol =
+          clampedCell?.tensor === 'q' ||
+          clampedCell?.tensor === 'kv_k' ||
+          clampedCell?.tensor === 'kv_v'
+            ? Math.max(0, Math.min(dHead - 1, clampedCell.col))
+            : 0;
+        if (tLocal < activeRow) return [SHEET_REVEAL_NONE, 0, 0, 0];
+        if (tLocal === activeRow) {
+          return [
+            SHEET_REVEAL_ROW_MAJOR,
+            activeCol,
+            0,
+            s.kvHeadIndex === ctx.activeGroup ? pulse : 0,
+          ];
+        }
+        return [SHEET_REVEAL_UNCOMPUTED, 0, 0, 0];
+      }
+      return [SHEET_REVEAL_UNCOMPUTED, 0, 0, 0];
+    }
+
+    case 2: {
+      // Step 3: QK^T/sqrt(d) — Scores reveals row-major (square [T×T] or rectangular [1×(P+1)]);
+      // downstream Softmax, V_out, Concat, Residual uncomputed
+      if (tensor === 'rmsnorm' || tensor === 'q' || tensor === 'kv_k' || tensor === 'kv_v') {
+        return [SHEET_REVEAL_NONE, 0, 0, 0];
+      }
+      if (tensor === 'scores') {
+        const row = clampedCell?.tensor === 'scores' ? clampedCell.row : lastRow;
+        const col = clampedCell?.tensor === 'scores' ? clampedCell.col : 0;
+        return [SHEET_REVEAL_ROW_MAJOR, col, row, s.kvHeadIndex === ctx.activeGroup ? pulse : 0];
+      }
+      return [SHEET_REVEAL_UNCOMPUTED, 0, 0, 0];
+    }
+
+    case 3: {
+      // Step 4: Softmax — Scores 100% revealed; Softmax reveals row-major; downstream V_out, Concat, Residual uncomputed
+      if (
+        tensor === 'rmsnorm' ||
+        tensor === 'q' ||
+        tensor === 'kv_k' ||
+        tensor === 'kv_v' ||
+        tensor === 'scores'
+      ) {
+        return [SHEET_REVEAL_NONE, 0, 0, 0];
+      }
+      if (tensor === 'softmax') {
+        const row = clampedCell?.tensor === 'softmax' ? clampedCell.row : lastRow;
+        const col = clampedCell?.tensor === 'softmax' ? clampedCell.col : 0;
+        return [SHEET_REVEAL_ROW_MAJOR, col, row, s.kvHeadIndex === ctx.activeGroup ? pulse : 0];
+      }
+      return [SHEET_REVEAL_UNCOMPUTED, 0, 0, 0];
+    }
+
+    case 4: {
+      // Step 5: Weighted V — Scores & Softmax 100% revealed; V_out reveals row-major; Concat & Residual uncomputed
+      if (
+        tensor === 'rmsnorm' ||
+        tensor === 'q' ||
+        tensor === 'kv_k' ||
+        tensor === 'kv_v' ||
+        tensor === 'scores' ||
+        tensor === 'softmax'
+      ) {
+        return [SHEET_REVEAL_NONE, 0, 0, 0];
+      }
+      if (tensor === 'v_out') {
+        const row = clampedCell?.tensor === 'v_out' ? clampedCell.row : lastRow;
+        const col =
+          clampedCell?.tensor === 'v_out'
+            ? clampedCell.col
+            : (ctx.activeHead % 16) * dHead;
+        return [SHEET_REVEAL_ROW_MAJOR, col, row, s.kvHeadIndex === ctx.activeGroup ? pulse : 0];
+      }
+      return [SHEET_REVEAL_UNCOMPUTED, 0, 0, 0];
+    }
+
+    default: {
+      // Step 6: W_O + Residual — Residual reveals row-major
+      if (tensor === 'residual') {
+        const row = clampedCell?.tensor === 'residual' ? clampedCell.row : lastRow;
+        const col = clampedCell?.tensor === 'residual' ? clampedCell.col : 0;
+        return [SHEET_REVEAL_ROW_MAJOR, col, row, pulse];
+      }
+      return [SHEET_REVEAL_NONE, 0, 0, 0];
+    }
+  }
+}
+
 class SpatialGqaBuilder {
   readonly sheetFloats: number[] = [];
   readonly basisFloats: number[] = [];
+  readonly revealFloats: number[] = [];
   readonly solidFloats: number[] = [];
   readonly lineFloats: number[] = [];
   readonly pickBoxes: PickBox[] = [];
@@ -254,10 +443,15 @@ class SpatialGqaBuilder {
   readonly calipers: DimensionCaliper[] = [];
   readonly flow = new FlowRibbonBuilder();
   readonly sheetRegistry = new Map<string, SheetGeomRecord>();
+  readonly activeOpPartIds = new Set<string>();
   private readonly bayId: number;
+  private readonly revealCtx: GqaRevealContext;
+  private readonly collectActiveOpParts: boolean;
 
-  constructor(bayId: number) {
+  constructor(bayId: number, revealCtx: GqaRevealContext, collectActiveOpParts: boolean) {
     this.bayId = bayId;
+    this.revealCtx = revealCtx;
+    this.collectActiveOpParts = collectActiveOpParts;
   }
 
   addSheet(s: SpatialSheetSpec): SheetFrame3D {
@@ -292,6 +486,25 @@ class SpatialGqaBuilder {
       frame.axisU[0], frame.axisU[1], frame.axisU[2],
       frame.axisN[0], frame.axisN[1], frame.axisN[2],
     );
+
+    // 2b. Optional parallel V2 progressive reveal buffer (4 floats: mode, colFrontier, rowFrontier, pulsePhase)
+    if (this.revealCtx.enabled) {
+      const [revMode, revCol, revRow, revPulse] = computeGqaSheetReveal(this.revealCtx, s);
+      this.revealFloats.push(revMode, revCol, revRow, revPulse);
+    }
+
+    // 2c. Track active-op partIds for V1/V3 secondary label dimming in MacroOverlay
+    if (
+      this.collectActiveOpParts &&
+      (s.highlight === SHEET_HL_ACTIVE ||
+        s.highlight === SHEET_HL_OPERAND_A ||
+        s.highlight === SHEET_HL_OPERAND_B)
+    ) {
+      this.activeOpPartIds.add(s.partId);
+      if (s.tensorKey === 'q' && s.headIndex !== undefined) {
+        this.activeOpPartIds.add(`q-head-${s.headIndex}`);
+      }
+    }
 
     // 3. 1-to-1 mirror in solidData (12 floats)
     this.solidFloats.push(
@@ -365,10 +578,14 @@ class SpatialGqaBuilder {
 
   pack() {
     const flowPacked = this.flow.pack();
+    const sheetCount = this.sheetFloats.length / SHEET_INSTANCE_FLOATS;
     return {
       sheetData: new Float32Array(this.sheetFloats),
-      sheetCount: this.sheetFloats.length / SHEET_INSTANCE_FLOATS,
+      sheetCount,
       sheetBasisData: new Float32Array(this.basisFloats),
+      ...(this.revealCtx.enabled && this.revealFloats.length === sheetCount * SHEET_REVEAL_FLOATS
+        ? { sheetRevealData: new Float32Array(this.revealFloats) }
+        : {}),
       solidData: new Float32Array(this.solidFloats),
       solidCount: this.solidFloats.length / SOLID_INSTANCE_FLOATS,
       lineData: new Float32Array(this.lineFloats),
@@ -468,6 +685,486 @@ export function buildGqaFocusSet(formula: GqaCellFormula | null): SheetFocusSet 
   ]);
 }
 
+/**
+ * Build a concise, Bycroft-style V3 floating contextual cell formula popover from an active
+ * `GqaCellFormula` and its resolved 3D target/operand world anchors.
+ */
+export function buildGqaCellPopover(
+  sim: GqaSimResult,
+  formula: GqaCellFormula,
+  targetWorld: readonly [number, number, number],
+  sourceWorlds: readonly {
+    readonly world: readonly [number, number, number];
+    readonly role: 'indigo' | 'teal';
+  }[],
+): CellPopoverSpec {
+  const cell = clampCellToSim(sim, formula.cell);
+  const P = sim.prefixTokens;
+  const { dHead } = sim;
+
+  let coordLabel = formula.coordLabel;
+  let equation = formula.equation;
+  let valueText = `= ${formula.valueText}`;
+
+  switch (cell.tensor) {
+    case 'input': {
+      const t = cell.row;
+      const tAbs = P + t;
+      const i = cell.col;
+      coordLabel = `[ch=${i}, t${tAbs} ${sim.tokenLabels[t]}]`;
+      equation = `Incoming residual X[${i}, t${tAbs}]`;
+      break;
+    }
+    case 'rmsnorm': {
+      const t = cell.row;
+      const tAbs = P + t;
+      const i = cell.col;
+      coordLabel = `[ch=${i}, t${tAbs} ${sim.tokenLabels[t]}]`;
+      equation = `(X[${i},t${tAbs}] / ${sim.rms[t].toFixed(2)}) · γ[${i}]`;
+      break;
+    }
+    case 'w_q': {
+      const j = cell.row;
+      const outRow = cell.col;
+      const h = Math.floor(outRow / dHead);
+      const r = outRow % dHead;
+      coordLabel = `[${fmtHeadTag(h)}·d${r}, in=${j}]`;
+      equation = `W_Q[${outRow}, ${j}] · BF16 projection`;
+      break;
+    }
+    case 'w_k':
+    case 'w_v': {
+      const isK = cell.tensor === 'w_k';
+      const j = cell.row;
+      const outRow = cell.col;
+      const g: 0 | 1 = outRow < dHead ? 0 : 1;
+      const r = outRow % dHead;
+      coordLabel = `[KV${g}·d${r}, in=${j}]`;
+      equation = `${isK ? 'W_K' : 'W_V'}[${outRow}, ${j}] · 16:1 GQA weight`;
+      break;
+    }
+    case 'q': {
+      const h = cell.headIndex ?? 0;
+      const t = cell.row;
+      const tAbs = P + t;
+      const r = cell.col;
+      const outRow = h * dHead + r;
+      coordLabel = `[t${tAbs} ${sim.tokenLabels[t]}, d=${r}]`;
+      equation = `Σ_{j=0..${sim.d - 1}} W_Q[${outRow},j]·U[j,t${tAbs}]`;
+      break;
+    }
+    case 'kv_k':
+    case 'kv_v': {
+      const isK = cell.tensor === 'kv_k';
+      const g: 0 | 1 = cell.kvHeadIndex === 1 ? 1 : 0;
+      const k = cell.tokenIndex ?? 0;
+      const r = cell.col;
+      const outRow = g * dHead + r;
+      const name = isK ? `K${g}` : `V${g}`;
+      coordLabel = `[t${k} ${sim.keyTokenLabels[k]}, d=${r}]`;
+      equation =
+        k < P
+          ? `Reused prefix ${name}[${r}, t${k}] (0 compute)`
+          : `Σ_{j=0..${sim.d - 1}} ${isK ? 'W_K' : 'W_V'}[${outRow},j]·U[j,t${k}]`;
+      break;
+    }
+    case 'scores': {
+      const g: 0 | 1 = cell.kvHeadIndex === 1 ? 1 : 0;
+      const h = cell.headIndex ?? (g === 0 ? 0 : 16);
+      const q = cell.row;
+      const k = cell.col;
+      const qAbs = P + q;
+      coordLabel = `[q=t${qAbs}, k=t${k}]`;
+      if (formula.isMasked) {
+        equation = `k=${k} > q=${qAbs} · Causal mask`;
+        valueText = '= −∞';
+      } else {
+        equation = `(${fmtHeadTag(h)}[:,t${qAbs}] · K${g}[:,t${k}]) / √${dHead}`;
+      }
+      break;
+    }
+    case 'softmax': {
+      const q = cell.row;
+      const k = cell.col;
+      const qAbs = P + q;
+      coordLabel = `[q=t${qAbs}, k=t${k}]`;
+      if (formula.isMasked) {
+        equation = `Score=−∞ (k=${k} > q=${qAbs}) → exp(−∞)`;
+        valueText = '= 0.000 (masked)';
+      } else {
+        equation = `exp(s − max) / Σ_{j=0..${qAbs}} exp(s_j − max)`;
+        valueText = `= ${fmtProb(formula.value)}`;
+      }
+      break;
+    }
+    case 'v_out': {
+      const g: 0 | 1 = cell.kvHeadIndex === 1 ? 1 : 0;
+      const q = cell.row;
+      const qAbs = P + q;
+      const localH = Math.floor(cell.col / dHead);
+      const r = cell.col % dHead;
+      const h = g * 16 + localH;
+      coordLabel = `[${fmtHeadTag(h)}, q=t${qAbs}, d=${r}]`;
+      equation = `Σ_{k=0..${qAbs}} Softmax[${fmtHeadTag(h)},t${qAbs},k]·V${g}[${r},k]`;
+      break;
+    }
+    case 'concat': {
+      const q = cell.row;
+      const qAbs = P + q;
+      const c = cell.col;
+      const h = Math.floor(c / dHead);
+      const r = c % dHead;
+      coordLabel = `[ch=${c} (${fmtHeadTag(h)}·d${r}), q=t${qAbs}]`;
+      equation = `V_out[${fmtHeadTag(h)}, d=${r}, q=t${qAbs}]`;
+      break;
+    }
+    case 'w_o': {
+      const i = cell.row;
+      const c = cell.col;
+      coordLabel = `[out=${i}, in=${c}]`;
+      equation = `W_O[${i}, ${c}] · 4,096→2,688`;
+      break;
+    }
+    case 'residual': {
+      const t = cell.row;
+      const tAbs = P + t;
+      const i = cell.col;
+      coordLabel = `[ch=${i}, t${tAbs} ${sim.tokenLabels[t]}]`;
+      equation = `X[${i},t${tAbs}] + (W_O·Concat)[${i},t${tAbs}]`;
+      break;
+    }
+  }
+
+  const hasOpA = formula.upstreamSpans.some((s) => s.role === 'operand_a');
+  const hasOpB = formula.upstreamSpans.some((s) => s.role === 'operand_b');
+  const operandColors: ('indigo' | 'teal' | 'red')[] = [];
+  if (hasOpA) operandColors.push('indigo');
+  if (hasOpB) operandColors.push('teal');
+  operandColors.push('red');
+
+  return {
+    world: targetWorld,
+    tensorLabel: formula.tensorLabel,
+    coordLabel,
+    badge: formula.headBadge ?? undefined,
+    equation,
+    valueText,
+    operandColors,
+    sourceWorlds: sourceWorlds.length > 0 ? sourceWorlds : undefined,
+  };
+}
+
+/**
+ * Build live V3 zoom-adaptive `ActiveSheetCellGrid` descriptors for active/focused GQA sheets
+ * directly from `sim` Float32 arrays, complete with absolute token headers (`t${abs} ${label}`),
+ * dimension badges (`colDimLabel` / `rowDimLabel`), and causal mask flags (`masked: Uint8Array`).
+ */
+export function buildGqaActiveCellGrids(
+  sim: GqaSimResult,
+  registry: ReadonlyMap<string, SheetGeomRecord>,
+  formula: GqaCellFormula | null,
+  group0Head: number,
+  group1Head: number,
+  activeHeadIdx: number | null,
+  activeKvGroup: 0 | 1 | null,
+): readonly ActiveSheetCellGrid[] {
+  const T = sim.tokens;
+  const K = sim.keyTokens;
+  const P = sim.prefixTokens;
+  const { d, dHead } = sim;
+  const isIncremental = P > 0;
+  const displayedHeads: readonly [number, number] = [group0Head, group1Head];
+
+  const queryTokLabels = Array.from(
+    { length: T },
+    (_, q) => `t${P + q} ${sim.tokenLabels[q] ?? ''}`.trim(),
+  );
+  const keyTokLabels = Array.from(
+    { length: K },
+    (_, k) => `t${k} ${sim.keyTokenLabels[k] ?? ''}`.trim(),
+  );
+  const headDimLabels = Array.from({ length: dHead }, (_, r) => `d${r}`);
+  const chanLabels = Array.from({ length: d }, (_, i) => `ch${i}`);
+
+  const grids: ActiveSheetCellGrid[] = [];
+  const emittedKeys = new Set<string>();
+
+  const makeGridFromSheet = (
+    regKey: string,
+    values: Float32Array,
+    opts: {
+      readonly masked?: Uint8Array;
+      readonly format?: 'signed' | 'prob';
+      readonly activeCol?: number;
+      readonly activeRow?: number;
+      readonly colLabels?: readonly string[];
+      readonly rowLabels?: readonly string[];
+      readonly colDimLabel?: string;
+      readonly rowDimLabel?: string;
+    },
+  ): void => {
+    if (emittedKeys.has(regKey)) return;
+    const sheet = registry.get(regKey);
+    if (!sheet) return;
+    const frame =
+      sheet.frame ??
+      makeSheetFrame3D([sheet.cx, sheet.cy, sheet.cz], [sheet.ex, sheet.ey, sheet.ez]);
+    emittedKeys.add(regKey);
+    grids.push({
+      originWorld: frame.center,
+      extent: frame.extent,
+      axisU: frame.axisU,
+      axisN: frame.axisN,
+      cols: sheet.gridCols,
+      rows: sheet.gridRows,
+      values,
+      masked: opts.masked,
+      format: opts.format ?? 'signed',
+      activeCol: opts.activeCol,
+      activeRow: opts.activeRow,
+      colLabels: opts.colLabels,
+      rowLabels: opts.rowLabels,
+      colDimLabel: opts.colDimLabel,
+      rowDimLabel: opts.rowDimLabel,
+    });
+  };
+
+  const emitScoresOrSoftmax = (
+    kind: 'scores' | 'softmax',
+    g: 0 | 1,
+    activeCol?: number,
+    activeRow?: number,
+  ): void => {
+    const h = displayedHeads[g];
+    const values = new Float32Array(T * K);
+    const masked = new Uint8Array(T * K);
+    const src = kind === 'scores' ? sim.Scores : sim.Softmax;
+    const headOff = h * T * K;
+    for (let q = 0; q < T; q++) {
+      const qAbs = P + q;
+      for (let k = 0; k < K; k++) {
+        const idx = q * K + k;
+        values[idx] = src[headOff + idx];
+        masked[idx] = k > qAbs ? 1 : 0;
+      }
+    }
+    makeGridFromSheet(`${kind}:${g}`, values, {
+      masked,
+      format: kind === 'softmax' ? 'prob' : 'signed',
+      activeCol,
+      activeRow,
+      colLabels: keyTokLabels,
+      rowLabels: queryTokLabels,
+      colDimLabel: isIncremental ? `K = ${K} (${P}+${T})` : `K = ${K}`,
+      rowDimLabel: `Q = ${T}`,
+    });
+  };
+
+  const emitQHead = (h: number, activeCol?: number, activeRow?: number): void => {
+    const values = new Float32Array(T * dHead);
+    const headOff = h * dHead * T;
+    for (let t = 0; t < T; t++) {
+      for (let r = 0; r < dHead; r++) {
+        values[t * dHead + r] = sim.Q[headOff + r * T + t];
+      }
+    }
+    makeGridFromSheet(`q:${h}`, values, {
+      format: 'signed',
+      activeCol,
+      activeRow,
+      colLabels: headDimLabels,
+      rowLabels: queryTokLabels,
+      colDimLabel: `d_h = ${dHead}`,
+      rowDimLabel: `${fmtHeadTag(h)} · Q = ${T}`,
+    });
+  };
+
+  const emitKvSlice = (
+    kind: 'kv_k' | 'kv_v',
+    g: 0 | 1,
+    kTok: number,
+    activeCol?: number,
+    activeRow?: number,
+  ): void => {
+    const clampedK = Math.max(0, Math.min(K - 1, kTok));
+    const values = new Float32Array(dHead);
+    const src = kind === 'kv_k' ? sim.K : sim.V;
+    const headOff = g * dHead * K;
+    for (let r = 0; r < dHead; r++) {
+      values[r] = src[headOff + r * K + clampedK];
+    }
+    makeGridFromSheet(`${kind}:${g}:${clampedK}`, values, {
+      format: 'signed',
+      activeCol,
+      activeRow,
+      colLabels: headDimLabels,
+      rowLabels: [keyTokLabels[clampedK]],
+      colDimLabel: `d_h = ${dHead}`,
+      rowDimLabel: `${kind === 'kv_k' ? 'K' : 'V'}${g}[t${clampedK}]`,
+    });
+  };
+
+  const emitVOut = (g: 0 | 1, activeCol?: number, activeRow?: number): void => {
+    const cols = 16 * dHead;
+    const values = new Float32Array(T * cols);
+    const baseChan = g * cols;
+    for (let q = 0; q < T; q++) {
+      for (let c = 0; c < cols; c++) {
+        values[q * cols + c] = sim.V_out[(baseChan + c) * T + q];
+      }
+    }
+    const colLabels = Array.from(
+      { length: cols },
+      (_, c) => `${fmtHeadTag(g * 16 + Math.floor(c / dHead))}·d${c % dHead}`,
+    );
+    makeGridFromSheet(`v_out:${g}`, values, {
+      format: 'signed',
+      activeCol,
+      activeRow,
+      colLabels,
+      rowLabels: queryTokLabels,
+      colDimLabel: `16Q×${dHead} = ${cols}`,
+      rowDimLabel: `Q = ${T}`,
+    });
+  };
+
+  const emitTokenChannelSheet = (
+    kind: 'input' | 'rmsnorm' | 'residual',
+    activeCol?: number,
+    activeRow?: number,
+  ): void => {
+    const src = kind === 'input' ? sim.X : kind === 'rmsnorm' ? sim.U : sim.Y;
+    const values = new Float32Array(T * d);
+    for (let t = 0; t < T; t++) {
+      for (let i = 0; i < d; i++) {
+        values[t * d + i] = src[i * T + t];
+      }
+    }
+    makeGridFromSheet(kind, values, {
+      format: 'signed',
+      activeCol,
+      activeRow,
+      colLabels: chanLabels,
+      rowLabels: queryTokLabels,
+      colDimLabel: `d = ${d}`,
+      rowDimLabel: `T = ${T}`,
+    });
+  };
+
+  const emitConcat = (activeCol?: number, activeRow?: number): void => {
+    const cols = sim.qConcatDim;
+    const values = new Float32Array(T * cols);
+    for (let q = 0; q < T; q++) {
+      for (let c = 0; c < cols; c++) {
+        values[q * cols + c] = sim.Concat[c * T + q];
+      }
+    }
+    makeGridFromSheet('concat', values, {
+      format: 'signed',
+      activeCol,
+      activeRow,
+      rowLabels: queryTokLabels,
+      colDimLabel: `32Q×${dHead} = ${cols}`,
+      rowDimLabel: `Q = ${T}`,
+    });
+  };
+
+  const emitWeightKV = (
+    kind: 'w_k' | 'w_v',
+    activeCol?: number,
+    activeRow?: number,
+  ): void => {
+    const cols = sim.nKv * dHead;
+    const src = kind === 'w_k' ? sim.W_K : sim.W_V;
+    const values = new Float32Array(d * cols);
+    for (let j = 0; j < d; j++) {
+      for (let outRow = 0; outRow < cols; outRow++) {
+        values[j * cols + outRow] = src[outRow * d + j];
+      }
+    }
+    makeGridFromSheet(kind, values, {
+      format: 'signed',
+      activeCol,
+      activeRow,
+      rowLabels: chanLabels,
+      colDimLabel: `2KV×${dHead} = ${cols}`,
+      rowDimLabel: `d = ${d}`,
+    });
+  };
+
+  const emitSpan = (span: GqaSheetSpan, isTarget: boolean): void => {
+    const activeCol = isTarget || span.colStart === span.colEnd ? span.colStart : undefined;
+    const activeRow = isTarget || span.rowStart === span.rowEnd ? span.rowStart : undefined;
+    switch (span.tensor) {
+      case 'scores':
+      case 'softmax': {
+        const g: 0 | 1 =
+          span.kvHeadIndex ??
+          (span.headIndex !== undefined ? kvHeadForQuery(span.headIndex) : 0);
+        if (span.headIndex !== undefined && displayedHeads[g] !== span.headIndex) return;
+        emitScoresOrSoftmax(span.tensor, g, activeCol, activeRow);
+        break;
+      }
+      case 'q': {
+        const h = span.headIndex ?? 0;
+        emitQHead(h, activeCol, activeRow);
+        break;
+      }
+      case 'kv_k':
+      case 'kv_v': {
+        const g: 0 | 1 = span.kvHeadIndex ?? 0;
+        const t0 = Math.max(0, span.tokenStart ?? 0);
+        const t1 = Math.min(K - 1, span.tokenEnd ?? t0);
+        // Emit the latest active slice first so it gets highest priority, then remaining slices in range
+        emitKvSlice(span.tensor, g, t1, activeCol, 0);
+        for (let tk = t0; tk < t1; tk++) {
+          emitKvSlice(span.tensor, g, tk, activeCol, 0);
+        }
+        break;
+      }
+      case 'v_out': {
+        const g: 0 | 1 = span.kvHeadIndex ?? 0;
+        emitVOut(g, activeCol, activeRow);
+        break;
+      }
+      case 'input':
+      case 'rmsnorm':
+      case 'residual':
+        emitTokenChannelSheet(span.tensor, activeCol, activeRow);
+        break;
+      case 'concat':
+        emitConcat(activeCol, activeRow);
+        break;
+      case 'w_k':
+      case 'w_v':
+        emitWeightKV(span.tensor, activeCol, activeRow);
+        break;
+      default:
+        break;
+    }
+  };
+
+  if (formula) {
+    emitSpan(formula.targetSpan, true);
+    for (const up of formula.upstreamSpans) {
+      emitSpan(up, false);
+    }
+  } else {
+    // Idle close-zoom support: expose the active group's core attention sheets for zoom-adaptive numbers
+    const focusGrp: 0 | 1 =
+      activeKvGroup ?? (activeHeadIdx !== null ? kvHeadForQuery(activeHeadIdx) : 0);
+    const focusHead = activeHeadIdx ?? displayedHeads[focusGrp];
+    emitScoresOrSoftmax('scores', focusGrp);
+    emitScoresOrSoftmax('softmax', focusGrp);
+    emitQHead(focusHead);
+    emitKvSlice('kv_k', focusGrp, K - 1);
+    emitKvSlice('kv_v', focusGrp, K - 1);
+    emitVOut(focusGrp);
+  }
+
+  return grids;
+}
+
 export interface BuildGqaSpatialContext {
   readonly bayId: number;
   readonly clampedT: number;
@@ -481,6 +1178,10 @@ export interface BuildGqaSpatialContext {
   readonly group1Head: number;
   readonly activeCell: GqaCellRef | null;
   readonly activeFormula: GqaCellFormula | null;
+  readonly stepperActive: boolean;
+  readonly reducedMotion: boolean;
+  readonly stepperStep: number | null;
+  readonly stepperPulsePhase: number;
   readonly sim: GqaSimResult;
   readonly atlas: GqaValueAtlas;
   readonly partCatalog: Readonly<Record<string, CutawayPartInfo>>;
@@ -508,17 +1209,35 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     activeKvGroup,
     group0Head,
     group1Head,
+    activeCell,
     activeFormula,
+    stepperActive,
+    reducedMotion,
+    stepperStep,
+    stepperPulsePhase,
     sim,
     atlas,
     partCatalog,
   } = ctx;
 
-  const b = new SpatialGqaBuilder(bayId);
-
   const focusSet = buildGqaFocusSet(activeFormula);
   const hasCellTrace = focusSet.active;
   const hasFocus = activePart !== null || hasCellTrace;
+
+  const focusGrp: 0 | 1 = activeKvGroup ?? (activeHeadIdx !== null ? kvHeadForQuery(activeHeadIdx) : 0);
+  const focusHead = activeHeadIdx ?? (focusGrp === 0 ? group0Head : group1Head);
+  const revealEnabled = stepperActive && !reducedMotion && stepperStep !== null;
+  const revealCtx: GqaRevealContext = {
+    enabled: revealEnabled,
+    step: stepperStep ?? 0,
+    sim,
+    activeCell,
+    activeHead: focusHead,
+    activeGroup: focusGrp,
+    pulsePhase: stepperPulsePhase,
+  };
+
+  const b = new SpatialGqaBuilder(bayId, revealCtx, hasCellTrace);
 
   const SHEET_THICK = 0.056;
   const BASE_Y = 0.04;
@@ -1177,12 +1896,13 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     );
   }
 
-  // KV depth ticks (1, 8, 16, active K) along outer left edge of Shared K1 (clear of Scores!)
+  // KV depth ticks (1, 8, 16, active K) centered cleanly in the open corridor left of Shared K1
+  // so rightward-aligned tick labels (`T=N`) never intrude on K1 slices or crowd Scores.
   const tickSet = new Set<number>([1, 8, 16, keyCount]);
   for (const t of Array.from(tickSet).sort((a, c) => a - c)) {
     b.kvDepthTicks.push({
       token: t,
-      world: [xKTrack - kvSliceWidth * 0.5 - 0.16, 0.08, kvSliceZ(1, t)],
+      world: [xKTrack - kvSliceWidth * 0.5 - 0.44, 0.08, kvSliceZ(1, t)],
     });
   }
 
@@ -1514,6 +2234,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
   // 7. LIVE 3D CELL HIGHLIGHTS & CROSS-PLANE OPERAND DEPENDENCY THREADS
   // ==========================================================================
   let residualCarryInfo: { readonly ch: number; readonly tok: number; readonly val: number } | null = null;
+  let cellPopover: CellPopoverSpec | null = null;
   if (activeFormula) {
     const displayedHeads: readonly [number, number] = [group0Head, group1Head];
     const targetSpan = resolveSpatialSpan(b.sheetRegistry, activeFormula.targetSpan, displayedHeads);
@@ -1521,9 +2242,18 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     if (targetSpan) {
       drawCellHighlight3D(b.flow, targetSpan, CELL_TARGET_FILL, CELL_TARGET_FRAME, 0.024, true);
 
+      const sourceWorlds: {
+        readonly world: readonly [number, number, number];
+        readonly role: 'indigo' | 'teal';
+      }[] = [];
+
       for (const up of activeFormula.upstreamSpans) {
         const upSpan = resolveSpatialSpan(b.sheetRegistry, up, displayedHeads);
         if (!upSpan) continue;
+        sourceWorlds.push({
+          world: upSpan.frontPoint,
+          role: up.role === 'operand_a' ? 'indigo' : 'teal',
+        });
 
         // Focused visual routing for Input X -> + Residual Y: follow the overhead Residual Highway
         // bridge instead of cutting horizontally offscreen through intermediate attention planes.
@@ -1577,11 +2307,13 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
 
         drawOperandDependency3D(b.flow, upSpan, targetSpan, up.role === 'operand_a');
       }
+
+      cellPopover = buildGqaCellPopover(sim, activeFormula, targetSpan.frontPoint, sourceWorlds);
     }
   }
 
   // ==========================================================================
-  // 8. 3D EXTERIOR LABELS & DIMENSION CALIPERS (Accurate Head-Specific Naming)
+  // 8. 3D EXTERIOR LABELS & DIMENSION CALIPERS (V1 Hygiene + Head-Specific Naming)
   // ==========================================================================
   const g0Tag = fmtHeadTag(group0Head);
   const g1Tag = fmtHeadTag(group1Head);
@@ -1602,14 +2334,16 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     { id: 'g-wk', label: 'W_K', world: [xWeightsIn, wkvY + wkvHeightY * 0.5 + 0.18, wkZ - 0.22], partId: 'k-proj', align: 'top', tier: 'primary', tone: isFp8Mode ? 'gold' : 'default' },
     { id: 'g-wv', label: 'W_V', world: [xWeightsIn, 0.12, wvZ + wkvSpanZ * 0.5 + 0.24], partId: 'v-proj', align: 'bottom', tier: 'primary', tone: isFp8Mode ? 'gold' : 'default' },
 
-    // Query stacks with active head badge anchored directly above the lifted head sheet
+    // Query stacks: Group 0 anchored cleanly above its rear-most lifted rep/active card;
+    // Group 1 anchored cleanly exterior to the front-left stack perimeter (align: 'left') when idle
+    // (zero overlap with Q16–Q31 cards or K1 at both 1440×900 and 1024×800) or above the lifted active card.
     {
       id: 'g-q0',
       label: grp0Selected ? `Q₀..Q₁₅ · ${selectedHeadLabel}` : `Q₀..Q₁₅ (×16 · ${g0Tag})`,
       world: [
-        grp0Selected ? g0AnchorPos.x : xQBase + 0.28,
-        grp0Selected ? qActiveLiftY + qActiveH * 0.5 + 0.26 : qRepLiftY + qRestH * 0.5 + 0.20,
-        grp0Selected ? g0AnchorPos.z : zGrp[0],
+        g0AnchorPos.x,
+        grp0Selected ? qActiveLiftY + qActiveH * 0.5 + 0.28 : qRepLiftY + qRestH * 0.5 + 0.24,
+        g0AnchorPos.z,
       ],
       partId: grp0Selected ? activePart ?? 'q-proj' : 'q-proj',
       align: 'top',
@@ -1618,17 +2352,15 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     {
       id: 'g-q1',
       label: grp1Selected ? `Q₁₆..Q₃₁ · ${selectedHeadLabel}` : `Q₁₆..Q₃₁ (×16 · ${g1Tag})`,
-      world: [
-        grp1Selected ? g1AnchorPos.x : xQBase + 0.28,
-        grp1Selected ? qActiveLiftY + qActiveH * 0.5 + 0.26 : qRepLiftY + qRestH * 0.5 + 0.20,
-        grp1Selected ? g1AnchorPos.z : zGrp[1],
-      ],
+      world: grp1Selected
+        ? [g1AnchorPos.x, qActiveLiftY + qActiveH * 0.5 + 0.28, g1AnchorPos.z]
+        : [xQBase - qRestW * 0.5 - 0.16, 0.16, zGrp[1] + groupSpanZ * 0.5 + 0.14],
       partId: grp1Selected ? activePart ?? 'q-proj' : 'q-proj',
-      align: 'top',
+      align: grp1Selected ? 'top' : 'left',
       tier: 'primary',
     },
 
-    // Explicitly distinguished Shared K and Shared V racks!
+    // Explicitly distinguished Shared K and Shared V racks (generous rear/front exterior clearance)
     {
       id: 'g-kv0-k',
       label: isIncremental
@@ -1638,7 +2370,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
         : kvCacheFp8
           ? `K₀ · FP8 (T=${clampedT})`
           : `K₀ (T=${clampedT})`,
-      world: [xKTrack, 0.16, zGrp[0] - groupSpanZ * 0.5 - 0.22],
+      world: [xKTrack - 0.14, 0.14, zGrp[0] - groupSpanZ * 0.5 - 0.34],
       partId: 'kv-head-0',
       align: 'top',
       tier: 'primary',
@@ -1653,7 +2385,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
         : kvCacheFp8
           ? `K₁ · FP8 (T=${clampedT})`
           : `K₁ (T=${clampedT})`,
-      world: [xKTrack, 0.16, zGrp[1] + groupSpanZ * 0.5 + 0.22],
+      world: [xKTrack, 0.14, zGrp[1] + groupSpanZ * 0.5 + 0.30],
       partId: 'kv-head-1',
       align: 'bottom',
       tier: 'primary',
@@ -1668,7 +2400,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
         : kvCacheFp8
           ? `V₀ · FP8 (T=${clampedT})`
           : `V₀ (T=${clampedT})`,
-      world: [xVTrack, 0.16, zGrp[0] - groupSpanZ * 0.5 - 0.22],
+      world: [xVTrack, 0.14, zGrp[0] - groupSpanZ * 0.5 - 0.32],
       partId: 'kv-head-0',
       align: 'top',
       tier: 'primary',
@@ -1683,18 +2415,18 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
         : kvCacheFp8
           ? `V₁ · FP8 (T=${clampedT})`
           : `V₁ (T=${clampedT})`,
-      world: [xVTrack, 0.16, zGrp[1] + groupSpanZ * 0.5 + 0.22],
+      world: [xVTrack, 0.14, zGrp[1] + groupSpanZ * 0.5 + 0.30],
       partId: 'kv-head-1',
       align: 'bottom',
       tier: 'primary',
       tone: kvCacheFp8 ? 'muted' : 'cyan',
     },
 
-    // Accurately head-labeled Scores & Softmax matrices (rectangular S×(P+S) in incremental decode)
+    // Accurately head-labeled Scores & Softmax matrices (cleanly separated from K₀ and active score cells)
     {
       id: 'g-scores-0',
       label: `Scores · ${g0Tag}×K₀`,
-      world: [xScores, DECK_Y + 0.14, zGrp[0] - scoreDepthZ * 0.5 - 0.20],
+      world: [xScores + 0.08, DECK_Y + 0.08, zGrp[0] - scoreDepthZ * 0.5 - 0.36],
       partId: 'attn-scores',
       align: 'top',
       tier: grp0Selected ? 'primary' : 'detail',
@@ -1704,7 +2436,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
       label: isIncremental
         ? `Scores · ${g1Tag}×K₁ (${clampedT}×${keyCount} rect)`
         : `Scores · ${g1Tag}×K₁ (${clampedT}×${clampedT})`,
-      world: [xScores, DECK_Y + 0.14, zGrp[1] + scoreDepthZ * 0.5 + 0.22],
+      world: [xScores, DECK_Y + 0.06, zGrp[1] + scoreDepthZ * 0.5 + 0.38],
       partId: 'attn-scores',
       align: 'bottom',
       tier: 'primary',
@@ -1712,7 +2444,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     {
       id: 'g-softmax-0',
       label: `Softmax · ${g0Tag}`,
-      world: [xSoftmax, DECK_Y + 0.14, zGrp[0] - scoreDepthZ * 0.5 - 0.20],
+      world: [xSoftmax + 0.08, DECK_Y + 0.08, zGrp[0] - scoreDepthZ * 0.5 - 0.36],
       partId: 'softmax',
       align: 'top',
       tier: grp0Selected ? 'primary' : 'detail',
@@ -1720,7 +2452,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     {
       id: 'g-softmax',
       label: `Softmax · ${g1Tag}`,
-      world: [xSoftmax, DECK_Y + 0.14, zGrp[1] + scoreDepthZ * 0.5 + 0.22],
+      world: [xSoftmax, DECK_Y + 0.06, zGrp[1] + scoreDepthZ * 0.5 + 0.38],
       partId: 'softmax',
       align: 'bottom',
       tier: 'primary',
@@ -1751,8 +2483,12 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     { id: 'g-wo-shape', label: isFp8Mode ? '4,096 → 2,688 · BF16' : '4,096 → 2,688', world: [xWO, woY - woHeightY * 0.5 - 0.14, 0], partId: 'o-proj', align: 'bottom', tier: 'detail', tone: isFp8Mode ? 'gold' : 'default' },
   );
 
-  // Subtle architectural calipers
+  // Subtle architectural calipers (placed in the wide central corridor opposite exterior Scores labels)
   const calGrp: 0 | 1 = activeKvGroup ?? 1;
+  const calScoresZ =
+    calGrp === 0
+      ? zGrp[0] + scoreDepthZ * 0.5 + 0.26
+      : zGrp[1] - scoreDepthZ * 0.5 - 0.26;
   b.calipers.push(
     {
       id: 'cal-gqa-ratio',
@@ -1765,19 +2501,17 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     },
     {
       id: 'cal-scores-t',
-      aWorld: [xScores - scoreWidthX * 0.5, DECK_Y + 0.04, zGrp[calGrp] + scoreDepthZ * 0.5 + 0.10],
-      bWorld: [xScores + scoreWidthX * 0.5, DECK_Y + 0.04, zGrp[calGrp] + scoreDepthZ * 0.5 + 0.10],
+      aWorld: [xScores - scoreWidthX * 0.5, DECK_Y + 0.04, calScoresZ],
+      bWorld: [xScores + scoreWidthX * 0.5, DECK_Y + 0.04, calScoresZ],
       label: isIncremental ? `Q=${clampedT} × K=${keyCount} (${prefixCount}+${clampedT})` : `T = ${clampedT}`,
       partIds: ['attn-scores', 'softmax'],
       minPixels: 48,
-      offsetPx: 8,
+      offsetPx: calGrp === 0 ? 14 : -18,
     },
   );
 
   const packed = b.pack();
   const reg = (k: string) => b.sheetRegistry.get(k);
-  const focusGrp: 0 | 1 = activeKvGroup ?? (activeHeadIdx !== null ? kvHeadForQuery(activeHeadIdx) : 0);
-  const focusHead = activeHeadIdx ?? (focusGrp === 0 ? group0Head : group1Head);
   const kvKSlices = Array.from({ length: keyCount }, (_, t) => reg(`kv_k:${focusGrp}:${t}`));
   const kvVSlices = Array.from({ length: keyCount }, (_, t) => reg(`kv_v:${focusGrp}:${t}`));
 
@@ -1789,6 +2523,16 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     4: computeSheetGroupBounds([reg(`softmax:${focusGrp}`), ...kvVSlices, reg(`v_out:${focusGrp}`)], 0.48, 0.28, 0.48, GQA_SPATIAL_FIT_BOUNDS),
     5: computeSheetGroupBounds([reg('concat'), reg('w_o'), reg('residual')], 0.48, 0.28, 0.48, GQA_SPATIAL_FIT_BOUNDS),
   };
+
+  const activeCellGrids = buildGqaActiveCellGrids(
+    sim,
+    b.sheetRegistry,
+    activeFormula,
+    group0Head,
+    group1Head,
+    activeHeadIdx,
+    activeKvGroup,
+  );
 
   return {
     kind: 'cutaway_gqa',
@@ -1802,6 +2546,9 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     valueAtlas: atlas,
     gqaSim: sim,
     activeFormula,
+    ...(hasCellTrace ? { activeOpPartIds: b.activeOpPartIds } : {}),
+    cellPopover,
+    activeCellGrids,
     solidPickBoxes: b.pickBoxes,
     partCatalog,
     gqaStats: {

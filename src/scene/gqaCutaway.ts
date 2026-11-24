@@ -33,6 +33,7 @@ import {
   SHEET_KIND_CAUSAL_SOFTMAX,
   SHEET_KIND_GHOST_RAIL,
   SHEET_KIND_STANDARD,
+  SHEET_REVEAL_FLOATS,
   SHEET_ROLE_ACTIVATION,
   SHEET_ROLE_KV_K,
   SHEET_ROLE_KV_V,
@@ -42,13 +43,18 @@ import {
   SHEET_ROLE_SOFTMAX,
   SHEET_ROLE_WEIGHT,
 } from '../render/sheets';
+import type { CellPopoverSpec } from '../ui/overlay';
 import type { CutawayPartInfo, CutawaySceneGeometry } from './cutaways';
 import { buildGqaValueAtlas, type GqaAtlasSlice } from './gqaAtlas';
 import {
+  buildGqaActiveCellGrids,
+  buildGqaCellPopover,
   buildGqaFocusSet,
   buildGqaSpatialScene,
+  computeGqaSheetReveal,
   fitSpatialGqaCamera,
   GQA_SPATIAL_FIT_BOUNDS,
+  type GqaRevealContext,
 } from './gqaSpatial';
 import {
   CELL_TARGET_FILL,
@@ -109,6 +115,14 @@ export interface GqaCutawayOptions {
   readonly activeGroup0Head?: number;
   readonly activeGroup1Head?: number;
   readonly activeCell?: GqaCellRef | null;
+  /** Active Math Stepper stage index `0..5` when progressive accumulation reveal is engaged. */
+  readonly stepperStep?: number | null;
+  /** When true (and `!reducedMotion` and `stepperStep != null`), emit V2 `sheetRevealData`. Defaults to `false`. */
+  readonly stepperActive?: boolean;
+  /** When true, omit progressive reveal masking (`sheetRevealData`) so all sheets stay 100% revealed. Defaults to `false`. */
+  readonly reducedMotion?: boolean;
+  /** Optional 0..1 accumulation pulse phase for the active frontier cell border. */
+  readonly stepperPulsePhase?: number;
   /** Layout mode: `'three_quarter'` builds the 3D Spatial GQA architecture; `'near_plan'` (default) keeps the coplanar XZ schematic. */
   readonly viewAngle?: GqaViewAngle;
   /** Optional authoritative simulator result from a unified `HybridExecutionResult`. */
@@ -141,7 +155,10 @@ interface SheetSpec {
 
 class GqaSheetBuilder {
   private readonly bayId: number;
+  private readonly revealCtx: GqaRevealContext;
+  private readonly collectActiveOpParts: boolean;
   private readonly sheetFloats: number[] = [];
+  private readonly revealFloats: number[] = [];
   private readonly solidFloats: number[] = [];
   private readonly lineFloats: number[] = [];
   readonly pickBoxes: PickBox[] = [];
@@ -150,9 +167,12 @@ class GqaSheetBuilder {
   readonly calipers: DimensionCaliper[] = [];
   readonly flow = new FlowRibbonBuilder();
   readonly sheetRegistry = new Map<string, SheetGeomRecord>();
+  readonly activeOpPartIds = new Set<string>();
 
-  constructor(bayId: number) {
+  constructor(bayId: number, revealCtx: GqaRevealContext, collectActiveOpParts: boolean) {
     this.bayId = bayId;
+    this.revealCtx = revealCtx;
+    this.collectActiveOpParts = collectActiveOpParts;
   }
 
   addSheet(s: SheetSpec): void {
@@ -174,6 +194,25 @@ class GqaSheetBuilder {
       scale,                              // iValueScale
       modeFlag, 0,                        // iFlags (x: 0=signed, 1=prob)
     );
+
+    // 1b. Optional parallel V2 progressive reveal buffer (4 floats: mode, colFrontier, rowFrontier, pulsePhase)
+    if (this.revealCtx.enabled) {
+      const [revMode, revCol, revRow, revPulse] = computeGqaSheetReveal(this.revealCtx, s);
+      this.revealFloats.push(revMode, revCol, revRow, revPulse);
+    }
+
+    // 1c. Track active-op partIds for V1/V3 secondary label dimming in MacroOverlay
+    if (
+      this.collectActiveOpParts &&
+      (s.highlight === SHEET_HL_ACTIVE ||
+        s.highlight === SHEET_HL_OPERAND_A ||
+        s.highlight === SHEET_HL_OPERAND_B)
+    ) {
+      this.activeOpPartIds.add(s.partId);
+      if (s.tensorKey === 'q' && s.headIndex !== undefined) {
+        this.activeOpPartIds.add(`q-head-${s.headIndex}`);
+      }
+    }
 
     // 2. 1-to-1 mirror in solidData (12 floats, fp8Flag at +7) for test & picking contract parity
     this.solidFloats.push(
@@ -240,6 +279,7 @@ class GqaSheetBuilder {
   pack(): {
     sheetData: Float32Array;
     sheetCount: number;
+    sheetRevealData?: Float32Array;
     solidData: Float32Array;
     solidCount: number;
     lineData: Float32Array;
@@ -250,9 +290,13 @@ class GqaSheetBuilder {
     flowIndices: Uint32Array;
   } {
     const flowPacked = this.flow.pack();
+    const sheetCount = this.sheetFloats.length / SHEET_INSTANCE_FLOATS;
     return {
       sheetData: new Float32Array(this.sheetFloats),
-      sheetCount: this.sheetFloats.length / SHEET_INSTANCE_FLOATS,
+      sheetCount,
+      ...(this.revealCtx.enabled && this.revealFloats.length === sheetCount * SHEET_REVEAL_FLOATS
+        ? { sheetRevealData: new Float32Array(this.revealFloats) }
+        : {}),
       solidData: new Float32Array(this.solidFloats),
       solidCount: this.solidFloats.length / SOLID_INSTANCE_FLOATS,
       lineData: new Float32Array(this.lineFloats),
@@ -403,6 +447,11 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     sim.rmsEps,
   );
 
+  const stepperActive = Boolean(opts.stepperActive);
+  const reducedMotion = Boolean(opts.reducedMotion);
+  const stepperStep = opts.stepperStep ?? null;
+  const stepperPulsePhase = opts.stepperPulsePhase ?? 0.25;
+
   if (opts.viewAngle === 'three_quarter') {
     return buildGqaSpatialScene({
       bayId,
@@ -417,16 +466,34 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
       group1Head,
       activeCell: opts.activeCell ?? null,
       activeFormula,
+      stepperActive,
+      reducedMotion,
+      stepperStep,
+      stepperPulsePhase,
       sim,
       atlas,
       partCatalog,
     });
   }
 
-  const b = new GqaSheetBuilder(bayId);
   const focusSet = buildGqaFocusSet(activeFormula);
   const hasCellTrace = focusSet.active;
   const hasFocus = activePart !== null || hasCellTrace;
+
+  const focusGrp: 0 | 1 = activeKvGroup ?? (activeHeadIdx !== null ? kvHeadForQueryHead(activeHeadIdx) : 0);
+  const focusHead = activeHeadIdx ?? (focusGrp === 0 ? group0Head : group1Head);
+  const revealEnabled = stepperActive && !reducedMotion && stepperStep !== null;
+  const revealCtx: GqaRevealContext = {
+    enabled: revealEnabled,
+    step: stepperStep ?? 0,
+    sim,
+    activeCell: opts.activeCell ?? null,
+    activeHead: focusHead,
+    activeGroup: focusGrp,
+    pulsePhase: stepperPulsePhase,
+  };
+
+  const b = new GqaSheetBuilder(bayId, revealCtx, hasCellTrace);
 
   // Sheet elevation: thin flat sheets (thickness 0.07) lying cleanly on the XZ drafting plane
   const BASE_Y = 0.035;
@@ -1342,8 +1409,9 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
   );
 
   // ==========================================================================
-  // 8. LIVE CELL-LEVEL HIGHLIGHTS & UPSTREAM DEPENDENCY THREADS (Increment 2)
+  // 8. LIVE CELL-LEVEL HIGHLIGHTS & UPSTREAM DEPENDENCY THREADS (Increment 2 + V3 Popover)
   // ==========================================================================
+  let cellPopover: CellPopoverSpec | null = null;
   if (activeFormula) {
     const targetRect = resolveSpanWorldRect(b.sheetRegistry, activeFormula.targetSpan, displayedHeads);
     if (targetRect) {
@@ -1359,12 +1427,28 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
         0.028,
       );
 
+      const sourceWorlds: {
+        readonly world: readonly [number, number, number];
+        readonly role: 'indigo' | 'teal';
+      }[] = [];
+
       // Highlight each upstream operand row/column/cell and connect with thin crisp dependency threads
       for (const upSpan of activeFormula.upstreamSpans) {
         const upRect = resolveSpanWorldRect(b.sheetRegistry, upSpan, displayedHeads);
         if (!upRect) continue;
+        sourceWorlds.push({
+          world: [upRect.cx, upRect.topY + 0.012, upRect.cz],
+          role: upSpan.role === 'operand_a' ? 'indigo' : 'teal',
+        });
         drawOperandDependencyXZ(b.flow, upRect, targetRect, upSpan.role === 'operand_a');
       }
+
+      cellPopover = buildGqaCellPopover(
+        sim,
+        activeFormula,
+        [targetRect.cx, targetRect.topY + 0.012, targetRect.cz],
+        sourceWorlds,
+      );
     }
   }
 
@@ -1548,8 +1632,6 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
 
   const packed = b.pack();
   const reg = (k: string) => b.sheetRegistry.get(k);
-  const focusGrp: 0 | 1 = activeKvGroup ?? (activeHeadIdx !== null ? kvHeadForQueryHead(activeHeadIdx) : 0);
-  const focusHead = activeHeadIdx ?? (focusGrp === 0 ? group0Head : group1Head);
   const kvKSlices = Array.from({ length: keyCount }, (_, t) => reg(`kv_k:${focusGrp}:${t}`));
   const kvVSlices = Array.from({ length: keyCount }, (_, t) => reg(`kv_v:${focusGrp}:${t}`));
 
@@ -1561,6 +1643,16 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     4: computeSheetGroupBounds([reg(`softmax:${focusGrp}`), ...kvVSlices, reg(`v_out:${focusGrp}`)], 0.48, 0.10, 0.48, GQA_FIT_BOUNDS),
     5: computeSheetGroupBounds([reg('concat'), reg('w_o'), reg('residual')], 0.48, 0.10, 0.48, GQA_FIT_BOUNDS),
   };
+
+  const activeCellGrids = buildGqaActiveCellGrids(
+    sim,
+    b.sheetRegistry,
+    activeFormula,
+    group0Head,
+    group1Head,
+    activeHeadIdx,
+    activeKvGroup,
+  );
 
   return {
     kind: 'cutaway_gqa',
@@ -1574,6 +1666,9 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     valueAtlas: atlas,
     gqaSim: sim,
     activeFormula,
+    ...(hasCellTrace ? { activeOpPartIds: b.activeOpPartIds } : {}),
+    cellPopover,
+    activeCellGrids,
     solidPickBoxes: b.pickBoxes,
     partCatalog,
     gqaStats: {
