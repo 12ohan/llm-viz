@@ -16,7 +16,11 @@
  *                y_norm [rows=T, cols=64] at x=192..255
  */
 
-import type { MambaSimResult } from '../math/mambaSim';
+import {
+  readMambaConvTapValue,
+  readMambaPriorSsmValue,
+  type MambaSimResult,
+} from '../math/mambaSim';
 import {
   computeMaxAbs,
   createRg32fAtlas,
@@ -72,11 +76,16 @@ export function buildMambaValueAtlas(
   };
 
   // 2. Active head H_prev [4×4] at (210, 0) and H_curr [4×4] at (216, 0)
-  const hScale = 1 / Math.max(computeMaxAbs(sim.H_history, 0.25), 0.35);
+  const hMax = Math.max(
+    computeMaxAbs(sim.H_history, 0.25),
+    sim.initialSsmState ? computeMaxAbs(sim.initialSsmState, 0.25) : 0,
+    0.35,
+  );
+  const hScale = 1 / hMax;
   for (let p = 0; p < dHead; p++) {
     for (let n = 0; n < dState; n++) {
       const localIdx = (head * dHead + p) * dState + n;
-      const prevVal = tokIdx === 0 ? 0 : sim.H_history[(tokIdx - 1) * stateStride + localIdx];
+      const prevVal = readMambaPriorSsmValue(sim, tokIdx, localIdx).value;
       const currVal = sim.H_history[tokIdx * stateStride + localIdx];
       setTexel(210 + n, p, prevVal);
       setTexel(216 + n, p, currVal);
@@ -118,14 +127,16 @@ export function buildMambaValueAtlas(
   };
 
   // 5. Rolling 4-tap Conv1D buffer [rows=4, cols=128] at (64, 8), synchronized to tokIdx
-  //    (bit-for-bit identical to sim.conv_buf when tokIdx === T - 1; causal zero-padded when srcT < 0)
-  const convBufScale = 1 / computeMaxAbs(sim.xBC_pre, 0.35);
+  //    (bit-for-bit identical to sim.conv_buf when tokIdx === T - 1; respects externally seeded initialConvState)
+  const convMax = Math.max(
+    computeMaxAbs(sim.xBC_pre, 0.35),
+    sim.initialConvState ? computeMaxAbs(sim.initialConvState, 0.35) : 0,
+  );
+  const convBufScale = 1 / convMax;
   const convBufTaps: AtlasSlice[] = [];
   for (let s = 0; s < convKernel; s++) {
-    const lag = convKernel - 1 - s;
-    const srcT = tokIdx - lag;
     for (let c = 0; c < convDim; c++) {
-      const val = srcT >= 0 ? sim.xBC_pre[c * T + srcT] : 0;
+      const val = readMambaConvTapValue(sim, c, tokIdx, s).value;
       setTexel(64 + c, 8 + s, val);
     }
     convBufTaps.push({

@@ -67,6 +67,13 @@ export function buildGqaValueAtlas(
   const g0 = Math.max(0, Math.min(15, Math.round(group0Head)));
   const g1 = Math.max(16, Math.min(31, Math.round(group1Head)));
   const T = sim.tokens;
+  const K = sim.keyTokens;
+  const P = sim.prefixTokens;
+  if (T > 16 || K > 16) {
+    throw new RangeError(
+      `GQA value atlas supports at most 16 query rows and 16 key columns (received ${T}×${K})`,
+    );
+  }
   const { d, dHead, qConcatDim } = sim;
 
   const writer = createRg32fAtlas(ATLAS_W, ATLAS_H);
@@ -89,7 +96,7 @@ export function buildGqaValueAtlas(
     }
   }
 
-  // 3. Scores & Softmax for Group 0 head (g0) & Group 1 head (g1)
+  // 3. Rectangular Scores & Softmax [K cols × T rows] for Group 0 head (g0) & Group 1 head (g1)
   const scoreHeads: readonly [number, number] = [g0, g1];
   const scoreOffsets: readonly [number, number] = [32, 64];
   const softOffsets: readonly [number, number] = [48, 80];
@@ -97,31 +104,32 @@ export function buildGqaValueAtlas(
 
   for (let grp = 0; grp < 2; grp++) {
     const h = scoreHeads[grp];
-    const headOff = h * T * T;
+    const headOff = h * T * K;
     for (let q = 0; q < T; q++) {
-      for (let k = 0; k < T; k++) {
-        const s = sim.Scores[headOff + q * T + k];
+      const qAbs = P + q;
+      for (let k = 0; k < K; k++) {
+        const s = sim.Scores[headOff + q * K + k];
         if (Number.isFinite(s) && Math.abs(s) > maxAbsScore) {
           maxAbsScore = Math.abs(s);
         }
         setTexel(scoreOffsets[grp] + k, q, s);
-        const sm = sim.Softmax[headOff + q * T + k];
+        const sm = sim.Softmax[headOff + q * K + k];
         const smIdx = (q * ATLAS_W + (softOffsets[grp] + k)) * 2;
         data[smIdx] = sm;
-        data[smIdx + 1] = k > q ? 1.0 : 0.0;
+        data[smIdx + 1] = k > qAbs ? 1.0 : 0.0;
       }
     }
   }
 
-  // 4. Shared KV0 & KV1 (K & V tracks, 4 cols × T rows)
+  // 4. Shared KV0 & KV1 (K & V tracks, 4 cols × K rows: 0..P-1 reused prefix + P..K-1 newly computed)
   for (let g = 0; g < 2; g++) {
     const kBaseX = g === 0 ? 96 : 104;
     const vBaseX = g === 0 ? 100 : 108;
-    for (let t = 0; t < T; t++) {
+    for (let k = 0; k < K; k++) {
       for (let r = 0; r < dHead; r++) {
         const row = g * dHead + r;
-        setTexel(kBaseX + r, t, sim.K[row * T + t]);
-        setTexel(vBaseX + r, t, sim.V[row * T + t]);
+        setTexel(kBaseX + r, k, sim.K[row * K + k]);
+        setTexel(vBaseX + r, k, sim.V[row * K + k]);
       }
     }
   }
@@ -181,11 +189,11 @@ export function buildGqaValueAtlas(
   const kvV0: GqaAtlasSlice[] = [];
   const kvK1: GqaAtlasSlice[] = [];
   const kvV1: GqaAtlasSlice[] = [];
-  for (let t = 0; t < T; t++) {
-    kvK0.push({ rect: makeRect(96, t, dHead, 1), scale: scaleK, mode: 0 });
-    kvV0.push({ rect: makeRect(100, t, dHead, 1), scale: scaleV, mode: 0 });
-    kvK1.push({ rect: makeRect(104, t, dHead, 1), scale: scaleK, mode: 0 });
-    kvV1.push({ rect: makeRect(108, t, dHead, 1), scale: scaleV, mode: 0 });
+  for (let k = 0; k < K; k++) {
+    kvK0.push({ rect: makeRect(96, k, dHead, 1), scale: scaleK, mode: 0 });
+    kvV0.push({ rect: makeRect(100, k, dHead, 1), scale: scaleV, mode: 0 });
+    kvK1.push({ rect: makeRect(104, k, dHead, 1), scale: scaleK, mode: 0 });
+    kvV1.push({ rect: makeRect(108, k, dHead, 1), scale: scaleV, mode: 0 });
   }
 
   return {
@@ -205,12 +213,12 @@ export function buildGqaValueAtlas(
     kvK: [kvK0, kvK1],
     kvV: [kvV0, kvV1],
     scores: [
-      { rect: makeRect(32, 0, T, T), scale: scaleScores, mode: 0 },
-      { rect: makeRect(64, 0, T, T), scale: scaleScores, mode: 0 },
+      { rect: makeRect(32, 0, K, T), scale: scaleScores, mode: 0 },
+      { rect: makeRect(64, 0, K, T), scale: scaleScores, mode: 0 },
     ],
     softmax: [
-      { rect: makeRect(48, 0, T, T), scale: 1.0, mode: 1 },
-      { rect: makeRect(80, 0, T, T), scale: 1.0, mode: 1 },
+      { rect: makeRect(48, 0, K, T), scale: 1.0, mode: 1 },
+      { rect: makeRect(80, 0, K, T), scale: 1.0, mode: 1 },
     ],
     vOut: [
       { rect: makeRect(0, 48, 64, T), scale: scaleVOut, mode: 0 },

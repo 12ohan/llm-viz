@@ -292,8 +292,10 @@ void main() {
   float valueLod = smoothstep(1.35, 4.6, cellPxMin);
 
   bool isCausal = (vSheetKind == 1 || vSheetKind == 2);
-  bool isMaskedUpper = isCausal && (cellCol > cellRow);
   bool hasLiveTex = (vTexRect.z > 0.0 && vTexRect.w > 0.0);
+  // For live RG32F value textures, channel G carries the exact per-cell causal mask (supports rectangular [S, P+S]).
+  // Fall back to geometric cellCol > cellRow only when no live value texture is bound.
+  bool isMaskedUpper = isCausal && !hasLiveTex && (cellCol > cellRow);
 
   // --- Value surface: Live Float32 RG32F texture OR fallback structural tone ---
   if (hasLiveTex) {

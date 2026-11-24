@@ -79,6 +79,25 @@ export function resolveSimTokens(
   return { tokenIds, tokenLabels: EDUCATIONAL_TOKENS.slice(0, tokens) };
 }
 
+/**
+ * Optional prefix KV cache input for cached incremental GQA attention (`[nQ, S, P+S]`).
+ * Positions `0..seqLen-1` are reused verbatim without recomputing `W_K` or `W_V`.
+ */
+export interface GqaSimKvCacheInput {
+  /** Number of populated prefix tokens `P` (`0..maxTokens`). */
+  readonly seqLen: number;
+  /** Sequence capacity stride used to index `K` and `V`: `[(g * dHead + r) * maxTokens + k]`. */
+  readonly maxTokens: number;
+  /** Cached prefix keys `[nKv * dHead, maxTokens]`. */
+  readonly K: Float32Array;
+  /** Cached prefix values `[nKv * dHead, maxTokens]`. */
+  readonly V: Float32Array;
+  /** Optional prefix token IDs (length `seqLen`) for truthful key coordinate inspection. */
+  readonly prefixTokenIds?: readonly number[] | Int32Array;
+  /** Optional prefix token labels (length `seqLen`) for truthful key coordinate inspection. */
+  readonly prefixTokenLabels?: readonly string[];
+}
+
 export interface GqaSimFixture {
   /** Input hidden state X: [d, T], indexed [i * T + t]. */
   readonly X?: Float32Array;
@@ -98,6 +117,8 @@ export interface GqaSimFixture {
   readonly tokenIds?: readonly number[] | Int32Array;
   /** Matching display labels for each token position (length T). */
   readonly tokenLabels?: readonly string[];
+  /** Optional cached prefix KV state for true rectangular `[nQ, S, P+S]` incremental attention. */
+  readonly kvCacheIn?: GqaSimKvCacheInput;
 }
 
 export type GqaTensorKey =
@@ -181,9 +202,20 @@ export interface GqaCellFormula {
 }
 
 export interface GqaSimResult {
+  /** Number of newly processed query tokens `S` (`=== keyTokens` when `prefixTokens === 0`). */
   readonly tokens: number;
+  /** Number of reused cached prefix KV tokens `P` (`0` in standalone / full-sequence runs). */
+  readonly prefixTokens: number;
+  /** Total attended KV context length `P + S` (`=== tokens` when `prefixTokens === 0`). */
+  readonly keyTokens: number;
+  /** Absolute starting position offset (`=== prefixTokens`) for newly processed query tokens. */
+  readonly startTokenOffset: number;
   readonly tokenIds: Int32Array;
   readonly tokenLabels: readonly string[];
+  /** Key/value token IDs across `0..keyTokens-1` (`=== tokenIds` when `prefixTokens === 0`). */
+  readonly keyTokenIds: Int32Array;
+  /** Key/value display labels across `0..keyTokens-1` (`=== tokenLabels` when `prefixTokens === 0`). */
+  readonly keyTokenLabels: readonly string[];
   readonly d: number;
   readonly nQ: number;
   readonly nKv: number;
@@ -191,15 +223,15 @@ export interface GqaSimResult {
   readonly qConcatDim: number;
   /** Effective RMSNorm epsilon used for this simulation (1e-6 standalone default; 1e-5 unified). */
   readonly rmsEps: number;
-  /** Input hidden state X: [8, T], indexed [i * T + t] */
+  /** Input hidden state X: [8, S], indexed [i * S + t] */
   readonly X: Float32Array;
-  /** Pre-gamma unit-RMS normalized state X_norm: [8, T], indexed [i * T + t] */
+  /** Pre-gamma unit-RMS normalized state X_norm: [8, S], indexed [i * S + t] */
   readonly X_norm: Float32Array;
-  /** Per-token RMS denominators: [T] */
+  /** Per-token RMS denominators: [S] */
   readonly rms: Float32Array;
   /** Non-unit learned RMSNorm scale gamma: [8] */
   readonly gamma: Float32Array;
-  /** Scaled RMSNorm output U = X_norm * gamma: [8, T], indexed [i * T + t] */
+  /** Scaled RMSNorm output U = X_norm * gamma: [8, S], indexed [i * S + t] */
   readonly U: Float32Array;
   /** W_Q: [128, 8], indexed [outRow * 8 + j] where outRow = h * 4 + r */
   readonly W_Q: Float32Array;
@@ -207,25 +239,25 @@ export interface GqaSimResult {
   readonly W_K: Float32Array;
   /** W_V: [8, 8], indexed [outRow * 8 + j] where outRow = g * 4 + r */
   readonly W_V: Float32Array;
-  /** Q: [32, 4, T], indexed [(h * 4 + r) * T + t] */
+  /** Q: [32, 4, S], indexed [(h * 4 + r) * S + t] */
   readonly Q: Float32Array;
-  /** K: [2, 4, T], indexed [(g * 4 + r) * T + t] */
+  /** K: [2, 4, P+S], indexed [(g * 4 + r) * keyTokens + k] (0..P-1 reused prefix, P..P+S-1 new) */
   readonly K: Float32Array;
-  /** V: [2, 4, T], indexed [(g * 4 + r) * T + t] */
+  /** V: [2, 4, P+S], indexed [(g * 4 + r) * keyTokens + k] (0..P-1 reused prefix, P..P+S-1 new) */
   readonly V: Float32Array;
-  /** Causal scaled attention scores: [32, T, T], indexed [(h * T + q) * T + k]; -Infinity for k > q */
+  /** Causal scaled attention scores: [32, S, P+S], indexed [(h * S + q) * keyTokens + k]; -Infinity for k > P + q */
   readonly Scores: Float32Array;
-  /** Row-wise causal softmax: [32, T, T], indexed [(h * T + q) * T + k]; 0 for k > q */
+  /** Row-wise causal softmax: [32, S, P+S], indexed [(h * S + q) * keyTokens + k]; 0 for k > P + q */
   readonly Softmax: Float32Array;
-  /** Per-head weighted value outputs: [32, 4, T], indexed [(h * 4 + r) * T + q] */
+  /** Per-head weighted value outputs: [32, 4, S], indexed [(h * 4 + r) * S + q] */
   readonly V_out: Float32Array;
-  /** Concatenated 32 heads: [128, T], indexed [c * T + q] where c = h * 4 + r */
+  /** Concatenated 32 heads: [128, S], indexed [c * S + q] where c = h * 4 + r */
   readonly Concat: Float32Array;
   /** Output projection W_O: [8, 128], indexed [i * 128 + c] */
   readonly W_O: Float32Array;
-  /** Projected attention update Attn_out = W_O @ Concat: [8, T], indexed [i * T + q] */
+  /** Projected attention update Attn_out = W_O @ Concat: [8, S], indexed [i * S + q] */
   readonly Attn_out: Float32Array;
-  /** Residual merge Y = X + Attn_out: [8, T], indexed [i * T + q] */
+  /** Residual merge Y = X + Attn_out: [8, S], indexed [i * S + q] */
   readonly Y: Float32Array;
 }
 
@@ -341,13 +373,41 @@ const simCache = new Map<number, GqaSimResult>();
  * Fixture calls accept external `X`, weights, `rmsEps`, `tokenIds`, and `tokenLabels` without polluting the standalone cache.
  */
 export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult {
-  const T = Math.max(1, Math.min(GQA_SIM_CONFIG.maxTokens, Math.round(tokens)));
+  const { d, nQ, nKv, dHead, qConcatDim, maxTokens } = GQA_SIM_CONFIG;
+  const kvIn = fixture?.kvCacheIn;
+  const T = kvIn
+    ? Math.max(1, Math.round(tokens))
+    : Math.max(1, Math.min(maxTokens, Math.round(tokens)));
   if (!fixture) {
     const cached = simCache.get(T);
     if (cached) return cached;
   }
 
-  const { d, nQ, nKv, dHead, qConcatDim, maxTokens } = GQA_SIM_CONFIG;
+  let P = 0;
+  if (kvIn) {
+    if (!Number.isInteger(kvIn.seqLen) || kvIn.seqLen < 0) {
+      throw new RangeError(`Invalid kvCacheIn.seqLen: ${kvIn.seqLen}`);
+    }
+    if (!Number.isInteger(kvIn.maxTokens) || kvIn.maxTokens < kvIn.seqLen) {
+      throw new RangeError(
+        `Invalid kvCacheIn.maxTokens (${kvIn.maxTokens}) for seqLen (${kvIn.seqLen})`,
+      );
+    }
+    if (kvIn.seqLen + T > kvIn.maxTokens) {
+      throw new RangeError(
+        `Incremental GQA step (${kvIn.seqLen} + ${T}) exceeds kvCacheIn.maxTokens (${kvIn.maxTokens})`,
+      );
+    }
+    const minKvLen = nKv * dHead * kvIn.maxTokens;
+    if (kvIn.K.length < minKvLen || kvIn.V.length < minKvLen) {
+      throw new RangeError(
+        `kvCacheIn.K/V length (${kvIn.K.length}/${kvIn.V.length}) < expected ${minKvLen}`,
+      );
+    }
+    P = kvIn.seqLen;
+  }
+
+  const keyTokens = P + T;
   const rmsEps = fixture?.rmsEps ?? GQA_SIM_CONFIG.rmsEps;
   const gamma = fixture?.gamma ?? SIM_PARAMS.gamma;
   const W_Q = fixture?.W_Q ?? SIM_PARAMS.W_Q;
@@ -356,6 +416,26 @@ export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult
   const W_O = fixture?.W_O ?? SIM_PARAMS.W_O;
   const { tokenIds, tokenLabels } = resolveSimTokens(T, fixture?.tokenIds, fixture?.tokenLabels);
 
+  let keyTokenIds: Int32Array;
+  let keyTokenLabels: readonly string[];
+  if (P === 0) {
+    keyTokenIds = tokenIds;
+    keyTokenLabels = tokenLabels;
+  } else {
+    keyTokenIds = new Int32Array(keyTokens);
+    const labels: string[] = [];
+    for (let k = 0; k < P; k++) {
+      const pid = kvIn?.prefixTokenIds?.[k] ?? -1;
+      keyTokenIds[k] = pid;
+      labels.push(kvIn?.prefixTokenLabels?.[k] ?? (pid >= 0 ? `id:${pid}` : `cache#${k}`));
+    }
+    for (let t = 0; t < T; t++) {
+      keyTokenIds[P + t] = tokenIds[t];
+      labels.push(tokenLabels[t]);
+    }
+    keyTokenLabels = labels;
+  }
+
   // 1. Slice or copy input X [8, T]
   const X = new Float32Array(d * T);
   if (fixture?.X) {
@@ -363,7 +443,7 @@ export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult
   } else {
     for (let i = 0; i < d; i++) {
       for (let t = 0; t < T; t++) {
-        X[i * T + t] = SIM_PARAMS.X_full[i * maxTokens + t];
+        X[i * T + t] = SIM_PARAMS.X_full[i * maxTokens + ((P + t) % maxTokens)];
       }
     }
   }
@@ -388,6 +468,7 @@ export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult
   }
 
   // 3. Linear projections (NoPE, zero linear bias)
+  //    Query Q [128, T] is computed ONLY for the T newly arriving tokens.
   const Q = new Float32Array(nQ * dHead * T);
   for (let outRow = 0; outRow < qConcatDim; outRow++) {
     const wOff = outRow * d;
@@ -401,11 +482,24 @@ export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult
     }
   }
 
-  const K = new Float32Array(nKv * dHead * T);
-  const V = new Float32Array(nKv * dHead * T);
+  //    K, V [8, P+T]: copy reused prefix columns 0..P-1 verbatim from kvCacheIn; compute ONLY P..P+T-1.
+  const K = new Float32Array(nKv * dHead * keyTokens);
+  const V = new Float32Array(nKv * dHead * keyTokens);
   for (let outRow = 0; outRow < nKv * dHead; outRow++) {
+    const kvOff = outRow * keyTokens;
+    if (kvIn && P > 0) {
+      const inOff = outRow * kvIn.maxTokens;
+      for (let k = 0; k < P; k++) {
+        const kvVal = kvIn.K[inOff + k];
+        const vvVal = kvIn.V[inOff + k];
+        if (!Number.isFinite(kvVal) || !Number.isFinite(vvVal)) {
+          throw new RangeError(`Non-finite prefix KV value at row=${outRow}, k=${k}`);
+        }
+        K[kvOff + k] = kvVal;
+        V[kvOff + k] = vvVal;
+      }
+    }
     const wOff = outRow * d;
-    const kvOff = outRow * T;
     for (let t = 0; t < T; t++) {
       let accK = 0;
       let accV = 0;
@@ -414,33 +508,34 @@ export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult
         accK += W_K[wOff + j] * uVal;
         accV += W_V[wOff + j] * uVal;
       }
-      K[kvOff + t] = Math.fround(accK);
-      V[kvOff + t] = Math.fround(accV);
+      K[kvOff + P + t] = Math.fround(accK);
+      V[kvOff + P + t] = Math.fround(accV);
     }
   }
 
-  // 4. Scaled Dot-Product Causal Scores [32, T, T] & Row-Wise Softmax [32, T, T]
+  // 4. Scaled Dot-Product Causal Scores [32, T, P+T] & Row-Wise Softmax [32, T, P+T]
   const invSqrtD = 1 / Math.sqrt(dHead); // 1 / 2 = 0.5
-  const Scores = new Float32Array(nQ * T * T);
-  const Softmax = new Float32Array(nQ * T * T);
+  const Scores = new Float32Array(nQ * T * keyTokens);
+  const Softmax = new Float32Array(nQ * T * keyTokens);
 
   for (let h = 0; h < nQ; h++) {
     const g = h < 16 ? 0 : 1; // Exact 16:1 GQA grouping
     const qHeadOff = h * dHead * T;
-    const kHeadOff = g * dHead * T;
-    const headScoreOff = h * T * T;
+    const kHeadOff = g * dHead * keyTokens;
+    const headScoreOff = h * T * keyTokens;
 
     for (let q = 0; q < T; q++) {
-      const rowOff = headScoreOff + q * T;
+      const rowOff = headScoreOff + q * keyTokens;
+      const maxCausalK = P + q;
       let maxScore = -Infinity;
 
-      for (let k = 0; k < T; k++) {
-        if (k > q) {
+      for (let k = 0; k < keyTokens; k++) {
+        if (k > maxCausalK) {
           Scores[rowOff + k] = -Infinity;
         } else {
           let dot = 0;
           for (let r = 0; r < dHead; r++) {
-            dot += Q[qHeadOff + r * T + q] * K[kHeadOff + r * T + k];
+            dot += Q[qHeadOff + r * T + q] * K[kHeadOff + r * keyTokens + k];
           }
           const s = Math.fround(dot * invSqrtD);
           Scores[rowOff + k] = s;
@@ -448,15 +543,15 @@ export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult
         }
       }
 
-      // Numerically stable row-wise softmax over causal keys 0..q
+      // Numerically stable row-wise softmax over causal keys 0..P+q
       let sumExp = 0;
-      for (let k = 0; k <= q; k++) {
+      for (let k = 0; k <= maxCausalK; k++) {
         const e = Math.exp(Scores[rowOff + k] - maxScore);
         Softmax[rowOff + k] = e;
         sumExp += e;
       }
-      for (let k = 0; k < T; k++) {
-        if (k <= q) {
+      for (let k = 0; k < keyTokens; k++) {
+        if (k <= maxCausalK) {
           Softmax[rowOff + k] = Math.fround(Softmax[rowOff + k] / sumExp);
         } else {
           Softmax[rowOff + k] = 0;
@@ -471,16 +566,17 @@ export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult
 
   for (let h = 0; h < nQ; h++) {
     const g = h < 16 ? 0 : 1;
-    const vHeadOff = g * dHead * T;
-    const headSoftOff = h * T * T;
+    const vHeadOff = g * dHead * keyTokens;
+    const headSoftOff = h * T * keyTokens;
     const outHeadOff = h * dHead * T;
 
     for (let q = 0; q < T; q++) {
-      const softRowOff = headSoftOff + q * T;
+      const softRowOff = headSoftOff + q * keyTokens;
+      const maxCausalK = P + q;
       for (let r = 0; r < dHead; r++) {
         let acc = 0;
-        for (let k = 0; k <= q; k++) {
-          acc += Softmax[softRowOff + k] * V[vHeadOff + r * T + k];
+        for (let k = 0; k <= maxCausalK; k++) {
+          acc += Softmax[softRowOff + k] * V[vHeadOff + r * keyTokens + k];
         }
         const val = Math.fround(acc);
         V_out[outHeadOff + r * T + q] = val;
@@ -507,8 +603,13 @@ export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult
 
   const result: GqaSimResult = {
     tokens: T,
+    prefixTokens: P,
+    keyTokens,
+    startTokenOffset: P,
     tokenIds,
     tokenLabels,
+    keyTokenIds,
+    keyTokenLabels,
     d,
     nQ,
     nKv,
@@ -562,14 +663,20 @@ function fmtHead(h: number): string {
 
 function tokStr(sim: GqaSimResult, idx: number): string {
   const clamped = Math.max(0, Math.min(sim.tokens - 1, idx));
-  return `"${sim.tokenLabels[clamped]}"(${clamped})`;
+  return `"${sim.tokenLabels[clamped]}"(${sim.startTokenOffset + clamped})`;
+}
+
+function keyTokStr(sim: GqaSimResult, kIdx: number): string {
+  const clamped = Math.max(0, Math.min(sim.keyTokens - 1, kIdx));
+  return `"${sim.keyTokenLabels[clamped]}"(${clamped})`;
 }
 
 /**
- * Clamp a cell reference to valid simulator bounds for the active token count `T`.
+ * Clamp a cell reference to valid simulator bounds for the active query length `S` and KV length `P+S`.
  */
 export function clampCellToSim(sim: GqaSimResult, cell: GqaCellRef): GqaCellRef {
   const T = sim.tokens;
+  const K = sim.keyTokens;
   const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
   switch (cell.tensor) {
     case 'input':
@@ -595,11 +702,11 @@ export function clampCellToSim(sim: GqaSimResult, cell: GqaCellRef): GqaCellRef 
     case 'kv_k':
     case 'kv_v': {
       const g: 0 | 1 = cell.kvHeadIndex === 1 ? 1 : 0;
-      const t = clamp(cell.tokenIndex ?? cell.row, 0, T - 1);
+      const k = clamp(cell.tokenIndex ?? cell.row, 0, K - 1);
       return {
         ...cell,
         kvHeadIndex: g,
-        tokenIndex: t,
+        tokenIndex: k,
         row: 0,
         col: clamp(cell.col, 0, sim.dHead - 1),
       };
@@ -618,7 +725,7 @@ export function clampCellToSim(sim: GqaSimResult, cell: GqaCellRef): GqaCellRef 
         headIndex: h,
         kvHeadIndex: g,
         row: clamp(cell.row, 0, T - 1),
-        col: clamp(cell.col, 0, T - 1),
+        col: clamp(cell.col, 0, K - 1),
       };
     }
     case 'v_out': {
@@ -655,11 +762,14 @@ export function clampCellToSim(sim: GqaSimResult, cell: GqaCellRef): GqaCellRef 
 export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): GqaCellFormula {
   const cell = clampCellToSim(sim, rawCell);
   const T = sim.tokens;
+  const K = sim.keyTokens;
+  const P = sim.prefixTokens;
   const { d, dHead, qConcatDim } = sim;
 
   switch (cell.tensor) {
     case 'input': {
       const t = cell.row;
+      const tAbs = P + t;
       const i = cell.col;
       const val = sim.X[i * T + t];
       return {
@@ -670,8 +780,8 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
         value: val,
         isMasked: false,
         valueText: fmtSigned(val),
-        equation: `X[${i}, ${t}] = ${fmtSigned(val)} (incoming residual state before RMSNorm)`,
-        subEquation: `Token ${tokStr(sim, t)} · RMS(X[:, ${t}]) = ${sim.rms[t].toFixed(3)} · NoPE (no positional encoding added)`,
+        equation: `X[${i}, ${tAbs}] = ${fmtSigned(val)} (incoming residual state before RMSNorm)`,
+        subEquation: `Token ${tokStr(sim, t)} · RMS(X[:, ${tAbs}]) = ${sim.rms[t].toFixed(3)} · NoPE (no positional encoding added)`,
         targetSpan: { tensor: 'input', rowStart: t, rowEnd: t, colStart: i, colEnd: i, role: 'target' },
         upstreamSpans: [],
       };
@@ -679,6 +789,7 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
 
     case 'rmsnorm': {
       const t = cell.row;
+      const tAbs = P + t;
       const i = cell.col;
       const xVal = sim.X[i * T + t];
       const rmsVal = sim.rms[t];
@@ -693,8 +804,8 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
         value: uVal,
         isMasked: false,
         valueText: fmtSigned(uVal),
-        equation: `(X[${i},${t}] / rms) · γ[${i}] = (${fmtSigned(xVal)} / ${rmsVal.toFixed(3)}) · ${gVal.toFixed(2)} = ${fmtSigned(xn)} · ${gVal.toFixed(2)} = ${fmtSigned(uVal)}`,
-        subEquation: `Pre-γ unit-RMS X_norm[${i},${t}] = ${fmtSigned(xn)} · rms(X[:,${t}]) = √(mean(x²) + ${formatEpsLabel(sim.rmsEps)}) = ${rmsVal.toFixed(3)}`,
+        equation: `(X[${i},${tAbs}] / rms) · γ[${i}] = (${fmtSigned(xVal)} / ${rmsVal.toFixed(3)}) · ${gVal.toFixed(2)} = ${fmtSigned(xn)} · ${gVal.toFixed(2)} = ${fmtSigned(uVal)}`,
+        subEquation: `Pre-γ unit-RMS X_norm[${i},${tAbs}] = ${fmtSigned(xn)} · rms(X[:,${tAbs}]) = √(mean(x²) + ${formatEpsLabel(sim.rmsEps)}) = ${rmsVal.toFixed(3)}`,
         targetSpan: { tensor: 'rmsnorm', rowStart: t, rowEnd: t, colStart: i, colEnd: i, role: 'target' },
         upstreamSpans: [
           { tensor: 'input', rowStart: t, rowEnd: t, colStart: 0, colEnd: d - 1, role: 'operand_a' },
@@ -753,6 +864,7 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
       const h = cell.headIndex ?? 0;
       const g: 0 | 1 = h < 16 ? 0 : 1;
       const t = cell.row;
+      const tAbs = P + t;
       const r = cell.col;
       const outRow = h * dHead + r;
       const val = sim.Q[outRow * T + t];
@@ -768,7 +880,7 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
         value: val,
         isMasked: false,
         valueText: fmtSigned(val),
-        equation: `Σ_{j=0..7} W_Q[${outRow},j]·U[j,${t}] = ${terms.join(' + ')} + … = ${fmtSigned(val)}`,
+        equation: `Σ_{j=0..7} W_Q[${outRow},j]·U[j,${tAbs}] = ${terms.join(' + ')} + … = ${fmtSigned(val)}`,
         subEquation: `Zero bias · NoPE · ${fmtHead(h)} attends shared KV Head ${g} (Group ${g}: ${g === 0 ? 'Q00–Q15' : 'Q16–Q31'})`,
         targetSpan: {
           tensor: 'q',
@@ -791,32 +903,64 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
     case 'kv_v': {
       const isK = cell.tensor === 'kv_k';
       const g: 0 | 1 = cell.kvHeadIndex === 1 ? 1 : 0;
-      const t = cell.tokenIndex ?? 0;
+      const k = cell.tokenIndex ?? 0;
       const r = cell.col;
       const outRow = g * dHead + r;
       const mat = isK ? sim.K : sim.V;
       const W = isK ? sim.W_K : sim.W_V;
-      const val = mat[outRow * T + t];
+      const val = mat[outRow * K + k];
+      const name = isK ? `K${g}` : `V${g}`;
+
+      // Reused prefix KV slice (0..P-1): loaded verbatim from prior KV cache, zero W_K/W_V compute this step
+      if (k < P) {
+        return {
+          cell,
+          tensorLabel: `Reused ${name} Cache`,
+          coordLabel: `${name}[k=${keyTokStr(sim, k)}, d=${r}]`,
+          headBadge: `KV${g} · Reused Prefix Cache (0 compute)`,
+          value: val,
+          isMasked: false,
+          valueText: fmtSigned(val),
+          equation: `${name}[${outRow}, k=${k}] = ${fmtSigned(val)}  (loaded from prefix KV cache; ${isK ? 'W_K' : 'W_V'} not recomputed)`,
+          subEquation: `Reused prefix slot ${k + 1}/${K} (${P} cached + ${T} new) · Shared across ${g === 0 ? 'Q00–Q15' : 'Q16–Q31'} (16:1 GQA)`,
+          targetSpan: {
+            tensor: cell.tensor,
+            kvHeadIndex: g,
+            tokenStart: k,
+            tokenEnd: k,
+            rowStart: 0,
+            rowEnd: 0,
+            colStart: r,
+            colEnd: r,
+            role: 'target',
+          },
+          upstreamSpans: [],
+        };
+      }
+
+      const tLocal = k - P;
       const terms: string[] = [];
       for (let j = 0; j < 3; j++) {
-        terms.push(`${fmtSigned(W[outRow * d + j], 2)}·${fmtSigned(sim.U[j * T + t], 2)}`);
+        terms.push(`${fmtSigned(W[outRow * d + j], 2)}·${fmtSigned(sim.U[j * T + tLocal], 2)}`);
       }
-      const name = isK ? `K${g}` : `V${g}`;
       return {
         cell,
-        tensorLabel: `Shared ${name} Cache`,
-        coordLabel: `${name}[t=${tokStr(sim, t)}, d=${r}]`,
-        headBadge: `KV${g} · shared by 16Q`,
+        tensorLabel: P > 0 ? `New ${name} Append` : `Shared ${name} Cache`,
+        coordLabel: `${name}[t=${keyTokStr(sim, k)}, d=${r}]`,
+        headBadge: P > 0 ? `KV${g} · Newly Computed (+${T} slot${T > 1 ? 's' : ''})` : `KV${g} · shared by 16Q`,
         value: val,
         isMasked: false,
         valueText: fmtSigned(val),
-        equation: `Σ_{j=0..7} ${isK ? 'W_K' : 'W_V'}[${outRow},j]·U[j,${t}] = ${terms.join(' + ')} + … = ${fmtSigned(val)}`,
-        subEquation: `Shared verbatim across ${g === 0 ? 'Q00–Q15' : 'Q16–Q31'} · 16:1 GQA sharing · Cached at token slot ${t + 1}/${T}`,
+        equation: `Σ_{j=0..7} ${isK ? 'W_K' : 'W_V'}[${outRow},j]·U[j,${k}] = ${terms.join(' + ')} + … = ${fmtSigned(val)}`,
+        subEquation:
+          P > 0
+            ? `Newly appended slot ${k + 1}/${K} (${P} reused prefix + ${T} new) · Shared verbatim across ${g === 0 ? 'Q00–Q15' : 'Q16–Q31'}`
+            : `Shared verbatim across ${g === 0 ? 'Q00–Q15' : 'Q16–Q31'} · 16:1 GQA sharing · Cached at token slot ${k + 1}/${K}`,
         targetSpan: {
           tensor: cell.tensor,
           kvHeadIndex: g,
-          tokenStart: t,
-          tokenEnd: t,
+          tokenStart: k,
+          tokenEnd: k,
           rowStart: 0,
           rowEnd: 0,
           colStart: r,
@@ -832,7 +976,7 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
             colEnd: outRow,
             role: 'operand_a',
           },
-          { tensor: 'rmsnorm', rowStart: t, rowEnd: t, colStart: 0, colEnd: d - 1, role: 'operand_b' },
+          { tensor: 'rmsnorm', rowStart: tLocal, rowEnd: tLocal, colStart: 0, colEnd: d - 1, role: 'operand_b' },
         ],
       };
     }
@@ -842,20 +986,21 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
       const h = cell.headIndex ?? (g === 0 ? 0 : 16);
       const q = cell.row;
       const k = cell.col;
-      const val = sim.Scores[(h * T + q) * T + k];
-      const isMasked = k > q || !Number.isFinite(val);
+      const qAbs = P + q;
+      const val = sim.Scores[(h * T + q) * K + k];
+      const isMasked = k > qAbs || !Number.isFinite(val);
 
       if (isMasked) {
         return {
           cell,
           tensorLabel: `Scores · ${fmtHead(h)}`,
-          coordLabel: `Scores[${fmtHead(h)}, q=${tokStr(sim, q)}, k=${tokStr(sim, k)}]`,
+          coordLabel: `Scores[${fmtHead(h)}, q=${tokStr(sim, q)}, k=${keyTokStr(sim, k)}]`,
           headBadge: `${fmtHead(h)} → KV${g}`,
           value: -Infinity,
           isMasked: true,
           valueText: '−∞ (masked)',
-          equation: `k=${k} > q=${q} (future token) → Causal Mask sets Score = −∞ → Softmax = 0.000`,
-          subEquation: `Autoregressive causality blocks query ${tokStr(sim, q)} from attending future key ${tokStr(sim, k)}`,
+          equation: `k=${k} > q=${qAbs} (future token) → Causal Mask sets Score = −∞ → Softmax = 0.000`,
+          subEquation: `Autoregressive causality blocks query ${tokStr(sim, q)} from attending future key ${keyTokStr(sim, k)}`,
           targetSpan: {
             tensor: 'scores',
             headIndex: h,
@@ -871,25 +1016,27 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
       }
 
       const qHeadOff = h * dHead * T;
-      const kHeadOff = g * dHead * T;
+      const kHeadOff = g * dHead * K;
       const prods: string[] = [];
       let dot = 0;
       for (let r = 0; r < dHead; r++) {
         const qv = sim.Q[qHeadOff + r * T + q];
-        const kv = sim.K[kHeadOff + r * T + k];
+        const kv = sim.K[kHeadOff + r * K + k];
         dot += qv * kv;
         prods.push(`(${fmtSigned(qv, 2)}·${fmtSigned(kv, 2)})`);
       }
+      const keyOriginNote =
+        P > 0 ? (k < P ? ` · Reused prefix K${g} · Rect [${T}×${K}]` : ` · Newly computed K${g} · Rect [${T}×${K}]`) : '';
       return {
         cell,
         tensorLabel: `Scores · ${fmtHead(h)}`,
-        coordLabel: `Scores[${fmtHead(h)}, q=${tokStr(sim, q)}, k=${tokStr(sim, k)}]`,
-        headBadge: `${fmtHead(h)} → KV${g}`,
+        coordLabel: `Scores[${fmtHead(h)}, q=${tokStr(sim, q)}, k=${keyTokStr(sim, k)}]`,
+        headBadge: P > 0 ? `${fmtHead(h)} → KV${g} · [${T}×${K}]` : `${fmtHead(h)} → KV${g}`,
         value: val,
         isMasked: false,
         valueText: fmtSigned(val),
-        equation: `(${fmtHead(h)}[:,${q}] · K${g}[:,${k}]) / √4 = [${prods.join(' + ')}] / 2 = ${fmtSigned(dot, 3)} / 2 = ${fmtSigned(val)}`,
-        subEquation: `16:1 GQA: ${fmtHead(h)} queries shared K${g} · Post-Softmax weight = ${fmtProb(sim.Softmax[(h * T + q) * T + k])}`,
+        equation: `(${fmtHead(h)}[:,${qAbs}] · K${g}[:,${k}]) / √4 = [${prods.join(' + ')}] / 2 = ${fmtSigned(dot, 3)} / 2 = ${fmtSigned(val)}`,
+        subEquation: `16:1 GQA: ${fmtHead(h)} queries shared K${g} · Post-Softmax weight = ${fmtProb(sim.Softmax[(h * T + q) * K + k])}${keyOriginNote}`,
         targetSpan: {
           tensor: 'scores',
           headIndex: h,
@@ -931,21 +1078,22 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
       const h = cell.headIndex ?? (g === 0 ? 0 : 16);
       const q = cell.row;
       const k = cell.col;
-      const val = sim.Softmax[(h * T + q) * T + k];
-      const scoreVal = sim.Scores[(h * T + q) * T + k];
-      const isMasked = k > q;
+      const qAbs = P + q;
+      const val = sim.Softmax[(h * T + q) * K + k];
+      const scoreVal = sim.Scores[(h * T + q) * K + k];
+      const isMasked = k > qAbs;
 
       if (isMasked) {
         return {
           cell,
           tensorLabel: `Softmax · ${fmtHead(h)}`,
-          coordLabel: `Softmax[${fmtHead(h)}, q=${tokStr(sim, q)}, k=${tokStr(sim, k)}]`,
+          coordLabel: `Softmax[${fmtHead(h)}, q=${tokStr(sim, q)}, k=${keyTokStr(sim, k)}]`,
           headBadge: `${fmtHead(h)} → KV${g}`,
           value: 0,
           isMasked: true,
           valueText: '0.000 (masked)',
-          equation: `Score = −∞ (k=${k} > q=${q}) → exp(−∞) = 0 → Softmax = 0.000`,
-          subEquation: `Upper triangle strictly 0.000 · Valid causal keys for q=${q} are k = 0..${q}`,
+          equation: `Score = −∞ (k=${k} > q=${qAbs}) → exp(−∞) = 0 → Softmax = 0.000`,
+          subEquation: `Upper triangle strictly 0.000 · Valid causal keys for q=${qAbs} are k = 0..${qAbs}`,
           targetSpan: {
             tensor: 'softmax',
             headIndex: h,
@@ -972,27 +1120,27 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
       }
 
       let maxS = -Infinity;
-      for (let j = 0; j <= q; j++) {
-        const s = sim.Scores[(h * T + q) * T + j];
+      for (let j = 0; j <= qAbs; j++) {
+        const s = sim.Scores[(h * T + q) * K + j];
         if (s > maxS) maxS = s;
       }
       let sumExp = 0;
       let rowSum = 0;
-      for (let j = 0; j <= q; j++) {
-        sumExp += Math.exp(sim.Scores[(h * T + q) * T + j] - maxS);
-        rowSum += sim.Softmax[(h * T + q) * T + j];
+      for (let j = 0; j <= qAbs; j++) {
+        sumExp += Math.exp(sim.Scores[(h * T + q) * K + j] - maxS);
+        rowSum += sim.Softmax[(h * T + q) * K + j];
       }
       const num = Math.exp(scoreVal - maxS);
       return {
         cell,
         tensorLabel: `Softmax · ${fmtHead(h)}`,
-        coordLabel: `Softmax[${fmtHead(h)}, q=${tokStr(sim, q)}, k=${tokStr(sim, k)}]`,
-        headBadge: `${fmtHead(h)} → KV${g}`,
+        coordLabel: `Softmax[${fmtHead(h)}, q=${tokStr(sim, q)}, k=${keyTokStr(sim, k)}]`,
+        headBadge: P > 0 ? `${fmtHead(h)} → KV${g} · [${T}×${K}]` : `${fmtHead(h)} → KV${g}`,
         value: val,
         isMasked: false,
         valueText: fmtProb(val),
-        equation: `exp(${fmtSigned(scoreVal)} − ${fmtSigned(maxS)}) / Σ_{j=0..${q}} exp(s_j − max) = ${num.toFixed(3)} / ${sumExp.toFixed(3)} = ${fmtProb(val)}`,
-        subEquation: `Causal row ${q} sum Σ_{k=0..${q}} Softmax = ${rowSum.toFixed(4)} (${(val * 100).toFixed(1)}% weight on ${tokStr(sim, k)})`,
+        equation: `exp(${fmtSigned(scoreVal)} − ${fmtSigned(maxS)}) / Σ_{j=0..${qAbs}} exp(s_j − max) = ${num.toFixed(3)} / ${sumExp.toFixed(3)} = ${fmtProb(val)}`,
+        subEquation: `Causal row ${qAbs} sum Σ_{k=0..${qAbs}} Softmax = ${rowSum.toFixed(4)} (${(val * 100).toFixed(1)}% weight on ${keyTokStr(sim, k)})`,
         targetSpan: {
           tensor: 'softmax',
           headIndex: h,
@@ -1011,7 +1159,7 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
             rowStart: q,
             rowEnd: q,
             colStart: 0,
-            colEnd: q,
+            colEnd: qAbs,
             role: 'operand_a',
           },
         ],
@@ -1021,18 +1169,19 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
     case 'v_out': {
       const g: 0 | 1 = cell.kvHeadIndex === 1 ? 1 : 0;
       const q = cell.row;
+      const qAbs = P + q;
       const localH = Math.floor(cell.col / dHead);
       const r = cell.col % dHead;
       const h = g * 16 + localH;
       const val = sim.V_out[(h * dHead + r) * T + q];
-      const vHeadOff = g * dHead * T;
-      const softRowOff = (h * T + q) * T;
+      const vHeadOff = g * dHead * K;
+      const softRowOff = (h * T + q) * K;
       const terms: string[] = [];
-      const showN = Math.min(q + 1, 3);
+      const showN = Math.min(qAbs + 1, 3);
       for (let k = 0; k < showN; k++) {
-        terms.push(`${fmtProb(sim.Softmax[softRowOff + k], 2)}·${fmtSigned(sim.V[vHeadOff + r * T + k], 2)}`);
+        terms.push(`${fmtProb(sim.Softmax[softRowOff + k], 2)}·${fmtSigned(sim.V[vHeadOff + r * K + k], 2)}`);
       }
-      const tail = q + 1 > showN ? ` + … (${q + 1} terms)` : '';
+      const tail = qAbs + 1 > showN ? ` + … (${qAbs + 1} terms)` : '';
       return {
         cell,
         tensorLabel: `V Out · ${fmtHead(h)}`,
@@ -1041,8 +1190,11 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
         value: val,
         isMasked: false,
         valueText: fmtSigned(val),
-        equation: `Σ_{k=0..${q}} Softmax[${fmtHead(h)},${q},k]·V${g}[${r},k] = ${terms.join(' + ')}${tail} = ${fmtSigned(val)}`,
-        subEquation: `Weighted blend of cached shared V${g} slices 0..${q} → feeds Concat channel ${h * dHead + r}`,
+        equation: `Σ_{k=0..${qAbs}} Softmax[${fmtHead(h)},${qAbs},k]·V${g}[${r},k] = ${terms.join(' + ')}${tail} = ${fmtSigned(val)}`,
+        subEquation:
+          P > 0
+            ? `Weighted blend of ${P} reused + ${q + 1} new shared V${g} slices 0..${qAbs} → Concat ch ${h * dHead + r}`
+            : `Weighted blend of cached shared V${g} slices 0..${qAbs} → feeds Concat channel ${h * dHead + r}`,
         targetSpan: {
           tensor: 'v_out',
           headIndex: h,
@@ -1061,14 +1213,14 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
             rowStart: q,
             rowEnd: q,
             colStart: 0,
-            colEnd: q,
+            colEnd: qAbs,
             role: 'operand_a',
           },
           {
             tensor: 'kv_v',
             kvHeadIndex: g,
             tokenStart: 0,
-            tokenEnd: q,
+            tokenEnd: qAbs,
             rowStart: 0,
             rowEnd: 0,
             colStart: r,
@@ -1081,6 +1233,7 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
 
     case 'concat': {
       const q = cell.row;
+      const qAbs = P + q;
       const c = cell.col;
       const h = Math.floor(c / dHead);
       const r = c % dHead;
@@ -1095,7 +1248,7 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
         value: val,
         isMasked: false,
         valueText: fmtSigned(val),
-        equation: `Concat[${c}, ${q}] = V_out[${fmtHead(h)}, d=${r}, q=${q}] = ${fmtSigned(val)}`,
+        equation: `Concat[${c}, ${qAbs}] = V_out[${fmtHead(h)}, d=${r}, q=${qAbs}] = ${fmtSigned(val)}`,
         subEquation: `32 heads × 4 = 128 channels (mirrors production 32 × 128 = 4,096 ≠ 2,688 before W_O)`,
         targetSpan: { tensor: 'concat', rowStart: q, rowEnd: q, colStart: c, colEnd: c, role: 'target' },
         upstreamSpans: [
@@ -1136,6 +1289,7 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
 
     case 'residual': {
       const t = cell.row;
+      const tAbs = P + t;
       const i = cell.col;
       const xVal = sim.X[i * T + t];
       const attnVal = sim.Attn_out[i * T + t];
@@ -1148,8 +1302,8 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
         value: yVal,
         isMasked: false,
         valueText: fmtSigned(yVal),
-        equation: `Y[${i},${t}] = X[${i},${t}] + (W_O·Concat)[${i},${t}] = ${fmtSigned(xVal)} + (${fmtSigned(attnVal)}) = ${fmtSigned(yVal)}`,
-        subEquation: `Attn_out[${i},${t}] = Σ_{c=0..127} W_O[${i},c]·Concat[c,${t}] = ${fmtSigned(attnVal)}`,
+        equation: `Y[${i},${tAbs}] = X[${i},${tAbs}] + (W_O·Concat)[${i},${tAbs}] = ${fmtSigned(xVal)} + (${fmtSigned(attnVal)}) = ${fmtSigned(yVal)}`,
+        subEquation: `Attn_out[${i},${tAbs}] = Σ_{c=0..127} W_O[${i},c]·Concat[c,${tAbs}] = ${fmtSigned(attnVal)}`,
         targetSpan: { tensor: 'residual', rowStart: t, rowEnd: t, colStart: i, colEnd: i, role: 'target' },
         upstreamSpans: [
           { tensor: 'input', rowStart: t, rowEnd: t, colStart: i, colEnd: i, role: 'operand_a' },
@@ -1239,13 +1393,13 @@ export function stepperCellForState(
       return { tensor: 'q', headIndex: h, kvHeadIndex: g, row: lastTok, col: r };
     }
     case 2: {
-      // QK^T / sqrt(d): sweep key k = 0..lastTok on causal row q = lastTok (with a brief peek at masked if T>1)
-      const k = Math.floor(p * T);
+      // QK^T / sqrt(d): sweep key k = 0..keyTokens-1 on latest query row q = lastTok
+      const k = Math.floor(p * sim.keyTokens);
       return { tensor: 'scores', headIndex: h, kvHeadIndex: g, row: lastTok, col: k };
     }
     case 3: {
-      // Causal Softmax: sweep causal probabilities k = 0..lastTok along row q = lastTok
-      const k = Math.floor(p * T);
+      // Causal Softmax: sweep causal probabilities k = 0..keyTokens-1 along row q = lastTok
+      const k = Math.floor(p * sim.keyTokens);
       return { tensor: 'softmax', headIndex: h, kvHeadIndex: g, row: lastTok, col: k };
     }
     case 4: {

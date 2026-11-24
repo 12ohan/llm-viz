@@ -394,6 +394,8 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
   const partCatalog = buildGqaPartCatalog(
     bayId,
     clampedT,
+    sim.prefixTokens,
+    sim.keyTokens,
     isFp8Mode,
     kvCacheFp8,
     group0Head,
@@ -462,6 +464,11 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     return resolveSheetHighlight(focusSet, { tensor }, fallback);
   };
 
+  // Query length S (= clampedT), reused prefix KV count P, and total attended KV length K = P + S
+  const keyCount = sim.keyTokens;
+  const prefixCount = sim.prefixTokens;
+  const isIncremental = prefixCount > 0;
+
   // --- Key Spatial Anchors (symmetric two-lane XZ schematic) ---
   const resX = 6.50;
   const zRow0 = -5.62; // Input + RMSNorm
@@ -472,8 +479,8 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
   const kvSliceDepth = 0.130;
   const kvTrackLen = 16 * kvSlicePitch; // 2.752 -> ends at z = +0.302
   const kvSliceZ = (tok: number) => kvStartZ + (tok - 1) * kvSlicePitch + kvSliceDepth * 0.5;
-  const kvActiveTipZ = kvSliceZ(clampedT);
-  const zScores = 1.70; // Causal T x T Scores & Softmax
+  const kvActiveTipZ = kvSliceZ(keyCount);
+  const zScores = 1.70; // Causal Scores & Softmax ([T×T] or rectangular [S×(P+S)])
   const zVOut = 3.55;   // Weighted V Output (2 lanes)
   const zConcat = 4.65; // Concat [4,096]
   const zWO = 5.82;     // W_O [4,096 -> 2,688] & + Residual
@@ -499,8 +506,11 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
   const kvPairCenterX: readonly [number, number] = [-1.55, 4.81];
   const kvSliceWidth = 0.54;
 
-  // Causal T x T Scores & Softmax square size scales visibly from T=1 to T=16
-  const scoreSize = 0.54 + (clampedT / 16) * 1.42; // 0.63 at T=1 -> 1.25 at T=8 -> 1.96 at T=16
+  // Causal Scores & Softmax extent: square T×T when P === 0; rectangular S×(P+S) when P > 0
+  const scoreWidthX = 0.54 + (keyCount / 16) * 1.42;
+  const scoreDepthZ = isIncremental
+    ? Math.max(0.28, (clampedT / Math.max(1, keyCount)) * scoreWidthX)
+    : scoreWidthX;
   const scoresX: readonly [number, number] = [-4.62, 1.72];
   const softmaxX: readonly [number, number] = [-2.12, 4.22];
 
@@ -896,9 +906,10 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
       });
     }
 
-    // Live token slices t = 1..T (K slice + V slice per token -> 2*T live slices per KV head!)
-    for (let t = 1; t <= clampedT; t++) {
+    // Live token slices k = 1..K (0..P-1 reused prefix + P..K-1 newly computed)
+    for (let t = 1; t <= keyCount; t++) {
       const tokIdx = t - 1;
+      const isNewKvSlice = isIncremental && tokIdx >= prefixCount;
       const sz = kvSliceZ(t);
       const sliceFallbackHl = isDirectKv
         ? SHEET_HL_ACTIVE
@@ -906,7 +917,9 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
           ? SHEET_HL_PATHWAY
           : hasFocus && !isKvRelevant
             ? SHEET_HL_DIMMED
-            : SHEET_HL_NORMAL;
+            : isNewKvSlice
+              ? SHEET_HL_PATHWAY
+              : SHEET_HL_NORMAL;
       const kSliceHl = resolveSheetHighlight(
         focusSet,
         { tensor: 'kv_k', kvHeadIndex: khTyped, tokenIndex: tokIdx },
@@ -999,17 +1012,17 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     );
   }
 
-  // KV depth scale ticks (1, 8, 16, active T) neatly along outer right edge of KV Head 1
+  // KV depth scale ticks (1, 8, 16, active K) neatly along outer right edge of KV Head 1
   const tickScaleX = kvVCenterX[1] + kvSliceWidth * 0.5 + 0.22;
   b.addGuideLine(tickScaleX, 0.02, kvStartZ, tickScaleX, 0.02, kvStartZ + kvTrackLen, 0.85, LINE_STYLE_GUIDE, 0.50);
-  const tickSet = new Set<number>([1, 8, 16, clampedT]);
+  const tickSet = new Set<number>([1, 8, 16, keyCount]);
   for (const tk of Array.from(tickSet).sort((a, c) => a - c)) {
     const tz = kvSliceZ(tk);
     b.addGuideLine(
       tickScaleX - 0.09, 0.02, tz,
       tickScaleX + 0.09, 0.02, tz,
-      tk === clampedT ? 1.4 : 0.85,
-      tk === clampedT ? LINE_STYLE_ACTIVE : LINE_STYLE_GUIDE,
+      tk === keyCount ? 1.4 : 0.85,
+      tk === keyCount ? LINE_STYLE_ACTIVE : LINE_STYLE_GUIDE,
       0.8,
     );
     b.kvDepthTicks.push({
@@ -1019,7 +1032,7 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
   }
 
   // ==========================================================================
-  // 5. ROW 3: Causal T x T Scores (QK^T / sqrt(d_h)) & Causal Mask + Softmax
+  // 5. ROW 3: Causal Scores ([T×T] or [S×(P+S)]) & Causal Mask + Softmax
   // ==========================================================================
   const groupHeads: readonly [number, number] = [group0Head, group1Head];
 
@@ -1047,16 +1060,16 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
       cx: scoresX[grp],
       cy: sheetY(scoresHl, true),
       cz: zScores,
-      ex: scoreSize,
+      ex: scoreWidthX,
       ey: SHEET_THICK,
-      ez: scoreSize,
-      gridCols: clampedT,
+      ez: scoreDepthZ,
+      gridCols: keyCount,
       gridRows: clampedT,
       sheetKind: SHEET_KIND_CAUSAL_SCORES,
       role: SHEET_ROLE_SCORES,
       fp8Flag: 0,
       highlight: scoresHl,
-      seed: 11.3 + grp * 3.7 + clampedT * 0.4,
+      seed: 11.3 + grp * 3.7 + keyCount * 0.4,
       partId: 'attn-scores',
       headIndex: grpHead,
       kvHeadIndex: grpTyped,
@@ -1086,16 +1099,16 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
       cx: softmaxX[grp],
       cy: sheetY(softmaxHl, true),
       cz: zScores,
-      ex: scoreSize,
+      ex: scoreWidthX,
       ey: SHEET_THICK,
-      ez: scoreSize,
-      gridCols: clampedT,
+      ez: scoreDepthZ,
+      gridCols: keyCount,
       gridRows: clampedT,
       sheetKind: SHEET_KIND_CAUSAL_SOFTMAX,
       role: SHEET_ROLE_SOFTMAX,
       fp8Flag: 0,
       highlight: softmaxHl,
-      seed: 17.5 + grp * 5.1 + clampedT * 0.3,
+      seed: 17.5 + grp * 5.1 + keyCount * 0.3,
       partId: 'softmax',
       headIndex: grpHead,
       kvHeadIndex: grpTyped,
@@ -1115,7 +1128,7 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
       { x: qSourceX, z: zQComb + qDepth * 0.5 + 0.03 },
       { x: qSourceX, z: 0.10 },
       { x: scoresX[grp] - 0.16, z: 0.15 },
-      { x: scoresX[grp] - 0.16, z: zScores - scoreSize * 0.5 - 0.06 },
+      { x: scoresX[grp] - 0.16, z: zScores - scoreDepthZ * 0.5 - 0.06 },
       qToScoresActive ? RIBBON_Y_ACT : RIBBON_Y_BG,
       activeHeadIdx !== null && qToScoresActive ? 0.12 : 0.085,
       activeHeadIdx !== null && qToScoresActive
@@ -1128,13 +1141,13 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
       true,
     );
 
-    // Smooth curve Shared K_grp (from active 1..T tip!) -> Scores_grp
+    // Smooth curve Shared K_grp (from active 1..K tip!) -> Scores_grp
     const kToScoresActive = !hasCellTrace && (isGrpActive || activePart === 'attn-scores');
     b.flow.addCubicXZ(
       { x: kvKCenterX[grp], z: kvActiveTipZ + kvSliceDepth * 0.5 + 0.04 },
       { x: kvKCenterX[grp], z: Math.max(kvActiveTipZ + 0.45, 0.42) },
       { x: scoresX[grp] + 0.18, z: 0.35 },
-      { x: scoresX[grp] + 0.18, z: zScores - scoreSize * 0.5 - 0.06 },
+      { x: scoresX[grp] + 0.18, z: zScores - scoreDepthZ * 0.5 - 0.06 },
       kToScoresActive ? RIBBON_Y_ACT : RIBBON_Y_BG,
       kToScoresActive ? 0.115 : 0.075,
       kToScoresActive ? RIBBON_ACTIVE : hasFocus ? RIBBON_DIMMED : RIBBON_QUIET,
@@ -1145,8 +1158,8 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     const s2sActive = !hasCellTrace && (isGrpActive || activePart === 'attn-scores' || activePart === 'softmax');
     b.flow.addPolylineXZ(
       [
-        { x: scoresX[grp] + scoreSize * 0.5 + 0.04, z: zScores },
-        { x: softmaxX[grp] - scoreSize * 0.5 - 0.05, z: zScores },
+        { x: scoresX[grp] + scoreWidthX * 0.5 + 0.04, z: zScores },
+        { x: softmaxX[grp] - scoreWidthX * 0.5 - 0.05, z: zScores },
       ],
       s2sActive ? RIBBON_Y_ACT : RIBBON_Y_BG,
       s2sActive ? 0.115 : 0.08,
@@ -1202,7 +1215,7 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     // Ribbon Softmax_grp -> V Out_grp
     const sm2vActive = !hasCellTrace && (isGrpActive || activePart === 'softmax' || activePart === 'weighted-v');
     b.flow.addCubicXZ(
-      { x: softmaxX[grp], z: zScores + scoreSize * 0.5 + 0.03 },
+      { x: softmaxX[grp], z: zScores + scoreDepthZ * 0.5 + 0.03 },
       { x: softmaxX[grp], z: 2.95 },
       { x: vOutX[grp] + 0.35, z: 2.95 },
       { x: vOutX[grp] + 0.35, z: zVOut - 0.30 },
@@ -1396,7 +1409,13 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
 
     {
       id: 'g-kv0',
-      label: kvCacheFp8 ? `KV₀ · FP8 (T=${clampedT})` : `KV₀ (T=${clampedT})`,
+      label: isIncremental
+        ? kvCacheFp8
+          ? `KV₀ · FP8 (${prefixCount}+${clampedT})`
+          : `KV₀ (${prefixCount} cached + ${clampedT})`
+        : kvCacheFp8
+          ? `KV₀ · FP8 (T=${clampedT})`
+          : `KV₀ (T=${clampedT})`,
       world: [kvPairCenterX[0], 0.08, kvStartZ - 0.18],
       partId: 'kv-head-0',
       align: 'top',
@@ -1405,7 +1424,13 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     },
     {
       id: 'g-kv1',
-      label: kvCacheFp8 ? `KV₁ · FP8 (T=${clampedT})` : `KV₁ (T=${clampedT})`,
+      label: isIncremental
+        ? kvCacheFp8
+          ? `KV₁ · FP8 (${prefixCount}+${clampedT})`
+          : `KV₁ (${prefixCount} cached + ${clampedT})`
+        : kvCacheFp8
+          ? `KV₁ · FP8 (T=${clampedT})`
+          : `KV₁ (T=${clampedT})`,
       world: [kvPairCenterX[1], 0.08, kvStartZ - 0.18],
       partId: 'kv-head-1',
       align: 'top',
@@ -1413,13 +1438,13 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
       tone: kvCacheFp8 ? 'muted' : 'cyan',
     },
 
-    // Active head tags on Scores & Softmax (Polish #3)
+    // Active head tags on Scores & Softmax (rectangular S×K in incremental decode)
     {
       id: 'g-scores',
       label: grp0Selected
-        ? `Scores · ${g0Tag} (${clampedT}×${clampedT})`
-        : `Scores (${clampedT}×${clampedT})`,
-      world: [scoresX[0] - scoreSize * 0.5 - 0.16, 0.08, zScores],
+        ? `Scores · ${g0Tag} (${clampedT}×${keyCount})`
+        : `Scores (${clampedT}×${keyCount})`,
+      world: [scoresX[0] - scoreWidthX * 0.5 - 0.16, 0.08, zScores],
       partId: 'attn-scores',
       align: 'left',
       tier: 'primary',
@@ -1473,7 +1498,7 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     b.landmarks.push({
       id: 'g-softmax-active',
       label: `Softmax · ${g0Tag}`,
-      world: [softmaxX[0], 0.08, zScores - scoreSize * 0.5 - 0.14],
+      world: [softmaxX[0], 0.08, zScores - scoreDepthZ * 0.5 - 0.14],
       partId: 'softmax',
       align: 'top',
       tier: 'primary',
@@ -1481,8 +1506,8 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
   } else if (grp1Selected) {
     b.landmarks.push({
       id: 'g-scores-active',
-      label: `Scores · ${g1Tag} (${clampedT}×${clampedT})`,
-      world: [scoresX[1], 0.08, zScores - scoreSize * 0.5 - 0.14],
+      label: `Scores · ${g1Tag} (${clampedT}×${keyCount})`,
+      world: [scoresX[1], 0.08, zScores - scoreDepthZ * 0.5 - 0.14],
       partId: 'attn-scores',
       align: 'top',
       tier: 'primary',
@@ -1503,9 +1528,9 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     },
     {
       id: 'cal-scores-t',
-      aWorld: [scoresX[calGrp] - scoreSize * 0.5, 0.06, zScores + scoreSize * 0.5 + 0.12],
-      bWorld: [scoresX[calGrp] + scoreSize * 0.5, 0.06, zScores + scoreSize * 0.5 + 0.12],
-      label: `T = ${clampedT}`,
+      aWorld: [scoresX[calGrp] - scoreWidthX * 0.5, 0.06, zScores + scoreDepthZ * 0.5 + 0.12],
+      bWorld: [scoresX[calGrp] + scoreWidthX * 0.5, 0.06, zScores + scoreDepthZ * 0.5 + 0.12],
+      label: isIncremental ? `Q=${clampedT} × K=${keyCount}` : `T = ${clampedT}`,
       partIds: ['attn-scores', 'softmax'],
       minPixels: 52,
       offsetPx: 8,
@@ -1525,8 +1550,8 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
   const reg = (k: string) => b.sheetRegistry.get(k);
   const focusGrp: 0 | 1 = activeKvGroup ?? (activeHeadIdx !== null ? kvHeadForQueryHead(activeHeadIdx) : 0);
   const focusHead = activeHeadIdx ?? (focusGrp === 0 ? group0Head : group1Head);
-  const kvKSlices = Array.from({ length: clampedT }, (_, t) => reg(`kv_k:${focusGrp}:${t}`));
-  const kvVSlices = Array.from({ length: clampedT }, (_, t) => reg(`kv_v:${focusGrp}:${t}`));
+  const kvKSlices = Array.from({ length: keyCount }, (_, t) => reg(`kv_k:${focusGrp}:${t}`));
+  const kvVSlices = Array.from({ length: keyCount }, (_, t) => reg(`kv_v:${focusGrp}:${t}`));
 
   const opFocusBounds: Record<number, AABB> = {
     0: computeSheetGroupBounds([reg('input'), reg('rmsnorm')], 0.48, 0.10, 0.48, GQA_FIT_BOUNDS),
@@ -1558,7 +1583,7 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
       qHeadsPerGroup: 16,
       kvHeadCount: 2,
       gqaRatio: 16,
-      kvTokenSliceCount: 2 * clampedT,
+      kvTokenSliceCount: 2 * keyCount,
       computeFp8,
       kvCacheFp8,
       usesSmoothRibbons: true,
@@ -1573,6 +1598,8 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
 function buildGqaPartCatalog(
   bayId: 6 | 43,
   clampedT: number,
+  prefixTokens: number,
+  keyTokens: number,
   isFp8Mode: boolean,
   kvCacheFp8: boolean,
   group0Head: number,
@@ -1582,8 +1609,13 @@ function buildGqaPartCatalog(
   const g0Tag = formatQueryHeadId(group0Head);
   const g1Tag = formatQueryHeadId(group1Head);
   const epsText = formatEpsLabel(rmsEps);
-  const perBayKiB = ((kvCacheFp8 ? 512 : 1024) * clampedT) / 1024;
+  const isIncremental = prefixTokens > 0;
+  const perBayKiB = ((kvCacheFp8 ? 512 : 1024) * keyTokens) / 1024;
   const perBaySlope = kvCacheFp8 ? '+0.5 KiB/tok (FP8 KV)' : '+1 KiB/tok (BF16 KV)';
+  const kvRangeLabel = isIncremental
+    ? `${prefixTokens} reused + ${clampedT} new = ${keyTokens}`
+    : `t = 1 … ${keyTokens}`;
+  const attnShapeLabel = `${clampedT} × ${keyTokens}`;
   const precisionMetaLine = isFp8Mode
     ? 'Production precision metadata (§4.2): GQA compute BF16, KV storage FP8 · Live cells: miniature Float32 sim (d=8, 32Q/2KV, d_h=4)'
     : 'Production precision metadata: BF16 weights, activations & KV · Live cells: miniature Float32 sim (d=8, 32Q/2KV, d_h=4)';
@@ -1658,43 +1690,51 @@ function buildGqaPartCatalog(
     },
     'kv-head-0': {
       id: 'kv-head-0',
-      title: `Shared KV Head 0 (t = 1 … ${clampedT})`,
+      title: `Shared KV Head 0 (${kvRangeLabel})`,
       badge: kvCacheFp8 ? 'FP8 KV Metadata' : 'BF16 KV Metadata',
       summary:
-        'Shared Key (K₀) and Value (V₀) history track attended by all 16 query heads in Group 0 (Q00–Q15). Hover any token slice cell to inspect its exact Float32 projection.',
+        isIncremental
+          ? `Shared Key (K₀) and Value (V₀) track reusing ${prefixTokens} cached prefix slots (0 compute) plus ${clampedT} newly appended slot(s), attended by all 16 query heads in Group 0 (Q00–Q15).`
+          : 'Shared Key (K₀) and Value (V₀) history track attended by all 16 query heads in Group 0 (Q00–Q15). Hover any token slice cell to inspect its exact Float32 projection.',
       specs: [
         `Shared by 16 query heads: Q00–Q15 (16:1 GQA sharing)`,
-        `This GQA bay (KV₀ + KV₁): ${perBayKiB} KiB at T=${clampedT} (${perBaySlope})`,
+        `This GQA bay (KV₀ + KV₁): ${perBayKiB} KiB at K=${keyTokens} (${perBaySlope})`,
         precisionMetaLine,
       ],
     },
     'kv-head-1': {
       id: 'kv-head-1',
-      title: `Shared KV Head 1 (t = 1 … ${clampedT})`,
+      title: `Shared KV Head 1 (${kvRangeLabel})`,
       badge: kvCacheFp8 ? 'FP8 KV Metadata' : 'BF16 KV Metadata',
       summary:
-        'Shared Key (K₁) and Value (V₁) history track attended by all 16 query heads in Group 1 (Q16–Q31). Hover any token slice cell to inspect its exact Float32 projection.',
+        isIncremental
+          ? `Shared Key (K₁) and Value (V₁) track reusing ${prefixTokens} cached prefix slots (0 compute) plus ${clampedT} newly appended slot(s), attended by all 16 query heads in Group 1 (Q16–Q31).`
+          : 'Shared Key (K₁) and Value (V₁) history track attended by all 16 query heads in Group 1 (Q16–Q31). Hover any token slice cell to inspect its exact Float32 projection.',
       specs: [
         `Shared by 16 query heads: Q16–Q31 (16:1 GQA sharing)`,
-        `This GQA bay (KV₀ + KV₁): ${perBayKiB} KiB at T=${clampedT} (${perBaySlope})`,
+        `This GQA bay (KV₀ + KV₁): ${perBayKiB} KiB at K=${keyTokens} (${perBaySlope})`,
         precisionMetaLine,
       ],
     },
     'attn-scores': {
       id: 'attn-scores',
-      title: `Causal Attention Scores QKᵀ / √d (${clampedT} × ${clampedT})`,
+      title: `Causal Attention Scores QKᵀ / √d (${attnShapeLabel})`,
       badge: `${g0Tag} | ${g1Tag}`,
       summary:
-        'Live Float32 scaled dot-product score matrices for the active head in each group. Hover or click any cell (q, k) to trace Q[:, q] · K[:, k] / √d or inspect masked −∞ upper-triangle cells.',
+        isIncremental
+          ? `Live rectangular [${clampedT}×${keyTokens}] Float32 score matrix: ${clampedT} newly computed query row(s) attending across ${prefixTokens} reused prefix keys + ${clampedT} new key(s).`
+          : 'Live Float32 scaled dot-product score matrices for the active head in each group. Hover or click any cell (q, k) to trace Q[:, q] · K[:, k] / √d or inspect masked −∞ upper-triangle cells.',
       specs: [
         `Showing live matrices for Group 0: ${g0Tag} and Group 1: ${g1Tag}`,
-        'Causal mask strictly sets col > row (future tokens) to −∞',
+        isIncremental
+          ? `Cached incremental attention: ${clampedT} query row(s) × ${keyTokens} keys (no recomputed prefix rows)`
+          : 'Causal mask strictly sets col > row (future tokens) to −∞',
         precisionMetaLine,
       ],
     },
     softmax: {
       id: 'softmax',
-      title: `Causal Mask & Row-Wise Softmax (${clampedT} × ${clampedT})`,
+      title: `Causal Mask & Row-Wise Softmax (${attnShapeLabel})`,
       badge: `${g0Tag} | ${g1Tag}`,
       summary:
         'Live numerically stable row-wise Softmax over causal keys 0..q so each row sums to 1.000 (upper triangle strictly 0.000). Hover any cell to inspect exact exponential weights.',
@@ -1758,10 +1798,10 @@ function buildGqaPartCatalog(
       title: `Query Head ${label} → Shared KV Head ${kv}`,
       badge: `Group ${kv} · 16:1 GQA`,
       summary:
-        `Query head ${label} attends across all ${clampedT} cached tokens in Shared KV Head ${kv} (shared with ${groupRange}). Group ${kv}’s Scores & Softmax sheets now display ${label}’s live Float32 matrices.`,
+        `Query head ${label} attends across all ${keyTokens} cached tokens in Shared KV Head ${kv} (shared with ${groupRange}). Group ${kv}’s Scores & Softmax sheets now display ${label}’s live Float32 matrices.`,
       specs: [
-        `Mapping: ${label} → KV Head ${kv} (K${kv}, V${kv} · ${clampedT} live slices, ${kvCacheFp8 ? 'FP8 metadata' : 'BF16 metadata'})`,
-        `Live Scores & Softmax: ${clampedT} × ${clampedT} lower-triangular Float32 attention`,
+        `Mapping: ${label} → KV Head ${kv} (K${kv}, V${kv} · ${keyTokens} live slices, ${kvCacheFp8 ? 'FP8 metadata' : 'BF16 metadata'})`,
+        `Live Scores & Softmax: ${attnShapeLabel} ${isIncremental ? 'rectangular cached' : 'lower-triangular'} Float32 attention`,
         `Output slice: production [${i * 128}..${(i + 1) * 128 - 1}] · live sim [${i * 4}..${(i + 1) * 4 - 1}]`,
         precisionMetaLine,
       ],

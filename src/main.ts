@@ -13,6 +13,7 @@ import {
   MAX_TOKENS,
   MIN_TOKENS,
   type CameraPose,
+  type ExecutionMode,
   type GqaViewAngle,
   type SceneState,
   type TocSectionId,
@@ -44,6 +45,15 @@ import {
   HybridExecutionCache,
   type HybridExecutionResult,
 } from './math/hybridFlow';
+import {
+  createDecodeSession,
+  getActiveDecodeStep,
+  navigateDecodeSession,
+  stepDecodeSession,
+  stepDecodeSessionGreedy,
+  switchDecodeSessionBranch,
+  type HybridDecodeSession,
+} from './math/incrementalDecode';
 import {
   inferMambaCellHead,
   MAMBA_STEPPER_STEPS,
@@ -519,21 +529,41 @@ function boot(): void {
         ? state.moeViewAngle
         : state.gqaViewAngle;
 
-  // Single authoritative unified 52-layer miniature model + bounded execution cache
+  // Single authoritative unified 52-layer miniature model + bounded execution cache + cached AR decode session
   const hybridModel = createDefaultHybridModel();
   const hybridCache = new HybridExecutionCache(16);
+  let decodeSession: HybridDecodeSession = createDecodeSession(hybridModel, {
+    promptTokenIds: [0, 1, 2, 3],
+    precisionMetadata: state.precision,
+  });
 
   const activeHybridExecution = (): HybridExecutionResult =>
     getOrRunHybridExecution(hybridModel, hybridCache, {
       tokenIds: defaultTokenIdsForLength(state.tokens),
     });
 
-  const activeMambaSim = () => activeHybridExecution().getMambaTrace(state.mambaBayId);
-  const activeMoeSim = () => activeHybridExecution().getMoeTrace(state.moeBayId);
-  const activeGqaSim = () => activeHybridExecution().getGqaTrace(state.gqaBayId);
+  const activeCutawayTokens = (): number =>
+    state.executionMode === 'ar_decode'
+      ? getActiveDecodeStep(decodeSession).tokens
+      : state.tokens;
+
+  const activeMambaSim = () =>
+    state.executionMode === 'ar_decode'
+      ? getActiveDecodeStep(decodeSession).getMambaTrace(state.mambaBayId)
+      : activeHybridExecution().getMambaTrace(state.mambaBayId);
+
+  const activeMoeSim = () =>
+    state.executionMode === 'ar_decode'
+      ? getActiveDecodeStep(decodeSession).getMoeTrace(state.moeBayId)
+      : activeHybridExecution().getMoeTrace(state.moeBayId);
+
+  const activeGqaSim = () =>
+    state.executionMode === 'ar_decode'
+      ? getActiveDecodeStep(decodeSession).getGqaTrace(state.gqaBayId)
+      : activeHybridExecution().getGqaTrace(state.gqaBayId);
 
   const activeMoeFocusToken = (): number =>
-    resolveActiveMoeFocusToken(state.moeFocusToken, state.tokens);
+    resolveActiveMoeFocusToken(state.moeFocusToken, activeCutawayTokens());
 
   const activeMoeFocusExpert = (sim = activeMoeSim(), tok = activeMoeFocusToken()): number => {
     if (state.moeActiveExpert !== null) {
@@ -564,13 +594,14 @@ function boot(): void {
   };
 
   const activeMambaStateToken = (): number =>
-    resolveActiveMambaStateToken(state.mambaStateToken, state.tokens);
+    resolveActiveMambaStateToken(state.mambaStateToken, activeCutawayTokens());
 
   const resolveActiveMambaCell = (): MambaCellRef | null => {
     if (state.mode !== 'cutaway_mamba') return null;
+    const sim = activeMambaSim();
     return resolveEffectiveMambaCell({
-      sim: activeMambaSim(),
-      tokens: state.tokens,
+      sim,
+      tokens: sim.tokens,
       activeHead: state.mambaActiveHead,
       mambaStateToken: state.mambaStateToken,
       mambaTemporalPlaying: state.mambaTemporalPlaying,
@@ -599,9 +630,10 @@ function boot(): void {
 
   const buildActiveCutaway = (): CutawaySceneGeometry | null => {
     if (state.mode === 'cutaway_mamba') {
+      const sim = activeMambaSim();
       return buildMambaCutaway({
         bayId: state.mambaBayId,
-        tokens: state.tokens,
+        tokens: sim.tokens,
         precision: state.precision,
         selectedPart: state.selectedPart,
         hoveredPart: state.hoveredPart,
@@ -609,14 +641,15 @@ function boot(): void {
         activeCell: resolveActiveMambaCell(),
         viewAngle: state.mambaViewAngle,
         stateTokenIndex: state.mambaStateToken,
-        simOverride: activeMambaSim(),
+        simOverride: sim,
       });
     }
     if (state.mode === 'cutaway_moe') {
+      const sim = activeMoeSim();
       const tok = activeMoeFocusToken();
       return buildMoECutaway({
         bayId: state.moeBayId,
-        tokens: state.tokens,
+        tokens: sim.tokens,
         precision: state.precision,
         selectedPart: state.selectedPart,
         hoveredPart: state.hoveredPart,
@@ -625,13 +658,14 @@ function boot(): void {
         activeCell: resolveActiveMoeCell(),
         stepperStep: state.moeStepperActive ? state.moeStepperStep : null,
         viewAngle: state.moeViewAngle,
-        simOverride: activeMoeSim(),
+        simOverride: sim,
       });
     }
     if (state.mode === 'cutaway_gqa') {
+      const sim = activeGqaSim();
       return buildGqaCutaway({
         bayId: state.gqaBayId,
-        tokens: state.tokens,
+        tokens: sim.tokens,
         precision: state.precision,
         selectedPart: state.selectedPart,
         hoveredPart: state.hoveredPart,
@@ -639,7 +673,7 @@ function boot(): void {
         activeGroup1Head: state.gqaActiveGroup1Head,
         activeCell: resolveActiveGqaCell(),
         viewAngle: state.gqaViewAngle,
-        simOverride: activeGqaSim(),
+        simOverride: sim,
       });
     }
     return null;
@@ -704,7 +738,13 @@ function boot(): void {
   };
 
   const syncUi = () => {
-    controls.sync(state, currentCutawayScene, manualCameraOverride, activeHybridExecution());
+    controls.sync(
+      state,
+      currentCutawayScene,
+      manualCameraOverride,
+      activeHybridExecution(),
+      state.executionMode === 'ar_decode' ? decodeSession : null,
+    );
     memoryDrawer.sync(state.memoryChartOpen, state.precision, state.memoryProbeTokens);
   };
 
@@ -878,6 +918,7 @@ function boot(): void {
       state.savedMacroCamera = cloneCameraPose(state.camera);
     }
     state.tourActive = true;
+    state.executionMode = 'full_sequence';
     state.tourChapter = ch.index;
     state.precision = ch.precision;
     state.tokens = ch.tokens;
@@ -1087,6 +1128,11 @@ function boot(): void {
   };
 
   const resetAll = () => {
+    state.executionMode = 'full_sequence';
+    decodeSession = createDecodeSession(hybridModel, {
+      promptTokenIds: [0, 1, 2, 3],
+      precisionMetadata: 'bf16',
+    });
     state.tokens = DEFAULT_TOKENS;
     state.precision = 'bf16';
     state.selectedBay = null;
@@ -1246,13 +1292,14 @@ function boot(): void {
       lastMambaTemporalTickMs = null;
       state.mambaHoveredCell = null;
       state.hoveredPart = null;
+      const cutT = activeCutawayTokens();
       state.mambaStateToken =
-        tokenIdx === null ? null : Math.max(0, Math.min(state.tokens - 1, tokenIdx));
+        tokenIdx === null ? null : Math.max(0, Math.min(cutT - 1, tokenIdx));
       if (state.mambaSelectedCell !== null) {
         state.mambaSelectedCell = remapMambaCellToken(
           state.mambaSelectedCell,
           activeMambaStateToken(),
-          state.tokens,
+          cutT,
         );
       }
       markDirtyAndSchedule(true);
@@ -1263,11 +1310,12 @@ function boot(): void {
       lastMambaTemporalTickMs = null;
       state.mambaHoveredCell = null;
       state.hoveredPart = null;
+      const cutT = activeCutawayTokens();
       const cur = activeMambaStateToken();
-      const next = (cur + delta + state.tokens) % state.tokens;
+      const next = (cur + delta + cutT) % cutT;
       state.mambaStateToken = next;
       if (state.mambaSelectedCell !== null) {
-        state.mambaSelectedCell = remapMambaCellToken(state.mambaSelectedCell, next, state.tokens);
+        state.mambaSelectedCell = remapMambaCellToken(state.mambaSelectedCell, next, cutT);
       }
       markDirtyAndSchedule(true);
     },
@@ -1275,13 +1323,14 @@ function boot(): void {
       state.tourActive = false;
       state.mambaHoveredCell = null;
       state.hoveredPart = null;
+      const cutT = activeCutawayTokens();
       if (state.reducedMotion) {
-        const next = (activeMambaStateToken() + 1) % state.tokens;
+        const next = (activeMambaStateToken() + 1) % cutT;
         state.mambaStateToken = next;
         state.mambaTemporalPlaying = false;
         lastMambaTemporalTickMs = null;
         if (state.mambaSelectedCell !== null) {
-          state.mambaSelectedCell = remapMambaCellToken(state.mambaSelectedCell, next, state.tokens);
+          state.mambaSelectedCell = remapMambaCellToken(state.mambaSelectedCell, next, cutT);
         }
         markDirtyAndSchedule(true);
         return;
@@ -1297,10 +1346,10 @@ function boot(): void {
       const cur = activeMambaStateToken();
       // When starting playback from latest token (or unpinned), begin cleanly from t = 0 so
       // users watch Conv1D zero-padding fill in and H_{t-1} -> H_t build up in place.
-      const startTok = state.mambaStateToken === null || cur >= state.tokens - 1 ? 0 : cur;
+      const startTok = state.mambaStateToken === null || cur >= cutT - 1 ? 0 : cur;
       state.mambaStateToken = startTok;
       if (state.mambaSelectedCell !== null) {
-        state.mambaSelectedCell = remapMambaCellToken(state.mambaSelectedCell, startTok, state.tokens);
+        state.mambaSelectedCell = remapMambaCellToken(state.mambaSelectedCell, startTok, cutT);
       }
       state.mambaTemporalPlaying = true;
       lastMambaTemporalTickMs = null;
@@ -1364,7 +1413,7 @@ function boot(): void {
       state.tourActive = false;
       state.moeTokenCycling = false;
       lastMoeCycleTickMs = null;
-      const clamped = Math.max(0, Math.min(state.tokens - 1, tokenIdx));
+      const clamped = Math.max(0, Math.min(activeCutawayTokens() - 1, tokenIdx));
       state.moeFocusToken = clamped;
       state.moeActiveExpert = null; // follow rank-0 active expert for newly selected token
       state.moeSelectedCell = null;
@@ -1418,7 +1467,7 @@ function boot(): void {
       state.moeStepperPlaying = false;
       lastStepperTickMs = null;
       const cur = activeMoeFocusToken();
-      const startTok = state.moeFocusToken === null || cur >= state.tokens - 1 ? 0 : cur;
+      const startTok = state.moeFocusToken === null || cur >= activeCutawayTokens() - 1 ? 0 : cur;
       state.moeFocusToken = startTok;
       state.moeActiveExpert = null;
       if (state.moeSelectedCell !== null) {
@@ -1799,6 +1848,110 @@ function boot(): void {
         scheduleDraw();
       }
     },
+    onSelectExecutionMode: (mode: ExecutionMode) => {
+      if (mode === state.executionMode) return;
+      state.executionMode = mode;
+      state.mambaStateToken = null;
+      state.mambaTemporalPlaying = false;
+      state.mambaSelectedCell = null;
+      state.mambaHoveredCell = null;
+      state.moeFocusToken = null;
+      state.moeActiveExpert = null;
+      state.moeTokenCycling = false;
+      state.moeSelectedCell = null;
+      state.moeHoveredCell = null;
+      state.gqaSelectedCell = null;
+      state.gqaHoveredCell = null;
+      lastMambaTemporalTickMs = null;
+      lastMoeCycleTickMs = null;
+      if (mode === 'ar_decode') {
+        state.tourActive = false;
+        state.tokens = getActiveDecodeStep(decodeSession).totalTokens;
+      }
+      markDirtyAndSchedule(true);
+    },
+    onDecodeStepToken: (tokenId: number) => {
+      state.tourActive = false;
+      decodeSession = stepDecodeSession(decodeSession, tokenId);
+      state.tokens = getActiveDecodeStep(decodeSession).totalTokens;
+      state.mambaStateToken = null;
+      state.mambaTemporalPlaying = false;
+      state.mambaSelectedCell = null;
+      state.mambaHoveredCell = null;
+      state.moeFocusToken = null;
+      state.moeActiveExpert = null;
+      state.moeTokenCycling = false;
+      state.moeSelectedCell = null;
+      state.moeHoveredCell = null;
+      state.gqaSelectedCell = null;
+      state.gqaHoveredCell = null;
+      markDirtyAndSchedule(true);
+    },
+    onDecodeStepGreedy: () => {
+      state.tourActive = false;
+      decodeSession = stepDecodeSessionGreedy(decodeSession);
+      state.tokens = getActiveDecodeStep(decodeSession).totalTokens;
+      state.mambaStateToken = null;
+      state.mambaTemporalPlaying = false;
+      state.mambaSelectedCell = null;
+      state.mambaHoveredCell = null;
+      state.moeFocusToken = null;
+      state.moeActiveExpert = null;
+      state.moeTokenCycling = false;
+      state.moeSelectedCell = null;
+      state.moeHoveredCell = null;
+      state.gqaSelectedCell = null;
+      state.gqaHoveredCell = null;
+      markDirtyAndSchedule(true);
+    },
+    onDecodeNavStep: (stepIndex: number) => {
+      state.tourActive = false;
+      decodeSession = navigateDecodeSession(decodeSession, stepIndex);
+      state.tokens = getActiveDecodeStep(decodeSession).totalTokens;
+      state.mambaStateToken = null;
+      state.mambaSelectedCell = null;
+      state.mambaHoveredCell = null;
+      state.moeFocusToken = null;
+      state.moeActiveExpert = null;
+      state.moeSelectedCell = null;
+      state.moeHoveredCell = null;
+      state.gqaSelectedCell = null;
+      state.gqaHoveredCell = null;
+      markDirtyAndSchedule(true);
+    },
+    onDecodeSwitchBranch: (branchId: string) => {
+      state.tourActive = false;
+      decodeSession = switchDecodeSessionBranch(decodeSession, branchId);
+      state.tokens = getActiveDecodeStep(decodeSession).totalTokens;
+      state.mambaStateToken = null;
+      state.mambaSelectedCell = null;
+      state.mambaHoveredCell = null;
+      state.moeFocusToken = null;
+      state.moeActiveExpert = null;
+      state.moeSelectedCell = null;
+      state.moeHoveredCell = null;
+      state.gqaSelectedCell = null;
+      state.gqaHoveredCell = null;
+      markDirtyAndSchedule(true);
+    },
+    onDecodeReset: () => {
+      state.tourActive = false;
+      decodeSession = createDecodeSession(hybridModel, {
+        promptTokenIds: [0, 1, 2, 3],
+        precisionMetadata: state.precision,
+      });
+      state.tokens = getActiveDecodeStep(decodeSession).totalTokens;
+      state.mambaStateToken = null;
+      state.mambaSelectedCell = null;
+      state.mambaHoveredCell = null;
+      state.moeFocusToken = null;
+      state.moeActiveExpert = null;
+      state.moeSelectedCell = null;
+      state.moeHoveredCell = null;
+      state.gqaSelectedCell = null;
+      state.gqaHoveredCell = null;
+      markDirtyAndSchedule(true);
+    },
   });
 
   const drawFrame = (nowMs: number) => {
@@ -1920,7 +2073,7 @@ function boot(): void {
         lastMambaTemporalTickMs = nowMs;
         const tick = advanceMambaTemporalPlaybackTick(
           state.mambaStateToken,
-          state.tokens,
+          activeCutawayTokens(),
           state.mambaSelectedCell,
           state.mambaHoveredCell,
         );
@@ -2314,14 +2467,15 @@ function boot(): void {
             : hit?.headIndex !== undefined && hit.tensorKey === 'x'
               ? `mamba-head-${hit.headIndex}`
               : hit?.partId ?? null;
+        const cutT = activeCutawayTokens();
         const rawHitCell = hit
-          ? pickHitToMambaCell(hit, state.mambaActiveHead, state.tokens)
+          ? pickHitToMambaCell(hit, state.mambaActiveHead, cutT)
           : null;
         const resolvedHover = resolveMambaHoverDuringPlayback(
           rawHitCell,
           state.mambaTemporalPlaying,
           activeMambaStateToken(),
-          state.tokens,
+          cutT,
         );
         const hitCell = resolvedHover.hoveredCell;
         const pausePlayback = resolvedHover.shouldPauseTemporalPlayback;
@@ -2431,7 +2585,7 @@ function boot(): void {
         if (hitPart !== null) state.tourActive = false;
         applyHeadSelectionToGroupHeads(hitPart);
         const hitCell = hit
-          ? pickHitToMambaCell(hit, state.mambaActiveHead, state.tokens)
+          ? pickHitToMambaCell(hit, state.mambaActiveHead, activeCutawayTokens())
           : null;
         const cellHead = inferMambaCellHead(hitCell);
         if (cellHead !== null) {
@@ -2473,7 +2627,7 @@ function boot(): void {
           state.moeActiveExpert = hit.headIndex;
         }
         if (hitCell?.tokenIndex !== undefined) {
-          state.moeFocusToken = Math.max(0, Math.min(state.tokens - 1, hitCell.tokenIndex));
+          state.moeFocusToken = Math.max(0, Math.min(sim.tokens - 1, hitCell.tokenIndex));
         }
         state.selectedPart = hitPart;
         state.hoveredPart = hitPart;

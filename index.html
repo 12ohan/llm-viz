@@ -121,8 +121,34 @@
             <div id="editorial-panel" class="editorial-panel" data-testid="bay-inspector" aria-live="polite"></div>
           </section>
 
-          <!-- Bottom panel: Token scrubber, BF16/FP8 toggle, memory readout, bay stepping -->
-          <section class="sidebar-bottom" aria-label="Memory depth, precision, and bay stepping">
+          <!-- Bottom panel: Execution mode, token scrubber, BF16/FP8 toggle, memory readout, bay stepping -->
+          <section class="sidebar-bottom" aria-label="Execution mode, memory depth, precision, and bay stepping">
+            <div class="control-block exec-mode-block">
+              <div class="exec-mode-row">
+                <span class="control-label">Execution</span>
+                <div class="segmented-control exec-mode-seg" role="radiogroup" aria-label="Execution mode">
+                  <button
+                    type="button"
+                    id="exec-mode-full"
+                    class="seg-btn is-active"
+                    role="radio"
+                    aria-checked="true"
+                    data-exec-mode="full_sequence"
+                    title="Unified full-sequence 52-layer miniature forward pass (T = 1..16)"
+                  >Full Seq</button>
+                  <button
+                    type="button"
+                    id="exec-mode-decode"
+                    class="seg-btn"
+                    role="radio"
+                    aria-checked="false"
+                    data-exec-mode="ar_decode"
+                    title="Cached incremental autoregressive decoding (growing GQA KV vs fixed Mamba state vs 0 B MoE)"
+                  >AR Decode</button>
+                </div>
+              </div>
+            </div>
+
             <div class="control-block">
               <div class="control-header">
                 <label for="token-slider" class="control-label">Cached tokens <span class="unit-note">(per token)</span></label>

@@ -2456,6 +2456,254 @@ input:focus-visible {
   color: #64748B;
 }
 
+/* Execution Mode Switcher & Interactive Cached AR Decode Session Card (Gate B) */
+.exec-mode-block {
+  margin-bottom: 2px;
+}
+
+.exec-mode-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.exec-mode-seg {
+  flex: 0 0 auto;
+  min-width: 158px;
+}
+
+.exec-mode-seg .seg-btn {
+  padding: 2.5px 7px;
+  font-size: 10.5px;
+  line-height: 14px;
+}
+
+.ar-decode-card {
+  margin: 0 0 10px;
+  padding: 8px 9px;
+  border-radius: 6px;
+  border: 1px solid #CBD5E1;
+  background-color: #F8FAFC;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ar-decode-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.ar-decode-title {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--navy-bar);
+}
+
+.ar-branch-tag {
+  background-color: #E0E7FF;
+  color: #3730A3;
+}
+
+.ar-branch-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.ar-mini-label {
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 600;
+  color: #475569;
+}
+
+.ar-seq-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.ar-seq-chip {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 13px;
+  padding: 1.5px 5px;
+  border-radius: 3px;
+  border: 1px solid #CBD5E1;
+  font-variant-numeric: tabular-nums;
+}
+
+.ar-seq-chip.is-cached {
+  background-color: #FFFFFF;
+  color: #475569;
+}
+
+.ar-seq-chip.is-new {
+  background-color: #1E293B;
+  border-color: #1E293B;
+  color: #FFFFFF;
+  font-weight: 600;
+}
+
+.ar-cache-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.ar-cache-cell {
+  padding: 4px 5px;
+  border-radius: 4px;
+  background-color: #FFFFFF;
+  border: 1px solid #E2E8F0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ar-cache-cell.is-gqa {
+  border-left: 2.5px solid #4F65E8;
+}
+
+.ar-cache-cell.is-mamba {
+  border-left: 2.5px solid #0EA5E9;
+}
+
+.ar-cache-cell.is-moe {
+  border-left: 2.5px solid #D97706;
+}
+
+.ar-cache-k {
+  font-family: var(--font-sans);
+  font-size: 9px;
+  font-weight: 700;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.ar-cache-v {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  color: #0F172A;
+  font-variant-numeric: tabular-nums;
+}
+
+.ar-cache-s {
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  line-height: 11px;
+  color: #64748B;
+}
+
+.ar-nav-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.ar-reset-btn {
+  color: #475569;
+}
+
+.ar-snap-meta {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: #475569;
+  font-variant-numeric: tabular-nums;
+}
+
+.ar-pred-head {
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 700;
+  color: #334155;
+}
+
+.ar-cand-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ar-cand-row {
+  appearance: none;
+  width: 100%;
+  text-align: left;
+  border: 1px solid #E2E8F0;
+  border-radius: 4px;
+  background-color: #FFFFFF;
+  padding: 3px 5px;
+  display: grid;
+  grid-template-columns: 24px 66px 1fr 38px;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 14px;
+  cursor: pointer;
+}
+
+.ar-cand-row:hover {
+  background-color: #F1F5F9;
+  border-color: #94A3B8;
+}
+
+.ar-cand-row.is-selected {
+  background-color: #EEF2FF;
+  border-color: #4F65E8;
+  box-shadow: inset 0 0 0 1px rgba(79, 101, 232, 0.25);
+}
+
+.ar-cand-rank {
+  font-size: 9.5px;
+  font-weight: 700;
+  color: #64748B;
+}
+
+.ar-cand-rank.is-greedy {
+  color: #B45309;
+}
+
+.ar-actions-row {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.ar-insert-btn {
+  flex: 1 1 auto;
+  text-align: center;
+  font-size: 11px;
+  padding: 4.5px 8px;
+}
+
+.ar-greedy-btn {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  padding: 4.5px 7px;
+}
+
+.ar-cutaway-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.ar-disclaimer {
+  border-top: 1px solid #E2E8F0;
+  padding-top: 4px;
+}
+
 @media (max-width: 900px) {
   .app-shell {
     height: auto;

@@ -1771,8 +1771,12 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
   // 8. 3D EXTERIOR LABELS & ARCHITECTURAL DIMENSION CALIPERS
   // ==========================================================================
   const headTag = formatMambaHeadId(activeHead);
-  const tokLabel = sim.tokenLabels[stateTokIdx] ?? `t${stateTokIdx}`;
-  const tokTag = stateTokIdx < clampedT - 1 || explicitTokenPlayback ? ` · t${stateTokIdx} "${tokLabel}"` : '';
+  const absTokIdx = sim.startTokenOffset + stateTokIdx;
+  const tokLabel = sim.tokenLabels[stateTokIdx] ?? `t${absTokIdx}`;
+  const tokTag =
+    stateTokIdx < clampedT - 1 || explicitTokenPlayback || sim.hasInitialState
+      ? ` · t${absTokIdx} "${tokLabel}"`
+      : '';
 
   b.landmarks.push(
     { id: 'm-res-in', label: `Input (2,688 · T=${clampedT})`, world: [xInput, 0.16, ioMaxZ * 0.5 + 0.24], partId: 'residual-in', align: 'bottom', tier: 'primary' },
@@ -1809,7 +1813,7 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
     { id: 'm-c', label: 'C (8 grps)', world: [cX, 0.16, bcZ + bcMaxZ * 0.5 + 0.22], partId: 'c-proj', align: 'bottom', tier: 'primary' },
     {
       id: 'm-hprev',
-      label: `Hₜ₋₁ (${headTag})`,
+      label: sim.hasInitialState ? `Hₜ₋₁ (${headTag} · Carried)` : `Hₜ₋₁ (${headTag})`,
       world: [xHPrev, PEDESTAL_Y + 0.14, hZ + hSize * 0.5 + 0.18],
       partId: 'ssm-state-prev',
       align: 'bottom',
@@ -1851,7 +1855,7 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
       ? [
           {
             id: 'm-res-carry',
-            label: `← Input X[${residualCarryInfo.ch}, t${residualCarryInfo.tok}] = ${fmtSigned(residualCarryInfo.val)}`,
+            label: `← Input X[${residualCarryInfo.ch}, t${sim.startTokenOffset + residualCarryInfo.tok}] = ${fmtSigned(residualCarryInfo.val)}`,
             world: [xResOut - 0.18, bridgeY * 0.80, bridgeZ * 0.62] as Vec3,
             partId: 'residual-in',
             align: 'left' as const,

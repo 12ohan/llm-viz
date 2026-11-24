@@ -567,6 +567,11 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     };
   };
 
+  // Query length S (= clampedT), reused prefix KV count P, and total attended KV length K = P + S
+  const keyCount = sim.keyTokens;
+  const prefixCount = sim.prefixTokens;
+  const isIncremental = prefixCount > 0;
+
   // Shared K / V token rack geometry along Z (1..16 slots)
   const kvPitchZ = groupSpanZ / 16;
   const kvSliceDepth = 0.125;
@@ -574,8 +579,11 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
   const kvSliceZ = (g: 0 | 1, tok1Based: number): number =>
     zGrp[g] - groupSpanZ * 0.5 + (tok1Based - 0.5) * kvPitchZ;
 
-  // Square causal T x T size (grows monotonically T=1 -> T=16)
-  const scoreSize = 0.88 + (clampedT / 16) * 0.74;
+  // Causal attention Scores/Softmax extent: square T x T when P === 0; true rectangular S x (P+S) when P > 0
+  const scoreWidthX = 0.88 + (keyCount / 16) * 0.74;
+  const scoreDepthZ = isIncremental
+    ? Math.max(0.32, (clampedT / Math.max(1, keyCount)) * scoreWidthX)
+    : scoreWidthX;
 
   // ==========================================================================
   // 1. STAGE 1: Input X, Pre-Attention RMSNorm & Overhead Emerald Residual Bridge
@@ -1050,9 +1058,10 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
       });
     }
 
-    // Live token slices t = 1..T for Shared K_g and Shared V_g
-    for (let t = 1; t <= clampedT; t++) {
+    // Live token slices k = 1..K (0..P-1 reused prefix KV + P..K-1 newly computed KV)
+    for (let t = 1; t <= keyCount; t++) {
       const tokIdx = t - 1;
+      const isNewKvSlice = isIncremental && tokIdx >= prefixCount;
       const sz = kvSliceZ(grp, t);
       const sliceFallbackHl = isDirectKv
         ? SHEET_HL_ACTIVE
@@ -1060,7 +1069,9 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
           ? SHEET_HL_PATHWAY
           : hasFocus && !isKvRelevant
             ? SHEET_HL_DIMMED
-            : SHEET_HL_NORMAL;
+            : isNewKvSlice
+              ? SHEET_HL_PATHWAY
+              : SHEET_HL_NORMAL;
       const kSliceHl = resolveSheetHighlight(
         focusSet,
         { tensor: 'kv_k', kvHeadIndex: grp, tokenIndex: tokIdx },
@@ -1131,11 +1142,12 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     // Direct W_K -> Shared K_g ribbon (routes cleanly along low floor lane y=0.05, NEVER via Q!)
     const kActive = (isSharedForHead || isDirectKv || activePart === 'k-proj') && !hasCellTrace;
     const kEntryZ = grp === 0 ? -3.65 : 0.25;
+    const kTargetSlot = isIncremental ? keyCount : Math.max(1, Math.min(keyCount, 3));
     b.flow.addCubic3D(
       [xWeightsIn + 0.06, wkvY - 0.12, wkZ],
       [xWeightsIn + 1.05, 0.06, kEntryZ],
       [xKTrack - 0.85, 0.06, zGrp[grp] - groupSpanZ * 0.42],
-      [xKTrack - kvSliceWidth * 0.5 - 0.05, 0.06, kvSliceZ(grp, Math.max(1, Math.min(clampedT, 3)))],
+      [xKTrack - kvSliceWidth * 0.5 - 0.05, 0.06, kvSliceZ(grp, kTargetSlot)],
       [0, 1, 0],
       kActive ? 0.095 : 0.068,
       kActive ? RIBBON_K_ACTIVE : hasFocus ? RIBBON_DIMMED : RIBBON_K_FLOW,
@@ -1153,7 +1165,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
         [xWeightsIn + 0.06, wkvY - 0.15, wvZ],
         [xWeightsIn + 0.95, 0.05, vCorridorZ],
         [xVTrack - 0.65, 0.05, vCorridorZ],
-        [xVTrack - kvSliceWidth * 0.5 - 0.06, 0.06, zGrp[grp] + (grp === 0 ? 0.45 : 0.45)],
+        [xVTrack - kvSliceWidth * 0.5 - 0.06, 0.06, isIncremental ? kvSliceZ(grp, keyCount) : zGrp[grp] + 0.45],
       ],
       [0, 1, 0],
       vActive ? 0.095 : 0.068,
@@ -1165,8 +1177,8 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     );
   }
 
-  // KV depth ticks (1, 8, 16, active T) along outer left edge of Shared K1 (clear of Scores!)
-  const tickSet = new Set<number>([1, 8, 16, clampedT]);
+  // KV depth ticks (1, 8, 16, active K) along outer left edge of Shared K1 (clear of Scores!)
+  const tickSet = new Set<number>([1, 8, 16, keyCount]);
   for (const t of Array.from(tickSet).sort((a, c) => a - c)) {
     b.kvDepthTicks.push({
       token: t,
@@ -1206,22 +1218,22 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
       scoresFallbackHl,
     );
 
-    // Causal Scores = Q_h * K_g^T / sqrt(d_h)
+    // Causal Scores = Q_h * K_g^T / sqrt(d_h) (rectangular [S × (P+S)] during incremental decode)
     b.addSheet({
       cx: xScores,
       cy: DECK_Y,
       cz: zGrp[grp],
-      ex: scoreSize,
+      ex: scoreWidthX,
       ey: SHEET_THICK,
-      ez: scoreSize,
+      ez: scoreDepthZ,
       axes: FRAME_XZ_AXES,
-      gridCols: clampedT,
+      gridCols: keyCount,
       gridRows: clampedT,
       sheetKind: SHEET_KIND_CAUSAL_SCORES,
       role: SHEET_ROLE_SCORES,
       fp8Flag: 0,
       highlight: scoresHl,
-      seed: 10.2 + grp * 3.1 + clampedT * 0.2,
+      seed: 10.2 + grp * 3.1 + keyCount * 0.2,
       partId: 'attn-scores',
       headIndex: repHead,
       kvHeadIndex: grp,
@@ -1247,22 +1259,22 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
       smFallbackHl,
     );
 
-    // Causal Softmax (row-wise probabilities)
+    // Causal Softmax (row-wise probabilities, rectangular [S × (P+S)] during incremental decode)
     b.addSheet({
       cx: xSoftmax,
       cy: DECK_Y,
       cz: zGrp[grp],
-      ex: scoreSize,
+      ex: scoreWidthX,
       ey: SHEET_THICK,
-      ez: scoreSize,
+      ez: scoreDepthZ,
       axes: FRAME_XZ_AXES,
-      gridCols: clampedT,
+      gridCols: keyCount,
       gridRows: clampedT,
       sheetKind: SHEET_KIND_CAUSAL_SOFTMAX,
       role: SHEET_ROLE_SOFTMAX,
       fp8Flag: 0,
       highlight: smHl,
-      seed: 14.5 + grp * 2.7 + clampedT * 0.2,
+      seed: 14.5 + grp * 2.7 + keyCount * 0.2,
       partId: 'softmax',
       headIndex: repHead,
       kvHeadIndex: grp,
@@ -1318,8 +1330,8 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     b.flow.addCubic3D(
       [repPos.x + repW * 0.5 + 0.04, repY, repPos.z],
       [xKTrack - 0.1, Math.max(repY + 0.15, 1.35), repPos.z * 0.7 + zGrp[grp] * 0.3],
-      [xScores - scoreSize * 0.5 - 0.35, DECK_Y + 0.55, zGrp[grp]],
-      [xScores - scoreSize * 0.5 - 0.05, DECK_Y + 0.06, zGrp[grp] - 0.12],
+      [xScores - scoreWidthX * 0.5 - 0.35, DECK_Y + 0.55, zGrp[grp]],
+      [xScores - scoreWidthX * 0.5 - 0.05, DECK_Y + 0.06, zGrp[grp] - 0.12],
       [0, 1, 0],
       laneActive ? 0.105 : 0.072,
       laneActive ? RIBBON_ACTIVE : hasFocus ? RIBBON_DIMMED : RIBBON_QUIET,
@@ -1332,8 +1344,8 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     b.flow.addCubic3D(
       [xKTrack + kvSliceWidth * 0.5 + 0.04, 0.08, zGrp[grp] + 0.18],
       [xKTrack + 0.75, 0.18, zGrp[grp] + 0.16],
-      [xScores - scoreSize * 0.5 - 0.35, DECK_Y + 0.06, zGrp[grp] + 0.14],
-      [xScores - scoreSize * 0.5 - 0.05, DECK_Y + 0.05, zGrp[grp] + 0.14],
+      [xScores - scoreWidthX * 0.5 - 0.35, DECK_Y + 0.06, zGrp[grp] + 0.14],
+      [xScores - scoreWidthX * 0.5 - 0.05, DECK_Y + 0.05, zGrp[grp] + 0.14],
       [0, 1, 0],
       laneActive ? 0.095 : 0.068,
       laneActive ? RIBBON_K_ACTIVE : hasFocus ? RIBBON_DIMMED : RIBBON_K_FLOW,
@@ -1345,8 +1357,8 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     // Scores -> Softmax
     b.flow.addPolyline3D(
       [
-        [xScores + scoreSize * 0.5 + 0.04, DECK_Y + 0.04, zGrp[grp]],
-        [xSoftmax - scoreSize * 0.5 - 0.05, DECK_Y + 0.04, zGrp[grp]],
+        [xScores + scoreWidthX * 0.5 + 0.04, DECK_Y + 0.04, zGrp[grp]],
+        [xSoftmax - scoreWidthX * 0.5 - 0.05, DECK_Y + 0.04, zGrp[grp]],
       ],
       [0, 1, 0],
       laneActive || activePart === 'attn-scores' || activePart === 'softmax' ? 0.10 : 0.072,
@@ -1363,7 +1375,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
 
     // Convergence 2A: Softmax -> V_out (arches cleanly OVER Shared V_g!)
     b.flow.addCubic3D(
-      [xSoftmax + scoreSize * 0.5 + 0.04, DECK_Y + 0.06, zGrp[grp] - 0.14],
+      [xSoftmax + scoreWidthX * 0.5 + 0.04, DECK_Y + 0.06, zGrp[grp] - 0.14],
       [xVTrack - 0.15, DECK_Y + 0.62, zGrp[grp] - 0.14],
       [xVTrack + 0.35, DECK_Y + 0.55, zGrp[grp] - 0.14],
       [xVOut - vOutWidthX * 0.5 - 0.05, DECK_Y + 0.06, zGrp[grp] - 0.14],
@@ -1619,7 +1631,13 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     // Explicitly distinguished Shared K and Shared V racks!
     {
       id: 'g-kv0-k',
-      label: kvCacheFp8 ? `K₀ · FP8 (T=${clampedT})` : `K₀ (T=${clampedT})`,
+      label: isIncremental
+        ? kvCacheFp8
+          ? `K₀ · FP8 (${prefixCount}+${clampedT})`
+          : `K₀ (${prefixCount} cached + ${clampedT})`
+        : kvCacheFp8
+          ? `K₀ · FP8 (T=${clampedT})`
+          : `K₀ (T=${clampedT})`,
       world: [xKTrack, 0.16, zGrp[0] - groupSpanZ * 0.5 - 0.22],
       partId: 'kv-head-0',
       align: 'top',
@@ -1628,7 +1646,13 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     },
     {
       id: 'g-kv1-k',
-      label: kvCacheFp8 ? `K₁ · FP8 (T=${clampedT})` : `K₁ (T=${clampedT})`,
+      label: isIncremental
+        ? kvCacheFp8
+          ? `K₁ · FP8 (${prefixCount}+${clampedT})`
+          : `K₁ (${prefixCount} cached + ${clampedT})`
+        : kvCacheFp8
+          ? `K₁ · FP8 (T=${clampedT})`
+          : `K₁ (T=${clampedT})`,
       world: [xKTrack, 0.16, zGrp[1] + groupSpanZ * 0.5 + 0.22],
       partId: 'kv-head-1',
       align: 'bottom',
@@ -1637,7 +1661,13 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     },
     {
       id: 'g-kv0-v',
-      label: kvCacheFp8 ? `V₀ · FP8 (T=${clampedT})` : `V₀ (T=${clampedT})`,
+      label: isIncremental
+        ? kvCacheFp8
+          ? `V₀ · FP8 (${prefixCount}+${clampedT})`
+          : `V₀ (${prefixCount} cached + ${clampedT})`
+        : kvCacheFp8
+          ? `V₀ · FP8 (T=${clampedT})`
+          : `V₀ (T=${clampedT})`,
       world: [xVTrack, 0.16, zGrp[0] - groupSpanZ * 0.5 - 0.22],
       partId: 'kv-head-0',
       align: 'top',
@@ -1646,7 +1676,13 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     },
     {
       id: 'g-kv1-v',
-      label: kvCacheFp8 ? `V₁ · FP8 (T=${clampedT})` : `V₁ (T=${clampedT})`,
+      label: isIncremental
+        ? kvCacheFp8
+          ? `V₁ · FP8 (${prefixCount}+${clampedT})`
+          : `V₁ (${prefixCount} cached + ${clampedT})`
+        : kvCacheFp8
+          ? `V₁ · FP8 (T=${clampedT})`
+          : `V₁ (T=${clampedT})`,
       world: [xVTrack, 0.16, zGrp[1] + groupSpanZ * 0.5 + 0.22],
       partId: 'kv-head-1',
       align: 'bottom',
@@ -1654,19 +1690,21 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
       tone: kvCacheFp8 ? 'muted' : 'cyan',
     },
 
-    // Accurately head-labeled Scores & Softmax matrices
+    // Accurately head-labeled Scores & Softmax matrices (rectangular S×(P+S) in incremental decode)
     {
       id: 'g-scores-0',
       label: `Scores · ${g0Tag}×K₀`,
-      world: [xScores, DECK_Y + 0.14, zGrp[0] - scoreSize * 0.5 - 0.20],
+      world: [xScores, DECK_Y + 0.14, zGrp[0] - scoreDepthZ * 0.5 - 0.20],
       partId: 'attn-scores',
       align: 'top',
       tier: grp0Selected ? 'primary' : 'detail',
     },
     {
       id: 'g-scores',
-      label: `Scores · ${g1Tag}×K₁ (${clampedT}×${clampedT})`,
-      world: [xScores, DECK_Y + 0.14, zGrp[1] + scoreSize * 0.5 + 0.22],
+      label: isIncremental
+        ? `Scores · ${g1Tag}×K₁ (${clampedT}×${keyCount} rect)`
+        : `Scores · ${g1Tag}×K₁ (${clampedT}×${clampedT})`,
+      world: [xScores, DECK_Y + 0.14, zGrp[1] + scoreDepthZ * 0.5 + 0.22],
       partId: 'attn-scores',
       align: 'bottom',
       tier: 'primary',
@@ -1674,7 +1712,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     {
       id: 'g-softmax-0',
       label: `Softmax · ${g0Tag}`,
-      world: [xSoftmax, DECK_Y + 0.14, zGrp[0] - scoreSize * 0.5 - 0.20],
+      world: [xSoftmax, DECK_Y + 0.14, zGrp[0] - scoreDepthZ * 0.5 - 0.20],
       partId: 'softmax',
       align: 'top',
       tier: grp0Selected ? 'primary' : 'detail',
@@ -1682,7 +1720,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     {
       id: 'g-softmax',
       label: `Softmax · ${g1Tag}`,
-      world: [xSoftmax, DECK_Y + 0.14, zGrp[1] + scoreSize * 0.5 + 0.22],
+      world: [xSoftmax, DECK_Y + 0.14, zGrp[1] + scoreDepthZ * 0.5 + 0.22],
       partId: 'softmax',
       align: 'bottom',
       tier: 'primary',
@@ -1697,7 +1735,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
       ? [
           {
             id: 'g-res-carry',
-            label: `← Input X[${residualCarryInfo.ch}, t${residualCarryInfo.tok}] = ${fmtSigned(residualCarryInfo.val)}`,
+            label: `← Input X[${residualCarryInfo.ch}, t${sim.startTokenOffset + residualCarryInfo.tok}] = ${fmtSigned(residualCarryInfo.val)}`,
             world: [xResOut - 0.18, bridgeY * 0.80, bridgeZ * 0.62] as Vec3,
             partId: 'residual-in',
             align: 'left' as const,
@@ -1727,9 +1765,9 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     },
     {
       id: 'cal-scores-t',
-      aWorld: [xScores - scoreSize * 0.5, DECK_Y + 0.04, zGrp[calGrp] + scoreSize * 0.5 + 0.10],
-      bWorld: [xScores + scoreSize * 0.5, DECK_Y + 0.04, zGrp[calGrp] + scoreSize * 0.5 + 0.10],
-      label: `T = ${clampedT}`,
+      aWorld: [xScores - scoreWidthX * 0.5, DECK_Y + 0.04, zGrp[calGrp] + scoreDepthZ * 0.5 + 0.10],
+      bWorld: [xScores + scoreWidthX * 0.5, DECK_Y + 0.04, zGrp[calGrp] + scoreDepthZ * 0.5 + 0.10],
+      label: isIncremental ? `Q=${clampedT} × K=${keyCount} (${prefixCount}+${clampedT})` : `T = ${clampedT}`,
       partIds: ['attn-scores', 'softmax'],
       minPixels: 48,
       offsetPx: 8,
@@ -1740,8 +1778,8 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
   const reg = (k: string) => b.sheetRegistry.get(k);
   const focusGrp: 0 | 1 = activeKvGroup ?? (activeHeadIdx !== null ? kvHeadForQuery(activeHeadIdx) : 0);
   const focusHead = activeHeadIdx ?? (focusGrp === 0 ? group0Head : group1Head);
-  const kvKSlices = Array.from({ length: clampedT }, (_, t) => reg(`kv_k:${focusGrp}:${t}`));
-  const kvVSlices = Array.from({ length: clampedT }, (_, t) => reg(`kv_v:${focusGrp}:${t}`));
+  const kvKSlices = Array.from({ length: keyCount }, (_, t) => reg(`kv_k:${focusGrp}:${t}`));
+  const kvVSlices = Array.from({ length: keyCount }, (_, t) => reg(`kv_v:${focusGrp}:${t}`));
 
   const opFocusBounds: Record<number, AABB> = {
     0: computeSheetGroupBounds([reg('input'), reg('rmsnorm')], 0.48, 0.28, 0.48, GQA_SPATIAL_FIT_BOUNDS),
@@ -1773,7 +1811,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
       qHeadsPerGroup: 16,
       kvHeadCount: 2,
       gqaRatio: 16,
-      kvTokenSliceCount: 2 * clampedT,
+      kvTokenSliceCount: 2 * keyCount,
       computeFp8,
       kvCacheFp8,
       usesSmoothRibbons: true,

@@ -121,6 +121,8 @@ export interface MoeSimFixture {
   readonly tokenIds?: readonly number[] | Int32Array;
   /** Matching display labels for each token position (length T). */
   readonly tokenLabels?: readonly string[];
+  /** Absolute starting token position offset P >= 0 for incremental steps (defaults to 0). */
+  readonly startTokenOffset?: number;
 }
 
 export interface SingleRoutedExpertEval {
@@ -147,6 +149,8 @@ export interface SingleRoutedExpertEval {
 
 export interface MoeSimResult {
   readonly tokens: number;
+  /** Absolute starting token position offset P >= 0 (0 in standalone / full-sequence passes). */
+  readonly startTokenOffset: number;
   readonly tokenIds: Int32Array;
   readonly tokenLabels: readonly string[];
   readonly d: number;
@@ -623,6 +627,7 @@ export function runMoeSim(tokens: number, fixture?: MoeSimFixture): MoeSimResult
 
   const result: MoeSimResult = {
     tokens: T,
+    startTokenOffset: Math.max(0, Math.trunc(fixture?.startTokenOffset ?? 0)),
     tokenIds,
     tokenLabels,
     d,
@@ -752,7 +757,8 @@ export function describeMoeCellFormula(
 ): MoeCellFormula {
   const { d, dExp, dShared, topK, tokens: T } = sim;
   const tokIdx = Math.max(0, Math.min(T - 1, rawCell.tokenIndex ?? defaultFocusToken));
-  const tokLabel = sim.tokenLabels[tokIdx] ?? `t${tokIdx}`;
+  const absTok = (t: number) => sim.startTokenOffset + t;
+  const tokLabel = sim.tokenLabels[tokIdx] ?? `t${absTok(tokIdx)}`;
   const inferredExp = inferMoeCellExpert(rawCell, sim, defaultFocusExpert);
   const expId = Math.max(0, Math.min(sim.nRoutedExperts - 1, inferredExp ?? defaultFocusExpert));
   const expTag = formatExpertId(expId);
@@ -762,16 +768,16 @@ export function describeMoeCellFormula(
       const t = Math.max(0, Math.min(T - 1, rawCell.row));
       const ch = Math.max(0, Math.min(d - 1, rawCell.col));
       const val = sim.X[ch * T + t];
-      const tl = sim.tokenLabels[t] ?? `t${t}`;
+      const tl = sim.tokenLabels[t] ?? `t${absTok(t)}`;
       return {
         cell: { ...rawCell, row: t, col: ch, tokenIndex: t },
         tensorLabel: 'Input X',
-        coordLabel: `t${t} "${tl}" · ch ${ch}`,
+        coordLabel: `t${absTok(t)} "${tl}" · ch ${ch}`,
         headBadge: 'Residual Spine · d=8 mini / 2,688 prod',
         value: val,
         isMasked: false,
         valueText: fmtSigned(val, 3),
-        equation: `X[${ch}, t${t}] = ${fmtSigned(val, 3)}  (RMS = ${sim.rms[t].toFixed(3)})`,
+        equation: `X[${ch}, t${absTok(t)}] = ${fmtSigned(val, 3)}  (RMS = ${sim.rms[t].toFixed(3)})`,
         subEquation: `Per-token hidden state from residual spine (0 B sequence cache in MoE).`,
         upstreamSpans: [],
         activeExpertId: null,
@@ -786,16 +792,16 @@ export function describeMoeCellFormula(
       const xn = sim.X_norm[ch * T + t];
       const g = sim.gamma_in[ch];
       const uv = sim.U[ch * T + t];
-      const tl = sim.tokenLabels[t] ?? `t${t}`;
+      const tl = sim.tokenLabels[t] ?? `t${absTok(t)}`;
       return {
         cell: { ...rawCell, row: t, col: ch, tokenIndex: t },
         tensorLabel: 'RMSNorm U',
-        coordLabel: `t${t} "${tl}" · ch ${ch}`,
+        coordLabel: `t${absTok(t)} "${tl}" · ch ${ch}`,
         headBadge: `ε = ${formatEpsLabel(sim.eps)} · Pre-MoE`,
         value: uv,
         isMasked: false,
         valueText: fmtSigned(uv, 3),
-        equation: `U[${ch}, t${t}] = (${fmtSigned(xv, 3)} / ${sim.rms[t].toFixed(3)}) × γ[${ch}](${g.toFixed(2)}) = ${fmtSigned(uv, 3)}`,
+        equation: `U[${ch}, t${absTok(t)}] = (${fmtSigned(xv, 3)} / ${sim.rms[t].toFixed(3)}) × γ[${ch}](${g.toFixed(2)}) = ${fmtSigned(uv, 3)}`,
         subEquation: `X_norm = ${fmtSigned(xn, 3)} · RMS = √(mean(X²) + ${formatEpsLabel(sim.eps)}) = ${sim.rms[t].toFixed(3)} · Forks in parallel to Router & Shared Expert.`,
         upstreamSpans: [
           { tensor: 'input', rowStart: t, rowEnd: t, colStart: 0, colEnd: d - 1, tokenIndex: t },
@@ -843,7 +849,7 @@ export function describeMoeCellFormula(
           expertId: expId,
         },
         tensorLabel: ev.isActive ? `Router ${expTag} (Active)` : `Router ${expTag} (Idle)`,
-        coordLabel: `t${tokIdx} "${tokLabel}" · ${expTag}`,
+        coordLabel: `t${absTok(tokIdx)} "${tokLabel}" · ${expTag}`,
         headBadge: statusText,
         value: ev.choiceScore,
         isMasked: !ev.isActive,
@@ -853,7 +859,7 @@ export function describeMoeCellFormula(
           : `choice = σ(${fmtSigned(ev.logit, 2)})(${ev.unbiasedScore.toFixed(3)}) + bias(${fmtSigned(ev.bias, 3)}) = ${ev.choiceScore.toFixed(3)} → Rank #${ev.choiceRank + 1} (skipped, 0 weight)`,
         subEquation: ev.isActive
           ? `Weight gathered from UNBIASED σ = ${ev.unbiasedScore.toFixed(3)} (bias excluded) → norm × 2.5 = ${ev.appliedWeight.toFixed(3)}.`
-          : `Not in Top-6 for t${tokIdx}; detail sheets preview its hypothetical ReLU² weights on demand while layer contribution stays 0.`,
+          : `Not in Top-6 for t${absTok(tokIdx)}; detail sheets preview its hypothetical ReLU² weights on demand while layer contribution stays 0.`,
         upstreamSpans: [
           { tensor: 'rmsnorm', rowStart: tokIdx, rowEnd: tokIdx, colStart: 0, colEnd: d - 1, tokenIndex: tokIdx },
           { tensor: 'w_router', rowStart: expId, rowEnd: expId, colStart: 0, colEnd: d - 1, expertId: expId },
@@ -886,7 +892,7 @@ export function describeMoeCellFormula(
           rankSlot: slot,
         },
         tensorLabel: `Top-6 Weight #${slot + 1}`,
-        coordLabel: `t${tokIdx} "${tokLabel}" · ${wTag}`,
+        coordLabel: `t${absTok(tokIdx)} "${tokLabel}" · ${wTag}`,
         headBadge: `Unbiased σ → norm × 2.5`,
         value: scaledW,
         isMasked: false,
@@ -1037,12 +1043,12 @@ export function describeMoeCellFormula(
       return {
         cell: { tensor: 'routed_sum', row: t, col: ch, tokenIndex: t, expertId: resolvedExp },
         tensorLabel: 'Routed Sum (Top-6)',
-        coordLabel: `t${t} "${tl}" · ch ${ch}`,
+        coordLabel: `t${absTok(t)} "${tl}" · ch ${ch}`,
         headBadge: 'Σ_{j=1..6} wⱼ·yⱼ (×2.5 scaled)',
         value: val,
         isMasked: false,
         valueText: fmtSigned(val, 3),
-        equation: `y_routed[${ch}, t${t}] = ${terms.join(' + ')} + … (6 active) = ${fmtSigned(val, 3)}`,
+        equation: `y_routed[${ch}, t${absTok(t)}] = ${terms.join(' + ')} + … (6 active) = ${fmtSigned(val, 3)}`,
         subEquation: `Parallel sum of 6 active routed experts (122 idle = 0). Focused: ${formatExpertId(resolvedExp)} (Top-6 #${activeRank + 1}, ${resolvedW.toFixed(3)}×${fmtSigned(resolvedY, 3)}).`,
         upstreamSpans: [
           { tensor: 'topk_weights', rowStart: 0, rowEnd: 0, colStart: 0, colEnd: topK - 1, tokenIndex: t },
@@ -1183,12 +1189,12 @@ export function describeMoeCellFormula(
       return {
         cell: { tensor: 'residual', row: t, col: ch, tokenIndex: t },
         tensorLabel: 'Residual Out Y',
-        coordLabel: `t${t} "${tl}" · ch ${ch}`,
+        coordLabel: `t${absTok(t)} "${tl}" · ch ${ch}`,
         headBadge: 'X + y_routed + y_shared',
         value: yv,
         isMasked: false,
         valueText: fmtSigned(yv, 3),
-        equation: `Y[${ch}, t${t}] = X(${fmtSigned(xv, 3)}) + y_moe(${fmtSigned(ym, 3)}) = ${fmtSigned(yv, 3)}`,
+        equation: `Y[${ch}, t${absTok(t)}] = X(${fmtSigned(xv, 3)}) + y_moe(${fmtSigned(ym, 3)}) = ${fmtSigned(yv, 3)}`,
         subEquation: `Returns to the 2,688-channel emerald residual spine. 0 B sequence cache allocated.`,
         upstreamSpans: [
           { tensor: 'moe_out', rowStart: t, rowEnd: t, colStart: ch, colEnd: ch, tokenIndex: t },

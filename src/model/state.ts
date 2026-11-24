@@ -19,6 +19,8 @@ export type ViewMode =
 
 export type GqaViewAngle = 'three_quarter' | 'near_plan';
 
+export type ExecutionMode = 'full_sequence' | 'ar_decode';
+
 export type TocSectionId =
   | 'overview'
   | 'embedding'
@@ -30,6 +32,7 @@ export type TocSectionId =
 
 export interface SceneState {
   mode: ViewMode;
+  executionMode: ExecutionMode;
   section: TocSectionId;
   precision: PrecisionMode;
   tokens: number;
@@ -128,6 +131,7 @@ export function createPerspectivePose(
 export function createInitialState(defaultPose: CameraPose, reducedMotion = false): SceneState {
   return {
     mode: 'tower',
+    executionMode: 'full_sequence',
     section: 'overview',
     precision: 'bf16',
     tokens: DEFAULT_TOKENS,

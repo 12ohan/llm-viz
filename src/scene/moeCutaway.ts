@@ -638,7 +638,8 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
 
   const focusedEval = evaluateSingleRoutedExpert(sim, focusExpert, focusToken);
   const focusExpTag = formatExpertId(focusExpert);
-  const focusTokLabel = sim.tokenLabels[focusToken] ?? `t${focusToken}`;
+  const absFocusToken = focusToken + (sim.startTokenOffset ?? 0);
+  const focusTokLabel = sim.tokenLabels[focusToken] ?? `t${absFocusToken}`;
 
   const atlas = buildMoeValueAtlas(sim, focusToken, focusExpert);
 
@@ -651,7 +652,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   const partCatalog = buildMoePartCatalog({
     bayId,
     isFp8Mode,
-    focusToken,
+    focusToken: absFocusToken,
     focusTokLabel,
     focusExpert,
     focusExpTag,
@@ -1757,7 +1758,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     },
     {
       id: 'moe-bank',
-      label: `Router Bank (8×16 = 128 · Top-6 · t${focusToken} "${focusTokLabel}")`,
+      label: `Router Bank (8×16 = 128 · Top-6 · t${absFocusToken} "${focusTokLabel}")`,
       world: [routedCenterX - 0.52, 0.08, bankTop - 0.28],
       partId: 'routed-bank',
       align: 'top',

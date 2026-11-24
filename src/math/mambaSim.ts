@@ -106,10 +106,30 @@ export interface MambaSimFixture {
   readonly tokenIds?: readonly number[] | Int32Array;
   /** Matching display labels for each token position (length T). */
   readonly tokenLabels?: readonly string[];
+  /**
+   * Optional externally supplied rolling Conv1D state [convDim, convKernel]
+   * (slots 0..3 = oldest..newest prior xBC_pre taps before local token 0).
+   */
+  readonly initialConvState?: Float32Array;
+  /**
+   * Optional externally supplied persistent SSM state H_{P-1} [nHeads, dHead, dState]
+   * immediately prior to local token 0.
+   */
+  readonly initialSsmState?: Float32Array;
+  /** Absolute starting token position offset P >= 0 for incremental steps (defaults to 0). */
+  readonly startTokenOffset?: number;
 }
 
 export interface MambaSimResult {
   readonly tokens: number;
+  /** Absolute starting token position offset P >= 0 (0 in standalone / full-sequence runs). */
+  readonly startTokenOffset: number;
+  /** True when seeded from an externally supplied Conv1D or SSM prior state. */
+  readonly hasInitialState: boolean;
+  /** Defensive copy of the prior rolling Conv1D state [convDim, convKernel], if supplied. */
+  readonly initialConvState?: Float32Array;
+  /** Defensive copy of the prior FP32 SSM state H_{P-1} [nHeads, dHead, dState], if supplied. */
+  readonly initialSsmState?: Float32Array;
   readonly tokenIds: Int32Array;
   readonly d: number;
   readonly nHeads: number;
@@ -444,6 +464,31 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
   const W_out = fixture?.W_out ?? DEFAULT_WEIGHTS.W_out;
 
   const { tokenIds, tokenLabels } = resolveSimTokens(T, fixture?.tokenIds, fixture?.tokenLabels);
+  const startTokenOffset = Math.max(0, Math.trunc(fixture?.startTokenOffset ?? 0));
+
+  // Optional externally seeded boundary states (validated + defensively cloned so caller mutations cannot alias)
+  const expectedConvLen = convDim * convKernel;
+  const stateStride = nHeads * dHead * dState;
+  let initialConvState: Float32Array | undefined;
+  let initialSsmState: Float32Array | undefined;
+
+  if (fixture?.initialConvState) {
+    if (fixture.initialConvState.length !== expectedConvLen) {
+      throw new RangeError(
+        `Mamba initialConvState length ${fixture.initialConvState.length} !== expected ${expectedConvLen}`,
+      );
+    }
+    initialConvState = new Float32Array(fixture.initialConvState);
+  }
+  if (fixture?.initialSsmState) {
+    if (fixture.initialSsmState.length !== stateStride) {
+      throw new RangeError(
+        `Mamba initialSsmState length ${fixture.initialSsmState.length} !== expected ${stateStride}`,
+      );
+    }
+    initialSsmState = new Float32Array(fixture.initialSsmState);
+  }
+  const hasInitialState = initialConvState !== undefined || initialSsmState !== undefined;
 
   // 1. Input hidden state X [d, T]
   const X = new Float32Array(d * T);
@@ -499,7 +544,8 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
     }
   }
 
-  // 4. Depthwise Causal Conv1D (k=4, left zero-padded) + SiLU + fixed 4-tap rolling conv_buf
+  // 4. Depthwise Causal Conv1D (k=4, left zero-padded or seeded from initialConvState) + SiLU + fixed 4-tap rolling conv_buf
+  // Preserves EXACT newest-to-oldest lag accumulation order (lag = 0..convKernel-1) for bit-exact full-vs-incremental equivalence.
   const conv_out = new Float32Array(convDim * T);
   const xBC = new Float32Array(convDim * T);
   const conv_buf = new Float32Array(convDim * convKernel);
@@ -511,7 +557,15 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
       let acc = bias;
       for (let lag = 0; lag < convKernel; lag++) {
         const srcT = t - lag;
-        const sample = srcT >= 0 ? xBC_pre[c * T + srcT] : 0;
+        let sample = 0;
+        if (srcT >= 0) {
+          sample = xBC_pre[c * T + srcT];
+        } else if (initialConvState) {
+          const initSlot = convKernel + srcT; // srcT in {-1, -2, -3} -> slot in {3, 2, 1}
+          if (initSlot >= 0 && initSlot < convKernel) {
+            sample = initialConvState[wcOff + initSlot];
+          }
+        }
         const slot = convKernel - 1 - lag; // lag 0 -> slot 3 (newest)
         acc += w_conv[wcOff + slot] * sample;
       }
@@ -524,7 +578,15 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
     for (let s = 0; s < convKernel; s++) {
       const lag = convKernel - 1 - s;
       const srcT = lastT - lag;
-      conv_buf[wcOff + s] = srcT >= 0 ? xBC_pre[c * T + srcT] : 0;
+      if (srcT >= 0) {
+        conv_buf[wcOff + s] = xBC_pre[c * T + srcT];
+      } else if (initialConvState) {
+        const initSlot = convKernel + srcT;
+        conv_buf[wcOff + s] =
+          initSlot >= 0 && initSlot < convKernel ? initialConvState[wcOff + initSlot] : 0;
+      } else {
+        conv_buf[wcOff + s] = 0;
+      }
     }
   }
 
@@ -563,7 +625,6 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
     }
   }
 
-  const stateStride = nHeads * dHead * dState;
   const H_history = new Float32Array(T * stateStride);
   const H_prev = new Float32Array(stateStride);
   const H = new Float32Array(stateStride);
@@ -585,7 +646,12 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
         let readout = 0;
         for (let n = 0; n < dState; n++) {
           const localIdx = (h * dHead + p) * dState + n;
-          const prevVal = t === 0 ? 0 : H_history[prevStateOff + localIdx];
+          const prevVal =
+            t === 0
+              ? initialSsmState
+                ? initialSsmState[localIdx]
+                : 0
+              : H_history[prevStateOff + localIdx];
           const bVal = B[(g * dState + n) * T + t];
           const cVal = C[(g * dState + n) * T + t];
           const hNext = Math.fround(decay * prevVal + step * xVal * bVal);
@@ -599,12 +665,14 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
     }
   }
 
-  // Snapshot persistent H (at T-1) and H_prev (at T-2, or 0 when T=1)
+  // Snapshot persistent H (at T-1) and H_prev (at T-2, or initialSsmState when T=1, else 0)
   const lastOff = (T - 1) * stateStride;
   H.set(H_history.subarray(lastOff, lastOff + stateStride));
   if (T >= 2) {
     const prevOff = (T - 2) * stateStride;
     H_prev.set(H_history.subarray(prevOff, prevOff + stateStride));
+  } else if (initialSsmState) {
+    H_prev.set(initialSsmState);
   }
 
   // 6. MambaRMSNormGated (norm_before_gate = False): Gate FIRST -> 8-Group RMSNorm -> * gamma_gate
@@ -635,6 +703,10 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
 
   const result: MambaSimResult = {
     tokens: T,
+    startTokenOffset,
+    hasInitialState,
+    ...(initialConvState ? { initialConvState } : {}),
+    ...(initialSsmState ? { initialSsmState } : {}),
     tokenIds,
     d,
     nHeads,
@@ -772,9 +844,78 @@ export function inferMambaCellToken(
   return null;
 }
 
+/**
+ * Authoritative lookup for a single rolling Conv1D tap at `(channel, tokIdx, slot)`
+ * respecting externally seeded `initialConvState` for `srcT < 0`.
+ * Shared between `mambaAtlas.ts` and `describeMambaCellFormula()` so rendered values and
+ * inspected formulas stay 100% identical.
+ */
+export function readMambaConvTapValue(
+  sim: MambaSimResult,
+  channel: number,
+  tokIdx: number,
+  slot: number,
+): {
+  readonly value: number;
+  readonly sourceKind: 'current_step' | 'seeded_state' | 'zero_pad';
+  readonly localSrcT: number;
+  readonly absSrcT: number;
+  readonly initSlot: number;
+} {
+  const { convKernel, tokens: T } = sim;
+  const lag = convKernel - 1 - slot; // slot 3 = lag 0 (tokIdx), slot 0 = lag 3 (tokIdx-3)
+  const localSrcT = tokIdx - lag;
+  const absSrcT = sim.startTokenOffset + localSrcT;
+  if (localSrcT >= 0) {
+    return {
+      value: sim.xBC_pre[channel * T + localSrcT],
+      sourceKind: 'current_step',
+      localSrcT,
+      absSrcT,
+      initSlot: -1,
+    };
+  }
+  const initSlot = convKernel + localSrcT;
+  if (sim.initialConvState && initSlot >= 0 && initSlot < convKernel) {
+    return {
+      value: sim.initialConvState[channel * convKernel + initSlot],
+      sourceKind: 'seeded_state',
+      localSrcT,
+      absSrcT,
+      initSlot,
+    };
+  }
+  return {
+    value: 0,
+    sourceKind: 'zero_pad',
+    localSrcT,
+    absSrcT,
+    initSlot: -1,
+  };
+}
+
+/**
+ * Authoritative lookup for prior SSM state `H_{t-1}` at `(tokIdx, localIdx)`,
+ * respecting externally seeded `initialSsmState` at `tokIdx === 0`.
+ */
+export function readMambaPriorSsmValue(
+  sim: MambaSimResult,
+  tokIdx: number,
+  localIdx: number,
+): { readonly value: number; readonly isSeeded: boolean } {
+  const stateStride = sim.nHeads * sim.dHead * sim.dState;
+  if (tokIdx > 0) {
+    return { value: sim.H_history[(tokIdx - 1) * stateStride + localIdx], isSeeded: false };
+  }
+  if (sim.initialSsmState) {
+    return { value: sim.initialSsmState[localIdx], isSeeded: true };
+  }
+  return { value: 0, isSeeded: false };
+}
+
 function tokTag(sim: MambaSimResult, t: number): string {
   const clamped = Math.max(0, Math.min(sim.tokens - 1, t));
-  return `t${clamped}("${sim.tokenLabels[clamped]}")`;
+  return `t${sim.startTokenOffset + clamped}("${sim.tokenLabels[clamped]}")`;
 }
 
 /**
@@ -792,6 +933,7 @@ export function describeMambaCellFormula(
   switch (cell.tensor) {
     case 'input': {
       const t = clampT(cell.row);
+      const absT = sim.startTokenOffset + t;
       const i = clampC(cell.col, d);
       const val = sim.X[i * T + t];
       return {
@@ -802,8 +944,8 @@ export function describeMambaCellFormula(
         value: val,
         isMasked: false,
         valueText: fmtSigned(val),
-        equation: `X[${i}, t=${t}] = ${fmtSigned(val)}  (miniature d=8 · prod 2,688)`,
-        subEquation: `Synthetic Float32 token embedding · RMS(X[:, t=${t}]) = ${sim.rms_in[t].toFixed(3)} (ε=${formatEpsLabel(sim.eps)})`,
+        equation: `X[${i}, t=${absT}] = ${fmtSigned(val)}  (miniature d=8 · prod 2,688)`,
+        subEquation: `Synthetic Float32 token embedding · RMS(X[:, t=${absT}]) = ${sim.rms_in[t].toFixed(3)} (ε=${formatEpsLabel(sim.eps)})`,
         targetSpan: { tensor: 'input', rowStart: t, rowEnd: t, colStart: i, colEnd: i, role: 'target' },
         upstreamSpans: [],
       };
@@ -811,6 +953,7 @@ export function describeMambaCellFormula(
 
     case 'rmsnorm': {
       const t = clampT(cell.row);
+      const absT = sim.startTokenOffset + t;
       const i = clampC(cell.col, d);
       const xVal = sim.X[i * T + t];
       const rms = sim.rms_in[t];
@@ -825,8 +968,8 @@ export function describeMambaCellFormula(
         value: uVal,
         isMasked: false,
         valueText: fmtSigned(uVal),
-        equation: `U[${i}, t=${t}] = (${fmtSigned(xVal)} / ${rms.toFixed(3)}) · γ[${i}](${g.toFixed(3)}) = ${fmtSigned(uVal)}`,
-        subEquation: `X_norm = ${fmtSigned(xn)} · √(mean(X[:, t=${t}]²) + ${formatEpsLabel(sim.eps)}) = ${rms.toFixed(4)}`,
+        equation: `U[${i}, t=${absT}] = (${fmtSigned(xVal)} / ${rms.toFixed(3)}) · γ[${i}](${g.toFixed(3)}) = ${fmtSigned(uVal)}`,
+        subEquation: `X_norm = ${fmtSigned(xn)} · √(mean(X[:, t=${absT}]²) + ${formatEpsLabel(sim.eps)}) = ${rms.toFixed(4)}`,
         targetSpan: { tensor: 'rmsnorm', rowStart: t, rowEnd: t, colStart: i, colEnd: i, role: 'target' },
         upstreamSpans: [
           { tensor: 'input', rowStart: t, rowEnd: t, colStart: 0, colEnd: d - 1, role: 'operand_a' },
@@ -861,6 +1004,7 @@ export function describeMambaCellFormula(
 
     case 'z': {
       const t = clampT(cell.row);
+      const absT = sim.startTokenOffset + t;
       const c = clampC(cell.col, dInner);
       const h = Math.floor(c / dHead);
       const g = mambaGroupForHead(h);
@@ -878,7 +1022,7 @@ export function describeMambaCellFormula(
         value: val,
         isMasked: false,
         valueText: fmtSigned(val),
-        equation: `z[${c}, t=${t}] = Σⱼ W_in[${c},j]·U[j,t] = ${terms.join(' + ')} + … = ${fmtSigned(val)}`,
+        equation: `z[${c}, t=${absT}] = Σⱼ W_in[${c},j]·U[j,t] = ${terms.join(' + ')} + … = ${fmtSigned(val)}`,
         subEquation: `Bypasses Conv1D & SSM → SiLU(z) = ${fmtSigned(sVal)} multiplies y[${c}] BEFORE 8-group RMSNorm`,
         targetSpan: { tensor: 'z', rowStart: t, rowEnd: t, colStart: c, colEnd: c, role: 'target' },
         upstreamSpans: [
@@ -890,6 +1034,7 @@ export function describeMambaCellFormula(
 
     case 'xbc_pre': {
       const t = clampT(cell.row);
+      const absT = sim.startTokenOffset + t;
       const c = clampC(cell.col, convDim);
       const val = sim.xBC_pre[c * T + t];
       const wRow = dInner + c;
@@ -907,7 +1052,7 @@ export function describeMambaCellFormula(
         value: val,
         isMasked: false,
         valueText: fmtSigned(val),
-        equation: `xBC_pre[${c}, t=${t}] = W_in[${wRow}, :] · U[:, t=${t}] = ${fmtSigned(val)}`,
+        equation: `xBC_pre[${c}, t=${absT}] = W_in[${wRow}, :] · U[:, t=${absT}] = ${fmtSigned(val)}`,
         subEquation: `Feeds depthwise causal Conv1D (k=4, always BF16 in production) · conv_dim=128 (prod 6,144)`,
         targetSpan: { tensor: 'xbc_pre', rowStart: t, rowEnd: t, colStart: c, colEnd: c, role: 'target' },
         upstreamSpans: [
@@ -921,23 +1066,31 @@ export function describeMambaCellFormula(
       const slot = clampC(cell.tapIndex ?? cell.row, convKernel);
       const c = clampC(cell.col, convDim);
       const tok = clampT(cell.tokenIndex ?? lastT);
+      const absTok = sim.startTokenOffset + tok;
       const lag = convKernel - 1 - slot; // slot 3 = lag 0 (tok), slot 0 = lag 3 (tok-3)
-      const srcT = tok - lag;
-      const bufVal = srcT >= 0 ? sim.xBC_pre[c * T + srcT] : 0;
+      const tap = readMambaConvTapValue(sim, c, tok, slot);
+      const bufVal = tap.value;
       const wTap = sim.w_conv[c * convKernel + slot];
       const coVal = sim.conv_out[c * T + tok];
       const siluVal = sim.xBC[c * T + tok];
-      const srcNote = srcT >= 0 ? tokTag(sim, srcT) : '0 (causal left-pad)';
+      const srcNote =
+        tap.sourceKind === 'current_step'
+          ? tokTag(sim, tap.localSrcT)
+          : tap.sourceKind === 'seeded_state'
+            ? `carried conv_state[slot=${tap.initSlot}] (abs t${tap.absSrcT})`
+            : '0 (causal left-pad)';
       return {
         cell: { ...cell, row: slot, col: c, tapIndex: slot, tokenIndex: tok },
-        tensorLabel: 'Causal Conv1D Tap',
-        coordLabel: `slot ${slot} (t−${lag} @ t${tok}) · ch=${c}`,
-        headBadge: 'Always BF16 (prod)',
+        tensorLabel:
+          tap.sourceKind === 'seeded_state' ? 'Carried Conv1D Tap' : 'Causal Conv1D Tap',
+        coordLabel: `slot ${slot} (t−${lag} @ t${absTok}) · ch=${c}`,
+        headBadge:
+          tap.sourceKind === 'seeded_state' ? 'Carried State · BF16 (prod)' : 'Always BF16 (prod)',
         value: bufVal,
         isMasked: false,
         valueText: fmtSigned(bufVal),
         equation: `conv_buf[${c}, slot=${slot}] = ${fmtSigned(bufVal)} (${srcNote}) · w[${slot}]=${fmtSigned(wTap)}`,
-        subEquation: `Conv1D(t=${tok}) = ${fmtSigned(coVal)} → SiLU = ${fmtSigned(siluVal)} · Fixed 4-tap buffer (~1.08 MiB BF16 / 23 bays)`,
+        subEquation: `Conv1D(t=${absTok}) = ${fmtSigned(coVal)} → SiLU = ${fmtSigned(siluVal)} · Fixed 4-tap buffer (~1.08 MiB BF16 / 23 bays)`,
         targetSpan: {
           tensor: 'conv_buf',
           rowStart: 0,
@@ -950,14 +1103,24 @@ export function describeMambaCellFormula(
           role: 'target',
         },
         upstreamSpans:
-          srcT >= 0
-            ? [{ tensor: 'xbc_pre', rowStart: srcT, rowEnd: srcT, colStart: c, colEnd: c, role: 'operand_a' }]
+          tap.sourceKind === 'current_step'
+            ? [
+                {
+                  tensor: 'xbc_pre',
+                  rowStart: tap.localSrcT,
+                  rowEnd: tap.localSrcT,
+                  colStart: c,
+                  colEnd: c,
+                  role: 'operand_a',
+                },
+              ]
             : [],
       };
     }
 
     case 'x': {
       const t = clampT(cell.row);
+      const absT = sim.startTokenOffset + t;
       const h = cell.headIndex !== undefined
         ? clampC(cell.headIndex, sim.nHeads)
         : clampC(Math.floor(cell.col / dHead), sim.nHeads);
@@ -970,6 +1133,7 @@ export function describeMambaCellFormula(
       const val = sim.x[c * T + t];
       const co = sim.conv_out[c * T + t];
       const tapStart = Math.max(0, t - (convKernel - 1));
+      const absTapStart = Math.max(0, absT - (convKernel - 1));
       return {
         cell: { ...cell, row: t, col: p, headIndex: h, groupIndex: g, tokenIndex: t },
         tensorLabel: `Post-SiLU x (${formatMambaHeadId(h)})`,
@@ -978,8 +1142,8 @@ export function describeMambaCellFormula(
         value: val,
         isMasked: false,
         valueText: fmtSigned(val),
-        equation: `x[${formatMambaHeadId(h)}, p=${p}, t=${t}] = SiLU(Conv1D(${fmtSigned(co)})) = ${fmtSigned(val)}`,
-        subEquation: `Depthwise causal k=4 taps t∈[${tapStart}..${t}] (b=${fmtSigned(sim.b_conv[c], 2)}) → feeds SSM write & D·x skip`,
+        equation: `x[${formatMambaHeadId(h)}, p=${p}, t=${absT}] = SiLU(Conv1D(${fmtSigned(co)})) = ${fmtSigned(val)}`,
+        subEquation: `Depthwise causal k=4 taps t∈[${absTapStart}..${absT}] (b=${fmtSigned(sim.b_conv[c], 2)}) → feeds SSM write & D·x skip`,
         targetSpan: {
           tensor: 'x',
           rowStart: t,
@@ -1017,6 +1181,7 @@ export function describeMambaCellFormula(
     case 'c': {
       const isB = cell.tensor === 'b';
       const t = clampT(cell.row);
+      const absT = sim.startTokenOffset + t;
       const flatCol = clampC(cell.col, sim.nGroups * dState);
       // Support both flat sheet columns (0..31, with or without groupIndex) and explicit local coords (groupIndex > 0, col in 0..3)
       const isLocalWithGroup =
@@ -1043,7 +1208,7 @@ export function describeMambaCellFormula(
         value: val,
         isMasked: false,
         valueText: fmtSigned(val),
-        equation: `${isB ? 'B' : 'C'}[G${g}, n=${n}, t=${t}] = SiLU(Conv1D(${fmtSigned(co)})) = ${fmtSigned(val)}`,
+        equation: `${isB ? 'B' : 'C'}[G${g}, n=${n}, t=${absT}] = SiLU(Conv1D(${fmtSigned(co)})) = ${fmtSigned(val)}`,
         subEquation: isB
           ? `Shared write key across group G${g} heads (2 mini / 8 prod heads per group)`
           : `Shared readout query across group G${g} heads (y = Σₙ H·C + D·x)`,
@@ -1119,7 +1284,8 @@ export function describeMambaCellFormula(
       const stateStride = sim.nHeads * dHead * dState;
       const localIdx = (h * dHead + p) * dState + n;
 
-      const prevVal = t === 0 ? 0 : sim.H_history[(t - 1) * stateStride + localIdx];
+      const prior = readMambaPriorSsmValue(sim, t, localIdx);
+      const prevVal = prior.value;
       const currVal = sim.H_history[t * stateStride + localIdx];
       const decay = sim.dA[h * T + t];
       const step = sim.dt[h * T + t];
@@ -1129,16 +1295,22 @@ export function describeMambaCellFormula(
       if (isPrev) {
         return {
           cell: { ...cell, headIndex: h, groupIndex: g, tokenIndex: t },
-          tensorLabel: `Prior State H_{t−1} (${formatMambaHeadId(h)})`,
+          tensorLabel: prior.isSeeded
+            ? `Carried State H_{t−1} (${formatMambaHeadId(h)})`
+            : `Prior State H_{t−1} (${formatMambaHeadId(h)})`,
           coordLabel: `H_{t−1}[${formatMambaHeadId(h)}, p=${p}, n=${n}]`,
-          headBadge: `${formatMambaHeadId(h)} · G${g}`,
+          headBadge: prior.isSeeded
+            ? `${formatMambaHeadId(h)} · G${g} · Seeded Cache`
+            : `${formatMambaHeadId(h)} · G${g}`,
           value: prevVal,
           isMasked: false,
           valueText: fmtSigned(prevVal),
           equation:
-            t === 0
+            t === 0 && !prior.isSeeded
               ? `H_{−1}[${formatMambaHeadId(h)}, p=${p}, n=${n}] = +0.000  (initial zero state at T=1)`
-              : `H_{t−1}[${formatMambaHeadId(h)}, p=${p}, n=${n}] = ${fmtSigned(prevVal)}  (before ${tokTag(sim, t)})`,
+              : prior.isSeeded
+                ? `H_{t−1}[${formatMambaHeadId(h)}, p=${p}, n=${n}] = ${fmtSigned(prevVal)}  (carried FP32 state before ${tokTag(sim, t)})`
+                : `H_{t−1}[${formatMambaHeadId(h)}, p=${p}, n=${n}] = ${fmtSigned(prevVal)}  (before ${tokTag(sim, t)})`,
           subEquation: `Decays by dA=${decay.toFixed(3)} in-place into H_t = ${fmtSigned(currVal)} (46.0 MiB FP32 / 23 bays fixed)`,
           targetSpan: { tensor: 'h_prev', rowStart: p, rowEnd: p, colStart: n, colEnd: n, headIndex: h, tokenIndex: t, role: 'target' },
           upstreamSpans: [],
@@ -1167,6 +1339,7 @@ export function describeMambaCellFormula(
 
     case 'y': {
       const t = clampT(cell.row);
+      const absT = sim.startTokenOffset + t;
       const c = clampC(cell.col, dInner);
       const h = Math.floor(c / dHead);
       const p = c % dHead;
@@ -1183,7 +1356,7 @@ export function describeMambaCellFormula(
         value: yVal,
         isMasked: false,
         valueText: fmtSigned(yVal),
-        equation: `y[${c}, t=${t}] = Σₙ H_t[${p},n]·C[G${g},n](${fmtSigned(ySsm)}) + D(${dSkip.toFixed(2)})·x(${fmtSigned(xVal)}) = ${fmtSigned(yVal)}`,
+        equation: `y[${c}, t=${absT}] = Σₙ H_t[${p},n]·C[G${g},n](${fmtSigned(ySsm)}) + D(${dSkip.toFixed(2)})·x(${fmtSigned(xVal)}) = ${fmtSigned(yVal)}`,
         subEquation: `Readout contracts state dim n=0..3 with group C[G${g}] plus per-head skip D[${formatMambaHeadId(h)}]·x`,
         targetSpan: { tensor: 'y', rowStart: t, rowEnd: t, colStart: c, colEnd: c, headIndex: h, role: 'target' },
         upstreamSpans: [
@@ -1246,6 +1419,7 @@ export function describeMambaCellFormula(
 
     case 'residual': {
       const t = clampT(cell.row);
+      const absT = sim.startTokenOffset + t;
       const i = clampC(cell.col, d);
       const xVal = sim.X[i * T + t];
       const delta = sim.Mamba_out[i * T + t];
@@ -1258,7 +1432,7 @@ export function describeMambaCellFormula(
         value: yVal,
         isMasked: false,
         valueText: fmtSigned(yVal),
-        equation: `Y[${i}, t=${t}] = X(${fmtSigned(xVal)}) + (W_out·y_norm)(${fmtSigned(delta)}) = ${fmtSigned(yVal)}`,
+        equation: `Y[${i}, t=${absT}] = X(${fmtSigned(xVal)}) + (W_out·y_norm)(${fmtSigned(delta)}) = ${fmtSigned(yVal)}`,
         subEquation: `Adds Mamba-2 output delta into the continuous 2,688-channel emerald residual stream`,
         targetSpan: { tensor: 'residual', rowStart: t, rowEnd: t, colStart: i, colEnd: i, role: 'target' },
         upstreamSpans: [

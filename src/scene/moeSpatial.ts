@@ -533,7 +533,8 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
   const hasAnyFocus = hasCellTrace || hasPartFocus;
 
   const focusExpTag = formatExpertId(focusExpert);
-  const focusTokLabel = sim.tokenLabels[focusToken] ?? `t${focusToken}`;
+  const absFocusToken = focusToken + (sim.startTokenOffset ?? 0);
+  const focusTokLabel = sim.tokenLabels[focusToken] ?? `t${absFocusToken}`;
   const focusedRank = activeRankMap.get(focusExpert) ?? null;
 
   // Exact proportions upholding Safeguard #7: Shared Expert = STRICTLY 2.0x intermediate, 1.0x hidden!
@@ -1981,7 +1982,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     },
     {
       id: 'moe-bank',
-      label: `Router Bank (128 · σ+bias → Top-6 · t${focusToken} "${focusTokLabel}")`,
+      label: `Router Bank (128 · σ+bias → Top-6 · t${absFocusToken} "${focusTokLabel}")`,
       world: [bankCenterX, 0.92, zRouted - bankD * 0.5 - 0.18],
       partId: 'routed-bank',
       align: 'top',
@@ -2105,7 +2106,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
       ? [
           {
             id: 'moe-res-carry',
-            label: `← Input X[${residualCarryInfo.ch}, t${residualCarryInfo.tok}] = ${fmtSigned(residualCarryInfo.val)}`,
+            label: `← Input X[${residualCarryInfo.ch}, t${residualCarryInfo.tok + (sim.startTokenOffset ?? 0)}] = ${fmtSigned(residualCarryInfo.val)}`,
             world: [xResOut - 0.16, 0.46, -1.20] as Vec3,
             partId: 'residual-in',
             align: 'left' as const,

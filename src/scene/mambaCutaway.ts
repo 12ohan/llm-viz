@@ -362,7 +362,9 @@ function buildMambaPartCatalog(params: {
     sim,
   } = params;
   const headTag = formatMambaHeadId(activeHead);
-  const tokLabel = sim.tokenLabels[stateTokIdx] ?? `t${stateTokIdx}`;
+  const absTokIdx = sim.startTokenOffset + stateTokIdx;
+  const tokLabel = sim.tokenLabels[stateTokIdx] ?? `t${absTokIdx}`;
+  const zeroPads = Math.max(0, 3 - absTokIdx);
   const partCatalog: Record<string, CutawayPartInfo> = {
     'residual-in': {
       id: 'residual-in',
@@ -428,7 +430,13 @@ function buildMambaPartCatalog(params: {
       summary:
         'Fixed 4-tap depthwise causal convolution buffer holding the last four token vectors (t−3, t−2, t−1, t; zero-padded for t−lag < 0) followed by SiLU. Supplies local ordering and NEVER quantizes to FP8.',
       specs: [
-        `Active recurrence snapshot: t${stateTokIdx} "${tokLabel}" (${Math.max(0, 3 - stateTokIdx)} zero-padded tap${Math.max(0, 3 - stateTokIdx) === 1 ? '' : 's'})`,
+        `Active recurrence snapshot: t${absTokIdx} "${tokLabel}" (${
+          zeroPads > 0
+            ? `${zeroPads} zero-padded tap${zeroPads === 1 ? '' : 's'}`
+            : sim.hasInitialState
+              ? 'carried 4-tap Conv1D state + new token'
+              : '0 zero-padded taps'
+        })`,
         'Persistent Conv1D storage: 6,144 × 4 × 2 B = 48 KiB/bay (~1.08 MiB BF16 across 23 bays)',
         'Precision override: ALWAYS BF16 even on FP8 bays (NVIDIA §4.2 gold rim)',
       ],
@@ -469,11 +477,13 @@ function buildMambaPartCatalog(params: {
     'ssm-state-prev': {
       id: 'ssm-state-prev',
       title: `Prior SSM State Hₜ₋₁ (${headTag} · G${activeGroup})`,
-      badge: 'Fixed Size · FP32',
+      badge: sim.hasInitialState ? 'Carried FP32 Cache' : 'Fixed Size · FP32',
       summary:
-        'State matrix carried from the previous token (all zeros at t = 0). In production inference only the single active state buffer is kept and overwritten in place; H_history is browser-only playback history.',
+        sim.hasInitialState
+          ? 'Externally carried FP32 SSM state H_{t−1} from the prior cached decode step (strictly fixed size — zero token-history allocation).'
+          : 'State matrix carried from the previous token (all zeros at t = 0). In production inference only the single active state buffer is kept and overwritten in place; H_history is browser-only playback history.',
       specs: [
-        `Active miniature head: ${headTag} (4×4) at t${stateTokIdx} "${tokLabel}" · Production head: 64×128 FP32`,
+        `Active miniature head: ${headTag} (4×4) at t${absTokIdx} "${tokLabel}" · Production head: 64×128 FP32`,
         'Decays elementwise by dA = exp(Δt · A) ∈ (0, 1) into Hₜ.',
       ],
     },

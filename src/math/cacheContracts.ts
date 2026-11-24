@@ -1,19 +1,37 @@
 /**
- * Forward-Compatible Incremental Decode Cache & Boundary-State Contracts
- * (Design Contracts ONLY — NOT executed in the current full-sequence unified forward pass).
+ * Incremental Autoregressive (AR) Decode Cache, Ownership & Provenance Contracts
  *
- * A subsequent Nemotron 3 Nano increment will implement cached incremental autoregressive (AR)
- * execution, externally supplied initial states, and full-sequence vs. incremental numerical
- * equivalence verification against these contracts.
- *
- * Architectural boundary across Nemotron 3 Nano's 3 layer kinds (and extensible to future
- * Nemotron Labs hybrid models):
+ * Architectural memory boundary across Nemotron 3 Nano's 3 layer kinds (and extensible
+ * to future Nemotron Labs hybrid architectures):
  *  - GQA Attention (`*`, 6 bays): linear per-token K/V cache growth (`seqLen` entries per KV head)
  *  - Mamba-2 (`M`, 23 bays): strictly fixed-size rolling Conv1D buffer + FP32 persistent SSM state
  *  - Granular MoE (`E`, 23 bays): strictly stateless across tokens (`0 B` sequence cache)
+ *
+ * Ownership & Immutability Contract:
+ *  - Every `HybridDecodeCacheState` snapshot and every nested `GqaLayerKvCache` /
+ *    `MambaLayerBoundaryState` owns private, non-aliased `Float32Array` backing buffers.
+ *  - Snapshots are strictly IMMUTABLE BY CONTRACT (copy-on-step): stepping or branching from
+ *    a prior snapshot NEVER mutates any typed array inside `prevState`.
+ *  - External boundary seeds passed into `createExternalDecodeCacheState()` are defensively
+ *    cloned and validated (coverage, dimensions, capacities, finite populated values, and
+ *    `parameterFingerprint`) so subsequent caller mutations cannot corrupt any snapshot.
+ *
+ * Exact Default Miniature Snapshot Accounting (`L = 52`, `23 M`, `6 *`, `23 E`, `maxTokens = 16`):
+ *  - Mamba-2 fixed state: `23 × (128×4 + 16×4×4) × 4 B = 23 × 3,072 B = 70,656 B = 69.00 KiB`
+ *  - GQA KV allocated:    `6 × 2 × (2×4×16) × 4 B     = 6 × 1,024 B  =  6,144 B =  6.00 KiB`
+ *  - GQA KV populated:    `6 × 2 × (2×4×seqLen) × 4 B = 384 × seqLen B` (`0.375 KiB / token`)
+ *  - MoE sequence cache:  `0 B`
+ *  - Total allocated default snapshot (excluding JS objects & educational traces):
+ *    `76,800 B = 75.00 KiB` exactly.
  */
 
 import type { PrecisionMode } from '../model/spec';
+
+/** Distinguishes eagerly computed step traces from lazily reconstructed historical traces. */
+export type IncrementalTraceOrigin = 'computed_this_step' | 'reconstructed_from_checkpoint';
+
+/** Distinguishes prefill, multi-token chunk continuation, and single-token AR decode steps. */
+export type IncrementalDecodeStepKind = 'prefill' | 'chunk' | 'decode';
 
 /** Per-layer GQA Attention KV cache contract (grows linearly with `seqLen`). */
 export interface GqaLayerKvCache {
@@ -25,9 +43,15 @@ export interface GqaLayerKvCache {
   readonly seqLen: number;
   /** Allocated capacity in tokens along the sequence axis. */
   readonly maxTokens: number;
-  /** Cached key projections, indexed `[(g * dHead + r) * maxTokens + t]` (Float32 miniature storage). */
+  /**
+   * Owned, immutable cached key projections, indexed `[(g * dHead + r) * maxTokens + t]`
+   * (Float32 miniature storage; length strictly `nKv * dHead * maxTokens`).
+   */
   readonly K: Float32Array;
-  /** Cached value projections, indexed `[(g * dHead + r) * maxTokens + t]` (Float32 miniature storage). */
+  /**
+   * Owned, immutable cached value projections, indexed `[(g * dHead + r) * maxTokens + t]`
+   * (Float32 miniature storage; length strictly `nKv * dHead * maxTokens`).
+   */
   readonly V: Float32Array;
   /** Production precision metadata (`fp8` under FP8 Selective even beside BF16 attention bodies). */
   readonly storageDtypeMetadata: 'bf16' | 'fp8';
@@ -39,12 +63,18 @@ export interface MambaLayerBoundaryState {
   readonly kind: 'M';
   readonly convDim: number;
   readonly convKernel: number;
-  /** Rolling causal Conv1D input tap buffer, shape `[convDim, convKernel]` (slot `k-1` = newest). */
+  /**
+   * Owned, immutable rolling causal Conv1D input tap buffer, shape `[convDim, convKernel]`
+   * (slot `k-1` = newest prior token; length strictly `convDim * convKernel`).
+   */
   readonly convState: Float32Array;
   readonly nHeads: number;
   readonly dHead: number;
   readonly dState: number;
-  /** Persistent recurrent SSM hidden state `H_t`, shape `[nHeads, dHead, dState]` (always FP32). */
+  /**
+   * Owned, immutable persistent recurrent SSM hidden state `H_t`, shape `[nHeads, dHead, dState]`
+   * (always FP32; length strictly `nHeads * dHead * dState`).
+   */
   readonly ssmState: Float32Array;
   /** Number of tokens folded into this fixed-size state so far. */
   readonly processedTokens: number;
@@ -62,15 +92,49 @@ export interface MoeLayerStatelessContract {
   readonly cacheBytes: 0;
 }
 
+/** Exact typed-array byte breakdown of a `HybridDecodeCacheState` snapshot (excluding JS overhead & traces). */
+export interface DecodeCacheMemoryAccounting {
+  readonly mambaLayerCount: number;
+  readonly gqaLayerCount: number;
+  readonly moeLayerCount: number;
+  readonly processedTokens: number;
+  readonly maxTokens: number;
+  /** Fixed Mamba-2 typed-array bytes (`convState` + `ssmState`, independent of `processedTokens`). */
+  readonly mambaFixedBytes: number;
+  /** Allocated GQA KV typed-array bytes (`K` + `V` at full `maxTokens` capacity). */
+  readonly gqaAllocatedBytes: number;
+  /** Populated GQA KV typed-array bytes (`K` + `V` across `0..processedTokens-1`). */
+  readonly gqaPopulatedBytes: number;
+  /** Linear byte growth per newly appended token across all GQA attention bays. */
+  readonly bytesPerTokenGqaPopulated: number;
+  /** Granular MoE sequence cache bytes (strictly 0). */
+  readonly moeBytes: 0;
+  /** `mambaFixedBytes + gqaAllocatedBytes` (= 76,800 B = 75.00 KiB for default 52-layer miniature snapshot). */
+  readonly totalAllocatedBytes: number;
+  /** `mambaFixedBytes + gqaPopulatedBytes` (active populated bytes at `processedTokens`). */
+  readonly totalPopulatedBytes: number;
+}
+
 /**
- * Full hybrid model incremental decode cache snapshot spanning all 52 layers.
- * Keyed by `modelId` so caches from distinct parameter instances can never cross-contaminate.
+ * Full hybrid model incremental decode cache snapshot spanning all layers.
+ * Keyed by BOTH `modelId` and canonical `parameterFingerprint` so snapshots from
+ * differently parameterized models (even with duplicated display IDs) can never collide.
  */
 export interface HybridDecodeCacheState {
   readonly modelId: string;
+  /** Canonical 64-bit model parameter fingerprint binding this snapshot to exact weights & pattern. */
+  readonly parameterFingerprint: string;
+  /** Deterministic 64-bit hex digest over fingerprint, processedTokens, and all populated state bytes. */
+  readonly stateDigest: string;
   readonly precisionMetadata: PrecisionMode;
   /** Total prefix tokens already absorbed into `gqaCaches` and `mambaStates`. */
   readonly processedTokens: number;
+  /** Allocated KV capacity in tokens across every GQA bay in this snapshot. */
+  readonly maxTokens: number;
+  /** Prefix token IDs already absorbed (`length === processedTokens`; `-1` for synthetic external seeds). */
+  readonly prefixTokenIds: Int32Array;
+  /** Display labels aligned with `prefixTokenIds` (`length === processedTokens`). */
+  readonly prefixTokenLabels: readonly string[];
   /** Keyed by 1-based attention `bayId` (`06, 13, 20, 27, 34, 43` in Nemotron 3 Nano). */
   readonly gqaCaches: ReadonlyMap<number, GqaLayerKvCache>;
   /** Keyed by 1-based Mamba-2 `bayId` (23 layers in Nemotron 3 Nano). */
@@ -79,19 +143,87 @@ export interface HybridDecodeCacheState {
   readonly moeLayerIds: readonly number[];
 }
 
-/** Input contract for a future single-step or chunked cached incremental AR decode step. */
+/** External boundary-state seed for initializing a validated, defensively cloned `HybridDecodeCacheState`. */
+export interface ExternalDecodeCacheSeed {
+  readonly processedTokens: number;
+  readonly maxTokens?: number;
+  readonly precisionMetadata?: PrecisionMode;
+  readonly prefixTokenIds?: readonly number[] | Int32Array;
+  readonly prefixTokenLabels?: readonly string[];
+  readonly gqaCaches: ReadonlyMap<
+    number,
+    {
+      readonly K: Float32Array;
+      readonly V: Float32Array;
+      readonly seqLen?: number;
+      readonly maxTokens?: number;
+    }
+  >;
+  readonly mambaStates: ReadonlyMap<
+    number,
+    {
+      readonly convState: Float32Array;
+      readonly ssmState: Float32Array;
+      readonly processedTokens?: number;
+    }
+  >;
+}
+
+/** Provenance metadata distinguishing root seed, branch lineage, parent step, step execution, and absolute token coordinates. */
+export interface IncrementalStepProvenance {
+  /** Digest of the root initial boundary state at step 0 (zero state or external seed). */
+  readonly initialStateDigest: string;
+  /** Digest of `prevState` consumed by this step. */
+  readonly prevStateDigest: string;
+  /** Digest of `nextState` produced by this step. */
+  readonly nextStateDigest: string;
+  /** Session / continuation branch identity (distinguishes diverging continuations from a shared prefix). */
+  readonly branchId: string;
+  /** `stepExecutionId` of the immediate predecessor step (`null` for root step). */
+  readonly parentStepExecutionId: string | null;
+  /** 0-based step index along this branch. */
+  readonly stepIndex: number;
+  readonly stepKind: IncrementalDecodeStepKind;
+  /** Inclusive absolute token position range `[startPos, endPos]` = `[P, P + S - 1]`. */
+  readonly tokenRange: readonly [number, number];
+  /** Unambiguous deterministic identity for this exact step execution. */
+  readonly stepExecutionId: string;
+}
+
+/** Input contract for a single-step or chunked cached incremental AR decode step. */
 export interface IncrementalDecodeStepInput {
-  /** New token IDs appended after `prevState.processedTokens` (length `1` for AR step, `>= 1` for chunked prefill). */
+  /** New token IDs appended after `prevState.processedTokens` (`length === 1` for AR decode, `>= 1` for prefill/chunk). */
   readonly newTokenIds: readonly number[];
   readonly newTokenLabels?: readonly string[];
   /** Prior boundary state (`null` starts from zeroed Mamba states and empty KV caches). */
   readonly prevState: HybridDecodeCacheState | null;
+  /** Optional KV capacity when `prevState === null` (defaults to `16`). */
+  readonly maxTokens?: number;
+  /** Production precision metadata tag when `prevState === null` (defaults to `'fp8_selective'`). */
+  readonly precisionMetadata?: PrecisionMode;
+  /** Optional explicit branch identity (defaults to `'branch-0'`). */
+  readonly branchId?: string;
+  /** Optional explicit parent step execution ID (`null` for root prefill/seed step). */
+  readonly parentStepExecutionId?: string | null;
+  /** Optional root initial state digest propagated across a multi-step branch. */
+  readonly initialStateDigest?: string;
+  /** Optional 0-based step index along the branch (defaults to `0` if `prevState === null`, else `1`). */
+  readonly stepIndex?: number;
+  /** Override which bay IDs retain full simulator traces eagerly (`traceOrigin: 'computed_this_step'`). */
+  readonly retainedTraceBays?: readonly number[];
+  /** Maximum number of full layer traces retained inside this step result (bounded LRU). */
+  readonly maxRetainedTraces?: number;
 }
 
-/** Output contract for a future cached incremental decode step (must match full-sequence logits). */
+/** Output contract for a cached incremental decode step (matches full-sequence logits bit-for-bit). */
 export interface IncrementalDecodeStepResult {
   readonly modelId: string;
+  readonly parameterFingerprint: string;
+  /** Alias matching `stepExecutionId` for backwards compatibility with execution identity consumers. */
   readonly executionId: string;
+  readonly stepExecutionId: string;
+  readonly provenance: IncrementalStepProvenance;
+  readonly prevState: HybridDecodeCacheState;
   readonly nextState: HybridDecodeCacheState;
   /** Next-token logits for the newly processed positions, shape `[vocabSize, newTokenIds.length]`. */
   readonly logits: Float32Array;

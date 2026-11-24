@@ -17,6 +17,7 @@ type BayKind = BayDescriptor['kind'];
 import {
   MAX_TOKENS,
   MIN_TOKENS,
+  type ExecutionMode,
   type GqaViewAngle,
   type SceneState,
   type TocSectionId,
@@ -24,6 +25,11 @@ import {
 } from '../model/state';
 import { fmtSigned, formatEpsLabel, GQA_STEPPER_STEPS } from '../math/gqaSim';
 import type { HybridExecutionResult } from '../math/hybridFlow';
+import {
+  getActiveDecodeBranch,
+  getActiveDecodeStep,
+  type HybridDecodeSession,
+} from '../math/incrementalDecode';
 import { MAMBA_STEPPER_STEPS } from '../math/mambaSim';
 import { formatExpertId, MOE_STEPPER_STEPS } from '../math/moeSim';
 import {
@@ -77,6 +83,12 @@ export interface ControlsCallbacks {
   onGqaStepScrub: (progress01: number) => void;
   onGqaClearCell: () => void;
   onToggleAutoFollow: () => void;
+  onSelectExecutionMode: (mode: ExecutionMode) => void;
+  onDecodeStepToken: (tokenId: number) => void;
+  onDecodeStepGreedy: () => void;
+  onDecodeNavStep: (stepIndex: number) => void;
+  onDecodeSwitchBranch: (branchId: string) => void;
+  onDecodeReset: () => void;
 }
 
 interface SectionCopy {
@@ -209,6 +221,8 @@ export interface ControlsElements {
   gqaStepAutoFollow: HTMLButtonElement;
   gqaStepScrub: HTMLInputElement;
   editorialPanel: HTMLDivElement;
+  execModeFull: HTMLButtonElement;
+  execModeDecode: HTMLButtonElement;
   tokenSlider: HTMLInputElement;
   tokenDec: HTMLButtonElement;
   tokenInc: HTMLButtonElement;
@@ -272,6 +286,8 @@ export function queryControlsElements(): ControlsElements {
     gqaStepAutoFollow: get<HTMLButtonElement>('gqa-step-autofollow'),
     gqaStepScrub: get<HTMLInputElement>('gqa-step-scrub'),
     editorialPanel: get<HTMLDivElement>('editorial-panel'),
+    execModeFull: get<HTMLButtonElement>('exec-mode-full'),
+    execModeDecode: get<HTMLButtonElement>('exec-mode-decode'),
     tokenSlider: get<HTMLInputElement>('token-slider'),
     tokenDec: get<HTMLButtonElement>('token-dec'),
     tokenInc: get<HTMLButtonElement>('token-inc'),
@@ -304,6 +320,8 @@ export function computeEditorialCacheKey(
   activeCutaway: CutawaySceneGeometry | null,
   activeExecution: HybridExecutionResult | null = null,
   boundaryInspectToken: number | null = null,
+  decodeSession: HybridDecodeSession | null = null,
+  selectedCandidateTokenId: number | null = null,
 ): string {
   const isTower = state.mode === 'tower';
   const activeBayId = isTower ? state.hoveredBay ?? state.selectedBay : null;
@@ -316,8 +334,11 @@ export function computeEditorialCacheKey(
   const effGqaG0 = activeCutaway?.gqaStats?.activeGroup0Head ?? state.gqaActiveGroup0Head;
   const effGqaG1 = activeCutaway?.gqaStats?.activeGroup1Head ?? state.gqaActiveGroup1Head;
   const execKey = activeExecution ? activeExecution.executionId : 'standalone';
+  const decodeKey = decodeSession
+    ? `${decodeSession.activeBranchId}:${decodeSession.activeStepIndex}:${decodeSession.branches.size}:${getActiveDecodeStep(decodeSession).stepExecutionId}:cand${selectedCandidateTokenId ?? 'g'}`
+    : 'full';
   const boundTok = isTower ? (boundaryInspectToken ?? 'last') : 'na';
-  return `${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${execKey}:${boundTok}:${state.mode}:${state.mambaBayId}:${effMambaHead}:${effMambaTok}:${state.mambaStateToken ?? 'last'}:${state.mambaTemporalPlaying ? 'tplay' : 'tpause'}:${state.moeBayId}:${effMoeTok}:${effMoeExp}:${state.moeTokenCycling ? 'mplay' : 'mpause'}:${state.gqaBayId}:${effGqaG0}:${effGqaG1}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
+  return `${state.executionMode}:${decodeKey}:${state.tourActive ? `tour:${state.tourChapter}` : 'free'}:${execKey}:${boundTok}:${state.mode}:${state.mambaBayId}:${effMambaHead}:${effMambaTok}:${state.mambaStateToken ?? 'last'}:${state.mambaTemporalPlaying ? 'tplay' : 'tpause'}:${state.moeBayId}:${effMoeTok}:${effMoeExp}:${state.moeTokenCycling ? 'mplay' : 'mpause'}:${state.gqaBayId}:${effGqaG0}:${effGqaG1}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
 }
 
 export class MacroControls {
@@ -329,9 +350,12 @@ export class MacroControls {
   private lastReadoutKey = '';
   private lastEditorialKey = '';
   private boundaryInspectToken: number | null = null;
+  private selectedCandidateTokenId: number | null = null;
+  private lastDecodeStepId = '';
   private lastSyncedState: SceneState | null = null;
   private lastSyncedCutaway: CutawaySceneGeometry | null = null;
   private lastSyncedExecution: HybridExecutionResult | null = null;
+  private lastSyncedDecodeSession: HybridDecodeSession | null = null;
 
   constructor(spec: NemotronSpec, els: ControlsElements, cb: ControlsCallbacks) {
     this.spec = spec;
@@ -443,6 +467,9 @@ export class MacroControls {
       this.cb.onTokensChange(Math.min(MAX_TOKENS, cur + 1));
     });
 
+    this.on(this.els.execModeFull, 'click', () => this.cb.onSelectExecutionMode('full_sequence'));
+    this.on(this.els.execModeDecode, 'click', () => this.cb.onSelectExecutionMode('ar_decode'));
+
     this.on(this.els.precisionBf16, 'click', () => this.cb.onPrecisionChange('bf16'));
     this.on(this.els.precisionFp8, 'click', () => this.cb.onPrecisionChange('fp8_selective'));
 
@@ -511,10 +538,22 @@ export class MacroControls {
     activeCutaway: CutawaySceneGeometry | null = null,
     autoFollowManualPaused = false,
     activeExecution: HybridExecutionResult | null = null,
+    decodeSession: HybridDecodeSession | null = null,
   ): void {
     this.lastSyncedState = state;
     this.lastSyncedCutaway = activeCutaway;
     this.lastSyncedExecution = activeExecution;
+    this.lastSyncedDecodeSession = decodeSession;
+    if (decodeSession) {
+      const activeStep = getActiveDecodeStep(decodeSession);
+      if (activeStep.stepExecutionId !== this.lastDecodeStepId) {
+        this.lastDecodeStepId = activeStep.stepExecutionId;
+        this.selectedCandidateTokenId = activeStep.greedyNextToken.tokenId;
+      }
+    } else {
+      this.lastDecodeStepId = '';
+      this.selectedCandidateTokenId = null;
+    }
     if (this.boundaryInspectToken !== null && this.boundaryInspectToken >= state.tokens) {
       this.boundaryInspectToken = state.tokens - 1;
     }
@@ -571,16 +610,16 @@ export class MacroControls {
         state.mambaBayId === 42
           ? 'Cutaway: Mamba-2 · Bay 42 Feeder (BF16 §4.2)'
           : 'Cutaway: Mamba-2 · Bay 01 (47.1 MiB fixed state)';
-      this.syncMathDock(state, activeCutaway, autoFollowManualPaused);
+      this.syncMathDock(state, activeCutaway, autoFollowManualPaused, decodeSession);
     } else if (state.mode === 'cutaway_moe') {
       this.els.floatingBadge.textContent =
         state.moeBayId === 52
           ? 'Cutaway: MoE 128+1 · Bay 52 Final MoE (6 Active + Shared 3,712)'
           : 'Cutaway: MoE 128+1 · Bay 02 (6 Active + Shared 3,712)';
-      this.syncMathDock(state, activeCutaway, autoFollowManualPaused);
+      this.syncMathDock(state, activeCutaway, autoFollowManualPaused, decodeSession);
     } else {
       this.els.floatingBadge.textContent = `Cutaway: GQA Attention · Bay ${formatBayId(state.gqaBayId)} (32Q / 2KV, NoPE)`;
-      this.syncMathDock(state, activeCutaway, autoFollowManualPaused);
+      this.syncMathDock(state, activeCutaway, autoFollowManualPaused, decodeSession);
     }
 
     // Sync active TOC & mini-diagram highlight
@@ -603,14 +642,24 @@ export class MacroControls {
       node.classList.toggle('is-active', node.dataset.miniSection === effectiveSection);
     }
 
-    // Scrubber & precision
+    // Execution mode toggle (Full Sequence vs Cached Incremental AR Decode)
+    const isArDecode = state.executionMode === 'ar_decode';
+    this.els.execModeFull.classList.toggle('is-active', !isArDecode);
+    this.els.execModeFull.setAttribute('aria-checked', String(!isArDecode));
+    this.els.execModeDecode.classList.toggle('is-active', isArDecode);
+    this.els.execModeDecode.setAttribute('aria-checked', String(isArDecode));
+
+    // Scrubber & precision (scrubber follows active decode sequence length in AR Decode mode)
     const tokenStr = String(state.tokens);
     if (this.els.tokenSlider.value !== tokenStr) {
       this.els.tokenSlider.value = tokenStr;
     }
-    this.els.tokenValue.textContent = `${state.tokens} / ${MAX_TOKENS}`;
-    this.els.tokenDec.disabled = state.tokens <= MIN_TOKENS;
-    this.els.tokenInc.disabled = state.tokens >= MAX_TOKENS;
+    this.els.tokenValue.textContent = isArDecode
+      ? `${state.tokens} / ${MAX_TOKENS} (AR)`
+      : `${state.tokens} / ${MAX_TOKENS}`;
+    this.els.tokenSlider.disabled = isArDecode;
+    this.els.tokenDec.disabled = isArDecode || state.tokens <= MIN_TOKENS;
+    this.els.tokenInc.disabled = isArDecode || state.tokens >= MAX_TOKENS;
 
     const isBf16 = state.precision === 'bf16';
     this.els.precisionBf16.classList.toggle('is-active', isBf16);
@@ -684,6 +733,8 @@ export class MacroControls {
       activeCutaway,
       activeExecution,
       this.boundaryInspectToken,
+      decodeSession,
+      this.selectedCandidateTokenId,
     );
 
     if (editorialKey !== this.lastEditorialKey) {
@@ -698,9 +749,10 @@ export class MacroControls {
           state.precision,
           state.tokens,
           activeExecution,
+          decodeSession,
         );
       } else {
-        this.renderCutawayEditorial(state, activePart, activeCutaway, activeExecution);
+        this.renderCutawayEditorial(state, activePart, activeCutaway, activeExecution, decodeSession);
       }
     }
   }
@@ -709,10 +761,12 @@ export class MacroControls {
     state: SceneState,
     cutaway: CutawaySceneGeometry | null,
     autoFollowManualPaused: boolean,
+    decodeSession: HybridDecodeSession | null = null,
   ): void {
     const isMamba = state.mode === 'cutaway_mamba';
     const isMoe = state.mode === 'cutaway_moe';
     const formula = cutaway?.activeFormula ?? null;
+    const activeDecodeStep = decodeSession ? getActiveDecodeStep(decodeSession) : null;
     const isPinnedCell = isMamba
       ? state.mambaSelectedCell !== null
       : isMoe
@@ -726,11 +780,23 @@ export class MacroControls {
 
     // Update honest miniature simulator disclaimer note inside accessible popover & tooltip
     const gqaEpsLabel = formatEpsLabel(cutaway?.gqaSim?.rmsEps ?? 1e-5);
+    const activeBayForTrace = isMamba ? state.mambaBayId : isMoe ? state.moeBayId : state.gqaBayId;
+    const traceOriginTag = activeDecodeStep
+      ? (() => {
+          const orig = activeDecodeStep.getLayerTraceOrigin(activeBayForTrace);
+          return orig === 'reconstructed_from_checkpoint'
+            ? ' · Reconstructed from checkpoint'
+            : ' · Computed this step';
+        })()
+      : '';
+    const modePrefix = activeDecodeStep
+      ? `Cached AR ${activeDecodeStep.provenance.stepKind} (${activeDecodeStep.provenance.branchId}, pos ${activeDecodeStep.provenance.tokenRange[0]}..${activeDecodeStep.provenance.tokenRange[1]}${traceOriginTag})`
+      : 'Unified 52-layer miniature';
     const noteText = isMamba
-      ? 'Unified 52-layer miniature Mamba-2 sim (d=8, 16H/8G, dₕ=4, dₛ=4, ε=1e−5; synthetic Float32, rounded) · BF16/FP8 = production metadata'
+      ? `${modePrefix} Mamba-2 sim (d=8, 16H/8G, dₕ=4, dₛ=4, ε=1e−5; synthetic Float32, rounded) · BF16/FP8 = production metadata`
       : isMoe
-        ? 'Unified 52-layer miniature MoE sim (d=8, 128E top-6, d_exp=4, d_shared=8, ×2.5, ε=1e−5; synthetic Float32, rounded) · BF16/FP8/FP32 = production metadata'
-        : `Unified 52-layer miniature GQA sim (d=8, 32Q/2KV, dₕ=4, NoPE, ε=${gqaEpsLabel}; synthetic Float32, rounded) · BF16/FP8 = production metadata`;
+        ? `${modePrefix} MoE sim (d=8, 128E top-6, d_exp=4, d_shared=8, ×2.5, ε=1e−5; synthetic Float32, rounded) · BF16/FP8/FP32 = production metadata`
+        : `${modePrefix} GQA sim (d=8, 32Q/2KV, dₕ=4, NoPE, ε=${gqaEpsLabel}; synthetic Float32, rounded) · BF16/FP8 = production metadata`;
     this.els.gqaFormulaNote.textContent = noteText;
     this.els.gqaFormulaNoteBtn.title = noteText;
 
@@ -762,48 +828,70 @@ export class MacroControls {
       this.els.gqaCellClear.hidden = true;
 
       if (isMamba) {
+        const sim = cutaway?.mambaSim;
+        const simT = sim?.tokens ?? state.tokens;
         const activeH = cutaway?.mambaStats?.activeHead ?? state.mambaActiveHead;
         const activeG = mambaGroupForHead(activeH);
-        const activeT =
-          cutaway?.mambaStats?.stateTokenIndex ?? state.mambaStateToken ?? Math.max(0, state.tokens - 1);
-        const tokLbl = cutaway?.mambaSim?.tokenLabels[activeT] ?? `t${activeT}`;
-        const zeroPads = Math.max(0, 3 - activeT);
+        const activeT = Math.min(
+          simT - 1,
+          cutaway?.mambaStats?.stateTokenIndex ?? state.mambaStateToken ?? Math.max(0, simT - 1),
+        );
+        const absT = (sim?.startTokenOffset ?? 0) + activeT;
+        const tokLbl = sim?.tokenLabels[activeT] ?? `t${absT}`;
+        const zeroPads = Math.max(0, 3 - absT);
         this.els.gqaFormulaTensor.textContent = `Miniature Mamba-2 · Bay ${formatBayId(state.mambaBayId)}`;
-        this.els.gqaFormulaCoord.textContent = `Active: ${formatMambaHeadId(activeH)} (G${activeG}) · t${activeT} "${tokLbl}"`;
+        this.els.gqaFormulaCoord.textContent = `Active: ${formatMambaHeadId(activeH)} (G${activeG}) · t${absT} "${tokLbl}"`;
         this.els.gqaFormulaEq.textContent =
-          zeroPads > 0
-            ? `Recurrence at t${activeT} "${tokLbl}": Conv1D left-pads ${zeroPads} tap${zeroPads === 1 ? '' : 's'} with 0; Hₜ updates in place inside fixed 47.1 MiB state.`
-            : 'Hover or click any matrix cell for rounded numerical explanations, step Recurrence t in the sidebar, or press Play.';
-        const tokPreview = cutaway?.mambaSim?.tokenLabels
-          ? cutaway.mambaSim.tokenLabels.map((tok, i) => `${i}:"${tok}"`).join(' ')
+          sim?.hasInitialState
+            ? `Cached AR step at t${absT} "${tokLbl}": carried Hₜ₋₁ & 4-tap Conv1D update in place inside fixed 69 KiB mini / 47.1 MiB prod state.`
+            : zeroPads > 0
+              ? `Recurrence at t${absT} "${tokLbl}": Conv1D left-pads ${zeroPads} tap${zeroPads === 1 ? '' : 's'} with 0; Hₜ updates in place inside fixed 47.1 MiB state.`
+              : 'Hover or click any matrix cell for rounded numerical explanations, step Recurrence t in the sidebar, or press Play.';
+        const tokPreview = sim?.tokenLabels
+          ? sim.tokenLabels.map((tok, i) => `${(sim.startTokenOffset ?? 0) + i}:"${tok}"`).join(' ')
           : '';
         this.els.gqaFormulaSub.textContent = tokPreview
-          ? `Educational token labels (T=${state.tokens}): ${tokPreview}`
+          ? sim?.hasInitialState
+            ? `Incremental step token (S=${simT}, carried prefix P=${sim.startTokenOffset}): ${tokPreview}`
+            : `Educational token labels (T=${simT}): ${tokPreview}`
           : '';
       } else if (isMoe) {
-        const fTok = cutaway?.moeStats?.focusToken ?? Math.max(0, state.tokens - 1);
+        const sim = cutaway?.moeSim;
+        const simT = sim?.tokens ?? state.tokens;
+        const fTok = Math.min(simT - 1, cutaway?.moeStats?.focusToken ?? Math.max(0, simT - 1));
+        const absTok = (sim?.startTokenOffset ?? 0) + fTok;
         const fExp = cutaway?.moeStats?.focusExpert ?? cutaway?.moeStats?.activeExpertIds[0] ?? 0;
-        const tokLabel = cutaway?.moeSim?.tokenLabels[fTok] ?? `t${fTok}`;
+        const tokLabel = sim?.tokenLabels[fTok] ?? `t${absTok}`;
         this.els.gqaFormulaTensor.textContent = `Miniature MoE 128+1 · Bay ${formatBayId(state.moeBayId)}`;
-        this.els.gqaFormulaCoord.textContent = `Focus: t${fTok} "${tokLabel}" · ${formatExpertId(fExp)}`;
+        this.els.gqaFormulaCoord.textContent = `Focus: t${absTok} "${tokLabel}" · ${formatExpertId(fExp)}`;
         this.els.gqaFormulaEq.textContent =
           'Hover or click any router tile, Top-6 slot, routed ReLU² cell, or 2× shared cell, or press Play to step through parallel MoE.';
         const topList = cutaway?.moeStats?.activeExpertIds?.map(formatExpertId).join(', ') ?? '';
         this.els.gqaFormulaSub.textContent = topList
-          ? `Top-6 active for t${fTok} "${tokLabel}": ${topList} (122 idle = 0 contrib) · 0 B token cache`
+          ? `Top-6 active for t${absTok} "${tokLabel}": ${topList} (122 idle = 0 contrib) · 0 B token cache`
           : '';
       } else {
+        const sim = cutaway?.gqaSim;
         const g0 = formatQueryHeadId(cutaway?.gqaStats?.activeGroup0Head ?? state.gqaActiveGroup0Head);
         const g1 = formatQueryHeadId(cutaway?.gqaStats?.activeGroup1Head ?? state.gqaActiveGroup1Head);
         this.els.gqaFormulaTensor.textContent = `Miniature GQA · Bay ${formatBayId(state.gqaBayId)}`;
-        this.els.gqaFormulaCoord.textContent = `Displayed: ${g0}→KV₀ · ${g1}→KV₁`;
+        this.els.gqaFormulaCoord.textContent =
+          sim && sim.prefixTokens > 0
+            ? `Rect [${sim.tokens}×${sim.keyTokens}] · ${g0}→KV₀ · ${g1}→KV₁`
+            : `Displayed: ${g0}→KV₀ · ${g1}→KV₁`;
         this.els.gqaFormulaEq.textContent =
-          'Hover or click any matrix cell for rounded numerical explanations, or press Play to step through causal attention.';
-        const tokPreview = cutaway?.gqaSim?.tokenLabels
-          ? cutaway.gqaSim.tokenLabels.map((tok, i) => `${i}:"${tok}"`).join(' ')
+          sim && sim.prefixTokens > 0
+            ? `Cached AR step: ${sim.tokens} query row attends ${sim.prefixTokens} reused prefix KV slots + ${sim.tokens} new KV slot (no prefix recompute).`
+            : 'Hover or click any matrix cell for rounded numerical explanations, or press Play to step through causal attention.';
+        const tokPreview = sim?.keyTokenLabels
+          ? sim.keyTokenLabels
+              .map((tok, i) => (sim.prefixTokens > 0 && i >= sim.prefixTokens ? `[new ${i}:"${tok}"]` : `${i}:"${tok}"`))
+              .join(' ')
           : '';
         this.els.gqaFormulaSub.textContent = tokPreview
-          ? `Educational token labels (T=${state.tokens}): ${tokPreview}`
+          ? sim && sim.prefixTokens > 0
+            ? `KV context (${sim.prefixTokens} cached + ${sim.tokens} new): ${tokPreview}`
+            : `Educational token labels (T=${state.tokens}): ${tokPreview}`
           : '';
       }
     }
@@ -981,8 +1069,290 @@ export class MacroControls {
   private setBoundaryInspectToken(tok: number): void {
     this.boundaryInspectToken = tok;
     if (this.lastSyncedState) {
-      this.sync(this.lastSyncedState, this.lastSyncedCutaway, false, this.lastSyncedExecution);
+      this.sync(
+        this.lastSyncedState,
+        this.lastSyncedCutaway,
+        false,
+        this.lastSyncedExecution,
+        this.lastSyncedDecodeSession,
+      );
     }
+  }
+
+  private setSelectedCandidateToken(tokenId: number): void {
+    this.selectedCandidateTokenId = tokenId;
+    if (this.lastSyncedState) {
+      this.sync(
+        this.lastSyncedState,
+        this.lastSyncedCutaway,
+        false,
+        this.lastSyncedExecution,
+        this.lastSyncedDecodeSession,
+      );
+    }
+  }
+
+  /**
+   * Lightweight interactive Cached Incremental AR Decode session panel (Gate B).
+   * Explicitly separates next-token prediction selection from inserting & executing the next step,
+   * contrasts growing GQA KV vs. fixed Mamba state vs. stateless MoE, and carries synthetic disclaimers.
+   */
+  private buildArDecodeSessionCard(
+    session: HybridDecodeSession,
+    precision: PrecisionMode,
+    mode: ViewMode,
+  ): HTMLDivElement {
+    const branch = getActiveDecodeBranch(session);
+    const step = getActiveDecodeStep(session);
+    const prov = step.provenance;
+    const acct = step.cacheAccounting;
+    const isFp8 = precision === 'fp8_selective';
+    const isHistoricalStep = session.activeStepIndex < branch.steps.length - 1;
+    const canStepMore = step.totalTokens < session.maxTokens;
+
+    const card = document.createElement('div');
+    card.className = 'ar-decode-card';
+    card.dataset.testid = 'ar-decode-panel';
+
+    // 1. Header with step kind, provenance & branch tag
+    const head = document.createElement('div');
+    head.className = 'ar-decode-head';
+    const title = document.createElement('span');
+    title.className = 'ar-decode-title';
+    const rangeStr =
+      prov.tokenRange[0] === prov.tokenRange[1]
+        ? `t${prov.tokenRange[0]}`
+        : `t${prov.tokenRange[0]}..t${prov.tokenRange[1]}`;
+    title.textContent = `AR Decode · Step ${session.activeStepIndex + 1}/${branch.steps.length} (${prov.stepKind} ${rangeStr})`;
+    const branchPill = document.createElement('span');
+    branchPill.className = 'ed-flow-tag ar-branch-tag';
+    branchPill.textContent = prov.branchId;
+    branchPill.title = `Step ID: ${prov.stepExecutionId}\nState digest: ${prov.nextStateDigest}`;
+    head.append(title, branchPill);
+    card.appendChild(head);
+
+    // Optional branch switcher when the user has forked alternative continuations
+    if (session.branches.size > 1) {
+      const brRow = document.createElement('div');
+      brRow.className = 'ar-branch-strip';
+      brRow.dataset.testid = 'ar-branch-strip';
+      const brLbl = document.createElement('span');
+      brLbl.className = 'ar-mini-label';
+      brLbl.textContent = 'Branches:';
+      brRow.appendChild(brLbl);
+      for (const [brId, brObj] of session.branches.entries()) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `ed-flow-tok-btn${brId === session.activeBranchId ? ' is-active' : ''}`;
+        btn.dataset.decodeBranch = brId;
+        const tipStep = brObj.steps[brObj.steps.length - 1];
+        const tipWord = tipStep.newTokenLabels[tipStep.newTokenLabels.length - 1] ?? '';
+        btn.textContent = `${brId} (${brObj.steps.length}s · "${tipWord}")`;
+        btn.addEventListener('click', () => this.cb.onDecodeSwitchBranch(brId));
+        brRow.appendChild(btn);
+      }
+      card.appendChild(brRow);
+    }
+
+    // 2. Cumulative sequence strip distinguishing cached prefix vs newly processed token(s)
+    const seqStrip = document.createElement('div');
+    seqStrip.className = 'ar-seq-strip';
+    seqStrip.dataset.testid = 'ar-seq-strip';
+    for (let i = 0; i < step.sequenceTokenLabels.length; i++) {
+      const chip = document.createElement('span');
+      const isNew = i >= step.prefixTokens;
+      chip.className = isNew ? 'ar-seq-chip is-new' : 'ar-seq-chip is-cached';
+      chip.textContent = `t${i} ${step.sequenceTokenLabels[i]}`;
+      chip.title = isNew
+        ? `Processed in this step (${prov.stepKind}) · vocab #${step.sequenceTokenIds[i]}`
+        : `Reused from cached prefix (0 KV recompute) · vocab #${step.sequenceTokenIds[i]}`;
+      seqStrip.appendChild(chip);
+    }
+    card.appendChild(seqStrip);
+
+    // 3. 3-Kind Cache State Comparison (Growing GQA KV vs Fixed Mamba vs Stateless MoE)
+    const cacheGrid = document.createElement('div');
+    cacheGrid.className = 'ar-cache-grid';
+    cacheGrid.dataset.testid = 'ar-cache-grid';
+
+    const makeCacheCell = (label: string, val: string, sub: string, cls: string) => {
+      const el = document.createElement('div');
+      el.className = `ar-cache-cell ${cls}`;
+      const l = document.createElement('span');
+      l.className = 'ar-cache-k';
+      l.textContent = label;
+      const v = document.createElement('span');
+      v.className = 'ar-cache-v';
+      v.textContent = val;
+      const s = document.createElement('span');
+      s.className = 'ar-cache-s';
+      s.textContent = sub;
+      el.append(l, v, s);
+      return el;
+    };
+
+    cacheGrid.append(
+      makeCacheCell(
+        'GQA KV (×6)',
+        `${step.totalTokens}/${session.maxTokens} · ${(acct.gqaPopulatedBytes / 1024).toFixed(2)} KiB`,
+        `grows +384 B/t · prod +${isFp8 ? '3' : '6'} KiB/t`,
+        'is-gqa',
+      ),
+      makeCacheCell(
+        'Mamba (×23)',
+        `FIXED ${(acct.mambaFixedBytes / 1024).toFixed(0)} KiB`,
+        'prod 47.1 MiB fixed',
+        'is-mamba',
+      ),
+      makeCacheCell('MoE (×23)', '0 B cache', 'stateless / token', 'is-moe'),
+    );
+    card.appendChild(cacheGrid);
+
+    // 4. History Navigation & Reset
+    const navRow = document.createElement('div');
+    navRow.className = 'ar-nav-row';
+
+    const prevBtn = document.createElement('button');
+    prevBtn.type = 'button';
+    prevBtn.className = 'mtemp-btn';
+    prevBtn.dataset.testid = 'ar-step-prev';
+    prevBtn.textContent = '◀ Prev';
+    prevBtn.disabled = session.activeStepIndex <= 0;
+    prevBtn.addEventListener('click', () => this.cb.onDecodeNavStep(session.activeStepIndex - 1));
+
+    const nextBtn = document.createElement('button');
+    nextBtn.type = 'button';
+    nextBtn.className = 'mtemp-btn';
+    nextBtn.dataset.testid = 'ar-step-next';
+    nextBtn.textContent = 'Next ▶';
+    nextBtn.disabled = session.activeStepIndex >= branch.steps.length - 1;
+    nextBtn.addEventListener('click', () => this.cb.onDecodeNavStep(session.activeStepIndex + 1));
+
+    const resetBtn = document.createElement('button');
+    resetBtn.type = 'button';
+    resetBtn.className = 'mtemp-btn ar-reset-btn';
+    resetBtn.dataset.testid = 'ar-decode-reset';
+    resetBtn.textContent = 'Reset';
+    resetBtn.title = 'Reset cached AR decode session back to 4-token prefill';
+    resetBtn.addEventListener('click', () => this.cb.onDecodeReset());
+
+    const snapInfo = document.createElement('span');
+    snapInfo.className = 'ar-snap-meta';
+    snapInfo.textContent = `${(acct.totalAllocatedBytes / 1024).toFixed(0)} KiB snap · ${step.prefixTokens}P+${step.tokens}S`;
+    snapInfo.title = `Allocated miniature snapshot: ${acct.totalAllocatedBytes.toLocaleString()} B (75 KiB) · ${step.prefixTokens} reused prefix + ${step.tokens} new`;
+
+    navRow.append(prevBtn, nextBtn, resetBtn, snapInfo);
+    card.appendChild(navRow);
+
+    // 5. Next-Token Prediction (Explicitly Separated from Subsequent Insertion & Processing!)
+    const preds = step.predictedNextTokens;
+    const stagedPred =
+      preds.find((p) => p.tokenId === this.selectedCandidateTokenId) ?? preds[0];
+    const maxProb = Math.max(0.05, preds[0]?.prob ?? 0.25);
+
+    const predHead = document.createElement('div');
+    predHead.className = 'ar-pred-head';
+    predHead.textContent = `Predicted Next Token at t${prov.tokenRange[1]} (Not Yet Inserted):`;
+    card.appendChild(predHead);
+
+    const candList = document.createElement('div');
+    candList.className = 'ar-cand-list';
+    candList.dataset.testid = 'ar-cand-list';
+    for (let i = 0; i < preds.length; i++) {
+      const pred = preds[i];
+      const isSelected = pred.tokenId === stagedPred.tokenId;
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = `ar-cand-row${isSelected ? ' is-selected' : ''}`;
+      row.dataset.decodeCandidate = String(pred.tokenId);
+      row.setAttribute('aria-pressed', String(isSelected));
+      row.title = `Select synthetic candidate "${pred.label}" (vocab #${pred.tokenId}) for insertion`;
+      row.addEventListener('click', () => this.setSelectedCandidateToken(pred.tokenId));
+
+      const rankEl = document.createElement('span');
+      rankEl.className = i === 0 ? 'ar-cand-rank is-greedy' : 'ar-cand-rank';
+      rankEl.textContent = i === 0 ? '★1' : `#${i + 1}`;
+
+      const word = document.createElement('span');
+      word.className = 'ed-flow-pred-word';
+      word.textContent = pred.label;
+
+      const track = document.createElement('div');
+      track.className = 'ed-flow-pred-track';
+      const bar = document.createElement('div');
+      bar.className = 'ed-flow-pred-bar';
+      bar.style.width = `${Math.max(4, Math.min(100, (pred.prob / maxProb) * 100)).toFixed(1)}%`;
+      track.appendChild(bar);
+
+      const prob = document.createElement('span');
+      prob.className = 'ed-flow-pred-prob';
+      prob.textContent = `${(pred.prob * 100).toFixed(1)}%`;
+
+      row.append(rankEl, word, track, prob);
+      candList.appendChild(row);
+    }
+    card.appendChild(candList);
+
+    // Explicit Separate Insertion & Execution Buttons
+    const actRow = document.createElement('div');
+    actRow.className = 'ar-actions-row';
+
+    const insertBtn = document.createElement('button');
+    insertBtn.type = 'button';
+    insertBtn.className = 'ed-cta-btn ar-insert-btn';
+    insertBtn.dataset.testid = 'ar-insert-selected';
+    insertBtn.disabled = !canStepMore;
+    insertBtn.textContent = !canStepMore
+      ? `Max ${session.maxTokens} tokens reached`
+      : isHistoricalStep
+        ? `⑂ Branch & Step "${stagedPred.label}" →`
+        : `+ Insert & Step "${stagedPred.label}" →`;
+    insertBtn.title = isHistoricalStep
+      ? `Fork a new branch from step ${session.activeStepIndex + 1} with "${stagedPred.label}" (preserves prior branch)`
+      : `Insert "${stagedPred.label}" at position t${step.totalTokens} and run 1 cached incremental step`;
+    insertBtn.addEventListener('click', () => this.cb.onDecodeStepToken(stagedPred.tokenId));
+
+    const greedyBtn = document.createElement('button');
+    greedyBtn.type = 'button';
+    greedyBtn.className = 'ed-cta-btn ed-cta-secondary ar-greedy-btn';
+    greedyBtn.dataset.testid = 'ar-step-greedy';
+    greedyBtn.disabled = !canStepMore;
+    greedyBtn.textContent = `Greedy "${step.greedyNextToken.label}"`;
+    greedyBtn.title = `Insert & process Greedy argmax candidate "${step.greedyNextToken.label}"`;
+    greedyBtn.addEventListener('click', () => this.cb.onDecodeStepGreedy());
+
+    actRow.append(insertBtn, greedyBtn);
+    card.appendChild(actRow);
+
+    // Quick links into truthful incremental cutaways when viewing the 52-Layer Tower
+    if (mode === 'tower') {
+      const cutRow = document.createElement('div');
+      cutRow.className = 'ar-cutaway-links';
+      const mkCutBtn = (label: string, kind: BayKind, bayId: number, testid: string) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'ed-flow-tok-btn';
+        b.dataset.testid = testid;
+        b.textContent = label;
+        b.addEventListener('click', () => this.cb.onInspectInternals(kind, bayId));
+        return b;
+      };
+      cutRow.append(
+        mkCutBtn(`GQA Bay 43 [${step.tokens}×${step.totalTokens}]`, '*', 43, 'ar-inspect-gqa'),
+        mkCutBtn(`Mamba Bay 01 (Hₜ)`, 'M', 1, 'ar-inspect-mamba'),
+        mkCutBtn(`MoE Bay 02 (0 B)`, 'E', 2, 'ar-inspect-moe'),
+      );
+      card.appendChild(cutRow);
+    }
+
+    // Explicit synthetic disclaimer
+    const disclaimer = document.createElement('div');
+    disclaimer.className = 'ed-flow-note ar-disclaimer';
+    disclaimer.textContent =
+      'Synthetic miniature AR output (d=8, V=32, Float32) · Not 31.6B checkpoint text. Timing/sizes reflect miniature demo, not production throughput.';
+    card.appendChild(disclaimer);
+
+    return card;
   }
 
   private buildEmbeddingNumericalCard(exec: HybridExecutionResult): HTMLDivElement {
@@ -1147,10 +1517,15 @@ export class MacroControls {
     precision: PrecisionMode,
     tokens: number,
     activeExecution: HybridExecutionResult | null = null,
+    decodeSession: HybridDecodeSession | null = null,
   ): void {
     const panel = this.els.editorialPanel;
     panel.classList.remove('is-tour-mode');
     panel.innerHTML = '';
+
+    if (decodeSession) {
+      panel.appendChild(this.buildArDecodeSessionCard(decodeSession, precision, 'tower'));
+    }
 
     if (bayId !== null) {
       const bay = this.spec.bays[bayId - 1];
@@ -1298,10 +1673,15 @@ export class MacroControls {
     activePart: string | null,
     cutaway: CutawaySceneGeometry | null,
     activeExecution: HybridExecutionResult | null = null,
+    decodeSession: HybridDecodeSession | null = null,
   ): void {
     const panel = this.els.editorialPanel;
     panel.classList.remove('is-tour-mode');
     panel.innerHTML = '';
+
+    if (decodeSession) {
+      panel.appendChild(this.buildArDecodeSessionCard(decodeSession, state.precision, state.mode));
+    }
 
     // 1. If user clicked/hovered a specific tensor slab inside the cutaway, show its details!
     const partInfo: CutawayPartInfo | undefined =
@@ -1407,16 +1787,17 @@ export class MacroControls {
       ];
     } else if (state.mode === 'cutaway_moe') {
       const fTok = cutaway?.moeStats?.focusToken ?? Math.max(0, state.tokens - 1);
-      const tokLabel = cutaway?.moeSim?.tokenLabels[fTok] ?? `t${fTok}`;
+      const absFTok = fTok + (cutaway?.moeSim?.startTokenOffset ?? 0);
+      const tokLabel = cutaway?.moeSim?.tokenLabels[fTok] ?? `t${absFTok}`;
       title.textContent =
         state.moeBayId === 52
           ? 'MoE 128+1 Cutaway · Bay 52 (Final)'
           : 'MoE 128+1 Cutaway · Bay 02';
-      badge.textContent = isFp8 ? 'FP8 Experts · FP32 Router' : `6 / 128 Active · t${fTok}`;
+      badge.textContent = isFp8 ? 'FP8 Experts · FP32 Router' : `6 / 128 Active · t${absFTok}`;
       if (isFp8) badge.classList.add('ed-badge-gold');
 
       bodyText =
-        `Runs a deterministic miniature MoE simulator (d=8, 128 routed top-6, d_exp=4, d_shared=8 = 2×, ×2.5; Float32 storage, rounded outputs). For token t${fTok} "${tokLabel}", RMSNorm forks in parallel into the sparse 128-expert bank (non-gated ReLU², no gate_proj) and the always-on 2× shared expert.`;
+        `Runs a deterministic miniature MoE simulator (d=8, 128 routed top-6, d_exp=4, d_shared=8 = 2×, ×2.5; Float32 storage, rounded outputs). For token t${absFTok} "${tokLabel}", RMSNorm forks in parallel into the sparse 128-expert bank (non-gated ReLU², no gate_proj) and the always-on 2× shared expert.`;
 
       specs = [
         ...(activeExecution
@@ -1509,7 +1890,12 @@ export class MacroControls {
     wrap.setAttribute('data-testid', 'moe-inspector-controls');
 
     const sim = cutaway?.moeSim ?? null;
-    const focusTok = cutaway?.moeStats?.focusToken ?? Math.max(0, state.tokens - 1);
+    const simTokens = sim?.tokens ?? state.tokens;
+    const focusTok = Math.min(
+      simTokens - 1,
+      cutaway?.moeStats?.focusToken ?? Math.max(0, simTokens - 1),
+    );
+    const absFocusTok = (sim?.startTokenOffset ?? 0) + focusTok;
     const focusExp = cutaway?.moeStats?.focusExpert ?? cutaway?.moeStats?.activeExpertIds[0] ?? 0;
 
     // 1. Focused Token Row + Lightweight Per-Token Cycling (0 B sequence cache!)
@@ -1517,8 +1903,8 @@ export class MacroControls {
     tokTop.className = 'qhead-top-row';
     const tokHeading = document.createElement('span');
     tokHeading.className = 'qhead-heading';
-    const tokLabel = sim?.tokenLabels[focusTok] ?? `t${focusTok}`;
-    tokHeading.textContent = `Focused Token: t${focusTok} "${tokLabel}" (${focusTok + 1}/${state.tokens})`;
+    const tokLabel = sim?.tokenLabels[focusTok] ?? `t${absFocusTok}`;
+    tokHeading.textContent = `Focused Token: t${absFocusTok} "${tokLabel}" (${focusTok + 1}/${simTokens})`;
     tokTop.appendChild(tokHeading);
     wrap.appendChild(tokTop);
 
@@ -1531,7 +1917,7 @@ export class MacroControls {
     prevTokBtn.dataset.testid = 'moe-t-prev';
     prevTokBtn.textContent = '◀';
     prevTokBtn.title = 'Previous token (t − 1)';
-    prevTokBtn.disabled = state.tokens <= 1;
+    prevTokBtn.disabled = simTokens <= 1;
     prevTokBtn.addEventListener('click', () => this.cb.onStepMoeFocusToken(-1));
 
     const cycleBtn = document.createElement('button');
@@ -1542,7 +1928,7 @@ export class MacroControls {
     cycleBtn.dataset.testid = 'moe-t-cycle';
     cycleBtn.textContent = state.moeTokenCycling ? '❚❚ Pause t' : '▶ Cycle t';
     cycleBtn.title = 'Cycle tokens t = 0 → T−1 to watch Top-6 active experts switch independently (0 B cache)';
-    cycleBtn.disabled = state.tokens <= 1;
+    cycleBtn.disabled = simTokens <= 1;
     cycleBtn.setAttribute('aria-pressed', String(state.moeTokenCycling));
     cycleBtn.addEventListener('click', () => this.cb.onToggleMoeTokenCycle());
 
@@ -1552,7 +1938,7 @@ export class MacroControls {
     nextTokBtn.dataset.testid = 'moe-t-next';
     nextTokBtn.textContent = '▶';
     nextTokBtn.title = 'Next token (t + 1)';
-    nextTokBtn.disabled = state.tokens <= 1;
+    nextTokBtn.disabled = simTokens <= 1;
     nextTokBtn.addEventListener('click', () => this.cb.onStepMoeFocusToken(1));
 
     cycleRow.append(prevTokBtn, cycleBtn, nextTokBtn);
@@ -1560,14 +1946,15 @@ export class MacroControls {
 
     const tokGrid = document.createElement('div');
     tokGrid.className = 'moe-token-grid';
-    for (let t = 0; t < state.tokens; t++) {
+    for (let t = 0; t < simTokens; t++) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'moe-tok-btn';
       btn.dataset.moeToken = String(t);
+      const absT = (sim?.startTokenOffset ?? 0) + t;
       const lbl = sim?.tokenLabels[t] ?? '';
-      btn.textContent = `t${t} ${lbl}`;
-      btn.title = `Inspect routing for token t${t} "${lbl}"`;
+      btn.textContent = `t${absT} ${lbl}`;
+      btn.title = `Inspect routing for token t${absT} "${lbl}"`;
       const isSel = t === focusTok;
       btn.classList.toggle('is-selected', isSel);
       btn.setAttribute('aria-pressed', String(isSel));
@@ -1580,7 +1967,7 @@ export class MacroControls {
     if (sim) {
       const expTop = document.createElement('div');
       expTop.className = 'qhead-group-label';
-      expTop.textContent = `Top-6 Active Experts for t${focusTok} (×2.5 scaled, click to inspect):`;
+      expTop.textContent = `Top-6 Active Experts for t${absFocusTok} (×2.5 scaled, click to inspect):`;
       wrap.appendChild(expTop);
 
       const expGrid = document.createElement('div');
@@ -1683,30 +2070,39 @@ export class MacroControls {
     wrap.setAttribute('data-testid', 'mamba-temporal-controls');
 
     const sim = cutaway?.mambaSim ?? null;
+    const simTokens = sim?.tokens ?? state.tokens;
     const tok = Math.max(
       0,
       Math.min(
-        state.tokens - 1,
-        cutaway?.mambaStats?.stateTokenIndex ?? state.mambaStateToken ?? state.tokens - 1,
+        simTokens - 1,
+        cutaway?.mambaStats?.stateTokenIndex ?? state.mambaStateToken ?? simTokens - 1,
       ),
     );
-    const tokLabel = sim?.tokenLabels[tok] ?? `t${tok}`;
-    const zeroPads = Math.max(0, 3 - tok);
+    const absTok = (sim?.startTokenOffset ?? 0) + tok;
+    const tokLabel = sim?.tokenLabels[tok] ?? `t${absTok}`;
+    const zeroPads = Math.max(0, 3 - absTok);
 
     const topRow = document.createElement('div');
     topRow.className = 'qhead-top-row';
     const heading = document.createElement('span');
     heading.className = 'qhead-heading';
-    heading.textContent = `Recurrence t${tok} "${tokLabel}" (${tok + 1}/${state.tokens})`;
+    heading.textContent = `Recurrence t${absTok} "${tokLabel}" (${tok + 1}/${simTokens})`;
     topRow.appendChild(heading);
 
     const padPill = document.createElement('span');
     padPill.className = zeroPads > 0 ? 'mtemp-pad-pill is-padded' : 'mtemp-pad-pill';
-    padPill.textContent = zeroPads > 0 ? `${zeroPads} zero-pad` : 'full 4-tap';
+    padPill.textContent =
+      zeroPads > 0
+        ? `${zeroPads} zero-pad`
+        : sim?.hasInitialState
+          ? 'carried 4-tap'
+          : 'full 4-tap';
     padPill.title =
       zeroPads > 0
-        ? `Causal Conv1D left-pads ${zeroPads} slot${zeroPads === 1 ? '' : 's'} with 0 at t=${tok}`
-        : 'All 4 causal Conv1D taps hold live token inputs (t−3..t)';
+        ? `Causal Conv1D left-pads ${zeroPads} slot${zeroPads === 1 ? '' : 's'} with 0 at t=${absTok}`
+        : sim?.hasInitialState
+          ? '3 taps carried from prior Conv1D boundary state + 1 newly computed tap'
+          : 'All 4 causal Conv1D taps hold live token inputs (t−3..t)';
     topRow.appendChild(padPill);
     wrap.appendChild(topRow);
 
@@ -1719,7 +2115,7 @@ export class MacroControls {
     prevBtn.dataset.testid = 'mamba-t-prev';
     prevBtn.textContent = '◀';
     prevBtn.title = 'Previous recurrence token (t − 1)';
-    prevBtn.disabled = state.tokens <= 1;
+    prevBtn.disabled = simTokens <= 1;
     prevBtn.addEventListener('click', () => this.cb.onStepMambaStateToken(-1));
 
     const playBtn = document.createElement('button');
@@ -1731,7 +2127,7 @@ export class MacroControls {
     playBtn.textContent = state.mambaTemporalPlaying ? '❚❚ Pause t' : '▶ Step t';
     playBtn.title =
       'Play token recurrence t = 0 → T−1 to watch Conv1D shift & Hₜ overwrite in place';
-    playBtn.disabled = state.tokens <= 1;
+    playBtn.disabled = simTokens <= 1;
     playBtn.setAttribute('aria-pressed', String(state.mambaTemporalPlaying));
     playBtn.addEventListener('click', () => this.cb.onToggleMambaTemporalPlay());
 
@@ -1741,7 +2137,7 @@ export class MacroControls {
     nextBtn.dataset.testid = 'mamba-t-next';
     nextBtn.textContent = '▶';
     nextBtn.title = 'Next recurrence token (t + 1)';
-    nextBtn.disabled = state.tokens <= 1;
+    nextBtn.disabled = simTokens <= 1;
     nextBtn.addEventListener('click', () => this.cb.onStepMambaStateToken(1));
 
     ctrlRow.append(prevBtn, playBtn, nextBtn);
@@ -1760,14 +2156,15 @@ export class MacroControls {
 
     const tokGrid = document.createElement('div');
     tokGrid.className = 'mtemp-token-grid';
-    for (let t = 0; t < state.tokens; t++) {
+    for (let t = 0; t < simTokens; t++) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'mtemp-tok-btn';
       btn.dataset.mambaToken = String(t);
+      const absT = (sim?.startTokenOffset ?? 0) + t;
       const lbl = sim?.tokenLabels[t] ?? '';
-      btn.textContent = `t${t}`;
-      btn.title = `Inspect recurrence at t${t} "${lbl}"`;
+      btn.textContent = `t${absT}`;
+      btn.title = `Inspect recurrence at t${absT} "${lbl}"`;
       const isSel = t === tok;
       btn.classList.toggle('is-selected', isSel);
       btn.setAttribute('aria-pressed', String(isSel));

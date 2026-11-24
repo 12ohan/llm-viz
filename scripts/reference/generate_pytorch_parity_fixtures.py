@@ -78,29 +78,43 @@ def gqa_forward_ref(
     n_q: int = 32,
     n_kv: int = 2,
     d_head: int = 4,
+    kv_cache_in: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
-    """32Q / 2KV NoPE GQA Attention forward pass matching NemotronHAttention."""
-    T = x.shape[1]
+    """32Q / 2KV NoPE GQA Attention forward pass (full-sequence or rectangular cached [n_q, S, P+S])."""
+    S = x.shape[1]
     q_concat = n_q * d_head  # 128
 
     rn = rmsnorm_ref(x, gamma, eps)
-    u_t_d = rn["U"].transpose(0, 1)  # [T, d]
+    u_t_d = rn["U"].transpose(0, 1)  # [S, d]
 
-    q_flat = F.linear(u_t_d, w_q, bias=None).transpose(0, 1).contiguous()  # [128, T]
-    k_flat = F.linear(u_t_d, w_k, bias=None).transpose(0, 1).contiguous()  # [8, T]
-    v_flat = F.linear(u_t_d, w_v, bias=None).transpose(0, 1).contiguous()  # [8, T]
+    q_flat = F.linear(u_t_d, w_q, bias=None).transpose(0, 1).contiguous()      # [128, S]
+    k_new = F.linear(u_t_d, w_k, bias=None).transpose(0, 1).contiguous()       # [8, S]
+    v_new = F.linear(u_t_d, w_v, bias=None).transpose(0, 1).contiguous()       # [8, S]
 
-    q_h = q_flat.view(n_q, d_head, T).transpose(1, 2)  # [32, T, 4]
-    k_h = k_flat.view(n_kv, d_head, T).transpose(1, 2).repeat_interleave(n_q // n_kv, dim=0)
-    v_h = v_flat.view(n_kv, d_head, T).transpose(1, 2).repeat_interleave(n_q // n_kv, dim=0)
+    if kv_cache_in is not None and kv_cache_in[0].shape[1] > 0:
+        k_prev, v_prev = kv_cache_in
+        P = k_prev.shape[1]
+        k_flat = torch.cat([k_prev, k_new], dim=1).contiguous()                # [8, P+S]
+        v_flat = torch.cat([v_prev, v_new], dim=1).contiguous()                # [8, P+S]
+    else:
+        P = 0
+        k_flat = k_new
+        v_flat = v_new
 
-    scores = torch.matmul(q_h, k_h.transpose(-1, -2)) / math.sqrt(d_head)  # [32, T, T]
-    causal_mask = torch.triu(torch.ones((T, T), dtype=torch.bool), diagonal=1)
+    K_len = P + S
+    q_h = q_flat.view(n_q, d_head, S).transpose(1, 2)                          # [32, S, 4]
+    k_h = k_flat.view(n_kv, d_head, K_len).transpose(1, 2).repeat_interleave(n_q // n_kv, dim=0)
+    v_h = v_flat.view(n_kv, d_head, K_len).transpose(1, 2).repeat_interleave(n_q // n_kv, dim=0)
+
+    scores = torch.matmul(q_h, k_h.transpose(-1, -2)) / math.sqrt(d_head)      # [32, S, P+S]
+    q_pos = torch.arange(P, P + S, dtype=torch.long).unsqueeze(1)              # [S, 1]
+    k_pos = torch.arange(0, K_len, dtype=torch.long).unsqueeze(0)              # [1, P+S]
+    causal_mask = k_pos > q_pos                                                # [S, P+S]
     scores_masked = scores.masked_fill(causal_mask.unsqueeze(0), float("-inf"))
-    softmax = F.softmax(scores_masked, dim=-1)  # [32, T, T]
+    softmax = F.softmax(scores_masked, dim=-1)                                 # [32, S, P+S]
 
-    v_out_h = torch.matmul(softmax, v_h)  # [32, T, 4]
-    v_out_flat = v_out_h.transpose(1, 2).contiguous().view(q_concat, T)  # [128, T]
+    v_out_h = torch.matmul(softmax, v_h)                                       # [32, S, 4]
+    v_out_flat = v_out_h.transpose(1, 2).contiguous().view(q_concat, S)        # [128, S]
     attn_out = F.linear(v_out_flat.transpose(0, 1), w_o, bias=None).transpose(0, 1).contiguous()
     y = x + attn_out
 
@@ -134,8 +148,10 @@ def mamba2_forward_ref(
     d_head: int = 4,
     d_state: int = 4,
     k_conv: int = 4,
+    conv_state_in: torch.Tensor | None = None,
+    ssm_state_in: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Mamba-2 forward pass matching NemotronHMamba2Mixer + MambaRMSNormGated (norm_before_gate=False)."""
+    """Mamba-2 forward pass (full-sequence or externally seeded incremental state)."""
     T = x.shape[1]
     d_inner = n_heads * d_head                    # 64
     conv_dim = d_inner + 2 * n_groups * d_state   # 128
@@ -147,9 +163,22 @@ def mamba2_forward_ref(
     xbc_pre = proj[d_inner : d_inner + conv_dim]
     dt_raw = proj[d_inner + conv_dim :]
 
-    xbc_padded = F.pad(xbc_pre.unsqueeze(0), (k_conv - 1, 0))
-    conv_out = F.conv1d(xbc_padded, w_conv.unsqueeze(1), b_conv, groups=conv_dim).squeeze(0)
+    if conv_state_in is not None:
+        # Prior slots [1..k_conv-1] (last k_conv-1 prior taps) prepended before current xbc_pre
+        prefix_taps = conv_state_in[:, 1:]  # [conv_dim, k_conv - 1]
+    else:
+        prefix_taps = torch.zeros((conv_dim, k_conv - 1), dtype=torch.float32)
+
+    xbc_padded = torch.cat([prefix_taps, xbc_pre], dim=1)  # [conv_dim, k_conv - 1 + T]
+    conv_out = F.conv1d(xbc_padded.unsqueeze(0), w_conv.unsqueeze(1), b_conv, groups=conv_dim).squeeze(0)
     xbc = F.silu(conv_out)
+
+    # Next 4-tap rolling conv_state = final k_conv columns of [conv_state_in or 0, xbc_pre]
+    if conv_state_in is not None:
+        conv_hist = torch.cat([conv_state_in, xbc_pre], dim=1)
+    else:
+        conv_hist = torch.cat([torch.zeros((conv_dim, k_conv), dtype=torch.float32), xbc_pre], dim=1)
+    conv_state_out = conv_hist[:, -k_conv:].contiguous()
 
     x_ssm = xbc[:d_inner].view(n_heads, d_head, T)
     b_ssm = xbc[d_inner : d_inner + n_groups * d_state].view(n_groups, d_state, T)
@@ -159,8 +188,12 @@ def mamba2_forward_ref(
     dt = F.softplus(dt_raw + dt_bias.unsqueeze(1))
     da = torch.exp(dt * a_decay.unsqueeze(1))
 
-    h_state = torch.zeros((n_heads, d_head, d_state), dtype=torch.float32)
-    h_prev = torch.zeros_like(h_state)
+    h_state = (
+        ssm_state_in.clone().to(torch.float32)
+        if ssm_state_in is not None
+        else torch.zeros((n_heads, d_head, d_state), dtype=torch.float32)
+    )
+    h_prev = h_state.clone()
     y_ssm = torch.zeros((n_heads, d_head, T), dtype=torch.float32)
     heads_per_group = n_heads // n_groups
 
@@ -191,6 +224,7 @@ def mamba2_forward_ref(
     return {
         "U": rn["U"],
         "conv_out": conv_out,
+        "conv_state": conv_state_out,
         "dt": dt,
         "dA": da,
         "H_prev": h_prev,
@@ -629,6 +663,270 @@ def build_52layer_end_to_end_fixture(manifest_path: Path) -> dict[str, Any]:
     }
 
 
+def build_52layer_incremental_decode_fixture(
+    manifest_path: Path,
+    full_e2e_payload: dict[str, Any],
+    gen: torch.Generator,
+) -> dict[str, Any]:
+    """
+    Execute cached incremental 52-layer AR decoding in PyTorch 2.15.0:
+      Step 0 (prefill): [2, 5, 2]
+      Step 1 (decode):  [11]
+      Step 2 (decode):  [0]
+      Step 3 (decode):  [19]
+    Matches full sequence [2, 5, 2, 11, 0, 19] AND verifies an externally supplied non-zero
+    boundary state continuation for both Mamba-2 and rectangular GQA.
+    """
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw_bytes = Path(manifest["weightsFile"]).read_bytes()
+    actual_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+    if actual_sha256 != manifest["weightsSha256"]:
+        raise RuntimeError(
+            f"Weight file SHA-256 mismatch: {actual_sha256} != {manifest['weightsSha256']}"
+        )
+
+    floats = array.array("f")
+    floats.frombytes(raw_bytes)
+    flat_tensor = torch.tensor(floats, dtype=torch.float32)
+
+    tensor_map: dict[str, torch.Tensor] = {}
+    for entry in manifest["tensors"]:
+        off = entry["offsetFloats"]
+        length = entry["length"]
+        tensor_map[entry["name"]] = flat_tensor[off : off + length]
+
+    d = int(manifest["d"])
+    vocab_size = int(manifest["vocabSize"])
+    eps = float(manifest["rmsNormEps"])
+    pattern: str = manifest["pattern"]
+    num_layers = len(pattern)
+
+    w_embed = tensor_map["W_embed"].view(vocab_size, d)
+    final_gamma = tensor_map["finalNormGamma"].view(d)
+    w_lm_head = tensor_map["W_lm_head"].view(vocab_size, d)
+
+    mamba_conv_states: dict[int, torch.Tensor] = {}
+    mamba_ssm_states: dict[int, torch.Tensor] = {}
+    gqa_kv_caches: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+
+    step_chunks = [[2, 5, 2], [11], [0], [19]]
+    steps_out: list[dict[str, Any]] = []
+    prefix_tokens = 0
+    full_logits_ref = torch.tensor(full_e2e_payload["lmHead"]["logits"], dtype=torch.float32).view(vocab_size, 6)
+
+    for step_idx, chunk in enumerate(step_chunks):
+        S = len(chunk)
+        token_ids = torch.tensor(chunk, dtype=torch.long)
+        x_curr = F.embedding(token_ids, w_embed).transpose(0, 1).contiguous()
+        residual_streams: list[list[float]] = [to_f32_list(x_curr)]
+
+        bay01_trace: dict[str, Any] | None = None
+        bay43_trace: dict[str, Any] | None = None
+
+        for bay_id in range(1, num_layers + 1):
+            kind = pattern[bay_id - 1]
+            p = f"bay_{bay_id:02d}"
+            if kind == "M":
+                out = mamba2_forward_ref(
+                    x_curr,
+                    gamma_in=tensor_map[f"{p}.gamma_in"].view(d),
+                    w_in=tensor_map[f"{p}.W_in"].view(208, d),
+                    w_conv=tensor_map[f"{p}.w_conv"].view(128, 4),
+                    b_conv=tensor_map[f"{p}.b_conv"].view(128),
+                    a_log=tensor_map[f"{p}.A_log"].view(16),
+                    dt_bias=tensor_map[f"{p}.dt_bias"].view(16),
+                    d_skip=tensor_map[f"{p}.D"].view(16),
+                    gamma_gate=tensor_map[f"{p}.gamma_gate"].view(64),
+                    w_out=tensor_map[f"{p}.W_out"].view(d, 64),
+                    eps=eps,
+                    conv_state_in=mamba_conv_states.get(bay_id),
+                    ssm_state_in=mamba_ssm_states.get(bay_id),
+                )
+                mamba_conv_states[bay_id] = out["conv_state"]
+                mamba_ssm_states[bay_id] = out["H"]
+                if bay_id == 1:
+                    bay01_trace = {
+                        "convState": to_f32_list(out["conv_state"]),
+                        "HPrev": to_f32_list(out["H_prev"]),
+                        "H": to_f32_list(out["H"]),
+                        "Y": to_f32_list(out["Y"]),
+                    }
+                x_curr = out["Y"]
+            elif kind == "E":
+                out = moe_forward_ref(
+                    x_curr,
+                    gamma_in=tensor_map[f"{p}.gamma_in"].view(d),
+                    w_router=tensor_map[f"{p}.W_router"].view(128, d),
+                    e_bias=tensor_map[f"{p}.e_score_correction_bias"].view(128),
+                    w_up=tensor_map[f"{p}.W_up"].view(128, 4, d),
+                    w_down=tensor_map[f"{p}.W_down"].view(128, d, 4),
+                    w_up_s=tensor_map[f"{p}.W_up_s"].view(8, d),
+                    w_down_s=tensor_map[f"{p}.W_down_s"].view(d, 8),
+                    eps=eps,
+                )
+                x_curr = out["Y"]
+            elif kind == "*":
+                out = gqa_forward_ref(
+                    x_curr,
+                    gamma=tensor_map[f"{p}.gamma"].view(d),
+                    w_q=tensor_map[f"{p}.W_Q"].view(128, d),
+                    w_k=tensor_map[f"{p}.W_K"].view(8, d),
+                    w_v=tensor_map[f"{p}.W_V"].view(8, d),
+                    w_o=tensor_map[f"{p}.W_O"].view(d, 128),
+                    eps=eps,
+                    kv_cache_in=gqa_kv_caches.get(bay_id),
+                )
+                gqa_kv_caches[bay_id] = (out["K"], out["V"])
+                if bay_id == 43:
+                    scores_json: list[float | None] = [
+                        None if math.isinf(v) else float(v)
+                        for v in out["Scores"].reshape(-1).tolist()
+                    ]
+                    bay43_trace = {
+                        "K": to_f32_list(out["K"]),
+                        "V": to_f32_list(out["V"]),
+                        "Scores": scores_json,
+                        "Softmax": to_f32_list(out["Softmax"]),
+                        "Y": to_f32_list(out["Y"]),
+                    }
+                x_curr = out["Y"]
+            else:
+                raise ValueError(f"Unexpected layer kind {kind!r} at bay {bay_id}")
+
+            residual_streams.append(to_f32_list(x_curr))
+
+        lm = lm_head_forward_ref(x_curr, final_gamma, w_lm_head, eps)
+
+        # Internal PyTorch self-check: cached incremental logits MUST match PyTorch full-sequence logits
+        ref_slice = full_logits_ref[:, prefix_tokens : prefix_tokens + S]
+        pt_inc_err = float((lm["logits"] - ref_slice).abs().max().item())
+        if pt_inc_err > 1e-5:
+            raise RuntimeError(
+                f"PyTorch incremental vs full mismatch at step {step_idx}: maxAbs={pt_inc_err}"
+            )
+
+        top5_by_token: list[list[int]] = []
+        for t in range(S):
+            _, top5 = torch.topk(lm["logits"][:, t], k=5, largest=True, sorted=True)
+            top5_by_token.append([int(v) for v in top5.tolist()])
+
+        steps_out.append({
+            "stepIndex": step_idx,
+            "prefixTokens": prefix_tokens,
+            "newTokenIds": chunk,
+            "residualStreams": residual_streams,
+            "logits": to_f32_list(lm["logits"]),
+            "probs": to_f32_list(lm["probs"]),
+            "top5TokenIdsByToken": top5_by_token,
+            "bay01Trace": bay01_trace,
+            "bay43Trace": bay43_trace,
+        })
+        prefix_tokens += S
+
+    # Export final cached boundary snapshots for representative Mamba bays and all 6 GQA bays
+    final_mamba_bays = {
+        str(b): {
+            "convState": to_f32_list(mamba_conv_states[b]),
+            "ssmState": to_f32_list(mamba_ssm_states[b]),
+        }
+        for b in [1, 12, 33, 51]
+    }
+    final_gqa_bays = {
+        str(b): {
+            "K": to_f32_list(gqa_kv_caches[b][0]),
+            "V": to_f32_list(gqa_kv_caches[b][1]),
+        }
+        for b in sorted(gqa_kv_caches.keys())
+    }
+
+    # Arbitrary externally supplied non-zero boundary state verification (Bay 01 Mamba + Bay 43 GQA)
+    ext_x_m = torch.randn((d, 1), generator=gen, dtype=torch.float32) * 0.85
+    ext_conv_in = torch.randn((128, 4), generator=gen, dtype=torch.float32) * 0.45
+    ext_ssm_in = torch.randn((16, 4, 4), generator=gen, dtype=torch.float32) * 0.35
+    p1 = "bay_01"
+    ext_m_out = mamba2_forward_ref(
+        ext_x_m,
+        gamma_in=tensor_map[f"{p1}.gamma_in"].view(d),
+        w_in=tensor_map[f"{p1}.W_in"].view(208, d),
+        w_conv=tensor_map[f"{p1}.w_conv"].view(128, 4),
+        b_conv=tensor_map[f"{p1}.b_conv"].view(128),
+        a_log=tensor_map[f"{p1}.A_log"].view(16),
+        dt_bias=tensor_map[f"{p1}.dt_bias"].view(16),
+        d_skip=tensor_map[f"{p1}.D"].view(16),
+        gamma_gate=tensor_map[f"{p1}.gamma_gate"].view(64),
+        w_out=tensor_map[f"{p1}.W_out"].view(d, 64),
+        eps=eps,
+        conv_state_in=ext_conv_in,
+        ssm_state_in=ext_ssm_in,
+    )
+
+    ext_p_kv = 3
+    ext_x_g = torch.randn((d, 1), generator=gen, dtype=torch.float32) * 0.85
+    ext_k_in = torch.randn((8, ext_p_kv), generator=gen, dtype=torch.float32) * 0.65
+    ext_v_in = torch.randn((8, ext_p_kv), generator=gen, dtype=torch.float32) * 0.65
+    p43 = "bay_43"
+    ext_g_out = gqa_forward_ref(
+        ext_x_g,
+        gamma=tensor_map[f"{p43}.gamma"].view(d),
+        w_q=tensor_map[f"{p43}.W_Q"].view(128, d),
+        w_k=tensor_map[f"{p43}.W_K"].view(8, d),
+        w_v=tensor_map[f"{p43}.W_V"].view(8, d),
+        w_o=tensor_map[f"{p43}.W_O"].view(d, 128),
+        eps=eps,
+        kv_cache_in=(ext_k_in, ext_v_in),
+    )
+
+    return {
+        "metadata": {
+            "generator": "scripts/reference/generate_pytorch_parity_fixtures.py",
+            "pythonVersion": platform.python_version(),
+            "torchVersion": torch.__version__,
+            "pinnedTorchVersion": PINNED_TORCH_VERSION,
+            "referenceArchitecture": "NVIDIA NemotronH 52-Layer Cached Incremental AR Decode",
+            "tolerances": {
+                "residualCheckpointMaxAbs": 2e-5,
+                "lmHeadLogitsMaxAbs": 5e-5,
+                "lmHeadProbsMaxAbs": 2e-5,
+                "cacheStateMaxAbs": 2e-5,
+                "gqaScoresMaxAbs": 2e-5,
+                "gqaSoftmaxMaxAbs": 2e-5,
+            },
+        },
+        "modelId": manifest["modelId"],
+        "parameterFingerprint": manifest["parameterFingerprint"],
+        "weightsSha256": actual_sha256,
+        "totalWeightFloats": manifest["totalFloats"],
+        "pattern": pattern,
+        "steps": steps_out,
+        "finalCacheCheckpoints": {
+            "mamba": final_mamba_bays,
+            "gqa": final_gqa_bays,
+        },
+        "externalSeededSingleSteps": {
+            "bay01Mamba": {
+                "X": to_f32_list(ext_x_m),
+                "convStateIn": to_f32_list(ext_conv_in),
+                "ssmStateIn": to_f32_list(ext_ssm_in),
+                "convStateOut": to_f32_list(ext_m_out["conv_state"]),
+                "HPrev": to_f32_list(ext_m_out["H_prev"]),
+                "HOut": to_f32_list(ext_m_out["H"]),
+                "Y": to_f32_list(ext_m_out["Y"]),
+            },
+            "bay43Gqa": {
+                "prefixTokens": ext_p_kv,
+                "X": to_f32_list(ext_x_g),
+                "KIn": to_f32_list(ext_k_in),
+                "VIn": to_f32_list(ext_v_in),
+                "KOut": to_f32_list(ext_g_out["K"]),
+                "VOut": to_f32_list(ext_g_out["V"]),
+                "Scores": [float(v) for v in ext_g_out["Scores"].reshape(-1).tolist()],
+                "Softmax": to_f32_list(ext_g_out["Softmax"]),
+                "Y": to_f32_list(ext_g_out["Y"]),
+            },
+        },
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate Nemotron 3 Nano PyTorch parity fixtures.")
     parser.add_argument(
@@ -690,6 +988,11 @@ def main() -> None:
         e2e_out = fixtures_dir / "pytorch-52layer-parity.json"
         e2e_out.write_text(json.dumps(e2e_payload, separators=(",", ":")) + "\n", encoding="utf-8")
         print(f"Wrote 52-layer end-to-end PyTorch parity fixtures ({e2e_out.stat().st_size:,} bytes) -> {e2e_out}")
+
+        inc_payload = build_52layer_incremental_decode_fixture(args.model_manifest, e2e_payload, gen)
+        inc_out = fixtures_dir / "pytorch-incremental-52layer-parity.json"
+        inc_out.write_text(json.dumps(inc_payload, separators=(",", ":")) + "\n", encoding="utf-8")
+        print(f"Wrote 52-layer incremental decode PyTorch parity fixtures ({inc_out.stat().st_size:,} bytes) -> {inc_out}")
 
 
 if __name__ == "__main__":
