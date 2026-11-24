@@ -203,6 +203,173 @@ export function fitPerspectiveToBounds(
   };
 }
 
+export interface OpBoundsFitOptions {
+  readonly azimuthDeg?: number;
+  readonly elevationDeg?: number;
+  readonly fovDeg?: number;
+  readonly topInsetPx?: number;
+  readonly bottomInsetPx?: number;
+  readonly leftInsetPx?: number;
+  readonly rightInsetPx?: number;
+  /** Target fill fraction of the unobstructed viewport band (defaults to 0.80, i.e. ~75–85%). */
+  readonly fillFraction?: number;
+  readonly fillX?: number;
+  readonly fillY?: number;
+  readonly isNarrow?: boolean;
+  readonly minDistance?: number;
+}
+
+/**
+ * Projective, inset-aware perspective camera fitter for any operation AABB.
+ * Computes the tightest perspective distance that frames every corner of `bounds`
+ * inside the unobstructed canvas band `[leftInset, innerWidth - rightInset] × [topInset, innerHeight - bottomInset]`
+ * at ~75–85% fill (default 0.80), shifting the camera target along screen-up / screen-right
+ * so the operation cluster sits centered between the floating top toolbar and bottom Math Dock.
+ */
+export function fitOpBoundsCamera(
+  bounds: AABB,
+  metrics: ViewportMetrics,
+  options?: OpBoundsFitOptions,
+): CameraPose {
+  const safeW = Math.max(1, Number.isFinite(metrics.innerWidth) ? metrics.innerWidth : 960);
+  const safeH = Math.max(1, Number.isFinite(metrics.innerHeight) ? metrics.innerHeight : 640);
+  const isNarrow = options?.isNarrow ?? safeW < 760;
+
+  const azimuthDeg = Number.isFinite(options?.azimuthDeg)
+    ? options!.azimuthDeg!
+    : isNarrow
+      ? 17
+      : 20;
+  const rawElevation = Number.isFinite(options?.elevationDeg)
+    ? options!.elevationDeg!
+    : isNarrow
+      ? 25
+      : 23.5;
+  const elevationDeg = Math.max(MIN_ELEVATION_DEG, Math.min(MAX_ELEVATION_DEG, rawElevation));
+  const rawFov = Number.isFinite(options?.fovDeg) ? options!.fovDeg! : DEFAULT_FOV_DEG;
+  const fovDeg = Math.max(12, Math.min(110, rawFov));
+
+  const rawTop = Math.max(0, Number.isFinite(options?.topInsetPx) ? options!.topInsetPx! : isNarrow ? 12 : 84);
+  const rawBottom = Math.max(0, Number.isFinite(options?.bottomInsetPx) ? options!.bottomInsetPx! : isNarrow ? 12 : 118);
+  const rawLeft = Math.max(0, Number.isFinite(options?.leftInsetPx) ? options!.leftInsetPx! : 0);
+  const rawRight = Math.max(0, Number.isFinite(options?.rightInsetPx) ? options!.rightInsetPx! : 0);
+
+  const clampedTop = Math.min(rawTop, safeH * 0.40);
+  const clampedBottom = Math.min(rawBottom, safeH * 0.40);
+  const clampedLeft = Math.min(rawLeft, safeW * 0.40);
+  const clampedRight = Math.min(rawRight, safeW * 0.40);
+
+  const usableW = Math.max(1, safeW - clampedLeft - clampedRight);
+  const usableH = Math.max(1, safeH - clampedTop - clampedBottom);
+  const usableFracX = Math.max(0.20, Math.min(1, usableW / safeW));
+  const usableFracY = Math.max(0.20, Math.min(1, usableH / safeH));
+
+  const baseFill = Math.max(
+    0.25,
+    Math.min(0.98, Number.isFinite(options?.fillFraction) ? options!.fillFraction! : 0.80),
+  );
+  const fillX = Math.max(
+    0.25,
+    Math.min(0.98, Number.isFinite(options?.fillX) ? options!.fillX! : baseFill),
+  );
+  const fillY = Math.max(
+    0.25,
+    Math.min(0.98, Number.isFinite(options?.fillY) ? options!.fillY! : baseFill),
+  );
+
+  // Normalize bounds defensively so inverted or non-finite values never produce NaN
+  const safeVal = (v: number): number => (Number.isFinite(v) ? v : 0);
+  const normBounds: AABB = {
+    min: [
+      Math.min(safeVal(bounds.min[0]), safeVal(bounds.max[0])),
+      Math.min(safeVal(bounds.min[1]), safeVal(bounds.max[1])),
+      Math.min(safeVal(bounds.min[2]), safeVal(bounds.max[2])),
+    ],
+    max: [
+      Math.max(safeVal(bounds.min[0]), safeVal(bounds.max[0])),
+      Math.max(safeVal(bounds.min[1]), safeVal(bounds.max[1])),
+      Math.max(safeVal(bounds.min[2]), safeVal(bounds.max[2])),
+    ],
+  };
+
+  const basis = computeCameraBasis(azimuthDeg, elevationDeg);
+  const corners = aabbCorners(normBounds);
+
+  let minR = Infinity, maxR = -Infinity;
+  let minU = Infinity, maxU = -Infinity;
+  let minE = Infinity, maxE = -Infinity;
+
+  for (const p of corners) {
+    const r = dot3(p, basis.right);
+    const u = dot3(p, basis.up);
+    const e = dot3(p, basis.eyeDir);
+    if (r < minR) minR = r;
+    if (r > maxR) maxR = r;
+    if (u < minU) minU = u;
+    if (u > maxU) maxU = u;
+    if (e < minE) minE = e;
+    if (e > maxE) maxE = e;
+  }
+
+  const midR = 0.5 * (minR + maxR);
+  const midU = 0.5 * (minU + maxU);
+  const midE = 0.5 * (minE + maxE);
+
+  const aspect = Math.max(0.25, safeW / safeH);
+  const tanHalfFovY = Math.tan((fovDeg * 0.5) * DEG_TO_RAD);
+  const tanHalfFovX = tanHalfFovY * aspect;
+
+  // Target NDC intervals strictly inside the unobstructed viewport band
+  const ndcXCenter = (clampedLeft - clampedRight) / safeW;
+  const ndcXHalfSpan = Math.min(usableFracX, Math.max(0.12, fillX * usableFracX));
+  const ndcXMax = ndcXCenter + ndcXHalfSpan;
+  const ndcXMin = ndcXCenter - ndcXHalfSpan;
+
+  const ndcYCenter = (clampedBottom - clampedTop) / safeH;
+  const ndcYHalfSpan = Math.min(usableFracY, Math.max(0.12, fillY * usableFracY));
+  const ndcYMax = ndcYCenter + ndcYHalfSpan;
+  const ndcYMin = ndcYCenter - ndcYHalfSpan;
+
+  const minDist = Math.max(
+    MIN_CAMERA_DISTANCE,
+    Number.isFinite(options?.minDistance) ? options!.minDistance! : MIN_CAMERA_DISTANCE,
+  );
+  let requiredDist = minDist;
+
+  for (const p of corners) {
+    const dr = dot3(p, basis.right) - midR;
+    const du = dot3(p, basis.up) - midU;
+    const de = dot3(p, basis.eyeDir) - midE;
+
+    const dXRight = (dr / tanHalfFovX + de * ndcXMax) / ndcXHalfSpan;
+    const dXLeft = (-dr / tanHalfFovX - de * ndcXMin) / ndcXHalfSpan;
+    const dYTop = (du / tanHalfFovY + de * ndcYMax) / ndcYHalfSpan;
+    const dYBot = (-du / tanHalfFovY - de * ndcYMin) / ndcYHalfSpan;
+    const dCorner = Math.max(dXRight, dXLeft, dYTop, dYBot, de + 2.0);
+    if (Number.isFinite(dCorner) && dCorner > requiredDist) {
+      requiredDist = dCorner;
+    }
+  }
+
+  const distance = Math.max(minDist, Math.min(MAX_CAMERA_DISTANCE, requiredDist));
+  const targetShiftR = -ndcXCenter * distance * tanHalfFovX;
+  const targetShiftU = -ndcYCenter * distance * tanHalfFovY;
+
+  const target: Vec3 = [
+    (midR + targetShiftR) * basis.right[0] + (midU + targetShiftU) * basis.up[0] + midE * basis.eyeDir[0],
+    (midR + targetShiftR) * basis.right[1] + (midU + targetShiftU) * basis.up[1] + midE * basis.eyeDir[1],
+    (midR + targetShiftR) * basis.right[2] + (midU + targetShiftU) * basis.up[2] + midE * basis.eyeDir[2],
+  ];
+
+  return {
+    target,
+    azimuthDeg,
+    elevationDeg,
+    distance,
+    fovDeg,
+  };
+}
+
 function makeViewMatrix(eye: Vec3, basis: CameraBasis): Float32Array {
   const { right: R, up: U, eyeDir: E } = basis;
   const tx = -dot3(R, eye);

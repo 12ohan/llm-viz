@@ -70,6 +70,7 @@ export interface ControlsCallbacks {
   onGqaStepSelect: (step: number) => void;
   onGqaStepScrub: (progress01: number) => void;
   onGqaClearCell: () => void;
+  onToggleAutoFollow: () => void;
 }
 
 interface SectionCopy {
@@ -178,6 +179,7 @@ export interface ControlsElements {
   gqaViewButtons: HTMLButtonElement[];
   miniNodes: SVGGElement[];
   tourToggleBtn: HTMLButtonElement;
+  floatingToolbar: HTMLDivElement;
   towerSubbar: HTMLDivElement;
   mambaSubbar: HTMLDivElement;
   moeSubbar: HTMLDivElement;
@@ -189,6 +191,7 @@ export interface ControlsElements {
   gqaFormulaCoord: HTMLSpanElement;
   gqaFormulaHead: HTMLSpanElement;
   gqaFormulaValue: HTMLSpanElement;
+  gqaFormulaNoteBtn: HTMLButtonElement;
   gqaFormulaNote: HTMLDivElement;
   gqaCellClear: HTMLButtonElement;
   gqaFormulaEq: HTMLDivElement;
@@ -197,6 +200,7 @@ export interface ControlsElements {
   gqaStepPlay: HTMLButtonElement;
   gqaStepNext: HTMLButtonElement;
   gqaStepPills: HTMLButtonElement[];
+  gqaStepAutoFollow: HTMLButtonElement;
   gqaStepScrub: HTMLInputElement;
   editorialPanel: HTMLDivElement;
   tokenSlider: HTMLInputElement;
@@ -238,6 +242,7 @@ export function queryControlsElements(): ControlsElements {
     gqaViewButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-gqa-view]')),
     miniNodes: Array.from(document.querySelectorAll<SVGGElement>('.mini-node[data-mini-section]')),
     tourToggleBtn: get<HTMLButtonElement>('tour-toggle-btn'),
+    floatingToolbar: get<HTMLDivElement>('floating-toolbar'),
     towerSubbar: get<HTMLDivElement>('tower-subbar'),
     mambaSubbar: get<HTMLDivElement>('mamba-subbar'),
     moeSubbar: get<HTMLDivElement>('moe-subbar'),
@@ -249,6 +254,7 @@ export function queryControlsElements(): ControlsElements {
     gqaFormulaCoord: get<HTMLSpanElement>('gqa-formula-coord'),
     gqaFormulaHead: get<HTMLSpanElement>('gqa-formula-head'),
     gqaFormulaValue: get<HTMLSpanElement>('gqa-formula-value'),
+    gqaFormulaNoteBtn: get<HTMLButtonElement>('gqa-formula-note-btn'),
     gqaFormulaNote: get<HTMLDivElement>('gqa-formula-note'),
     gqaCellClear: get<HTMLButtonElement>('gqa-cell-clear'),
     gqaFormulaEq: get<HTMLDivElement>('gqa-formula-eq'),
@@ -257,6 +263,7 @@ export function queryControlsElements(): ControlsElements {
     gqaStepPlay: get<HTMLButtonElement>('gqa-step-play'),
     gqaStepNext: get<HTMLButtonElement>('gqa-step-next'),
     gqaStepPills: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-gqa-step]')),
+    gqaStepAutoFollow: get<HTMLButtonElement>('gqa-step-autofollow'),
     gqaStepScrub: get<HTMLInputElement>('gqa-step-scrub'),
     editorialPanel: get<HTMLDivElement>('editorial-panel'),
     tokenSlider: get<HTMLInputElement>('token-slider'),
@@ -419,7 +426,28 @@ export class MacroControls {
     this.on(this.els.gqaStepPrev, 'click', () => this.cb.onGqaStepPrev());
     this.on(this.els.gqaStepPlay, 'click', () => this.cb.onGqaStepTogglePlay());
     this.on(this.els.gqaStepNext, 'click', () => this.cb.onGqaStepNext());
+    this.on(this.els.gqaStepAutoFollow, 'click', () => this.cb.onToggleAutoFollow());
     this.on(this.els.gqaCellClear, 'click', () => this.cb.onGqaClearCell());
+    this.on(this.els.gqaFormulaNoteBtn, 'click', (ev) => {
+      ev.stopPropagation();
+      const willOpen = this.els.gqaFormulaNote.hidden;
+      this.els.gqaFormulaNote.hidden = !willOpen;
+      this.els.gqaFormulaNoteBtn.setAttribute('aria-expanded', String(willOpen));
+      this.els.gqaFormulaNoteBtn.classList.toggle('is-open', willOpen);
+    });
+    const onDocPointerDown = (ev: PointerEvent) => {
+      if (this.els.gqaFormulaNote.hidden) return;
+      const tgt = ev.target as Node | null;
+      if (
+        tgt &&
+        (this.els.gqaFormulaNote.contains(tgt) || this.els.gqaFormulaNoteBtn.contains(tgt))
+      ) {
+        return;
+      }
+      this.closeFormulaNotePopover();
+    };
+    document.addEventListener('pointerdown', onDocPointerDown);
+    this.cleanupFns.push(() => document.removeEventListener('pointerdown', onDocPointerDown));
     for (const btn of this.els.gqaStepPills) {
       this.on(btn, 'click', () => {
         const step = Number.parseInt(btn.dataset.gqaStep ?? '0', 10);
@@ -434,7 +462,19 @@ export class MacroControls {
     });
   }
 
-  sync(state: SceneState, activeCutaway: CutawaySceneGeometry | null = null): void {
+  closeFormulaNotePopover(): boolean {
+    if (this.els.gqaFormulaNote.hidden) return false;
+    this.els.gqaFormulaNote.hidden = true;
+    this.els.gqaFormulaNoteBtn.setAttribute('aria-expanded', 'false');
+    this.els.gqaFormulaNoteBtn.classList.remove('is-open');
+    return true;
+  }
+
+  sync(
+    state: SceneState,
+    activeCutaway: CutawaySceneGeometry | null = null,
+    autoFollowManualPaused = false,
+  ): void {
     // Active View Mode Switcher
     for (const btn of this.els.modeButtons) {
       const isAct = btn.dataset.mode === state.mode;
@@ -477,6 +517,10 @@ export class MacroControls {
     this.els.orbitHint.hidden = usesLiveMathDock;
     this.els.gqaMathDock.hidden = !usesLiveMathDock;
 
+    if (!usesLiveMathDock) {
+      this.closeFormulaNotePopover();
+    }
+
     if (state.mode === 'tower') {
       this.els.floatingBadge.textContent = 'Nemotron 3 Nano 30B-A3B · 3.2B active';
     } else if (state.mode === 'cutaway_mamba') {
@@ -484,16 +528,16 @@ export class MacroControls {
         state.mambaBayId === 42
           ? 'Cutaway: Mamba-2 · Bay 42 Feeder (BF16 §4.2)'
           : 'Cutaway: Mamba-2 · Bay 01 (47.1 MiB fixed state)';
-      this.syncMathDock(state, activeCutaway);
+      this.syncMathDock(state, activeCutaway, autoFollowManualPaused);
     } else if (state.mode === 'cutaway_moe') {
       this.els.floatingBadge.textContent =
         state.moeBayId === 52
           ? 'Cutaway: MoE 128+1 · Bay 52 Final MoE (6 Active + Shared 3,712)'
           : 'Cutaway: MoE 128+1 · Bay 02 (6 Active + Shared 3,712)';
-      this.syncMathDock(state, activeCutaway);
+      this.syncMathDock(state, activeCutaway, autoFollowManualPaused);
     } else {
       this.els.floatingBadge.textContent = `Cutaway: GQA Attention · Bay ${formatBayId(state.gqaBayId)} (32Q / 2KV, NoPE)`;
-      this.syncMathDock(state, activeCutaway);
+      this.syncMathDock(state, activeCutaway, autoFollowManualPaused);
     }
 
     // Sync active TOC & mini-diagram highlight
@@ -612,7 +656,11 @@ export class MacroControls {
     }
   }
 
-  private syncMathDock(state: SceneState, cutaway: CutawaySceneGeometry | null): void {
+  private syncMathDock(
+    state: SceneState,
+    cutaway: CutawaySceneGeometry | null,
+    autoFollowManualPaused: boolean,
+  ): void {
     const isMamba = state.mode === 'cutaway_mamba';
     const isMoe = state.mode === 'cutaway_moe';
     const formula = cutaway?.activeFormula ?? null;
@@ -627,12 +675,14 @@ export class MacroControls {
         ? MOE_STEPPER_STEPS
         : GQA_STEPPER_STEPS;
 
-    // Update honest miniature simulator disclaimer note
-    this.els.gqaFormulaNote.textContent = isMamba
+    // Update honest miniature simulator disclaimer note inside accessible popover & tooltip
+    const noteText = isMamba
       ? 'Deterministic miniature Mamba-2 sim (d=8, 16H/8G, dₕ=4, dₛ=4; Float32 storage, rounded outputs) · Educational token labels · BF16/FP8 = production metadata'
       : isMoe
         ? 'Deterministic miniature MoE sim (d=8, 128E top-6, d_exp=4, d_shared=8, ×2.5; Float32 storage, rounded outputs) · Educational token labels · BF16/FP8/FP32 = production metadata'
         : 'Deterministic miniature GQA sim (d=8, 32Q/2KV, dₕ=4; Float32 storage, rounded outputs) · Educational token labels · BF16/FP8 = production metadata';
+    this.els.gqaFormulaNote.textContent = noteText;
+    this.els.gqaFormulaNoteBtn.title = noteText;
 
     if (formula) {
       this.els.gqaFormulaTensor.textContent = formula.tensorLabel;
@@ -727,6 +777,17 @@ export class MacroControls {
     this.els.gqaStepPlay.textContent = playing ? '❚❚ Pause' : '▶ Play';
     this.els.gqaStepPlay.classList.toggle('is-playing', playing);
     this.els.gqaStepPlay.setAttribute('aria-pressed', String(playing));
+
+    const autoFollowOn = state.stepperAutoFollow;
+    const showManualPaused = autoFollowOn && stepperActive && autoFollowManualPaused;
+    this.els.gqaStepAutoFollow.classList.toggle('is-active', autoFollowOn && !showManualPaused);
+    this.els.gqaStepAutoFollow.classList.toggle('is-paused', showManualPaused);
+    this.els.gqaStepAutoFollow.setAttribute('aria-pressed', String(autoFollowOn && !showManualPaused));
+    this.els.gqaStepAutoFollow.title = showManualPaused
+      ? 'Manual camera active — click to resume Auto-Follow on current math operation'
+      : autoFollowOn
+        ? 'Auto-Follow ON: camera smoothly focuses each math step (manual orbit/pan/zoom always overrides)'
+        : 'Auto-Follow OFF: click to automatically focus camera on each math step';
 
     for (let i = 0; i < this.els.gqaStepPills.length; i++) {
       const btn = this.els.gqaStepPills[i];

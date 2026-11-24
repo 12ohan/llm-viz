@@ -194,7 +194,7 @@
 
         <main class="canvas-pane" aria-label="Interactive 3D 52-layer tower and layer cutaways">
           <!-- Floating top toolbar (desktop overlay; stacks cleanly above canvas on mobile) -->
-          <div class="floating-toolbar" role="toolbar" aria-label="View modes and camera controls">
+          <div id="floating-toolbar" class="floating-toolbar" role="toolbar" aria-label="View modes and camera controls">
             <div class="toolbar-row toolbar-row-modes">
               <div class="mode-pills" role="tablist" aria-label="Architecture views">
                 <button type="button" class="mode-btn is-active" role="tab" aria-selected="true" data-mode="tower">52-Layer Tower</button>
@@ -344,12 +344,15 @@
               hidden
             ></div>
 
-            <div id="floating-badge" class="floating-badge" aria-hidden="true">
-              Nemotron 3 Nano 30B-A3B · 3.2B active
-            </div>
+            <div class="stage-bottom-bar">
+              <div id="floating-badge" class="floating-badge" aria-hidden="true">
+                Nemotron 3 Nano 30B-A3B · 3.2B active
+              </div>
 
-            <div id="orbit-hint" class="orbit-hint" aria-hidden="true">
-              Left-drag: Orbit · Right/Shift-drag: Pan · Scroll: Zoom · Click: Inspect · ?: Keys
+              <div id="orbit-hint" class="orbit-hint" aria-hidden="true">
+                <span class="orbit-hint-full">Left-drag: Orbit · Right/Shift-drag: Pan · Scroll: Zoom · Click: Inspect · ?: Keys</span>
+                <span class="orbit-hint-compact">Drag: Orbit · Shift: Pan · Scroll: Zoom · ?: Keys</span>
+              </div>
             </div>
 
             <div
@@ -383,8 +386,24 @@
                   hidden
                 >Unpin ×</button>
               </div>
-              <div id="gqa-formula-note" class="gqa-formula-note">
-                Deterministic miniature simulator (Float32 storage, rounded outputs) · Educational token labels · BF16/FP8 = production metadata
+              <div class="gqa-note-wrap">
+                <button
+                  type="button"
+                  id="gqa-formula-note-btn"
+                  class="gqa-note-pill"
+                  aria-expanded="false"
+                  aria-controls="gqa-formula-note"
+                  title="Deterministic miniature simulator (Float32 storage, rounded outputs) · Educational token labels · BF16/FP8 = production metadata"
+                >Mini Float32 Sim · Prod metadata <span class="gqa-note-icon" aria-hidden="true">ⓘ</span></button>
+                <div
+                  id="gqa-formula-note"
+                  class="gqa-formula-note"
+                  role="region"
+                  aria-label="Miniature simulator precision disclaimer"
+                  hidden
+                >
+                  Deterministic miniature simulator (Float32 storage, rounded outputs) · Educational token labels · BF16/FP8 = production metadata
+                </div>
               </div>
             </div>
             <div class="gqa-eq-block">
@@ -405,17 +424,27 @@
                 <button type="button" class="gqa-step-pill" data-gqa-step="4">5. Weighted V</button>
                 <button type="button" class="gqa-step-pill" data-gqa-step="5">6. W_O + Res</button>
               </div>
-              <div class="gqa-step-scrub-wrap">
-                <input
-                  type="range"
-                  id="gqa-step-scrub"
-                  class="gqa-step-scrub"
-                  min="0"
-                  max="100"
-                  step="1"
-                  value="0"
-                  aria-label="Scrub active cell within math step"
-                />
+              <div class="gqa-stepper-tail">
+                <button
+                  type="button"
+                  id="gqa-step-autofollow"
+                  class="gqa-autofollow-btn is-active"
+                  data-testid="gqa-step-autofollow"
+                  aria-pressed="true"
+                  title="Automatically focus camera on the active math operation (manual orbit/pan/zoom always overrides)"
+                >Auto-Follow</button>
+                <div class="gqa-step-scrub-wrap">
+                  <input
+                    type="range"
+                    id="gqa-step-scrub"
+                    class="gqa-step-scrub"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value="0"
+                    aria-label="Scrub active cell within math step"
+                  />
+                </div>
               </div>
             </div>
           </section>

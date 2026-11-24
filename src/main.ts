@@ -20,6 +20,7 @@ import {
 } from './model/state';
 import {
   buildCameraSnapshot,
+  fitOpBoundsCamera,
   fitPerspectiveToBounds,
   interpolateCameraPose,
   makeViewportMetrics,
@@ -241,6 +242,51 @@ function sameMoeCell(a: MoeCellRef | null, b: MoeCellRef | null): boolean {
   );
 }
 
+type CutawayWithOpFocusBounds = CutawaySceneGeometry & {
+  readonly opFocusBounds?: Readonly<Record<number, AABB>>;
+};
+
+function resolveOpFocusBounds(
+  scene: CutawaySceneGeometry | null,
+  stepIndex: number,
+): AABB | null {
+  if (!scene) return null;
+  const withOp = scene as CutawayWithOpFocusBounds;
+  const opBounds = withOp.opFocusBounds?.[stepIndex];
+  return opBounds ?? scene.fitBounds;
+}
+
+function cameraPoseForOpStep(
+  mode: Exclude<ViewMode, 'tower'>,
+  opBounds: AABB,
+  metrics: ViewportMetrics,
+  sheetViewAngle: GqaViewAngle = 'three_quarter',
+  insets?: { readonly topInsetPx: number; readonly bottomInsetPx: number },
+): CameraPose {
+  const isStackedNarrow = window.innerWidth <= 900 || metrics.innerWidth < 760;
+  let azimuthDeg: number;
+  let elevationDeg: number;
+  if (sheetViewAngle === 'near_plan') {
+    azimuthDeg = 1.5;
+    elevationDeg = 78;
+  } else if (mode === 'cutaway_gqa') {
+    azimuthDeg = isStackedNarrow ? 17 : 20;
+    elevationDeg = isStackedNarrow ? 25 : 23.5;
+  } else {
+    azimuthDeg = 9;
+    elevationDeg = 50;
+  }
+  return fitOpBoundsCamera(opBounds, metrics, {
+    azimuthDeg,
+    elevationDeg,
+    fovDeg: DEFAULT_FOV_DEG,
+    topInsetPx: insets?.topInsetPx ?? (isStackedNarrow ? 12 : 84),
+    bottomInsetPx: insets?.bottomInsetPx ?? (isStackedNarrow ? 12 : 118),
+    fillFraction: 0.80,
+    isNarrow: isStackedNarrow,
+  });
+}
+
 function cameraPoseForCutaway(
   mode: Exclude<ViewMode, 'tower'>,
   bounds: AABB,
@@ -325,6 +371,8 @@ function boot(): void {
   let flyAnim: FlyAnimation | null = null;
   let lastStepperTickMs: number | null = null;
   let lastStepperCellKey = '';
+  let manualCameraOverride = false;
+  let lastAutoFollowedStepKey = '';
   let savedGqaSpatialPose: CameraPose | null = null;
   let savedGqaPlanPose: CameraPose | null = null;
 
@@ -364,7 +412,8 @@ function boot(): void {
 
   const measureCutawayInsets = (mode: Exclude<ViewMode, 'tower'>) => {
     const isMobileStack = window.innerWidth <= 900;
-    const topInsetPx = isMobileStack ? 12 : 84;
+    const toolbarH = !isMobileStack ? controlEls.floatingToolbar.offsetHeight || 68 : 0;
+    const topInsetPx = isMobileStack ? 12 : Math.max(64, toolbarH + 16);
     const usesMathDock =
       mode === 'cutaway_gqa' ||
       mode === 'cutaway_mamba' ||
@@ -383,6 +432,14 @@ function boot(): void {
 
   const cancelFly = () => {
     flyAnim = null;
+  };
+
+  const markManualCameraControl = () => {
+    cancelFly();
+    if (!manualCameraOverride) {
+      manualCameraOverride = true;
+      syncUi();
+    }
   };
 
   const flyToPose = (targetPose: CameraPose) => {
@@ -595,8 +652,159 @@ function boot(): void {
   };
 
   const syncUi = () => {
-    controls.sync(state, currentCutawayScene);
+    controls.sync(state, currentCutawayScene, manualCameraOverride);
     memoryDrawer.sync(state.memoryChartOpen, state.precision, state.memoryProbeTokens);
+  };
+
+  const getActiveCutawayStepper = (): { active: boolean; playing: boolean; step: number } | null => {
+    if (state.mode === 'cutaway_mamba') {
+      return {
+        active: state.mambaStepperActive,
+        playing: state.mambaStepperPlaying,
+        step: state.mambaStepperStep,
+      };
+    }
+    if (state.mode === 'cutaway_moe') {
+      return {
+        active: state.moeStepperActive,
+        playing: state.moeStepperPlaying,
+        step: state.moeStepperStep,
+      };
+    }
+    if (state.mode === 'cutaway_gqa') {
+      return {
+        active: state.gqaStepperActive,
+        playing: state.gqaStepperPlaying,
+        step: state.gqaStepperStep,
+      };
+    }
+    return null;
+  };
+
+  const focusCameraOnActiveOpStep = (force = false) => {
+    if (state.mode === 'tower' || !currentCutawayScene) return;
+    if (!state.stepperAutoFollow) return;
+    if (manualCameraOverride && !force) return;
+    const stepper = getActiveCutawayStepper();
+    if (!stepper || !stepper.active) return;
+
+    const viewAngle = activeViewAngleForMode(state.mode);
+    const stepKey = `${state.mode}:${viewAngle}:${stepper.step}`;
+    if (!force && stepKey === lastAutoFollowedStepKey) return;
+
+    const opBounds = resolveOpFocusBounds(currentCutawayScene, stepper.step);
+    if (!opBounds) return;
+    lastAutoFollowedStepKey = stepKey;
+    flyToPose(
+      cameraPoseForOpStep(
+        state.mode,
+        opBounds,
+        currentMetrics,
+        viewAngle,
+        measureCutawayInsets(state.mode),
+      ),
+    );
+  };
+
+  const toggleCutawayStepperPlay = () => {
+    if (state.mode === 'tower') return;
+    state.tourActive = false;
+
+    if (state.mode === 'cutaway_mamba') {
+      state.mambaSelectedCell = null;
+      state.mambaHoveredCell = null;
+      if (state.reducedMotion) {
+        state.mambaStepperActive = true;
+        state.mambaStepperPlaying = false;
+        state.mambaStepperStep = (state.mambaStepperStep + 1) % MAMBA_STEPPER_STEPS.length;
+        state.mambaStepperSubProgress = 0;
+        manualCameraOverride = false;
+        geometryDirty = true;
+        rebuildSceneIfNeeded();
+        syncUi();
+        focusCameraOnActiveOpStep(true);
+        scheduleDraw();
+        return;
+      }
+      if (state.mambaStepperActive && state.mambaStepperPlaying) {
+        state.mambaStepperPlaying = false;
+        lastStepperTickMs = null;
+        syncUi();
+      } else {
+        state.mambaStepperActive = true;
+        state.mambaStepperPlaying = true;
+        lastStepperTickMs = null;
+        geometryDirty = true;
+        rebuildSceneIfNeeded();
+        syncUi();
+        focusCameraOnActiveOpStep(false);
+        scheduleDraw();
+      }
+      return;
+    }
+
+    if (state.mode === 'cutaway_moe') {
+      state.moeSelectedCell = null;
+      state.moeHoveredCell = null;
+      if (state.reducedMotion) {
+        state.moeStepperActive = true;
+        state.moeStepperPlaying = false;
+        state.moeStepperStep = (state.moeStepperStep + 1) % MOE_STEPPER_STEPS.length;
+        state.moeStepperSubProgress = 0;
+        manualCameraOverride = false;
+        geometryDirty = true;
+        rebuildSceneIfNeeded();
+        syncUi();
+        focusCameraOnActiveOpStep(true);
+        scheduleDraw();
+        return;
+      }
+      if (state.moeStepperActive && state.moeStepperPlaying) {
+        state.moeStepperPlaying = false;
+        lastStepperTickMs = null;
+        syncUi();
+      } else {
+        state.moeStepperActive = true;
+        state.moeStepperPlaying = true;
+        lastStepperTickMs = null;
+        geometryDirty = true;
+        rebuildSceneIfNeeded();
+        syncUi();
+        focusCameraOnActiveOpStep(false);
+        scheduleDraw();
+      }
+      return;
+    }
+
+    state.gqaSelectedCell = null;
+    state.gqaHoveredCell = null;
+    if (state.reducedMotion) {
+      state.gqaStepperActive = true;
+      state.gqaStepperPlaying = false;
+      state.gqaStepperStep = (state.gqaStepperStep + 1) % GQA_STEPPER_STEPS.length;
+      state.gqaStepperSubProgress = 0;
+      manualCameraOverride = false;
+      geometryDirty = true;
+      rebuildSceneIfNeeded();
+      syncUi();
+      focusCameraOnActiveOpStep(true);
+      scheduleDraw();
+      return;
+    }
+    if (state.gqaStepperActive && state.gqaStepperPlaying) {
+      state.gqaStepperPlaying = false;
+      lastStepperTickMs = null;
+      syncUi();
+    } else {
+      state.gqaStepperActive = true;
+      state.gqaStepperPlaying = true;
+      lastStepperTickMs = null;
+      geometryDirty = true;
+      rebuildSceneIfNeeded();
+      syncUi();
+      focusCameraOnActiveOpStep(false);
+      scheduleDraw();
+    }
   };
 
   const markDirtyAndSchedule = (rebuildGeometry: boolean) => {
@@ -628,6 +836,9 @@ function boot(): void {
 
     geometryDirty = true;
     rebuildSceneIfNeeded();
+    manualCameraOverride = false;
+    lastAutoFollowedStepKey = '';
+    syncUi();
 
     if (ch.mode === 'tower') {
       flyToPose(cameraPoseForSection(ch.section, currentMetrics));
@@ -643,7 +854,6 @@ function boot(): void {
       );
     }
 
-    syncUi();
     scheduleDraw();
   };
 
@@ -685,26 +895,33 @@ function boot(): void {
     else if (nextMode === 'cutaway_moe') state.section = 'moe';
     else if (nextMode === 'cutaway_gqa') state.section = 'gqa';
 
+    manualCameraOverride = false;
+    lastAutoFollowedStepKey = '';
     geometryDirty = true;
     rebuildSceneIfNeeded();
+    syncUi();
 
     if (customPose) {
       flyToPose(customPose);
     } else if (nextMode === 'tower') {
       flyToPose(state.savedMacroCamera);
     } else if (currentCutawayScene) {
-      flyToPose(
-        cameraPoseForCutaway(
-          nextMode,
-          currentCutawayScene.fitBounds,
-          currentMetrics,
-          activeViewAngleForMode(nextMode),
-          measureCutawayInsets(nextMode),
-        ),
-      );
+      const stepper = getActiveCutawayStepper();
+      if (stepper?.active && state.stepperAutoFollow) {
+        focusCameraOnActiveOpStep(true);
+      } else {
+        flyToPose(
+          cameraPoseForCutaway(
+            nextMode,
+            currentCutawayScene.fitBounds,
+            currentMetrics,
+            activeViewAngleForMode(nextMode),
+            measureCutawayInsets(nextMode),
+          ),
+        );
+      }
     }
 
-    syncUi();
     scheduleDraw();
   };
 
@@ -779,6 +996,8 @@ function boot(): void {
   };
 
   const fitActiveView = () => {
+    manualCameraOverride = false;
+    lastAutoFollowedStepKey = '';
     if (state.mode === 'tower') {
       state.section = 'overview';
       flyToPose(cameraPoseForSection('overview', currentMetrics));
@@ -797,6 +1016,7 @@ function boot(): void {
           measureCutawayInsets(state.mode),
         ),
       );
+      syncUi();
     }
   };
 
@@ -830,6 +1050,9 @@ function boot(): void {
     state.moeStepperPlaying = false;
     state.moeStepperStep = 0;
     state.moeStepperSubProgress = 0;
+    state.stepperAutoFollow = true;
+    manualCameraOverride = false;
+    lastAutoFollowedStepKey = '';
     lastStepperTickMs = null;
     savedGqaSpatialPose = null;
     savedGqaPlanPose = null;
@@ -841,6 +1064,7 @@ function boot(): void {
     } else {
       geometryDirty = true;
       rebuildSceneIfNeeded();
+      syncUi();
       if (currentCutawayScene) {
         flyToPose(
           cameraPoseForCutaway(
@@ -852,7 +1076,6 @@ function boot(): void {
           ),
         );
       }
-      syncUi();
       scheduleDraw();
     }
   };
@@ -901,10 +1124,21 @@ function boot(): void {
     onSelectMambaView: (view: GqaViewAngle) => {
       if (state.mambaViewAngle === view && state.mode === 'cutaway_mamba') return;
       state.mambaViewAngle = view;
+      lastAutoFollowedStepKey = '';
       if (state.mode === 'cutaway_mamba' && currentCutawayScene) {
-        flyToPose(
-          cameraPoseForCutaway('cutaway_mamba', currentCutawayScene.fitBounds, currentMetrics, view),
-        );
+        if (state.mambaStepperActive && state.stepperAutoFollow && !manualCameraOverride) {
+          focusCameraOnActiveOpStep(true);
+        } else {
+          flyToPose(
+            cameraPoseForCutaway(
+              'cutaway_mamba',
+              currentCutawayScene.fitBounds,
+              currentMetrics,
+              view,
+              measureCutawayInsets('cutaway_mamba'),
+            ),
+          );
+        }
       }
       syncUi();
     },
@@ -921,10 +1155,21 @@ function boot(): void {
     onSelectMoeView: (view: GqaViewAngle) => {
       if (state.moeViewAngle === view && state.mode === 'cutaway_moe') return;
       state.moeViewAngle = view;
+      lastAutoFollowedStepKey = '';
       if (state.mode === 'cutaway_moe' && currentCutawayScene) {
-        flyToPose(
-          cameraPoseForCutaway('cutaway_moe', currentCutawayScene.fitBounds, currentMetrics, view),
-        );
+        if (state.moeStepperActive && state.stepperAutoFollow && !manualCameraOverride) {
+          focusCameraOnActiveOpStep(true);
+        } else {
+          flyToPose(
+            cameraPoseForCutaway(
+              'cutaway_moe',
+              currentCutawayScene.fitBounds,
+              currentMetrics,
+              view,
+              measureCutawayInsets('cutaway_moe'),
+            ),
+          );
+        }
       }
       syncUi();
     },
@@ -977,26 +1222,33 @@ function boot(): void {
         }
       }
       state.gqaViewAngle = view;
+      lastAutoFollowedStepKey = '';
       // Preserve selected head, pinned cell, tokens, precision, and stepper state across mode switches!
       if (state.mode === 'cutaway_gqa') {
         geometryDirty = true;
         rebuildSceneIfNeeded();
+        syncUi();
         if (currentCutawayScene) {
-          const savedPose = view === 'three_quarter' ? savedGqaSpatialPose : savedGqaPlanPose;
-          const nextPose =
-            savedPose !== null
-              ? cloneCameraPose(savedPose)
-              : cameraPoseForCutaway(
-                  'cutaway_gqa',
-                  currentCutawayScene.fitBounds,
-                  currentMetrics,
-                  view,
-                  measureCutawayInsets('cutaway_gqa'),
-                );
-          flyToPose(nextPose);
+          if (state.gqaStepperActive && state.stepperAutoFollow && !manualCameraOverride) {
+            focusCameraOnActiveOpStep(true);
+          } else {
+            const savedPose = view === 'three_quarter' ? savedGqaSpatialPose : savedGqaPlanPose;
+            const nextPose =
+              savedPose !== null
+                ? cloneCameraPose(savedPose)
+                : cameraPoseForCutaway(
+                    'cutaway_gqa',
+                    currentCutawayScene.fitBounds,
+                    currentMetrics,
+                    view,
+                    measureCutawayInsets('cutaway_gqa'),
+                  );
+            flyToPose(nextPose);
+          }
         }
+      } else {
+        syncUi();
       }
-      syncUi();
       scheduleDraw();
     },
     onSelectPart: (partId: string | null) => {
@@ -1092,6 +1344,7 @@ function boot(): void {
     onGqaStepPrev: () => {
       state.tourActive = false;
       lastStepperTickMs = null;
+      manualCameraOverride = false;
       if (state.mode === 'cutaway_mamba') {
         state.mambaSelectedCell = null;
         state.mambaHoveredCell = null;
@@ -1129,11 +1382,16 @@ function boot(): void {
         }
         state.gqaStepperSubProgress = 0;
       }
-      markDirtyAndSchedule(true);
+      geometryDirty = true;
+      rebuildSceneIfNeeded();
+      syncUi();
+      focusCameraOnActiveOpStep(true);
+      scheduleDraw();
     },
     onGqaStepNext: () => {
       state.tourActive = false;
       lastStepperTickMs = null;
+      manualCameraOverride = false;
       if (state.mode === 'cutaway_mamba') {
         state.mambaSelectedCell = null;
         state.mambaHoveredCell = null;
@@ -1168,82 +1426,17 @@ function boot(): void {
         }
         state.gqaStepperSubProgress = 0;
       }
-      markDirtyAndSchedule(true);
+      geometryDirty = true;
+      rebuildSceneIfNeeded();
+      syncUi();
+      focusCameraOnActiveOpStep(true);
+      scheduleDraw();
     },
-    onGqaStepTogglePlay: () => {
-      state.tourActive = false;
-      if (state.mode === 'cutaway_mamba') {
-        state.mambaSelectedCell = null;
-        state.mambaHoveredCell = null;
-        if (state.reducedMotion) {
-          state.mambaStepperActive = true;
-          state.mambaStepperPlaying = false;
-          state.mambaStepperStep = (state.mambaStepperStep + 1) % MAMBA_STEPPER_STEPS.length;
-          state.mambaStepperSubProgress = 0;
-          markDirtyAndSchedule(true);
-          return;
-        }
-        if (state.mambaStepperActive && state.mambaStepperPlaying) {
-          state.mambaStepperPlaying = false;
-          lastStepperTickMs = null;
-          syncUi();
-        } else {
-          state.mambaStepperActive = true;
-          state.mambaStepperPlaying = true;
-          lastStepperTickMs = null;
-          markDirtyAndSchedule(true);
-        }
-        return;
-      }
-
-      if (state.mode === 'cutaway_moe') {
-        state.moeSelectedCell = null;
-        state.moeHoveredCell = null;
-        if (state.reducedMotion) {
-          state.moeStepperActive = true;
-          state.moeStepperPlaying = false;
-          state.moeStepperStep = (state.moeStepperStep + 1) % MOE_STEPPER_STEPS.length;
-          state.moeStepperSubProgress = 0;
-          markDirtyAndSchedule(true);
-          return;
-        }
-        if (state.moeStepperActive && state.moeStepperPlaying) {
-          state.moeStepperPlaying = false;
-          lastStepperTickMs = null;
-          syncUi();
-        } else {
-          state.moeStepperActive = true;
-          state.moeStepperPlaying = true;
-          lastStepperTickMs = null;
-          markDirtyAndSchedule(true);
-        }
-        return;
-      }
-
-      state.gqaSelectedCell = null;
-      state.gqaHoveredCell = null;
-      if (state.reducedMotion) {
-        state.gqaStepperActive = true;
-        state.gqaStepperPlaying = false;
-        state.gqaStepperStep = (state.gqaStepperStep + 1) % GQA_STEPPER_STEPS.length;
-        state.gqaStepperSubProgress = 0;
-        markDirtyAndSchedule(true);
-        return;
-      }
-      if (state.gqaStepperActive && state.gqaStepperPlaying) {
-        state.gqaStepperPlaying = false;
-        lastStepperTickMs = null;
-        syncUi();
-      } else {
-        state.gqaStepperActive = true;
-        state.gqaStepperPlaying = true;
-        lastStepperTickMs = null;
-        markDirtyAndSchedule(true);
-      }
-    },
+    onGqaStepTogglePlay: toggleCutawayStepperPlay,
     onGqaStepSelect: (step: number) => {
       state.tourActive = false;
       lastStepperTickMs = null;
+      manualCameraOverride = false;
       if (state.mode === 'cutaway_mamba') {
         state.mambaSelectedCell = null;
         state.mambaHoveredCell = null;
@@ -1266,7 +1459,11 @@ function boot(): void {
         state.gqaStepperStep = Math.max(0, Math.min(GQA_STEPPER_STEPS.length - 1, step));
         state.gqaStepperSubProgress = 0;
       }
-      markDirtyAndSchedule(true);
+      geometryDirty = true;
+      rebuildSceneIfNeeded();
+      syncUi();
+      focusCameraOnActiveOpStep(true);
+      scheduleDraw();
     },
     onGqaStepScrub: (progress01: number) => {
       state.tourActive = false;
@@ -1293,13 +1490,49 @@ function boot(): void {
       markDirtyAndSchedule(true);
     },
     onGqaClearCell: () => {
+      const hadStepper =
+        state.gqaStepperActive || state.mambaStepperActive || state.moeStepperActive;
       state.gqaSelectedCell = null;
       state.gqaHoveredCell = null;
+      state.gqaStepperActive = false;
+      state.gqaStepperPlaying = false;
       state.mambaSelectedCell = null;
       state.mambaHoveredCell = null;
+      state.mambaStepperActive = false;
+      state.mambaStepperPlaying = false;
       state.moeSelectedCell = null;
       state.moeHoveredCell = null;
-      markDirtyAndSchedule(true);
+      state.moeStepperActive = false;
+      state.moeStepperPlaying = false;
+      lastStepperTickMs = null;
+      manualCameraOverride = false;
+      lastAutoFollowedStepKey = '';
+      geometryDirty = true;
+      rebuildSceneIfNeeded();
+      syncUi();
+      if (state.mode !== 'tower' && (hadStepper || state.stepperAutoFollow)) {
+        fitActiveView();
+      }
+      scheduleDraw();
+    },
+    onToggleAutoFollow: () => {
+      const stepper = getActiveCutawayStepper();
+      if (stepper?.active && state.stepperAutoFollow && manualCameraOverride) {
+        manualCameraOverride = false;
+        lastAutoFollowedStepKey = '';
+        syncUi();
+        focusCameraOnActiveOpStep(true);
+        scheduleDraw();
+        return;
+      }
+      state.stepperAutoFollow = !state.stepperAutoFollow;
+      manualCameraOverride = false;
+      lastAutoFollowedStepKey = '';
+      syncUi();
+      if (state.stepperAutoFollow && stepper?.active) {
+        focusCameraOnActiveOpStep(true);
+        scheduleDraw();
+      }
     },
   });
 
@@ -1322,8 +1555,9 @@ function boot(): void {
       }
     }
 
-    // Live Math Stepper playback loop (GQA & Mamba-2 cutaways, respects reducedMotion)
+    // Live Math Stepper playback loop (GQA, Mamba-2 & MoE cutaways, respects reducedMotion)
     let stepperChangedUi = false;
+    let stepperStageAdvanced = false;
     if (
       state.mode === 'cutaway_gqa' &&
       state.gqaStepperActive &&
@@ -1337,6 +1571,7 @@ function boot(): void {
       if (nextProgress >= 1) {
         state.gqaStepperSubProgress = nextProgress % 1;
         state.gqaStepperStep = (state.gqaStepperStep + 1) % GQA_STEPPER_STEPS.length;
+        stepperStageAdvanced = true;
       } else {
         state.gqaStepperSubProgress = nextProgress;
       }
@@ -1363,6 +1598,7 @@ function boot(): void {
       if (nextProgress >= 1) {
         state.mambaStepperSubProgress = nextProgress % 1;
         state.mambaStepperStep = (state.mambaStepperStep + 1) % MAMBA_STEPPER_STEPS.length;
+        stepperStageAdvanced = true;
       } else {
         state.mambaStepperSubProgress = nextProgress;
       }
@@ -1389,6 +1625,7 @@ function boot(): void {
       if (nextProgress >= 1) {
         state.moeStepperSubProgress = nextProgress % 1;
         state.moeStepperStep = (state.moeStepperStep + 1) % MOE_STEPPER_STEPS.length;
+        stepperStageAdvanced = true;
       } else {
         state.moeStepperSubProgress = nextProgress;
       }
@@ -1409,6 +1646,9 @@ function boot(): void {
     rebuildSceneIfNeeded();
     if (stepperChangedUi) {
       syncUi();
+    }
+    if (stepperStageAdvanced && state.stepperAutoFollow && !manualCameraOverride) {
+      focusCameraOnActiveOpStep(false);
     }
 
     const activeBounds =
@@ -1521,22 +1761,48 @@ function boot(): void {
     lastDpr = next.dpr;
     if (state.mode === 'tower' && state.section === 'overview' && !flyAnim && state.selectedBay === null) {
       state.camera = cameraPoseForSection('overview', next);
-    } else if (state.mode !== 'tower' && !flyAnim && currentCutawayScene) {
+    } else if (state.mode !== 'tower' && !flyAnim && currentCutawayScene && !manualCameraOverride) {
       savedGqaSpatialPose = null;
       savedGqaPlanPose = null;
-      state.camera = cameraPoseForCutaway(
-        state.mode,
-        currentCutawayScene.fitBounds,
-        next,
-        activeViewAngleForMode(state.mode),
-        measureCutawayInsets(state.mode),
-      );
+      const stepper = getActiveCutawayStepper();
+      const insets = measureCutawayInsets(state.mode);
+      if (stepper?.active && state.stepperAutoFollow) {
+        const opBounds = resolveOpFocusBounds(currentCutawayScene, stepper.step);
+        state.camera = cameraPoseForOpStep(
+          state.mode,
+          opBounds ?? currentCutawayScene.fitBounds,
+          next,
+          activeViewAngleForMode(state.mode),
+          insets,
+        );
+      } else {
+        state.camera = cameraPoseForCutaway(
+          state.mode,
+          currentCutawayScene.fitBounds,
+          next,
+          activeViewAngleForMode(state.mode),
+          insets,
+        );
+      }
     }
     drawNow();
   };
 
   const resizeObserver = new ResizeObserver(() => handleResizeOrDpr());
   resizeObserver.observe(host);
+
+  // Dynamically re-measure cutaway insets whenever Math Dock (wrapped formulas) or floating toolbar resizes
+  let lastChromeKey = '';
+  const chromeResizeObserver = new ResizeObserver(() => {
+    const key = `${controlEls.floatingToolbar.offsetHeight}:${controlEls.gqaMathDock.offsetHeight}`;
+    if (key === lastChromeKey) return;
+    lastChromeKey = key;
+    if (state.mode !== 'tower') {
+      scheduleDraw();
+    }
+  });
+  chromeResizeObserver.observe(controlEls.gqaMathDock);
+  chromeResizeObserver.observe(controlEls.floatingToolbar);
 
   let dprMediaQuery: MediaQueryList | null = null;
   const watchDpr = () => {
@@ -1649,7 +1915,7 @@ function boot(): void {
       isDragging = false;
       pendingSelectionCancelled = ev.button !== 0;
     } else if (activePointers.size === 2) {
-      cancelFly();
+      markManualCameraControl();
       pendingSelectionCancelled = true;
       isDragging = true;
       const pts = Array.from(activePointers.values());
@@ -1679,7 +1945,7 @@ function boot(): void {
       const totalDist = Math.hypot(ev.clientX - downX, ev.clientY - downY);
       if (!isDragging && totalDist >= DRAG_THRESHOLD_PX) {
         isDragging = true;
-        cancelFly();
+        markManualCameraControl();
       }
       if (isDragging && currentSnapshot) {
         const dx = ev.clientX - lastX;
@@ -1907,7 +2173,7 @@ function boot(): void {
     'wheel',
     (ev) => {
       ev.preventDefault();
-      cancelFly();
+      markManualCameraControl();
       let deltaPx = ev.deltaY;
       if (ev.deltaMode === WheelEvent.DOM_DELTA_LINE) deltaPx *= 16;
       else if (ev.deltaMode === WheelEvent.DOM_DELTA_PAGE) deltaPx *= currentMetrics.innerHeight;
@@ -1946,70 +2212,14 @@ function boot(): void {
       (state.mode === 'cutaway_gqa' || state.mode === 'cutaway_mamba' || state.mode === 'cutaway_moe')
     ) {
       ev.preventDefault();
-      state.tourActive = false;
-      if (state.mode === 'cutaway_mamba') {
-        state.mambaSelectedCell = null;
-        state.mambaHoveredCell = null;
-        if (state.reducedMotion) {
-          state.mambaStepperActive = true;
-          state.mambaStepperPlaying = false;
-          state.mambaStepperStep = (state.mambaStepperStep + 1) % MAMBA_STEPPER_STEPS.length;
-          state.mambaStepperSubProgress = 0;
-          markDirtyAndSchedule(true);
-        } else if (state.mambaStepperActive && state.mambaStepperPlaying) {
-          state.mambaStepperPlaying = false;
-          lastStepperTickMs = null;
-          syncUi();
-        } else {
-          state.mambaStepperActive = true;
-          state.mambaStepperPlaying = true;
-          lastStepperTickMs = null;
-          markDirtyAndSchedule(true);
-        }
-      } else if (state.mode === 'cutaway_moe') {
-        state.moeSelectedCell = null;
-        state.moeHoveredCell = null;
-        if (state.reducedMotion) {
-          state.moeStepperActive = true;
-          state.moeStepperPlaying = false;
-          state.moeStepperStep = (state.moeStepperStep + 1) % MOE_STEPPER_STEPS.length;
-          state.moeStepperSubProgress = 0;
-          markDirtyAndSchedule(true);
-        } else if (state.moeStepperActive && state.moeStepperPlaying) {
-          state.moeStepperPlaying = false;
-          lastStepperTickMs = null;
-          syncUi();
-        } else {
-          state.moeStepperActive = true;
-          state.moeStepperPlaying = true;
-          lastStepperTickMs = null;
-          markDirtyAndSchedule(true);
-        }
-      } else {
-        state.gqaSelectedCell = null;
-        state.gqaHoveredCell = null;
-        if (state.reducedMotion) {
-          state.gqaStepperActive = true;
-          state.gqaStepperPlaying = false;
-          state.gqaStepperStep = (state.gqaStepperStep + 1) % GQA_STEPPER_STEPS.length;
-          state.gqaStepperSubProgress = 0;
-          markDirtyAndSchedule(true);
-        } else if (state.gqaStepperActive && state.gqaStepperPlaying) {
-          state.gqaStepperPlaying = false;
-          lastStepperTickMs = null;
-          syncUi();
-        } else {
-          state.gqaStepperActive = true;
-          state.gqaStepperPlaying = true;
-          lastStepperTickMs = null;
-          markDirtyAndSchedule(true);
-        }
-      }
+      toggleCutawayStepperPlay();
       return;
     }
 
     if (key === 'Escape') {
-      if (state.shortcutsOpen) {
+      if (controls.closeFormulaNotePopover()) {
+        ev.preventDefault();
+      } else if (state.shortcutsOpen) {
         ev.preventDefault();
         state.shortcutsOpen = false;
         syncUi();
@@ -2026,6 +2236,8 @@ function boot(): void {
         state.moeStepperActive
       ) {
         ev.preventDefault();
+        const hadStepper =
+          state.gqaStepperActive || state.mambaStepperActive || state.moeStepperActive;
         state.gqaSelectedCell = null;
         state.gqaHoveredCell = null;
         state.gqaStepperActive = false;
@@ -2039,7 +2251,15 @@ function boot(): void {
         state.moeStepperActive = false;
         state.moeStepperPlaying = false;
         lastStepperTickMs = null;
-        markDirtyAndSchedule(true);
+        manualCameraOverride = false;
+        lastAutoFollowedStepKey = '';
+        geometryDirty = true;
+        rebuildSceneIfNeeded();
+        syncUi();
+        if (state.mode !== 'tower' && (hadStepper || state.stepperAutoFollow)) {
+          fitActiveView();
+        }
+        scheduleDraw();
       } else if (state.selectedPart !== null || state.hoveredPart !== null) {
         ev.preventDefault();
         state.selectedPart = null;

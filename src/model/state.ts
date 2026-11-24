@@ -68,6 +68,7 @@ export interface SceneState {
   moeStepperPlaying: boolean;
   moeStepperStep: number;
   moeStepperSubProgress: number;
+  stepperAutoFollow: boolean;
   camera: CameraPose;
   savedMacroCamera: CameraPose;
   reducedMotion: boolean;
@@ -159,6 +160,7 @@ export function createInitialState(defaultPose: CameraPose, reducedMotion = fals
     moeStepperPlaying: false,
     moeStepperStep: 0,
     moeStepperSubProgress: 0,
+    stepperAutoFollow: true,
     camera: cloneCameraPose(defaultPose),
     savedMacroCamera: cloneCameraPose(defaultPose),
     reducedMotion,
