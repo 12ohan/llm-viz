@@ -1,6 +1,8 @@
 import type { GqaCellRef } from '../math/gqaSim';
 import type { MambaCellRef } from '../math/mambaSim';
 import type { MoeCellRef } from '../math/moeSim';
+import type { EmbeddingCellRef } from '../scene/embeddingCutaway';
+import type { OutputCellRef } from '../scene/outputCutaway';
 import type { PrecisionMode, Vec3 } from './spec';
 
 export interface CameraPose {
@@ -13,9 +15,11 @@ export interface CameraPose {
 
 export type ViewMode =
   | 'tower'
+  | 'cutaway_embedding'
   | 'cutaway_mamba'
   | 'cutaway_moe'
-  | 'cutaway_gqa';
+  | 'cutaway_gqa'
+  | 'cutaway_output';
 
 export type GqaViewAngle = 'three_quarter' | 'near_plan';
 
@@ -76,11 +80,23 @@ export interface SceneState {
   moeStepperStep: number;
   moeStepperSubProgress: number;
   stepperAutoFollow: boolean;
+  embeddingFocusToken: number;
+  outputFocusToken: number;
+  embeddingActiveCell: EmbeddingCellRef | null;
+  outputActiveCell: OutputCellRef | null;
+  /** 0..1 progress during animated 52-layer AR propagation wave; null when idle. */
+  spineWaveProgress: number | null;
   camera: CameraPose;
   savedMacroCamera: CameraPose;
+  savedEmbedPose: CameraPose | null;
+  savedOutputPose: CameraPose | null;
   reducedMotion: boolean;
   tourActive: boolean;
   tourChapter: number;
+  /** Current 0..21 beat index in the V5 22-beat, 3-act walkthrough. */
+  tourBeat: number;
+  /** True when the user explored (clicked a step pill, hovered, or orbited) during tour without exiting it. */
+  tourExploring: boolean;
   memoryChartOpen: boolean;
   memoryProbeTokens: number;
   shortcutsOpen: boolean;
@@ -172,11 +188,20 @@ export function createInitialState(defaultPose: CameraPose, reducedMotion = fals
     moeStepperStep: 0,
     moeStepperSubProgress: 0,
     stepperAutoFollow: true,
+    embeddingFocusToken: 7,
+    outputFocusToken: 7,
+    embeddingActiveCell: null,
+    outputActiveCell: null,
+    spineWaveProgress: null,
     camera: cloneCameraPose(defaultPose),
     savedMacroCamera: cloneCameraPose(defaultPose),
+    savedEmbedPose: null,
+    savedOutputPose: null,
     reducedMotion,
     tourActive: true,
     tourChapter: 0,
+    tourBeat: 0,
+    tourExploring: false,
     memoryChartOpen: false,
     memoryProbeTokens: 1_048_576,
     shortcutsOpen: false,

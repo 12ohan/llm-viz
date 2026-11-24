@@ -3,9 +3,47 @@ import type { MambaSimResult } from '../math/mambaSim';
 import type { MoeSimResult } from '../math/moeSim';
 import type { AABB } from '../render/camera';
 import type { PickBox } from '../render/pick';
+import type { ActiveSheetCellGrid, CellPopoverSpec } from '../ui/overlay';
 import type { Rg32fValueAtlas } from './atlasPacker';
+import type { EmbeddingCellFormula } from './embeddingCutaway';
+import type { OutputCellFormula } from './outputCutaway';
 import type { LayerFormulaReadout } from './sheetInspector';
 import type { DimensionCaliper, KvDepthTickAnchor, LandmarkAnchor } from './spine';
+
+export {
+  buildEmbeddingCutaway,
+  fitSpatialEmbeddingCamera,
+  describeEmbeddingCellFormula,
+  pickHitToEmbeddingCell,
+  EMBEDDING_SPATIAL_FIT_BOUNDS,
+  EMBEDDING_STEPPER_STEPS,
+  type HybridEmbeddingResult,
+  type EmbeddingTensorKey,
+  type EmbeddingCellRef,
+  type EmbeddingSheetSpan,
+  type EmbeddingCellFormula,
+  type EmbeddingFormulaInput,
+  type BuildEmbeddingCutawayOptions,
+  type SpatialEmbeddingFitOptions,
+} from './embeddingCutaway';
+export {
+  buildOutputCutaway,
+  fitSpatialOutputCamera,
+  describeOutputCellFormula,
+  pickHitToOutputCell,
+  parseOutputCandidatePartId,
+  OUTPUT_SPATIAL_FIT_BOUNDS,
+  OUTPUT_STEPPER_STEPS,
+  type OutputTensorKey,
+  type OutputAuxTensorKey,
+  type OutputCellRef,
+  type OutputSheetSpan,
+  type OutputCellFormula,
+  type OutputFormulaInput,
+  type BuildOutputCutawayOptions,
+  type SpatialOutputFitOptions,
+} from './outputCutaway';
+export type { ActiveSheetCellGrid, CellPopoverSpec } from '../ui/overlay';
 
 export {
   buildGqaCutaway,
@@ -98,7 +136,12 @@ export interface GqaCutawayStats {
 }
 
 export interface CutawaySceneGeometry {
-  readonly kind: 'cutaway_mamba' | 'cutaway_moe' | 'cutaway_gqa';
+  readonly kind:
+    | 'cutaway_embedding'
+    | 'cutaway_mamba'
+    | 'cutaway_moe'
+    | 'cutaway_gqa'
+    | 'cutaway_output';
   readonly bayId: number;
   readonly solidData: Float32Array;
   readonly solidCount: number;
@@ -111,6 +154,8 @@ export interface CutawaySceneGeometry {
   readonly sheetCount?: number;
   /** Optional per-sheet 3D orthonormal basis buffer (6 floats/instance: axisU, axisN; axisV = U x N). */
   readonly sheetBasisData?: Float32Array;
+  /** Optional parallel 4-float-per-sheet progressive reveal buffer for SheetsPass.upload(..., sheetRevealData). */
+  readonly sheetRevealData?: Float32Array;
   /** Smooth 2D/3D vector flow ribbons for FlatFlowRibbonsPass. */
   readonly flowVertices?: Float32Array;
   readonly flowIndices?: Uint32Array;
@@ -124,6 +169,16 @@ export interface CutawaySceneGeometry {
   readonly moeSim?: MoeSimResult;
   /** Live formula readout for the currently inspected (hovered/pinned/stepped) cell. */
   readonly activeFormula?: LayerFormulaReadout | null;
+  /** Live formula readout for the dedicated Embedding (NoPE) cutaway. */
+  readonly embeddingFormula?: EmbeddingCellFormula | null;
+  /** Live formula readout for the dedicated Output & Untied LM Head cutaway. */
+  readonly outputFormula?: OutputCellFormula | null;
+  /** Active-op part IDs for V1 secondary sheet label dimming in MacroOverlay. */
+  readonly activeOpPartIds?: ReadonlySet<string>;
+  /** In-canvas contextual cell formula popover + provenance pointers for V3 MacroOverlay. */
+  readonly cellPopover?: CellPopoverSpec | null;
+  /** Active/inspected thin sheets eligible for V3 zoom-adaptive cell value overlays. */
+  readonly activeCellGrids?: readonly ActiveSheetCellGrid[];
   readonly fitBounds: AABB;
   /** Per-operation camera focus AABBs keyed by stepper step index 0..5. */
   readonly opFocusBounds?: Readonly<Record<number, AABB>>;
