@@ -26,6 +26,8 @@ import {
   GQA_SPATIAL_FIT_BOUNDS,
   type CutawaySceneGeometry,
 } from '../src/scene/cutaways';
+import { fmtSigned } from '../src/scene/sheetInspector';
+import { isCellHiddenByReveal } from '../src/ui/overlay';
 
 function revealTupleAt(
   scene: CutawaySceneGeometry,
@@ -596,7 +598,354 @@ describe('V1/V2/V3 GQA Cutaway: Label Hygiene, Progressive Accumulation Reveal, 
       });
       expect(idle.activeOpPartIds).toBeUndefined();
       expect(idle.cellPopover).toBeNull();
+      expect(idle.focusedAccumulation).toBeNull();
       expect(idle.activeCellGrids!.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('RC1 Step 3 (QKᵀ/√d): wires focused partial sums and non-spoiling activeCellGrids reveal for Full Seq and rectangular AR [1×9]', () => {
+    const model = createDefaultHybridModel();
+    let session = createDecodeSession(model, { promptTokenIds: [0, 1, 2, 3, 4, 5, 6, 7] });
+    session = stepDecodeSessionGreedy(session); // P = 8, S = 1, K = 9 => [1×9]
+    const arSim9 = getActiveDecodeStep(session).getGqaTrace(43);
+    expect(arSim9.prefixTokens).toBe(8);
+    expect(arSim9.tokens).toBe(1);
+    expect(arSim9.keyTokens).toBe(9);
+
+    for (const viewAngle of ['three_quarter', 'near_plan'] as const) {
+      // 1. Full Seq (T=8) Step 3 at termProgress = 0.25
+      const fullScene = buildGqaCutaway({
+        bayId: 43,
+        tokens: 8,
+        precision: 'bf16',
+        selectedPart: 'q-head-3',
+        hoveredPart: null,
+        activeGroup0Head: 3,
+        activeGroup1Head: 16,
+        viewAngle,
+        stepperActive: true,
+        stepperStep: 2,
+        termProgress: 0.25,
+        activeCell: { tensor: 'scores', headIndex: 3, kvHeadIndex: 0, row: 5, col: 2 },
+      });
+
+      const fullSim = fullScene.gqaSim!;
+      const fullExact = fullSim.Scores[(3 * fullSim.tokens + 5) * fullSim.keyTokens + 2];
+      const fullExactText = fmtSigned(fullExact, 3);
+      const fullAcc = fullScene.focusedAccumulation!;
+      expect(fullAcc).not.toBeNull();
+      expect(fullAcc.active).toBe(true);
+      expect(fullAcc.currentTermIndex).toBe(1);
+      expect(fullAcc.totalTerms).toBe(4);
+      expect(Math.abs(fullAcc.partialSum - fullExact)).toBeGreaterThan(1e-3);
+
+      const fullPop = fullScene.cellPopover!;
+      expect(fullPop).not.toBeNull();
+      expect(fullPop.isAccumulating).toBe(true);
+      expect(fullPop.equation).toBe(fullAcc.popoverEquation);
+      expect(fullPop.valueText).toBe(fullAcc.valueBadgeText);
+      expect(fullPop.badge).toBe(fullAcc.badgeText);
+      expect(fullPop.equation).not.toContain(fullExactText);
+      expect(fullPop.valueText).not.toContain(fullExactText);
+
+      const fullGrids = fullScene.activeCellGrids!;
+      const fullTarget = fullGrids[0];
+      expect(fullTarget.cols).toBe(8);
+      expect(fullTarget.rows).toBe(8);
+      expect(fullTarget.activeCol).toBe(2);
+      expect(fullTarget.activeRow).toBe(5);
+      expect(fullTarget.activeValueOverride).toBe(fullAcc.partialSum);
+      expect(fullTarget.revealMode).toBe(SHEET_REVEAL_ROW_MAJOR);
+      expect(fullTarget.revealColFrontier).toBe(2);
+      expect(fullTarget.revealRowFrontier).toBe(5);
+      expect(isCellHiddenByReveal(2, 5, fullTarget)).toBe(false);
+      expect(isCellHiddenByReveal(3, 5, fullTarget)).toBe(true);
+      expect(isCellHiddenByReveal(0, 6, fullTarget)).toBe(true);
+
+      // Upstream Q and K slice stay fully revealed with no activeValueOverride
+      const fullQGrid = fullGrids[1];
+      const fullKGrid = fullGrids[2];
+      expect(fullQGrid.revealMode).toBe(SHEET_REVEAL_NONE);
+      expect(fullQGrid.activeValueOverride).toBeUndefined();
+      expect(fullKGrid.revealMode).toBe(SHEET_REVEAL_NONE);
+      expect(fullKGrid.activeValueOverride).toBeUndefined();
+
+      // Downstream Softmax, V_out, Concat, Residual grids carry SHEET_REVEAL_UNCOMPUTED
+      const fullDownstream = fullGrids.slice(3);
+      expect(fullDownstream.length).toBeGreaterThanOrEqual(4);
+      expect(fullDownstream.some((g) => g.format === 'prob')).toBe(true);
+      expect(fullDownstream.some((g) => g.cols === 64)).toBe(true);
+      for (const dg of fullDownstream) {
+        expect(dg.revealMode).toBe(SHEET_REVEAL_UNCOMPUTED);
+        expect(dg.activeValueOverride).toBeUndefined();
+        expect(isCellHiddenByReveal(0, 0, dg)).toBe(true);
+      }
+
+      // 2. Rectangular AR [1×9] Step 3 at termProgress = 0.25 on reused prefix key k=2 < P=8
+      const arScene = buildGqaCutaway({
+        bayId: 43,
+        tokens: arSim9.tokens,
+        precision: 'fp8_selective',
+        selectedPart: 'q-head-18',
+        hoveredPart: null,
+        activeGroup0Head: 0,
+        activeGroup1Head: 18,
+        viewAngle,
+        simOverride: arSim9,
+        stepperActive: true,
+        stepperStep: 2,
+        termProgress: 0.25,
+        activeCell: { tensor: 'scores', headIndex: 18, kvHeadIndex: 1, row: 0, col: 2 },
+      });
+
+      const arExact = arSim9.Scores[(18 * arSim9.tokens + 0) * arSim9.keyTokens + 2];
+      const arExactText = fmtSigned(arExact, 3);
+      const arAcc = arScene.focusedAccumulation!;
+      expect(arAcc).not.toBeNull();
+      expect(arAcc.active).toBe(true);
+      expect(arAcc.currentTermIndex).toBe(1);
+      expect(arAcc.totalTerms).toBe(4);
+      expect(Math.abs(arAcc.partialSum - arExact)).toBeGreaterThan(1e-3);
+
+      const arPop = arScene.cellPopover!;
+      expect(arPop).not.toBeNull();
+      expect(arPop.isAccumulating).toBe(true);
+      expect(arPop.equation).toBe(arAcc.popoverEquation);
+      expect(arPop.valueText).toBe(arAcc.valueBadgeText);
+      expect(arPop.badge).toBe(arAcc.badgeText);
+      expect(arPop.equation).not.toContain(arExactText);
+      expect(arPop.valueText).not.toContain(arExactText);
+
+      const arGrids = arScene.activeCellGrids!;
+      const arTarget = arGrids[0];
+      expect(arTarget.cols).toBe(9);
+      expect(arTarget.rows).toBe(1);
+      expect(arTarget.activeCol).toBe(2);
+      expect(arTarget.activeRow).toBe(0);
+      expect(arTarget.activeValueOverride).toBe(arAcc.partialSum);
+      expect(arTarget.revealMode).toBe(SHEET_REVEAL_ROW_MAJOR);
+      expect(arTarget.revealColFrontier).toBe(2);
+      expect(arTarget.revealRowFrontier).toBe(0);
+      expect(isCellHiddenByReveal(2, 0, arTarget)).toBe(false);
+      expect(isCellHiddenByReveal(3, 0, arTarget)).toBe(true);
+
+      // Reused prefix KV slice K1[t2] stays SHEET_REVEAL_NONE (never ghosted!)
+      const arReusedK = arGrids.find((g) => g.rowDimLabel === 'K1[t2]');
+      expect(arReusedK).toBeDefined();
+      expect(arReusedK!.revealMode).toBe(SHEET_REVEAL_NONE);
+
+      // Downstream Softmax/V_out/Concat/Residual carry SHEET_REVEAL_UNCOMPUTED
+      const arDownstream = arGrids.slice(3);
+      expect(arDownstream.length).toBeGreaterThanOrEqual(4);
+      for (const dg of arDownstream) {
+        expect(dg.revealMode).toBe(SHEET_REVEAL_UNCOMPUTED);
+        expect(dg.activeValueOverride).toBeUndefined();
+      }
+    }
+  });
+
+  it('RC1 Step 5 (Weighted V): wires focused partial sums and non-spoiling activeCellGrids reveal for Full Seq and AR [1×9]', () => {
+    const model = createDefaultHybridModel();
+    let session = createDecodeSession(model, { promptTokenIds: [0, 1, 2, 3, 4, 5, 6, 7] });
+    session = stepDecodeSessionGreedy(session); // P = 8, S = 1, K = 9 => [1×9]
+    const arSim9 = getActiveDecodeStep(session).getGqaTrace(43);
+
+    for (const viewAngle of ['three_quarter', 'near_plan'] as const) {
+      // 1. Full Seq (T=8) Step 5 Weighted V (q=4 => keys k=0..4, 5 terms; termProgress=0.25 => term 1)
+      const h = 5;
+      const r = 2;
+      const col = (h % 16) * 4 + r;
+      const fullVScene = buildGqaCutaway({
+        bayId: 43,
+        tokens: 8,
+        precision: 'bf16',
+        selectedPart: 'q-head-5',
+        hoveredPart: null,
+        activeGroup0Head: 5,
+        activeGroup1Head: 16,
+        viewAngle,
+        stepperActive: true,
+        stepperStep: 4,
+        termProgress: 0.25,
+        activeCell: { tensor: 'v_out', headIndex: h, kvHeadIndex: 0, row: 4, col },
+      });
+
+      const sim = fullVScene.gqaSim!;
+      const exactV = sim.V_out[(h * sim.dHead + r) * sim.tokens + 4];
+      const exactVText = fmtSigned(exactV, 3);
+      const acc = fullVScene.focusedAccumulation!;
+      expect(acc).not.toBeNull();
+      expect(acc.active).toBe(true);
+      expect(acc.totalTerms).toBe(5);
+      expect(acc.currentTermIndex).toBe(1);
+      expect(Math.abs(acc.partialSum - exactV)).toBeGreaterThan(1e-3);
+
+      const pop = fullVScene.cellPopover!;
+      expect(pop).not.toBeNull();
+      expect(pop.isAccumulating).toBe(true);
+      expect(pop.equation).toBe(acc.popoverEquation);
+      expect(pop.valueText).toBe(acc.valueBadgeText);
+      expect(pop.badge).toBe(acc.badgeText);
+      expect(pop.equation).not.toContain(exactVText);
+      expect(pop.valueText).not.toContain(exactVText);
+
+      const grids = fullVScene.activeCellGrids!;
+      const vOutGrid = grids[0];
+      expect(vOutGrid.cols).toBe(64);
+      expect(vOutGrid.rows).toBe(8);
+      expect(vOutGrid.activeCol).toBe(col);
+      expect(vOutGrid.activeRow).toBe(4);
+      expect(vOutGrid.activeValueOverride).toBe(acc.partialSum);
+      expect(vOutGrid.revealMode).toBe(SHEET_REVEAL_ROW_MAJOR);
+      expect(vOutGrid.revealColFrontier).toBe(col);
+      expect(vOutGrid.revealRowFrontier).toBe(4);
+      expect(isCellHiddenByReveal(col, 4, vOutGrid)).toBe(false);
+      expect(isCellHiddenByReveal(col + 1, 4, vOutGrid)).toBe(true);
+
+      // Upstream Softmax and V0 slices stay SHEET_REVEAL_NONE
+      const softmaxUp = grids.find((g) => g.format === 'prob');
+      expect(softmaxUp).toBeDefined();
+      expect(softmaxUp!.revealMode).toBe(SHEET_REVEAL_NONE);
+      expect(softmaxUp!.activeValueOverride).toBeUndefined();
+      const vSlices = grids.filter((g) => g.rowDimLabel?.startsWith('V0[t'));
+      expect(vSlices.length).toBe(5);
+      for (const vs of vSlices) {
+        expect(vs.revealMode).toBe(SHEET_REVEAL_NONE);
+        expect(vs.activeValueOverride).toBeUndefined();
+      }
+
+      // Downstream Concat & Residual grids carry SHEET_REVEAL_UNCOMPUTED
+      const concatGrid = grids.find((g) => g.cols === 128);
+      const residualGrid = grids.find((g) => g.colDimLabel === 'd = 8');
+      expect(concatGrid).toBeDefined();
+      expect(residualGrid).toBeDefined();
+      expect(concatGrid!.revealMode).toBe(SHEET_REVEAL_UNCOMPUTED);
+      expect(residualGrid!.revealMode).toBe(SHEET_REVEAL_UNCOMPUTED);
+
+      // 2. Rectangular AR [1×9] Step 5 Weighted V (P=8, S=1, q=0 => 9 causal keys; termProgress=0.25 => term 2)
+      const arH = 18;
+      const arR = 1;
+      const arCol = (arH % 16) * 4 + arR;
+      const arVScene = buildGqaCutaway({
+        bayId: 43,
+        tokens: arSim9.tokens,
+        precision: 'fp8_selective',
+        selectedPart: 'q-head-18',
+        hoveredPart: null,
+        activeGroup0Head: 0,
+        activeGroup1Head: arH,
+        viewAngle,
+        simOverride: arSim9,
+        stepperActive: true,
+        stepperStep: 4,
+        termProgress: 0.25,
+        activeCell: { tensor: 'v_out', headIndex: arH, kvHeadIndex: 1, row: 0, col: arCol },
+      });
+
+      const arExactV = arSim9.V_out[(arH * arSim9.dHead + arR) * arSim9.tokens + 0];
+      const arExactVText = fmtSigned(arExactV, 3);
+      const arAcc = arVScene.focusedAccumulation!;
+      expect(arAcc).not.toBeNull();
+      expect(arAcc.active).toBe(true);
+      expect(arAcc.totalTerms).toBe(9);
+      expect(arAcc.currentTermIndex).toBe(2);
+      expect(Math.abs(arAcc.partialSum - arExactV)).toBeGreaterThan(1e-3);
+
+      expect(arVScene.cellPopover!.isAccumulating).toBe(true);
+      expect(arVScene.cellPopover!.equation).not.toContain(arExactVText);
+      expect(arVScene.cellPopover!.valueText).not.toContain(arExactVText);
+
+      const arVGrid = arVScene.activeCellGrids![0];
+      expect(arVGrid.activeValueOverride).toBe(arAcc.partialSum);
+      expect(arVGrid.revealMode).toBe(SHEET_REVEAL_ROW_MAJOR);
+      expect(arVGrid.revealColFrontier).toBe(arCol);
+      expect(arVGrid.revealRowFrontier).toBe(0);
+
+      // Reused prefix V1 slices (t0..t7) stay SHEET_REVEAL_NONE
+      for (let k = 0; k < 8; k++) {
+        const prefixV = arVScene.activeCellGrids!.find((g) => g.rowDimLabel === `V1[t${k}]`);
+        expect(prefixV, `${viewAngle} reused prefix V1[t${k}]`).toBeDefined();
+        expect(prefixV!.revealMode).toBe(SHEET_REVEAL_NONE);
+      }
+      const arConcat = arVScene.activeCellGrids!.find((g) => g.cols === 128);
+      const arResidual = arVScene.activeCellGrids!.find((g) => g.colDimLabel === 'd = 8');
+      expect(arConcat?.revealMode).toBe(SHEET_REVEAL_UNCOMPUTED);
+      expect(arResidual?.revealMode).toBe(SHEET_REVEAL_UNCOMPUTED);
+    }
+  });
+
+  it('RC1 preserves ordinary unrestricted inspection when stepperActive is false, reducedMotion is true, or termProgress >= 0.999', () => {
+    for (const viewAngle of ['three_quarter', 'near_plan'] as const) {
+      const cell = { tensor: 'scores' as const, headIndex: 3, kvHeadIndex: 0 as const, row: 5, col: 2 };
+
+      // 1. Ordinary hover/click (stepperActive: false) — no focusedAccumulation, no reveal suppression, completed value shown
+      const ordinary = buildGqaCutaway({
+        bayId: 43,
+        tokens: 8,
+        precision: 'bf16',
+        selectedPart: 'q-head-3',
+        hoveredPart: null,
+        activeGroup0Head: 3,
+        activeGroup1Head: 16,
+        viewAngle,
+        stepperActive: false,
+        stepperStep: 2,
+        termProgress: 0.25,
+        activeCell: cell,
+      });
+      const exactText = fmtSigned(ordinary.gqaSim!.Scores[(3 * 8 + 5) * 8 + 2], 3);
+      expect(ordinary.focusedAccumulation).toBeNull();
+      expect(ordinary.cellPopover?.isAccumulating).toBeUndefined();
+      expect(ordinary.cellPopover?.valueText).toContain(exactText);
+      for (const g of ordinary.activeCellGrids!) {
+        expect(g.revealMode).toBeUndefined();
+        expect(g.activeValueOverride).toBeUndefined();
+      }
+
+      // 2. Reduced motion (stepperActive: true, reducedMotion: true) — no focusedAccumulation or reveal suppression
+      const reduced = buildGqaCutaway({
+        bayId: 43,
+        tokens: 8,
+        precision: 'bf16',
+        selectedPart: 'q-head-3',
+        hoveredPart: null,
+        activeGroup0Head: 3,
+        activeGroup1Head: 16,
+        viewAngle,
+        stepperActive: true,
+        stepperStep: 2,
+        reducedMotion: true,
+        termProgress: 0.25,
+        activeCell: cell,
+      });
+      expect(reduced.focusedAccumulation).toBeNull();
+      expect(reduced.cellPopover?.isAccumulating).toBeUndefined();
+      expect(reduced.cellPopover?.valueText).toContain(exactText);
+      for (const g of reduced.activeCellGrids!) {
+        expect(g.revealMode).toBeUndefined();
+        expect(g.activeValueOverride).toBeUndefined();
+      }
+
+      // 3. Completed term (termProgress >= 0.999) during active stepper — no focusedAccumulation or activeValueOverride
+      const completed = buildGqaCutaway({
+        bayId: 43,
+        tokens: 8,
+        precision: 'bf16',
+        selectedPart: 'q-head-3',
+        hoveredPart: null,
+        activeGroup0Head: 3,
+        activeGroup1Head: 16,
+        viewAngle,
+        stepperActive: true,
+        stepperStep: 2,
+        termProgress: 0.999,
+        activeCell: cell,
+      });
+      expect(completed.focusedAccumulation).toBeNull();
+      expect(completed.cellPopover?.isAccumulating).toBeUndefined();
+      expect(completed.cellPopover?.valueText).toContain(exactText);
+      expect(completed.activeCellGrids![0].activeValueOverride).toBeUndefined();
+      expect(completed.activeCellGrids![0].revealMode).toBe(SHEET_REVEAL_ROW_MAJOR);
     }
   });
 });

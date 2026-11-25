@@ -59,6 +59,10 @@ import {
   SHEET_ROLE_WEIGHT,
 } from '../render/sheets';
 import type { ActiveSheetCellGrid, CellPopoverSpec } from '../ui/overlay';
+import {
+  computeGqaFocusedAccumulation,
+  type FocusedAccumulationResult,
+} from './accumulation';
 import type { AtlasSlice } from './atlasPacker';
 import type {
   CutawayPartInfo,
@@ -686,6 +690,32 @@ export function buildGqaFocusSet(formula: GqaCellFormula | null): SheetFocusSet 
 }
 
 /**
+ * Resolve optional RC1 focused-cell partial-sum accumulation during active Stepper playback.
+ * Returns `null` for ordinary inspection (`!stepperActive`), `reducedMotion`, missing `stepperStep`
+ * or `activeCell`, or when `termProgress >= 0.999` (including omitted default `1`).
+ */
+export function resolveGqaFocusedAccumulation(
+  sim: GqaSimResult,
+  activeCell: GqaCellRef | null,
+  stepperActive: boolean,
+  reducedMotion: boolean,
+  stepperStep: number | null,
+  termProgress: number | undefined,
+): FocusedAccumulationResult | null {
+  if (
+    !stepperActive ||
+    reducedMotion ||
+    stepperStep === null ||
+    termProgress === undefined ||
+    termProgress >= 0.999 ||
+    !activeCell
+  ) {
+    return null;
+  }
+  return computeGqaFocusedAccumulation(sim, activeCell, stepperStep, termProgress);
+}
+
+/**
  * Build a concise, Bycroft-style V3 floating contextual cell formula popover from an active
  * `GqaCellFormula` and its resolved 3D target/operand world anchors.
  */
@@ -697,6 +727,7 @@ export function buildGqaCellPopover(
     readonly world: readonly [number, number, number];
     readonly role: 'indigo' | 'teal';
   }[],
+  focusedAccumulation?: FocusedAccumulationResult | null,
 ): CellPopoverSpec {
   const cell = clampCellToSim(sim, formula.cell);
   const P = sim.prefixTokens;
@@ -842,13 +873,16 @@ export function buildGqaCellPopover(
   if (hasOpB) operandColors.push('teal');
   operandColors.push('red');
 
+  const isAccumulating = Boolean(focusedAccumulation?.active);
+
   return {
     world: targetWorld,
     tensorLabel: formula.tensorLabel,
     coordLabel,
-    badge: formula.headBadge ?? undefined,
-    equation,
-    valueText,
+    badge: isAccumulating ? focusedAccumulation!.badgeText : (formula.headBadge ?? undefined),
+    equation: isAccumulating ? focusedAccumulation!.popoverEquation : equation,
+    valueText: isAccumulating ? focusedAccumulation!.valueBadgeText : valueText,
+    ...(isAccumulating ? { isAccumulating: true } : {}),
     operandColors,
     sourceWorlds: sourceWorlds.length > 0 ? sourceWorlds : undefined,
   };
@@ -857,7 +891,9 @@ export function buildGqaCellPopover(
 /**
  * Build live V3 zoom-adaptive `ActiveSheetCellGrid` descriptors for active/focused GQA sheets
  * directly from `sim` Float32 arrays, complete with absolute token headers (`t${abs} ${label}`),
- * dimension badges (`colDimLabel` / `rowDimLabel`), and causal mask flags (`masked: Uint8Array`).
+ * dimension badges (`colDimLabel` / `rowDimLabel`), causal mask flags (`masked: Uint8Array`),
+ * non-spoiling progressive reveal frontiers (`revealMode`/`revealColFrontier`/`revealRowFrontier`),
+ * and optional running partial-sum override (`activeValueOverride`) on the accumulating frontier cell.
  */
 export function buildGqaActiveCellGrids(
   sim: GqaSimResult,
@@ -867,6 +903,8 @@ export function buildGqaActiveCellGrids(
   group1Head: number,
   activeHeadIdx: number | null,
   activeKvGroup: 0 | 1 | null,
+  revealCtx?: GqaRevealContext,
+  focusedAccumulation?: FocusedAccumulationResult | null,
 ): readonly ActiveSheetCellGrid[] {
   const T = sim.tokens;
   const K = sim.keyTokens;
@@ -874,6 +912,7 @@ export function buildGqaActiveCellGrids(
   const { d, dHead } = sim;
   const isIncremental = P > 0;
   const displayedHeads: readonly [number, number] = [group0Head, group1Head];
+  const revealEnabled = Boolean(revealCtx?.enabled);
 
   const queryTokLabels = Array.from(
     { length: T },
@@ -892,11 +931,13 @@ export function buildGqaActiveCellGrids(
   const makeGridFromSheet = (
     regKey: string,
     values: Float32Array,
+    sheetInfo: GqaRevealSheetInfo,
     opts: {
       readonly masked?: Uint8Array;
       readonly format?: 'signed' | 'prob';
       readonly activeCol?: number;
       readonly activeRow?: number;
+      readonly activeValueOverride?: number | null;
       readonly colLabels?: readonly string[];
       readonly rowLabels?: readonly string[];
       readonly colDimLabel?: string;
@@ -910,6 +951,32 @@ export function buildGqaActiveCellGrids(
       sheet.frame ??
       makeSheetFrame3D([sheet.cx, sheet.cy, sheet.cz], [sheet.ex, sheet.ey, sheet.ez]);
     emittedKeys.add(regKey);
+
+    let revealFields:
+      | Pick<
+          ActiveSheetCellGrid,
+          | 'revealMode'
+          | 'revealColFrontier'
+          | 'revealRowFrontier'
+          | 'suppressColHeaders'
+          | 'suppressRowHeaders'
+        >
+      | undefined;
+    if (revealEnabled && revealCtx) {
+      const [revealMode, revealColFrontier, revealRowFrontier] = computeGqaSheetReveal(
+        revealCtx,
+        sheetInfo,
+      );
+      revealFields = {
+        revealMode,
+        revealColFrontier,
+        revealRowFrontier,
+        ...(revealMode === SHEET_REVEAL_UNCOMPUTED
+          ? { suppressColHeaders: true, suppressRowHeaders: true }
+          : {}),
+      };
+    }
+
     grids.push({
       originWorld: frame.center,
       extent: frame.extent,
@@ -922,6 +989,10 @@ export function buildGqaActiveCellGrids(
       format: opts.format ?? 'signed',
       activeCol: opts.activeCol,
       activeRow: opts.activeRow,
+      ...revealFields,
+      ...(opts.activeValueOverride !== undefined && opts.activeValueOverride !== null
+        ? { activeValueOverride: opts.activeValueOverride }
+        : {}),
       colLabels: opts.colLabels,
       rowLabels: opts.rowLabels,
       colDimLabel: opts.colDimLabel,
@@ -934,6 +1005,7 @@ export function buildGqaActiveCellGrids(
     g: 0 | 1,
     activeCol?: number,
     activeRow?: number,
+    activeValueOverride?: number | null,
   ): void => {
     const h = displayedHeads[g];
     const values = new Float32Array(T * K);
@@ -948,16 +1020,27 @@ export function buildGqaActiveCellGrids(
         masked[idx] = k > qAbs ? 1 : 0;
       }
     }
-    makeGridFromSheet(`${kind}:${g}`, values, {
-      masked,
-      format: kind === 'softmax' ? 'prob' : 'signed',
-      activeCol,
-      activeRow,
-      colLabels: keyTokLabels,
-      rowLabels: queryTokLabels,
-      colDimLabel: isIncremental ? `K = ${K} (${P}+${T})` : `K = ${K}`,
-      rowDimLabel: `Q = ${T}`,
-    });
+    makeGridFromSheet(
+      `${kind}:${g}`,
+      values,
+      {
+        sheetKind: kind === 'scores' ? SHEET_KIND_CAUSAL_SCORES : SHEET_KIND_CAUSAL_SOFTMAX,
+        tensorKey: kind,
+        headIndex: h,
+        kvHeadIndex: g,
+      },
+      {
+        masked,
+        format: kind === 'softmax' ? 'prob' : 'signed',
+        activeCol,
+        activeRow,
+        activeValueOverride,
+        colLabels: keyTokLabels,
+        rowLabels: queryTokLabels,
+        colDimLabel: isIncremental ? `K = ${K} (${P}+${T})` : `K = ${K}`,
+        rowDimLabel: `Q = ${T}`,
+      },
+    );
   };
 
   const emitQHead = (h: number, activeCol?: number, activeRow?: number): void => {
@@ -968,15 +1051,25 @@ export function buildGqaActiveCellGrids(
         values[t * dHead + r] = sim.Q[headOff + r * T + t];
       }
     }
-    makeGridFromSheet(`q:${h}`, values, {
-      format: 'signed',
-      activeCol,
-      activeRow,
-      colLabels: headDimLabels,
-      rowLabels: queryTokLabels,
-      colDimLabel: `d_h = ${dHead}`,
-      rowDimLabel: `${fmtHeadTag(h)} · Q = ${T}`,
-    });
+    makeGridFromSheet(
+      `q:${h}`,
+      values,
+      {
+        sheetKind: SHEET_KIND_STANDARD,
+        tensorKey: 'q',
+        headIndex: h,
+        kvHeadIndex: kvHeadForQuery(h),
+      },
+      {
+        format: 'signed',
+        activeCol,
+        activeRow,
+        colLabels: headDimLabels,
+        rowLabels: queryTokLabels,
+        colDimLabel: `d_h = ${dHead}`,
+        rowDimLabel: `${fmtHeadTag(h)} · Q = ${T}`,
+      },
+    );
   };
 
   const emitKvSlice = (
@@ -993,18 +1086,33 @@ export function buildGqaActiveCellGrids(
     for (let r = 0; r < dHead; r++) {
       values[r] = src[headOff + r * K + clampedK];
     }
-    makeGridFromSheet(`${kind}:${g}:${clampedK}`, values, {
-      format: 'signed',
-      activeCol,
-      activeRow,
-      colLabels: headDimLabels,
-      rowLabels: [keyTokLabels[clampedK]],
-      colDimLabel: `d_h = ${dHead}`,
-      rowDimLabel: `${kind === 'kv_k' ? 'K' : 'V'}${g}[t${clampedK}]`,
-    });
+    makeGridFromSheet(
+      `${kind}:${g}:${clampedK}`,
+      values,
+      {
+        sheetKind: SHEET_KIND_STANDARD,
+        tensorKey: kind,
+        kvHeadIndex: g,
+        tokenIndex: clampedK,
+      },
+      {
+        format: 'signed',
+        activeCol,
+        activeRow,
+        colLabels: headDimLabels,
+        rowLabels: [keyTokLabels[clampedK]],
+        colDimLabel: `d_h = ${dHead}`,
+        rowDimLabel: `${kind === 'kv_k' ? 'K' : 'V'}${g}[t${clampedK}]`,
+      },
+    );
   };
 
-  const emitVOut = (g: 0 | 1, activeCol?: number, activeRow?: number): void => {
+  const emitVOut = (
+    g: 0 | 1,
+    activeCol?: number,
+    activeRow?: number,
+    activeValueOverride?: number | null,
+  ): void => {
     const cols = 16 * dHead;
     const values = new Float32Array(T * cols);
     const baseChan = g * cols;
@@ -1017,15 +1125,25 @@ export function buildGqaActiveCellGrids(
       { length: cols },
       (_, c) => `${fmtHeadTag(g * 16 + Math.floor(c / dHead))}·d${c % dHead}`,
     );
-    makeGridFromSheet(`v_out:${g}`, values, {
-      format: 'signed',
-      activeCol,
-      activeRow,
-      colLabels,
-      rowLabels: queryTokLabels,
-      colDimLabel: `16Q×${dHead} = ${cols}`,
-      rowDimLabel: `Q = ${T}`,
-    });
+    makeGridFromSheet(
+      `v_out:${g}`,
+      values,
+      {
+        sheetKind: SHEET_KIND_STANDARD,
+        tensorKey: 'v_out',
+        kvHeadIndex: g,
+      },
+      {
+        format: 'signed',
+        activeCol,
+        activeRow,
+        activeValueOverride,
+        colLabels,
+        rowLabels: queryTokLabels,
+        colDimLabel: `16Q×${dHead} = ${cols}`,
+        rowDimLabel: `Q = ${T}`,
+      },
+    );
   };
 
   const emitTokenChannelSheet = (
@@ -1040,15 +1158,23 @@ export function buildGqaActiveCellGrids(
         values[t * d + i] = src[i * T + t];
       }
     }
-    makeGridFromSheet(kind, values, {
-      format: 'signed',
-      activeCol,
-      activeRow,
-      colLabels: chanLabels,
-      rowLabels: queryTokLabels,
-      colDimLabel: `d = ${d}`,
-      rowDimLabel: `T = ${T}`,
-    });
+    makeGridFromSheet(
+      kind,
+      values,
+      {
+        sheetKind: SHEET_KIND_STANDARD,
+        tensorKey: kind,
+      },
+      {
+        format: 'signed',
+        activeCol,
+        activeRow,
+        colLabels: chanLabels,
+        rowLabels: queryTokLabels,
+        colDimLabel: `d = ${d}`,
+        rowDimLabel: `T = ${T}`,
+      },
+    );
   };
 
   const emitConcat = (activeCol?: number, activeRow?: number): void => {
@@ -1059,14 +1185,22 @@ export function buildGqaActiveCellGrids(
         values[q * cols + c] = sim.Concat[c * T + q];
       }
     }
-    makeGridFromSheet('concat', values, {
-      format: 'signed',
-      activeCol,
-      activeRow,
-      rowLabels: queryTokLabels,
-      colDimLabel: `32Q×${dHead} = ${cols}`,
-      rowDimLabel: `Q = ${T}`,
-    });
+    makeGridFromSheet(
+      'concat',
+      values,
+      {
+        sheetKind: SHEET_KIND_STANDARD,
+        tensorKey: 'concat',
+      },
+      {
+        format: 'signed',
+        activeCol,
+        activeRow,
+        rowLabels: queryTokLabels,
+        colDimLabel: `32Q×${dHead} = ${cols}`,
+        rowDimLabel: `Q = ${T}`,
+      },
+    );
   };
 
   const emitWeightKV = (
@@ -1082,19 +1216,29 @@ export function buildGqaActiveCellGrids(
         values[j * cols + outRow] = src[outRow * d + j];
       }
     }
-    makeGridFromSheet(kind, values, {
-      format: 'signed',
-      activeCol,
-      activeRow,
-      rowLabels: chanLabels,
-      colDimLabel: `2KV×${dHead} = ${cols}`,
-      rowDimLabel: `d = ${d}`,
-    });
+    makeGridFromSheet(
+      kind,
+      values,
+      {
+        sheetKind: SHEET_KIND_STANDARD,
+        tensorKey: kind,
+      },
+      {
+        format: 'signed',
+        activeCol,
+        activeRow,
+        rowLabels: chanLabels,
+        colDimLabel: `2KV×${dHead} = ${cols}`,
+        rowDimLabel: `d = ${d}`,
+      },
+    );
   };
 
   const emitSpan = (span: GqaSheetSpan, isTarget: boolean): void => {
     const activeCol = isTarget || span.colStart === span.colEnd ? span.colStart : undefined;
     const activeRow = isTarget || span.rowStart === span.rowEnd ? span.rowStart : undefined;
+    const targetOverride =
+      isTarget && focusedAccumulation?.active ? focusedAccumulation.partialSum : undefined;
     switch (span.tensor) {
       case 'scores':
       case 'softmax': {
@@ -1102,7 +1246,13 @@ export function buildGqaActiveCellGrids(
           span.kvHeadIndex ??
           (span.headIndex !== undefined ? kvHeadForQuery(span.headIndex) : 0);
         if (span.headIndex !== undefined && displayedHeads[g] !== span.headIndex) return;
-        emitScoresOrSoftmax(span.tensor, g, activeCol, activeRow);
+        emitScoresOrSoftmax(
+          span.tensor,
+          g,
+          activeCol,
+          activeRow,
+          span.tensor === 'scores' ? targetOverride : undefined,
+        );
         break;
       }
       case 'q': {
@@ -1124,7 +1274,7 @@ export function buildGqaActiveCellGrids(
       }
       case 'v_out': {
         const g: 0 | 1 = span.kvHeadIndex ?? 0;
-        emitVOut(g, activeCol, activeRow);
+        emitVOut(g, activeCol, activeRow, targetOverride);
         break;
       }
       case 'input':
@@ -1144,16 +1294,56 @@ export function buildGqaActiveCellGrids(
     }
   };
 
+  const focusGrp: 0 | 1 =
+    activeKvGroup ?? (activeHeadIdx !== null ? kvHeadForQuery(activeHeadIdx) : 0);
+  const focusHead = activeHeadIdx ?? displayedHeads[focusGrp];
+
   if (formula) {
     emitSpan(formula.targetSpan, true);
     for (const up of formula.upstreamSpans) {
       emitSpan(up, false);
     }
+    if (revealEnabled && revealCtx) {
+      // Include downstream uncomputed sheets for the active group so stepper-mode
+      // activeCellGrids explicitly carry SHEET_REVEAL_UNCOMPUTED on future stages.
+      const maybeEmitUncomputed = (info: GqaRevealSheetInfo, emitFn: () => void): void => {
+        if (computeGqaSheetReveal(revealCtx, info)[0] === SHEET_REVEAL_UNCOMPUTED) {
+          emitFn();
+        }
+      };
+      maybeEmitUncomputed(
+        {
+          sheetKind: SHEET_KIND_CAUSAL_SCORES,
+          tensorKey: 'scores',
+          headIndex: displayedHeads[focusGrp],
+          kvHeadIndex: focusGrp,
+        },
+        () => emitScoresOrSoftmax('scores', focusGrp),
+      );
+      maybeEmitUncomputed(
+        {
+          sheetKind: SHEET_KIND_CAUSAL_SOFTMAX,
+          tensorKey: 'softmax',
+          headIndex: displayedHeads[focusGrp],
+          kvHeadIndex: focusGrp,
+        },
+        () => emitScoresOrSoftmax('softmax', focusGrp),
+      );
+      maybeEmitUncomputed(
+        { sheetKind: SHEET_KIND_STANDARD, tensorKey: 'v_out', kvHeadIndex: focusGrp },
+        () => emitVOut(focusGrp),
+      );
+      maybeEmitUncomputed(
+        { sheetKind: SHEET_KIND_STANDARD, tensorKey: 'concat' },
+        () => emitConcat(),
+      );
+      maybeEmitUncomputed(
+        { sheetKind: SHEET_KIND_STANDARD, tensorKey: 'residual' },
+        () => emitTokenChannelSheet('residual'),
+      );
+    }
   } else {
     // Idle close-zoom support: expose the active group's core attention sheets for zoom-adaptive numbers
-    const focusGrp: 0 | 1 =
-      activeKvGroup ?? (activeHeadIdx !== null ? kvHeadForQuery(activeHeadIdx) : 0);
-    const focusHead = activeHeadIdx ?? displayedHeads[focusGrp];
     emitScoresOrSoftmax('scores', focusGrp);
     emitScoresOrSoftmax('softmax', focusGrp);
     emitQHead(focusHead);
@@ -1182,6 +1372,7 @@ export interface BuildGqaSpatialContext {
   readonly reducedMotion: boolean;
   readonly stepperStep: number | null;
   readonly stepperPulsePhase: number;
+  readonly termProgress?: number;
   readonly sim: GqaSimResult;
   readonly atlas: GqaValueAtlas;
   readonly partCatalog: Readonly<Record<string, CutawayPartInfo>>;
@@ -1215,6 +1406,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     reducedMotion,
     stepperStep,
     stepperPulsePhase,
+    termProgress,
     sim,
     atlas,
     partCatalog,
@@ -1236,6 +1428,14 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     activeGroup: focusGrp,
     pulsePhase: stepperPulsePhase,
   };
+  const focusedAccumulation = resolveGqaFocusedAccumulation(
+    sim,
+    activeCell,
+    stepperActive,
+    reducedMotion,
+    stepperStep,
+    termProgress,
+  );
 
   const b = new SpatialGqaBuilder(bayId, revealCtx, hasCellTrace);
 
@@ -2308,7 +2508,13 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
         drawOperandDependency3D(b.flow, upSpan, targetSpan, up.role === 'operand_a');
       }
 
-      cellPopover = buildGqaCellPopover(sim, activeFormula, targetSpan.frontPoint, sourceWorlds);
+      cellPopover = buildGqaCellPopover(
+        sim,
+        activeFormula,
+        targetSpan.frontPoint,
+        sourceWorlds,
+        focusedAccumulation,
+      );
     }
   }
 
@@ -2532,6 +2738,8 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     group1Head,
     activeHeadIdx,
     activeKvGroup,
+    revealCtx,
+    focusedAccumulation,
   );
 
   return {
@@ -2549,6 +2757,7 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
     ...(hasCellTrace ? { activeOpPartIds: b.activeOpPartIds } : {}),
     cellPopover,
     activeCellGrids,
+    focusedAccumulation,
     solidPickBoxes: b.pickBoxes,
     partCatalog,
     gqaStats: {

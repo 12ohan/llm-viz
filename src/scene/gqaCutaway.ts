@@ -54,6 +54,7 @@ import {
   computeGqaSheetReveal,
   fitSpatialGqaCamera,
   GQA_SPATIAL_FIT_BOUNDS,
+  resolveGqaFocusedAccumulation,
   type GqaRevealContext,
 } from './gqaSpatial';
 import {
@@ -123,6 +124,8 @@ export interface GqaCutawayOptions {
   readonly reducedMotion?: boolean;
   /** Optional 0..1 accumulation pulse phase for the active frontier cell border. */
   readonly stepperPulsePhase?: number;
+  /** Optional 0..1 focused-cell term-by-term accumulation progress during Stepper playback (default `1`). */
+  readonly termProgress?: number;
   /** Layout mode: `'three_quarter'` builds the 3D Spatial GQA architecture; `'near_plan'` (default) keeps the coplanar XZ schematic. */
   readonly viewAngle?: GqaViewAngle;
   /** Optional authoritative simulator result from a unified `HybridExecutionResult`. */
@@ -451,6 +454,7 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
   const reducedMotion = Boolean(opts.reducedMotion);
   const stepperStep = opts.stepperStep ?? null;
   const stepperPulsePhase = opts.stepperPulsePhase ?? 0.25;
+  const effectiveActiveCell = opts.activeCell ?? null;
 
   if (opts.viewAngle === 'three_quarter') {
     return buildGqaSpatialScene({
@@ -464,12 +468,13 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
       activeKvGroup,
       group0Head,
       group1Head,
-      activeCell: opts.activeCell ?? null,
+      activeCell: effectiveActiveCell,
       activeFormula,
       stepperActive,
       reducedMotion,
       stepperStep,
       stepperPulsePhase,
+      termProgress: opts.termProgress,
       sim,
       atlas,
       partCatalog,
@@ -487,11 +492,19 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     enabled: revealEnabled,
     step: stepperStep ?? 0,
     sim,
-    activeCell: opts.activeCell ?? null,
+    activeCell: effectiveActiveCell,
     activeHead: focusHead,
     activeGroup: focusGrp,
     pulsePhase: stepperPulsePhase,
   };
+  const focusedAccumulation = resolveGqaFocusedAccumulation(
+    sim,
+    effectiveActiveCell,
+    stepperActive,
+    reducedMotion,
+    stepperStep,
+    opts.termProgress,
+  );
 
   const b = new GqaSheetBuilder(bayId, revealCtx, hasCellTrace);
 
@@ -1448,6 +1461,7 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
         activeFormula,
         [targetRect.cx, targetRect.topY + 0.012, targetRect.cz],
         sourceWorlds,
+        focusedAccumulation,
       );
     }
   }
@@ -1652,6 +1666,8 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     group1Head,
     activeHeadIdx,
     activeKvGroup,
+    revealCtx,
+    focusedAccumulation,
   );
 
   return {
@@ -1669,6 +1685,7 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
     ...(hasCellTrace ? { activeOpPartIds: b.activeOpPartIds } : {}),
     cellPopover,
     activeCellGrids,
+    focusedAccumulation,
     solidPickBoxes: b.pickBoxes,
     partCatalog,
     gqaStats: {
