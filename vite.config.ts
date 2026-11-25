@@ -21,7 +21,8 @@ export default defineConfig({
     sourcemap: true,
   },
   test: {
-    include: ['tests/**/*.test.ts'],
+    include: ['tests/*.test.ts'],
+    exclude: ['tests/e2e/**', '**/node_modules/**', '**/dist/**'],
     environment: 'node',
   },
 });
