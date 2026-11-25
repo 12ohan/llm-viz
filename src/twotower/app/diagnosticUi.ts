@@ -310,9 +310,24 @@ function describeActionTooltips(
   };
 }
 
-export function mountTwoTowerDiagnosticWorkbench(root: HTMLElement): void {
-  const model = createDefaultTwoTowerModel();
-  let session: TwoTowerSession = createTwoTowerSession(model);
+export interface DiagnosticWorkbenchController {
+  syncSession(nextSession: TwoTowerSession, statusText?: string): void;
+  setInspectedBay(bayId: number): void;
+  getSession(): TwoTowerSession;
+}
+
+export interface DiagnosticWorkbenchOptions {
+  readonly initialSession?: TwoTowerSession;
+  readonly onSessionChange?: (nextSession: TwoTowerSession, statusText?: string) => void;
+  readonly onInspectedBayChange?: (bayId: number) => void;
+}
+
+export function mountTwoTowerDiagnosticWorkbench(
+  root: HTMLElement,
+  options?: DiagnosticWorkbenchOptions,
+): DiagnosticWorkbenchController {
+  let session: TwoTowerSession =
+    options?.initialSession ?? createTwoTowerSession(createDefaultTwoTowerModel());
   let selectedPromptPresetId: PromptPreset['id'] = 'default_8';
   let inspectedBayId = 6; // Default to Bay 6 (GQA *, eagerly retained on initial prefill)
   let statusBanner: StatusBannerState = {
@@ -741,6 +756,7 @@ export function mountTwoTowerDiagnosticWorkbench(root: HTMLElement): void {
   }
 
   function runSafe(actionLabel: string, fn: () => void): void {
+    const prevSession = session;
     try {
       fn();
     } catch (err) {
@@ -748,6 +764,9 @@ export function mountTwoTowerDiagnosticWorkbench(root: HTMLElement): void {
       setStatus('error', `${actionLabel}: ${msg}`);
     }
     render();
+    if (session !== prevSession) {
+      options?.onSessionChange?.(session, statusBanner.text);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1086,6 +1105,7 @@ export function mountTwoTowerDiagnosticWorkbench(root: HTMLElement): void {
   traceBaySelect.addEventListener('change', () => {
     inspectedBayId = Number(traceBaySelect.value);
     render();
+    options?.onInspectedBayChange?.(inspectedBayId);
   });
 
   // ---------------------------------------------------------------------------
@@ -1789,4 +1809,25 @@ export function mountTwoTowerDiagnosticWorkbench(root: HTMLElement): void {
   }
 
   render();
+
+  return {
+    syncSession(nextSession: TwoTowerSession, statusText?: string): void {
+      session = nextSession;
+      if (statusText) {
+        statusBanner = { severity: 'info', text: statusText };
+      }
+      render();
+    },
+    setInspectedBay(bayId: number): void {
+      const clamped = Math.max(1, Math.min(52, Math.trunc(bayId)));
+      if (clamped !== inspectedBayId) {
+        inspectedBayId = clamped;
+        traceBaySelect.value = String(clamped);
+        render();
+      }
+    },
+    getSession(): TwoTowerSession {
+      return session;
+    },
+  };
 }

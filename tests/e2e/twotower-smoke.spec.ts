@@ -1,5 +1,14 @@
-import { expect, test, type Page } from '@playwright/test';
+import { inflateSync } from 'node:zlib';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { PAGES_BASE_URL, ROOT_BASE_URL } from '../../playwright.config';
+import type { TwoTowerAppHandle, TwoTowerTelemetrySnapshot } from '../../src/twotower/app/spatialApp';
+
+declare global {
+  interface Window {
+    __TWOTOWER_TELEMETRY__?: TwoTowerTelemetrySnapshot;
+    __TWOTOWER_APP__?: TwoTowerAppHandle;
+  }
+}
 
 interface RuntimeGuards {
   readonly pageErrors: string[];
@@ -60,235 +69,515 @@ function attachRuntimeGuards(page: Page): RuntimeGuards {
   };
 }
 
+async function waitFrames(page: Page, count = 4): Promise<void> {
+  await page.evaluate(
+    (n) =>
+      new Promise<void>((resolve) => {
+        let remaining = n;
+        const tick = () => {
+          remaining -= 1;
+          if (remaining <= 0) resolve();
+          else requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      }),
+    count,
+  );
+}
+
+/** Pure-Node PNG RGBA pixel variance inspector (zero external image deps). */
+function analyzePngColorVariety(png: Buffer): {
+  width: number;
+  height: number;
+  distinctBuckets: number;
+  nonBackgroundRatio: number;
+} {
+  const PNG_SIG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  if (png.length < 33 || !png.subarray(0, 8).equals(PNG_SIG)) {
+    throw new Error('Invalid PNG buffer');
+  }
+
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  const idatChunks: Buffer[] = [];
+
+  let offset = 8;
+  while (offset + 12 <= png.length) {
+    const len = png.readUInt32BE(offset);
+    const type = png.subarray(offset + 4, offset + 8).toString('ascii');
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + len;
+    if (dataEnd > png.length) break;
+
+    if (type === 'IHDR') {
+      width = png.readUInt32BE(dataStart);
+      height = png.readUInt32BE(dataStart + 4);
+      bitDepth = png[dataStart + 8];
+      colorType = png[dataStart + 9];
+    } else if (type === 'IDAT') {
+      idatChunks.push(png.subarray(dataStart, dataEnd));
+    } else if (type === 'IEND') {
+      break;
+    }
+    offset = dataEnd + 4;
+  }
+
+  if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6)) {
+    throw new Error(`Unsupported PNG format: bitDepth=${bitDepth} colorType=${colorType}`);
+  }
+
+  const bpp = colorType === 6 ? 4 : 3;
+  const stride = width * bpp;
+  const raw = inflateSync(Buffer.concat(idatChunks));
+  const recon = Buffer.alloc(height * stride);
+
+  const paeth = (a: number, b: number, c: number): number => {
+    const p = a + b - c;
+    const pa = Math.abs(p - a);
+    const pb = Math.abs(p - b);
+    const pc = Math.abs(p - c);
+    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+  };
+
+  for (let y = 0; y < height; y++) {
+    const filter = raw[y * (stride + 1)];
+    const srcRow = y * (stride + 1) + 1;
+    const dstRow = y * stride;
+    for (let x = 0; x < stride; x++) {
+      const val = raw[srcRow + x];
+      const a = x >= bpp ? recon[dstRow + x - bpp] : 0;
+      const b = y > 0 ? recon[dstRow - stride + x] : 0;
+      const c = y > 0 && x >= bpp ? recon[dstRow - stride + x - bpp] : 0;
+      let out = val;
+      if (filter === 1) out = (val + a) & 0xff;
+      else if (filter === 2) out = (val + b) & 0xff;
+      else if (filter === 3) out = (val + ((a + b) >> 1)) & 0xff;
+      else if (filter === 4) out = (val + paeth(a, b, c)) & 0xff;
+      recon[dstRow + x] = out;
+    }
+  }
+
+  const buckets = new Set<number>();
+  let sampled = 0;
+  let nonBg = 0;
+  const bgR = recon[0];
+  const bgG = recon[1];
+  const bgB = recon[2];
+
+  for (let y = 0; y < height; y += 4) {
+    const rowOff = y * stride;
+    for (let x = 0; x < width; x += 4) {
+      const i = rowOff + x * bpp;
+      const r = recon[i];
+      const g = recon[i + 1];
+      const b = recon[i + 2];
+      sampled += 1;
+      buckets.add(((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4));
+      if (Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB) > 20) {
+        nonBg += 1;
+      }
+    }
+  }
+
+  return {
+    width,
+    height,
+    distinctBuckets: buckets.size,
+    nonBackgroundRatio: sampled > 0 ? nonBg / sampled : 0,
+  };
+}
+
+async function assertCanvasNonBlank(canvas: Locator, label: string): Promise<void> {
+  const png = await canvas.screenshot({ animations: 'allow' });
+  const stats = analyzePngColorVariety(png);
+  expect(stats.width, `${label}: canvas PNG width`).toBeGreaterThan(200);
+  expect(stats.height, `${label}: canvas PNG height`).toBeGreaterThan(200);
+  expect(
+    stats.distinctBuckets,
+    `${label}: expected non-uniform WebGL2 pixels (buckets=${stats.distinctBuckets})`,
+  ).toBeGreaterThanOrEqual(8);
+  expect(
+    stats.nonBackgroundRatio,
+    `${label}: expected visible 3D geometry above studio-white background (ratio=${stats.nonBackgroundRatio.toFixed(4)})`,
+  ).toBeGreaterThan(0.012);
+}
+
+async function getTelemetry(page: Page): Promise<TwoTowerTelemetrySnapshot> {
+  const tel = await page.evaluate(() => window.__TWOTOWER_TELEMETRY__);
+  expect(tel, 'window.__TWOTOWER_TELEMETRY__ must be populated').toBeDefined();
+  return tel!;
+}
+
 function assertNoInfinityText(text: string | null, context: string): void {
   const safe = text ?? '';
   expect(safe, `${context}: must never render "Infinity"`).not.toMatch(/Infinity/i);
   expect(safe, `${context}: must never render "∞"`).not.toContain('∞');
 }
 
-test.describe('Nemotron-Labs-TwoTower Stage TT2 · Diagnostic UI Smoke Suite', () => {
-  test('1. Root /twotower/ boot, epistemic disclosure, defaults, split prefill provenance, and persistent_cache', async ({
+test.describe('Nemotron-Labs-TwoTower Stage TT3 · Interactive WebGL2 Spatial Smoke Suite', () => {
+  test('1. Root /twotower/ WebGL2 Dual-Tower Macro boot, epistemic contract, linker channels, and 10-axis bay picking', async ({
     page,
   }) => {
     const guards = attachRuntimeGuards(page);
 
     await page.goto(`${ROOT_BASE_URL}/twotower/`, { waitUntil: 'networkidle' });
+    await waitFrames(page, 5);
 
-    await expect(page.getByTestId('twotower-app')).toBeVisible();
-    await expect(page.locator('h1')).toHaveText(
-      'Nemotron-Labs-TwoTower — Diagnostic Session Workbench (Stage TT2)',
-    );
-
-    // Stage TT2 must NOT expose a cross-app navigation link back to Nano
+    // Must NOT expose any cross-app navigation link back to Nano (deferred to TT5)
     await expect(page.locator('a[href="../"]')).toHaveCount(0);
 
-    // Epistemic disclosure & threshold calibration contract
-    const epistemic = page.getByTestId('epistemic-banner');
-    await expect(epistemic).toBeVisible();
-    await expect(epistemic).toContainText('d = 8');
-    await expect(epistemic).toContainText('V = 34');
-    await expect(epistemic).toContainText('L = 52');
-    await expect(epistemic).toContainText('kvCapacity = 24');
-    await expect(epistemic).toContainText('35b64985');
-    await expect(epistemic).toContainText('γ = 0.22');
-    await expect(epistemic).toContainText('0.80');
-    await expect(epistemic).toContainText('0.90');
+    // WebGL2 canvas mounted, fallback hidden, non-blank rendered pixels
+    const canvas = page.getByTestId('twotower-canvas');
+    await expect(canvas).toBeVisible();
+    await expect(page.locator('#webgl-fallback')).toBeHidden();
+    await assertCanvasNonBlank(canvas, 'Dual-Tower Macro initial frame');
 
-    // Default session controls and status badges
-    await expect(page.getByTestId('lifecycle-phase')).toHaveText('ready');
-    await expect(page.getByTestId('capacity-meter')).toHaveText('Context 8 / 24 (16 free)');
-    await expect(page.getByTestId('mode-select')).toHaveValue('mask_diffusion');
-    await expect(page.getByTestId('block-size-select')).toHaveValue('4');
-    await expect(page.getByTestId('steps-input')).toHaveValue('4');
-    await expect(page.getByTestId('threshold-input')).toHaveValue('0.22');
-    await expect(page.getByTestId('preset-mini')).toHaveClass(/is-active/);
-    await expect(page.getByTestId('preset-paper')).toBeVisible();
-    await expect(page.getByTestId('preset-code')).toBeVisible();
+    const tel = await getTelemetry(page);
+    expect(tel.viewMode).toBe('macro');
+    expect(tel.maxTextureSize).toBeGreaterThanOrEqual(2048);
+    expect(tel.atlasUploads).toBeGreaterThanOrEqual(0);
+    expect(tel.drawCallsLastFrame).toBeGreaterThan(0);
+    expect(tel.solidCount).toBeGreaterThan(100);
+    expect(tel.lineCount).toBeGreaterThan(0);
+    expect(tel.flowTriangleCount).toBeGreaterThan(0);
+    expect(tel.glErrorCount).toBe(0);
 
-    // Context prefill split-segment provenance + persistent_cache + eager context_computed trace
-    const inspector = page.getByTestId('inspector-panel');
-    await expect(inspector).toContainText('split_prefix_for_mamba_s2');
-    await expect(inspector).toContainText('split_final_token');
-    await expect(inspector).toContainText('persistent_cache');
-    await expect(inspector).toContainText('context_computed');
-    await expect(inspector).toContainText('70,656 B');
+    // Epistemic miniature disclosure contract
+    const pill = page.getByTestId('epistemic-pill');
+    await expect(pill).toContainText('d=8');
+    await expect(pill).toContainText('V=34');
+    await expect(pill).toContainText('2×52L');
+    await expect(pill).toContainText('Synthetic Mini');
+    await expect(page.getByTestId('inspector-telemetry-footer')).toContainText('35b64985');
 
-    // Assets loaded cleanly HTTP 200
-    expect(guards.loadedJsAssets.length, 'Expected root TwoTower JS assets HTTP 200').toBeGreaterThan(
-      0,
+    // Toggle all linker channel filters cleanly
+    for (const ch of ['gqa_kv', 'mamba_conv', 'mamba_ssm', 'timestep', 'all'] as const) {
+      await page.getByTestId(`linker-channel-${ch}`).click();
+      await waitFrames(page, 2);
+      await expect(page.getByTestId(`linker-channel-${ch}`)).toHaveClass(/is-active/);
+    }
+    await assertCanvasNonBlank(canvas, 'Macro after linker channel toggles');
+
+    // Click Context Bay 06 directly on the 3D canvas and verify all 10 identity axes
+    const bayPt = await page.evaluate(() =>
+      window.__TWOTOWER_APP__?.getCanvasClickPointForBay(6, 'context'),
     );
-    expect(
-      guards.loadedCssAssets.length,
-      'Expected root TwoTower CSS assets HTTP 200',
-    ).toBeGreaterThan(0);
+    expect(bayPt).not.toBeNull();
+    expect(bayPt!.visible).toBe(true);
+    await page.mouse.click(bayPt!.x, bayPt!.y);
+    await waitFrames(page, 3);
 
+    const idCard = page.getByTestId('selection-identity-card');
+    await expect(idCard).toContainText('context');
+    await expect(idCard).toContainText('twotower-context-mini:');
+    await expect(idCard).toContainText('Bay 06 (L5)');
+    await expect(idCard).toContainText('*');
+    await expect(idCard).toContainText('10. traceOrigin');
+
+    const telAfter = await getTelemetry(page);
+    expect(telAfter.glErrorCount).toBe(0);
+    expect(guards.loadedJsAssets.length).toBeGreaterThan(0);
+    expect(guards.loadedCssAssets.length).toBeGreaterThan(0);
     guards.assertClean();
   });
 
-  test('2. Full Diffusion Lifecycle: Init -> Denoise -> Confidence Commit -> completed_uncommitted -> Explicit Block Commit', async ({
+  test('2. Full Diffusion Lifecycle & All 7 Spatial Views (incl. 128×128 GQA, Mamba Conv1D replacement, MoE partial-denom guard, Output zero-Infinity)', async ({
     page,
   }) => {
     const guards = attachRuntimeGuards(page);
 
     await page.goto(`${ROOT_BASE_URL}/twotower/`, { waitUntil: 'networkidle' });
+    await waitFrames(page, 4);
 
-    // Initialize [MASK]^4 block
-    await page.getByTestId('btn-init-block').click();
-    await expect(page.getByTestId('lifecycle-phase')).toHaveText('block_initialized');
-    await expect(page.getByTestId('capacity-meter')).toHaveText('Context 8 / 24 (16 free)');
-    await expect(page.getByTestId('btn-commit-block')).toBeDisabled();
+    // Init Block -> Context remains 8 / 24 and Commit Block is disabled
+    await page.getByTestId('sp-btn-init').click();
+    await expect(page.getByTestId('sp-phase-badge')).toHaveText('block_initialized');
+    await expect(page.getByTestId('sp-capacity-badge')).toHaveText('Context 8 / 24');
+    await expect(page.getByTestId('sp-btn-commit')).toBeDisabled();
 
-    // Step explicitly through Denoiser Pass -> Commit Confidence until completed_uncommitted
+    // Refine -> Commit Conf until completed_uncommitted (Context MUST remain 8 / 24!)
     let refinementPairs = 0;
     for (let iter = 0; iter < 8; iter++) {
-      const phase = (await page.getByTestId('lifecycle-phase').textContent())?.trim();
+      const phase = (await page.getByTestId('sp-phase-badge').textContent())?.trim();
       if (phase === 'completed_uncommitted') break;
 
-      await expect(page.getByTestId('btn-run-refinement')).toBeEnabled();
-      await page.getByTestId('btn-run-refinement').click();
-      await expect(page.getByTestId('lifecycle-phase')).toHaveText('refinement_denoised');
-      await expect(page.getByTestId('inspector-panel')).toContainText('denoiser_scratch');
-      await expect(page.getByTestId('capacity-meter')).toHaveText('Context 8 / 24 (16 free)');
+      await expect(page.getByTestId('sp-btn-refine')).toBeEnabled();
+      await page.getByTestId('sp-btn-refine').click();
+      await expect(page.getByTestId('sp-phase-badge')).toHaveText('refinement_denoised');
 
-      await expect(page.getByTestId('btn-commit-confidence')).toBeEnabled();
-      await page.getByTestId('btn-commit-confidence').click();
+      await expect(page.getByTestId('sp-btn-conf')).toBeEnabled();
+      await page.getByTestId('sp-btn-conf').click();
       refinementPairs += 1;
-
-      // Context prefix MUST remain 8 / 24 until explicit block commit
-      await expect(page.getByTestId('capacity-meter')).toHaveText('Context 8 / 24 (16 free)');
-
-      const samplerText = await page.getByTestId('sampler-panel').textContent();
-      assertNoInfinityText(samplerText, `Sampler panel after refinement pair ${refinementPairs}`);
-      expect(samplerText).toContain('[MASK]=0.0000');
-      if (refinementPairs >= 2) {
-        expect(samplerText).toContain('Locked (prior step)');
-      }
+      await expect(page.getByTestId('sp-capacity-badge')).toHaveText('Context 8 / 24');
     }
 
-    // Must land in explicit completed_uncommitted state with Context STILL 8 / 24
     expect(refinementPairs).toBeGreaterThanOrEqual(1);
-    await expect(page.getByTestId('lifecycle-phase')).toHaveText('completed_uncommitted');
-    await expect(page.getByTestId('capacity-meter')).toHaveText('Context 8 / 24 (16 free)');
-    await expect(page.getByTestId('btn-commit-block')).toBeEnabled();
-    assertNoInfinityText(
-      await page.getByTestId('sampler-panel').textContent(),
-      'Sampler panel at completed_uncommitted',
-    );
+    await expect(page.getByTestId('sp-phase-badge')).toHaveText('completed_uncommitted');
+    await expect(page.getByTestId('sp-capacity-badge')).toHaveText('Context 8 / 24');
+    await expect(page.getByTestId('sp-btn-commit')).toBeEnabled();
 
-    // Explicit Block Commit -> Context advances 8 -> 12 / 24 with split-segment commit provenance
-    await page.getByTestId('btn-commit-block').click();
-    await expect(page.getByTestId('capacity-meter')).toHaveText('Context 12 / 24 (12 free)');
+    const canvas = page.getByTestId('twotower-canvas');
 
-    const inspector = page.getByTestId('inspector-panel');
-    await expect(inspector).toContainText('diffusion_block_commit');
-    await expect(inspector).toContainText('split_prefix_for_mamba_s2');
-    await expect(inspector).toContainText('range [8..10]');
-    await expect(inspector).toContainText('split_final_token');
-    await expect(inspector).toContainText('range [11..11]');
+    // View 1: Macro at completed_uncommitted
+    await waitFrames(page, 3);
+    await assertCanvasNonBlank(canvas, 'View 1: Macro (completed_uncommitted)');
 
-    // Deduplicated conditioning base count stays exactly 1 for the completed block
-    await expect(page.getByTestId('mem-unique-block-conditioning-count')).toHaveText('1');
+    // View 2: Paired GQA (128×128 atlas + bidirectional_block + 4 lengths)
+    await page.getByTestId('view-tab-paired_gqa').click();
+    await waitFrames(page, 5);
+    await assertCanvasNonBlank(canvas, 'View 2: Paired GQA');
+    const gqaTel = await getTelemetry(page);
+    expect(gqaTel.viewMode).toBe('paired_gqa');
+    expect(gqaTel.currentAtlasDims).toEqual([128, 128]);
+    expect(gqaTel.atlasUploads).toBeGreaterThanOrEqual(1);
+    expect(gqaTel.glErrorCount).toBe(0);
+    const gqaDiag = page.getByTestId('view-diagnostic-card');
+    await expect(gqaDiag).toContainText('bidirectional_block');
+    await expect(gqaDiag).toContainText('128×128');
+    await expect(gqaDiag).toContainText('allocatedKvCapacity');
 
+    // View 3: Paired Mamba (256×128 atlas + full-block position switch + Conv1D 3->0 replacement)
+    await page.getByTestId('view-tab-paired_mamba').click();
+    await waitFrames(page, 5);
+    await assertCanvasNonBlank(canvas, 'View 3: Paired Mamba');
+    const mambaTel = await getTelemetry(page);
+    expect(mambaTel.viewMode).toBe('paired_mamba');
+    expect(mambaTel.currentAtlasDims).toEqual([256, 128]);
+    expect(mambaTel.glErrorCount).toBe(0);
+    const mambaDiag = page.getByTestId('view-diagnostic-card');
+    await expect(mambaDiag).toContainText('Inherited: 3');
+    await expect(mambaDiag).toContainText('Block: 1');
+    await page.getByTestId('mamba-pos-select').selectOption('3');
+    await waitFrames(page, 3);
+    await expect(mambaDiag).toContainText('Inherited: 0');
+    await expect(mambaDiag).toContainText('Block: 4');
+    await expect(mambaDiag).toContainText('Inherited Retention');
+    await expect(mambaDiag).toContainText('Block Write');
+
+    // View 4: Timestep Conditioning (ACTIVE t + asymmetric pre-norm vs post-norm)
+    await page.getByTestId('view-tab-timestep').click();
+    await waitFrames(page, 5);
+    await assertCanvasNonBlank(canvas, 'View 4: Timestep Conditioning');
+    const timeDiag = page.getByTestId('view-diagnostic-card');
+    await expect(timeDiag).toContainText('ACTIVE');
+    await expect(timeDiag).toContainText('modulate_then_norm');
+    await page.getByTestId('timestep-bay-select').selectOption('2');
+    await waitFrames(page, 3);
+    await expect(timeDiag).toContainText('norm_then_modulate');
+    await expect(timeDiag).toContainText('unmodulated');
+
+    // View 5: MoE (FP64 6th-vs-7th margin + STRICT partial-denominator non-exposure at Step 2 termProgress=0.4!)
+    await page.getByTestId('view-tab-moe').click();
+    await waitFrames(page, 5);
+    await assertCanvasNonBlank(canvas, 'View 5: Granular MoE');
+    const moeDiag = page.getByTestId('view-diagnostic-card');
+    await expect(moeDiag).toContainText('FP64 Router');
+    await expect(moeDiag).toContainText('0 B Stateless');
+    await expect(moeDiag).toContainText('6th-vs-7th Margin');
+
+    // Capture finalized slot-0 weight before entering Step 2 partial accumulation
+    const revealedWeightsText = await page.getByTestId('moe-sidebar-weights').textContent();
+    expect(revealedWeightsText).toBeTruthy();
+
+    // Activate Step 2 with partial termProgress = 0.4 -> final weights MUST be masked!
+    await page.getByTestId('stepper-step-2').click();
+    await page.evaluate(() => window.__TWOTOWER_APP__?.setStepperTermProgress(0.4));
+    await waitFrames(page, 3);
+
+    const partialState = await page.evaluate(() => window.__TWOTOWER_APP__?.getState());
+    expect(partialState?.diagnostics?.partialDenominatorActive).toBe(true);
+    const partialSidebarText = await page.getByTestId('moe-sidebar-weights').textContent();
+    expect(partialSidebarText).toContain('…');
+    expect(partialSidebarText).toContain('—');
+    const partialFormulaText = await page.getByTestId('formula-card').textContent();
+    expect(partialFormulaText).toContain('Σ');
+
+    // View 6: Embedding (NoPE, V=34, independent W_embed_den)
+    await page.getByTestId('view-tab-embedding').click();
+    await waitFrames(page, 5);
+    await assertCanvasNonBlank(canvas, 'View 6: Embedding');
+    await expect(page.getByTestId('view-diagnostic-card')).toContainText('W_embed_den');
+    await expect(page.getByTestId('view-diagnostic-card')).toContainText('V=34');
+
+    // View 7: Output (Unshifted Block Logits + Presentation-Safe Sampler Table: ZERO Infinity, Locked prior step!)
+    await page.getByTestId('view-tab-output').click();
+    await waitFrames(page, 5);
+    await assertCanvasNonBlank(canvas, 'View 7: Output LM Head');
+    const outDiag = page.getByTestId('view-diagnostic-card');
+    await expect(outDiag).toContainText('Unshifted Block Logits');
+    await expect(outDiag).toContainText('Strictly UNMODULATED');
+    const samplerTable = page.getByTestId('spatial-sampler-table');
+    await expect(samplerTable).toBeVisible();
+    const samplerText = await samplerTable.textContent();
+    assertNoInfinityText(samplerText, 'Spatial Output sampler table');
+    expect(samplerText).toContain('[MASK]=0.0000');
+    if (refinementPairs >= 2) {
+      expect(samplerText).toContain('Locked (prior step)');
+    }
+
+    // Explicit Commit Block -> Context advances 8 -> 12 / 24!
+    await page.getByTestId('sp-btn-commit').click();
+    await waitFrames(page, 3);
+    await expect(page.getByTestId('sp-capacity-badge')).toHaveText('Context 12 / 24');
+
+    const finalTel = await getTelemetry(page);
+    expect(finalTel.glErrorCount).toBe(0);
     guards.assertClean();
   });
 
-  test('3. AR, Mock-AR (unmodulated denoiser_scratch), Mode Switch, Rewind, and Branch Forking', async ({
+  test('3. AR, Mock-AR (Timestep BYPASSED), Rewind, Branch Fork, and Synced Developer Workbench Drawer', async ({
     page,
   }) => {
     const guards = attachRuntimeGuards(page);
 
     await page.goto(`${ROOT_BASE_URL}/twotower/`, { waitUntil: 'networkidle' });
+    await waitFrames(page, 4);
 
-    // Execute Step Mock-AR on default 8-token prompt (8 -> 9) and verify unmodulated denoiser_scratch
-    await page.getByTestId('mode-select').selectOption('mock_ar');
-    await page.getByTestId('btn-step-mock-ar').click();
-    await expect(page.getByTestId('capacity-meter')).toHaveText('Context 9 / 24 (15 free)');
-    await expect(page.getByTestId('lifecycle-phase')).toHaveText('ready');
+    // Mock-AR (8 -> 9) and confirm Timestep view shows BYPASSED (t = null)
+    await page.getByTestId('spatial-mode-select').selectOption('mock_ar');
+    await page.getByTestId('sp-btn-mock-ar').click();
+    await expect(page.getByTestId('sp-capacity-badge')).toHaveText('Context 9 / 24');
 
-    const inspector = page.getByTestId('inspector-panel');
-    await expect(inspector).toContainText('denoiser_scratch');
-    await expect(inspector).toContainText('tModel=null');
-    await expect(inspector).toContainText('bypassed (unmodulated Mock-AR)');
+    await page.getByTestId('view-tab-timestep').click();
+    await waitFrames(page, 4);
+    await expect(page.getByTestId('view-diagnostic-card')).toContainText('BYPASSED (t = null)');
 
-    // Switch mode to AR and execute Step AR (9 -> 10)
-    await page.getByTestId('mode-select').selectOption('ar');
-    await page.getByTestId('btn-step-ar').click();
-    await expect(page.getByTestId('capacity-meter')).toHaveText('Context 10 / 24 (14 free)');
-    await expect(inspector).toContainText('single_segment');
+    // AR (9 -> 10)
+    await page.getByTestId('spatial-mode-select').selectOption('ar');
+    await page.getByTestId('sp-btn-ar').click();
+    await expect(page.getByTestId('sp-capacity-badge')).toHaveText('Context 10 / 24');
 
-    // Rewind backward via <- Back (10 -> 9)
-    await page.getByTestId('btn-nav-back').click();
-    await expect(page.getByTestId('capacity-meter')).toHaveText('Context 9 / 24 (15 free)');
-    await expect(page.getByTestId('btn-nav-forward')).toBeEnabled();
+    // Rewind (<- Back: 10 -> 9) and confirm Historical Record guard badge
+    await page.getByTestId('sp-btn-back').click();
+    await expect(page.getByTestId('sp-capacity-badge')).toHaveText('Context 9 / 24');
+    await expect(page.getByTestId('historical-config-card')).toContainText('Historical Record #1');
 
-    // Fork a new branch at rewound cursor (#1)
-    await page.getByTestId('btn-fork-branch').click();
-    const branchSelect = page.getByTestId('branch-select');
-    await expect(branchSelect.locator('option')).toHaveCount(2);
-    await expect(branchSelect).toHaveValue('branch-1');
-    await expect(page.getByTestId('capacity-meter')).toHaveText('Context 9 / 24 (15 free)');
+    // Fork branch at rewound cursor
+    await page.getByTestId('sp-btn-fork').click();
+    const spBranch = page.getByTestId('sp-branch-select');
+    await expect(spBranch.locator('option')).toHaveCount(2);
+    await expect(spBranch).toHaveValue('branch-1');
 
-    // Switch back to original branch-0 and verify its full 3-record trajectory (#0..#2, 10/24) is intact
-    await branchSelect.selectOption('branch-0');
-    await expect(branchSelect).toHaveValue('branch-0');
-    await expect(page.getByTestId('history-list').locator('button')).toHaveCount(3);
-    await page.getByTestId('btn-nav-forward').click();
-    await expect(page.getByTestId('capacity-meter')).toHaveText('Context 10 / 24 (14 free)');
+    // Open collapsible Developer Workbench drawer & verify bidirectional sync!
+    await page.getByTestId('btn-toggle-workbench').click();
+    const drawer = page.getByTestId('workbench-drawer');
+    await expect(drawer).toBeVisible();
+    await expect(drawer.getByTestId('capacity-meter')).toHaveText('Context 9 / 24 (15 free)');
+    await expect(drawer.getByTestId('branch-select')).toHaveValue('branch-1');
 
-    // Also verify Short 4 tokens preset runs Step AR (4 -> 5) -> Step Mock-AR (5 -> 6) cleanly
-    await page.getByTestId('prompt-select').selectOption('short_4');
-    await page.getByTestId('btn-restart').click();
-    await expect(page.getByTestId('capacity-meter')).toHaveText('Context 4 / 24 (20 free)');
-    await page.getByTestId('btn-step-ar').click();
-    await expect(page.getByTestId('capacity-meter')).toHaveText('Context 5 / 24 (19 free)');
-    await page.getByTestId('mode-select').selectOption('mock_ar');
-    await page.getByTestId('btn-step-mock-ar').click();
-    await expect(page.getByTestId('capacity-meter')).toHaveText('Context 6 / 24 (18 free)');
-    await expect(inspector).toContainText('denoiser_scratch');
-    await expect(inspector).toContainText('tModel=null');
+    // Step AR INSIDE the workbench drawer -> spatial app strip updates immediately!
+    await drawer.getByTestId('btn-step-ar').click();
+    await expect(drawer.getByTestId('capacity-meter')).toHaveText('Context 10 / 24 (14 free)');
+    await expect(page.getByTestId('sp-capacity-badge')).toHaveText('Context 10 / 24');
+
+    // Escape closes drawer and restores focus to Workbench toggle button
+    await page.keyboard.press('Escape');
+    await expect(drawer).toBeHidden();
+    await expect(page.getByTestId('btn-toggle-workbench')).toBeFocused();
+
+    const tel = await getTelemetry(page);
+    expect(tel.glErrorCount).toBe(0);
+    guards.assertClean();
+  });
+
+  test('4. Reduced-Motion, Idle-RAF Gating, Native Space/Enter Keyboard, and Clean Narrow 1024×800 Layout', async ({
+    page,
+  }) => {
+    const guards = attachRuntimeGuards(page);
+
+    await page.setViewportSize({ width: 1024, height: 800 });
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.goto(`${ROOT_BASE_URL}/twotower/`, { waitUntil: 'networkidle' });
+    await waitFrames(page, 4);
+
+    // Reduced motion detected & continuous animations disabled
+    const tel1 = await getTelemetry(page);
+    expect(tel1.reducedMotion).toBe(true);
+    expect(tel1.glErrorCount).toBe(0);
+    await expect(page.getByTestId('btn-replay-wave')).toBeDisabled();
+
+    // Idle-RAF gating: no continuous spinning while idle
+    const framesBefore = (await getTelemetry(page)).rafFramesRendered;
+    await page.waitForTimeout(350);
+    const framesAfter = (await getTelemetry(page)).rafFramesRendered;
+    expect(
+      framesAfter - framesBefore,
+      `Expected idle-RAF gating (delta=${framesAfter - framesBefore})`,
+    ).toBeLessThanOrEqual(2);
+
+    // Narrow 1024×800 layout hygiene: no horizontal overflow and generous non-blank WebGL2 canvas
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - window.innerWidth,
+    );
+    expect(overflow, 'Zero horizontal overflow at 1024×800').toBeLessThanOrEqual(1);
+    const canvas = page.getByTestId('twotower-canvas');
+    const box = await canvas.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.width).toBeGreaterThanOrEqual(480);
+    expect(box!.height).toBeGreaterThanOrEqual(450);
+    await assertCanvasNonBlank(canvas, 'Narrow 1024×800 WebGL2 render');
+
+    // Roving tabindex + ArrowRight on view tablist
+    const macroTab = page.getByTestId('view-tab-macro');
+    const gqaTab = page.getByTestId('view-tab-paired_gqa');
+    await expect(macroTab).toHaveAttribute('tabindex', '0');
+    await expect(gqaTab).toHaveAttribute('tabindex', '-1');
+    await macroTab.focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(gqaTab).toBeFocused();
+    await expect(gqaTab).toHaveAttribute('aria-selected', 'true');
+    await expect(gqaTab).toHaveAttribute('tabindex', '0');
+    await expect(macroTab).toHaveAttribute('tabindex', '-1');
+
+    // Native Space & Enter activation on focused buttons without hijacking
+    const initBtn = page.getByTestId('sp-btn-init');
+    await initBtn.focus();
+    await page.keyboard.press('Space');
+    await expect(page.getByTestId('sp-phase-badge')).toHaveText('block_initialized');
+
+    const refineBtn = page.getByTestId('sp-btn-refine');
+    await refineBtn.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByTestId('sp-phase-badge')).toHaveText('refinement_denoised');
 
     guards.assertClean();
   });
 
-  test('4. GitHub Pages Subpath /llm-viz/twotower/ assets HTTP 200 and interactive diffusion smoke', async ({
+  test('5. GitHub Pages Subpath /llm-viz/twotower/ WebGL2 Build, HTTP 200 Assets & Interactive Cutaway', async ({
     page,
   }) => {
     const guards = attachRuntimeGuards(page);
 
     await page.goto(`${PAGES_BASE_URL}twotower/`, { waitUntil: 'networkidle' });
+    await waitFrames(page, 5);
 
-    // Confirm subpath-prefixed JS and CSS assets loaded HTTP 200 with zero 404s
+    // Subpath-prefixed JS and CSS assets loaded HTTP 200 with zero 404s
     const subpathJs = guards.loadedJsAssets.filter((u) => u.includes('/llm-viz/assets/'));
     const subpathCss = guards.loadedCssAssets.filter((u) => u.includes('/llm-viz/assets/'));
     expect(subpathJs.length, 'Expected /llm-viz/assets/*.js HTTP 200').toBeGreaterThan(0);
     expect(subpathCss.length, 'Expected /llm-viz/assets/*.css HTTP 200').toBeGreaterThan(0);
 
-    await expect(page.getByTestId('lifecycle-phase')).toHaveText('ready');
-    await expect(page.getByTestId('capacity-meter')).toHaveText('Context 8 / 24 (16 free)');
+    const canvas = page.getByTestId('twotower-canvas');
+    await expect(canvas).toBeVisible();
+    await expect(page.locator('#webgl-fallback')).toBeHidden();
+    await assertCanvasNonBlank(canvas, 'Subpath /llm-viz/twotower/ Macro WebGL2 frame');
 
-    // Interactive block init + denoiser pass + confidence commit under /llm-viz/twotower/
-    await page.getByTestId('btn-init-block').click();
-    await expect(page.getByTestId('lifecycle-phase')).toHaveText('block_initialized');
+    // Interactive diffusion step + Paired GQA cutaway switch under subpath build
+    await page.getByTestId('sp-btn-init').click();
+    await page.getByTestId('sp-btn-refine').click();
+    await page.getByTestId('sp-btn-conf').click();
+    await expect(page.getByTestId('sp-capacity-badge')).toHaveText('Context 8 / 24');
 
-    await page.getByTestId('btn-run-refinement').click();
-    await expect(page.getByTestId('lifecycle-phase')).toHaveText('refinement_denoised');
+    await page.getByTestId('view-tab-paired_gqa').click();
+    await waitFrames(page, 5);
+    await assertCanvasNonBlank(canvas, 'Subpath /llm-viz/twotower/ Paired GQA WebGL2 frame');
 
-    await page.getByTestId('btn-commit-confidence').click();
-    const samplerPanel = page.getByTestId('sampler-panel');
-    await expect(samplerPanel.locator('table tbody tr')).toHaveCount(4);
-    assertNoInfinityText(
-      await samplerPanel.textContent(),
-      'Subpath /llm-viz/twotower/ sampler panel (step 1)',
-    );
-
-    // If block still has masked slots, run one additional refinement + commit to verify locked-slot display
-    if (await page.getByTestId('btn-run-refinement').isEnabled()) {
-      await page.getByTestId('btn-run-refinement').click();
-      await page.getByTestId('btn-commit-confidence').click();
-      const samplerText2 = await samplerPanel.textContent();
-      assertNoInfinityText(samplerText2, 'Subpath /llm-viz/twotower/ sampler panel (step 2)');
-      expect(samplerText2).toContain('Locked (prior step)');
-    }
+    const tel = await getTelemetry(page);
+    expect(tel.viewMode).toBe('paired_gqa');
+    expect(tel.currentAtlasDims).toEqual([128, 128]);
+    expect(tel.glErrorCount).toBe(0);
 
     guards.assertClean();
   });

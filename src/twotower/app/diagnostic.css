@@ -1,6 +1,7 @@
-/* Nemotron-Labs-TwoTower — Stage TT2 Minimal Diagnostic Session Workbench */
+/* Nemotron-Labs-TwoTower — Scoped Developer Diagnostic Session Workbench (Drawer-Safe) */
 
-:root {
+.tt-workbench-drawer,
+.tt-workbench {
   color-scheme: dark;
   --tt-bg: #0b101b;
   --tt-surface: #111827;
@@ -27,37 +28,29 @@
   --tt-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
 }
 
-*,
-*::before,
-*::after {
+.tt-workbench-drawer *,
+.tt-workbench-drawer *::before,
+.tt-workbench-drawer *::after,
+.tt-workbench *,
+.tt-workbench *::before,
+.tt-workbench *::after {
   box-sizing: border-box;
-}
-
-[hidden] {
-  display: none !important;
-}
-
-html,
-body {
-  margin: 0;
-  padding: 0;
-  min-height: 100vh;
-  background: var(--tt-bg);
-  color: var(--tt-text);
-  font-family: var(--tt-font-sans);
-  font-size: 13px;
-  line-height: 1.4;
-  -webkit-font-smoothing: antialiased;
 }
 
 .tt-workbench {
   max-width: 1440px;
   width: 100%;
   margin: 0 auto;
-  padding: 8px 14px 18px;
+  padding: 10px 14px 20px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  background: var(--tt-bg);
+  color: var(--tt-text);
+  font-family: var(--tt-font-sans);
+  font-size: 13px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
 }
 
 /* Header */
