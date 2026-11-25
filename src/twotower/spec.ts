@@ -43,6 +43,26 @@ export interface TwoTowerProvenance {
   readonly nanoBaselineRevision: string;
 }
 
+export interface TwoTowerLocalCheckpointHeaderAudit {
+  readonly auditDate: '2026-11-25';
+  readonly verifiedShardCount: 24;
+  readonly verifiedTensorCount: 12_544;
+  readonly verifiedTotalParams: 63_185_902_848;
+  readonly verifiedTensorPayloadBytes: 126_371_817_472;
+  readonly verifiedHeaderBytes: 1_679_536;
+  readonly verifiedDiskBytes: 126_373_497_008;
+  readonly bf16TensorCount: 12_498;
+  readonly bf16Params: 63_185_896_960;
+  readonly bf16PayloadBytes: 126_371_793_920;
+  readonly fp32TensorCount: 46;
+  readonly fp32Params: 5_888;
+  readonly fp32PayloadBytes: 23_552;
+  readonly fp32TensorScope: 'e_score_correction_bias_only';
+  readonly confirmedMambaNormKey: 'layers.{i}.mixer.norm.weight';
+  readonly nonWeightFilesByteIdenticalCount: 15;
+  readonly integrityErrorCount: 0;
+}
+
 export interface TwoTowerDirectlyInspectedMetadata {
   readonly provenanceSources: readonly string[];
   readonly architectureClass: 'NemotronHTwoTowerForCausalLM';
@@ -80,6 +100,8 @@ export interface TwoTowerDirectlyInspectedMetadata {
   readonly timeConditioningTensorCount: 58;
   readonly fp32ScoreCorrectionBiasTensorCount: 46;
   readonly fp32ScoreCorrectionBiasParams: 5_888;
+  /** Read-only 24-shard safetensors header audit summary (metadata/dtype/byte totals only; zero weight values). */
+  readonly localCheckpointHeaderAudit: TwoTowerLocalCheckpointHeaderAudit;
 }
 
 export interface TwoTowerDerivedInventoryCalculations {
@@ -274,6 +296,7 @@ const DIRECTLY_INSPECTED_METADATA: TwoTowerDirectlyInspectedMetadata = Object.fr
     'generation_config.json',
     'tokenizer_config.json',
     'model.safetensors.index.json',
+    '24-shard safetensors headers (read-only audit)',
   ]),
   architectureClass: 'NemotronHTwoTowerForCausalLM',
   numTowers: 2,
@@ -310,6 +333,25 @@ const DIRECTLY_INSPECTED_METADATA: TwoTowerDirectlyInspectedMetadata = Object.fr
   timeConditioningTensorCount: 58,
   fp32ScoreCorrectionBiasTensorCount: 46,
   fp32ScoreCorrectionBiasParams: 5_888,
+  localCheckpointHeaderAudit: Object.freeze({
+    auditDate: '2026-11-25',
+    verifiedShardCount: 24,
+    verifiedTensorCount: 12_544,
+    verifiedTotalParams: 63_185_902_848,
+    verifiedTensorPayloadBytes: 126_371_817_472,
+    verifiedHeaderBytes: 1_679_536,
+    verifiedDiskBytes: 126_373_497_008,
+    bf16TensorCount: 12_498,
+    bf16Params: 63_185_896_960,
+    bf16PayloadBytes: 126_371_793_920,
+    fp32TensorCount: 46,
+    fp32Params: 5_888,
+    fp32PayloadBytes: 23_552,
+    fp32TensorScope: 'e_score_correction_bias_only',
+    confirmedMambaNormKey: 'layers.{i}.mixer.norm.weight',
+    nonWeightFilesByteIdenticalCount: 15,
+    integrityErrorCount: 0,
+  }),
 });
 
 function computeDerivedInventory(
