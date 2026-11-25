@@ -10,3 +10,4 @@ export * from './sampler';
 export * from './parameters';
 export * from './contracts';
 export * from './execution';
+export * from './session';

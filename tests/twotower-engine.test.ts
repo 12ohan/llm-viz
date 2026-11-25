@@ -885,6 +885,7 @@ describe('Stage TT1 Wave 2: TwoTower Parameters, Read-Only Conditioning Contract
         'src/twotower/parameters.ts',
         'src/twotower/contracts.ts',
         'src/twotower/execution.ts',
+        'src/twotower/session.ts',
         'src/twotower/index.ts',
       ];
       for (const rel of files) {
