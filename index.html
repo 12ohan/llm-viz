@@ -59,8 +59,8 @@
                 type="button"
                 id="tour-toggle-btn"
                 class="toc-tour-btn is-active"
-                title="Toggle 7-chapter guided walkthrough"
-              >Tour 1/7</button>
+                title="Toggle 22-beat guided walkthrough"
+              >Tour 1/22</button>
             </div>
 
             <div id="sidebar-top-body" class="sidebar-top-body">
@@ -237,12 +237,12 @@
           <div id="floating-toolbar" class="floating-toolbar" role="toolbar" aria-label="View modes and camera controls">
             <div class="toolbar-row toolbar-row-modes">
               <div class="mode-pills" role="tablist" aria-label="Architecture views">
-                <button type="button" class="mode-btn is-active" role="tab" aria-selected="true" data-mode="tower" data-view="tower">52-Layer Tower</button>
-                <button type="button" id="tab-embed" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_embedding" data-view="cutaway_embedding">Embed</button>
-                <button type="button" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_mamba" data-view="cutaway_mamba">Mamba-2</button>
-                <button type="button" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_moe" data-view="cutaway_moe">MoE 128+1</button>
-                <button type="button" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_gqa" data-view="cutaway_gqa">GQA</button>
-                <button type="button" id="tab-output" class="mode-btn" role="tab" aria-selected="false" data-mode="cutaway_output" data-view="cutaway_output">Output</button>
+                <button type="button" class="mode-btn is-active" role="tab" aria-selected="true" tabindex="0" data-mode="tower" data-view="tower">52-Layer Tower</button>
+                <button type="button" id="tab-embed" class="mode-btn" role="tab" aria-selected="false" tabindex="-1" data-mode="cutaway_embedding" data-view="cutaway_embedding">Embed</button>
+                <button type="button" class="mode-btn" role="tab" aria-selected="false" tabindex="-1" data-mode="cutaway_mamba" data-view="cutaway_mamba">Mamba-2</button>
+                <button type="button" class="mode-btn" role="tab" aria-selected="false" tabindex="-1" data-mode="cutaway_moe" data-view="cutaway_moe">MoE 128+1</button>
+                <button type="button" class="mode-btn" role="tab" aria-selected="false" tabindex="-1" data-mode="cutaway_gqa" data-view="cutaway_gqa">GQA</button>
+                <button type="button" id="tab-output" class="mode-btn" role="tab" aria-selected="false" tabindex="-1" data-mode="cutaway_output" data-view="cutaway_output">Output</button>
               </div>
 
               <div class="camera-actions">
@@ -359,7 +359,9 @@
               id="shortcuts-popover"
               class="shortcuts-popover"
               role="dialog"
+              aria-modal="true"
               aria-label="Keyboard shortcuts"
+              tabindex="-1"
               hidden
             >
               <div class="shortcuts-header">
@@ -372,17 +374,19 @@
                 >×</button>
               </div>
               <dl class="shortcuts-list">
-                <div class="shortcut-row"><dt><kbd>1</kbd></dt><dd>52-Layer Tower</dd></div>
-                <div class="shortcut-row"><dt><kbd>2</kbd></dt><dd>Cutaway: Mamba-2</dd></div>
-                <div class="shortcut-row"><dt><kbd>3</kbd></dt><dd>Cutaway: MoE 128+1</dd></div>
-                <div class="shortcut-row"><dt><kbd>4</kbd></dt><dd>Cutaway: GQA Attention</dd></div>
+                <div class="shortcut-row"><dt><kbd>1</kbd>–<kbd>4</kbd></dt><dd>Tower / Mamba / MoE / GQA</dd></div>
+                <div class="shortcut-row"><dt><kbd>5</kbd></dt><dd>Cutaway: Embedding</dd></div>
+                <div class="shortcut-row"><dt><kbd>6</kbd></dt><dd>Cutaway: Output</dd></div>
+                <div class="shortcut-row"><dt><kbd>Space</kbd></dt><dd>Advance beat (Tour) or Play / pause cutaway stepper</dd></div>
+                <div class="shortcut-row"><dt><kbd>Shift</kbd>+<kbd>Space</kbd></dt><dd>Previous beat (Tour)</dd></div>
+                <div class="shortcut-row"><dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Step beat (Tour) or bay</dd></div>
+                <div class="shortcut-row"><dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Step bay (Tower)</dd></div>
+                <div class="shortcut-row"><dt><kbd>Enter</kbd></dt><dd>Zoom selected bay</dd></div>
                 <div class="shortcut-row"><dt><kbd>P</kbd></dt><dd>Toggle BF16 / FP8 Selective</dd></div>
                 <div class="shortcut-row"><dt><kbd>M</kbd></dt><dd>Toggle Memory Scaling (1 → 1M)</dd></div>
-                <div class="shortcut-row"><dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Step chapter (tour) or bay</dd></div>
                 <div class="shortcut-row"><dt><kbd>R</kbd></dt><dd>Reset view, T=8 &amp; BF16</dd></div>
-                <div class="shortcut-row"><dt><kbd>?</kbd></dt><dd>Toggle this help popover</dd></div>
-                <div class="shortcut-row"><dt><kbd>Space</kbd></dt><dd>Play / pause cutaway math stepper</dd></div>
-                <div class="shortcut-row"><dt><kbd>Esc</kbd></dt><dd>Close overlay / Back to tower</dd></div>
+                <div class="shortcut-row"><dt><kbd>?</kbd></dt><dd>Toggle shortcuts</dd></div>
+                <div class="shortcut-row"><dt><kbd>Esc</kbd></dt><dd>Close / clear focus / exit cutaway</dd></div>
               </dl>
             </div>
 
@@ -467,12 +471,12 @@
                 <button type="button" id="gqa-step-next" class="gqa-step-icon" title="Next math step" aria-label="Next math step">▶</button>
               </div>
               <div id="gqa-step-pills" class="gqa-step-pills" role="tablist" aria-label="Math stages">
-                <button type="button" class="gqa-step-pill" data-gqa-step="0">1. RMSNorm</button>
-                <button type="button" class="gqa-step-pill" data-gqa-step="1">2. Q/K/V</button>
-                <button type="button" class="gqa-step-pill" data-gqa-step="2">3. QKᵀ/√d</button>
-                <button type="button" class="gqa-step-pill" data-gqa-step="3">4. Softmax</button>
-                <button type="button" class="gqa-step-pill" data-gqa-step="4">5. Weighted V</button>
-                <button type="button" class="gqa-step-pill" data-gqa-step="5">6. W_O + Res</button>
+                <button type="button" class="gqa-step-pill" role="tab" aria-selected="true" tabindex="0" data-gqa-step="0">1. RMSNorm</button>
+                <button type="button" class="gqa-step-pill" role="tab" aria-selected="false" tabindex="-1" data-gqa-step="1">2. Q/K/V</button>
+                <button type="button" class="gqa-step-pill" role="tab" aria-selected="false" tabindex="-1" data-gqa-step="2">3. QKᵀ/√d</button>
+                <button type="button" class="gqa-step-pill" role="tab" aria-selected="false" tabindex="-1" data-gqa-step="3">4. Softmax</button>
+                <button type="button" class="gqa-step-pill" role="tab" aria-selected="false" tabindex="-1" data-gqa-step="4">5. Weighted V</button>
+                <button type="button" class="gqa-step-pill" role="tab" aria-selected="false" tabindex="-1" data-gqa-step="5">6. W_O + Res</button>
               </div>
               <div class="gqa-stepper-tail">
                 <button

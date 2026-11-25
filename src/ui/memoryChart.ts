@@ -9,6 +9,7 @@ import {
   tokensFromLogPosition,
 } from '../model/memory';
 import type { NemotronSpec, PrecisionMode } from '../model/spec';
+import { handleModalTabTrap, restoreFocusIfConnected } from './controls';
 
 export interface MemoryChartCallbacks {
   onClose: () => void;
@@ -75,6 +76,7 @@ export class MemoryScalingDrawer {
   private readonly cb: MemoryChartCallbacks;
   private readonly cleanupFns: (() => void)[] = [];
 
+  private readonly card: HTMLElement;
   private readonly precisionBf16Btn: HTMLButtonElement;
   private readonly precisionFp8Btn: HTMLButtonElement;
   private readonly closeBtn: HTMLButtonElement;
@@ -85,6 +87,8 @@ export class MemoryScalingDrawer {
   private readonly statsGrid: HTMLDivElement;
 
   private lastKey = '';
+  private isOpen = false;
+  private previouslyFocused: HTMLElement | null = null;
 
   constructor(spec: NemotronSpec, host: HTMLElement, cb: MemoryChartCallbacks) {
     this.spec = spec;
@@ -102,6 +106,20 @@ export class MemoryScalingDrawer {
     card.setAttribute('role', 'dialog');
     card.setAttribute('aria-modal', 'true');
     card.setAttribute('aria-labelledby', 'mem-drawer-title');
+    card.tabIndex = -1;
+    this.card = card;
+    this.on(this.card, 'keydown', (ev) => {
+      if (!this.isOpen) return;
+      handleModalTabTrap(this.card, ev);
+    });
+    if (typeof document !== 'undefined') {
+      const onDocKeydown = (ev: KeyboardEvent) => {
+        if (!this.isOpen || ev.defaultPrevented) return;
+        handleModalTabTrap(this.card, ev);
+      };
+      document.addEventListener('keydown', onDocKeydown);
+      this.cleanupFns.push(() => document.removeEventListener('keydown', onDocKeydown));
+    }
 
     // --- Header ---
     const header = document.createElement('div');
@@ -236,32 +254,54 @@ export class MemoryScalingDrawer {
   }
 
   sync(open: boolean, precision: PrecisionMode, probeTokens: number): void {
+    const wasOpen = this.isOpen;
+    this.isOpen = open;
     this.host.hidden = !open;
-    if (!open) return;
+    if (!open) {
+      if (wasOpen) {
+        const prev = this.previouslyFocused;
+        this.previouslyFocused = null;
+        restoreFocusIfConnected(prev);
+      }
+      return;
+    }
+
+    if (!wasOpen) {
+      const active =
+        typeof document !== 'undefined'
+          ? (document.activeElement as HTMLElement | null)
+          : null;
+      this.previouslyFocused = active && typeof active.focus === 'function' ? active : null;
+    }
 
     const clampedTokens = Math.max(1, Math.min(MAX_SCALING_TOKENS, Math.round(probeTokens)));
     const key = `${precision}:${clampedTokens}`;
-    if (key === this.lastKey) return;
-    this.lastKey = key;
+    if (key !== this.lastKey) {
+      this.lastKey = key;
 
-    const isBf16 = precision === 'bf16';
-    this.precisionBf16Btn.classList.toggle('is-active', isBf16);
-    this.precisionBf16Btn.setAttribute('aria-checked', String(isBf16));
-    this.precisionFp8Btn.classList.toggle('is-active', !isBf16);
-    this.precisionFp8Btn.setAttribute('aria-checked', String(!isBf16));
+      const isBf16 = precision === 'bf16';
+      this.precisionBf16Btn.classList.toggle('is-active', isBf16);
+      this.precisionBf16Btn.setAttribute('aria-checked', String(isBf16));
+      this.precisionFp8Btn.classList.toggle('is-active', !isBf16);
+      this.precisionFp8Btn.setAttribute('aria-checked', String(!isBf16));
 
-    const sliderPos = String(Math.round(logPositionFromTokens(clampedTokens) * 1000));
-    if (this.probeSlider.value !== sliderPos) {
-      this.probeSlider.value = sliderPos;
+      const sliderPos = String(Math.round(logPositionFromTokens(clampedTokens) * 1000));
+      if (this.probeSlider.value !== sliderPos) {
+        this.probeSlider.value = sliderPos;
+      }
+      this.probeOutput.textContent = `${formatTokenCount(clampedTokens)} tokens`;
+
+      for (const btn of this.jumpButtons) {
+        btn.classList.toggle('is-active', Number(btn.dataset.tokens) === clampedTokens);
+      }
+
+      this.renderSvg(precision, clampedTokens);
+      this.renderProbeStats(precision, clampedTokens);
     }
-    this.probeOutput.textContent = `${formatTokenCount(clampedTokens)} tokens`;
 
-    for (const btn of this.jumpButtons) {
-      btn.classList.toggle('is-active', Number(btn.dataset.tokens) === clampedTokens);
+    if (!wasOpen && typeof this.closeBtn.focus === 'function') {
+      this.closeBtn.focus();
     }
-
-    this.renderSvg(precision, clampedTokens);
-    this.renderProbeStats(precision, clampedTokens);
   }
 
   private renderSvg(precision: PrecisionMode, probeTokens: number): void {

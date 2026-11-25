@@ -108,6 +108,7 @@ export class RenderDevice {
   private height = 0;
   private samples = 0;
   private lost = false;
+  private fboAllocFailed = false;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -129,6 +130,10 @@ export class RenderDevice {
     return this.lost;
   }
 
+  get isFboAllocationFailed(): boolean {
+    return this.fboAllocFailed;
+  }
+
   get sampleCount(): number {
     return this.samples;
   }
@@ -143,7 +148,9 @@ export class RenderDevice {
       this.resolveColorRb = null;
       this.width = 0;
       this.height = 0;
+      this.fboAllocFailed = false;
     } else {
+      this.fboAllocFailed = false;
       this.samples = this.queryBestSampleCount();
     }
   }
@@ -182,8 +189,12 @@ export class RenderDevice {
       this.canvas.width = fb.backingWidth;
       this.canvas.height = fb.backingHeight;
     }
-    if (this.fbo && this.width === fb.backingWidth && this.height === fb.backingHeight) {
+    const dimsUnchanged = this.width === fb.backingWidth && this.height === fb.backingHeight;
+    if (dimsUnchanged && (this.fbo || this.fboAllocFailed)) {
       return fb;
+    }
+    if (!dimsUnchanged) {
+      this.fboAllocFailed = false;
     }
     this.allocateFramebuffer(fb.backingWidth, fb.backingHeight);
     return fb;
@@ -196,8 +207,19 @@ export class RenderDevice {
     const fbo = gl.createFramebuffer();
     const colorRb = gl.createRenderbuffer();
     const depthRb = gl.createRenderbuffer();
+    const cleanupPrimary = () => {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+      if (fbo) gl.deleteFramebuffer(fbo);
+      if (colorRb) gl.deleteRenderbuffer(colorRb);
+      if (depthRb) gl.deleteRenderbuffer(depthRb);
+    };
+
     if (!fbo || !colorRb || !depthRb) {
-      this.destroyFramebuffer();
+      cleanupPrimary();
+      this.width = width;
+      this.height = height;
+      this.fboAllocFailed = true;
       return;
     }
 
@@ -226,18 +248,26 @@ export class RenderDevice {
       return status === gl.FRAMEBUFFER_COMPLETE;
     };
 
-    let ok = this.samples > 1 ? tryBuild(this.samples) : false;
-    if (!ok) {
-      this.samples = 0;
-      ok = tryBuild(0);
+    let ok = false;
+    try {
+      ok = this.samples > 1 ? tryBuild(this.samples) : false;
+      if (!ok) {
+        this.samples = 0;
+        ok = tryBuild(0);
+      }
+    } catch (err) {
+      cleanupPrimary();
+      this.width = width;
+      this.height = height;
+      this.fboAllocFailed = true;
+      throw err;
     }
 
     if (!ok) {
-      gl.deleteFramebuffer(fbo);
-      gl.deleteRenderbuffer(colorRb);
-      gl.deleteRenderbuffer(depthRb);
+      cleanupPrimary();
       this.width = width;
       this.height = height;
+      this.fboAllocFailed = true;
       return;
     }
 
@@ -264,6 +294,9 @@ export class RenderDevice {
           gl.deleteFramebuffer(resolveFbo);
           gl.deleteRenderbuffer(resolveColorRb);
         }
+      } else {
+        if (resolveFbo) gl.deleteFramebuffer(resolveFbo);
+        if (resolveColorRb) gl.deleteRenderbuffer(resolveColorRb);
       }
     }
 
@@ -272,6 +305,7 @@ export class RenderDevice {
     this.depthRb = depthRb;
     this.width = width;
     this.height = height;
+    this.fboAllocFailed = false;
   }
 
   beginFrame(fb: FramebufferViewport): void {
@@ -349,6 +383,7 @@ export class RenderDevice {
     this.resolveColorRb = null;
     this.width = 0;
     this.height = 0;
+    this.fboAllocFailed = false;
   }
 
   dispose(): void {

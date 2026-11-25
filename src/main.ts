@@ -139,14 +139,19 @@ import {
   boundsForBay,
   boundsForSection,
   buildMacroSpine,
+  SPINE_STAGE_BAYS_END,
+  SPINE_STAGE_EMBED_END,
+  SPINE_STAGE_NORM_END,
   TOWER_FIT_BOUNDS,
   type MacroSceneGeometry,
 } from './scene/spine';
 import {
   MacroControls,
   queryControlsElements,
+  shouldDeferGlobalShortcut,
   type CrossBayNeighbor,
 } from './ui/controls';
+export { shouldDeferGlobalShortcut };
 import { MemoryScalingDrawer } from './ui/memoryChart';
 import { MacroOverlay } from './ui/overlay';
 import {
@@ -457,6 +462,154 @@ interface FlyAnimation {
   readonly durationMs: number;
 }
 
+export type CutawayPulseGateState = Pick<
+  SceneState,
+  | 'mode'
+  | 'reducedMotion'
+  | 'gqaStepperActive'
+  | 'gqaStepperPlaying'
+  | 'mambaStepperActive'
+  | 'mambaStepperPlaying'
+  | 'moeStepperActive'
+  | 'moeStepperPlaying'
+  | 'mambaTemporalPlaying'
+  | 'moeTokenCycling'
+>;
+
+/**
+ * PR-11 idle RAF gate for cutaway dataflow pulse ribbons:
+ * continuous pulse animation runs ONLY while a cutaway playback loop is actively playing
+ * (never for static pinned cells, steady hover, or paused steppers).
+ */
+export function shouldAnimateCutawayPulse(state: CutawayPulseGateState): boolean {
+  if (state.reducedMotion) return false;
+  if (state.mode === 'cutaway_gqa') {
+    return state.gqaStepperActive && state.gqaStepperPlaying;
+  }
+  if (state.mode === 'cutaway_mamba') {
+    return (
+      (state.mambaStepperActive && state.mambaStepperPlaying) ||
+      state.mambaTemporalPlaying
+    );
+  }
+  if (state.mode === 'cutaway_moe') {
+    return (
+      (state.moeStepperActive && state.moeStepperPlaying) ||
+      state.moeTokenCycling
+    );
+  }
+  return false;
+}
+
+export interface RafContinuationInput {
+  readonly state: CutawayPulseGateState;
+  readonly flyAnimActive: boolean;
+  readonly spineWaveActive: boolean;
+  readonly spineWavePaused: boolean;
+  readonly contextLost?: boolean;
+}
+
+/**
+ * PR-11/PR-10 global continuous-RAF predicate: true ONLY when camera fly, active Tower
+ * spine replay, or active cutaway playback is genuinely advancing frames (and WebGL is live).
+ */
+export function shouldContinueRafLoop(input: RafContinuationInput): boolean {
+  if (input.contextLost) return false;
+  if (input.flyAnimActive) return true;
+  if (
+    input.state.mode === 'tower' &&
+    input.spineWaveActive &&
+    !input.spineWavePaused &&
+    !input.state.reducedMotion
+  ) {
+    return true;
+  }
+  return shouldAnimateCutawayPulse(input.state);
+}
+
+export interface ValueAtlasKeyInput {
+  readonly mode: ViewMode;
+  readonly bayId: number;
+  readonly executionMode: ExecutionMode;
+  readonly executionId: string;
+  readonly tokenCount: number;
+  readonly precision: PrecisionMode;
+  readonly gqaGroup0Head: number;
+  readonly gqaGroup1Head: number;
+  readonly mambaActiveHead: number;
+  readonly mambaStateToken: number;
+  readonly moeFocusToken: number;
+  readonly moeFocusExpert: number;
+  readonly outputFocusToken: number;
+  readonly stepperActive: boolean;
+  readonly stepperStep: number;
+  readonly stepperTermBucket: number;
+  readonly reducedMotion: boolean;
+  readonly atlasWidth: number;
+  readonly atlasHeight: number;
+  readonly atlasByteLength: number;
+}
+
+/**
+ * PR-12 deterministic RG32F value-atlas cache key covering every input that affects atlas texels
+ * or mask bits while remaining invariant across cell-hover moves within the same head/expert/token.
+ */
+export function computeValueAtlasContentKey(input: ValueAtlasKeyInput): string {
+  const modeSpecific =
+    input.mode === 'cutaway_gqa'
+      ? `g0=${input.gqaGroup0Head}:g1=${input.gqaGroup1Head}`
+      : input.mode === 'cutaway_mamba'
+        ? `mh=${input.mambaActiveHead}:mt=${input.mambaStateToken}`
+        : input.mode === 'cutaway_moe'
+          ? `et=${input.moeFocusToken}:ee=${input.moeFocusExpert}`
+          : input.mode === 'cutaway_output'
+            ? `ot=${input.outputFocusToken}`
+            : 'emb';
+  return [
+    input.mode,
+    input.bayId,
+    input.executionMode,
+    input.executionId,
+    input.tokenCount,
+    input.precision,
+    modeSpecific,
+    input.stepperActive ? `s1:${input.stepperStep}:b${input.stepperTermBucket}` : 's0',
+    input.reducedMotion ? 'rm1' : 'rm0',
+    `${input.atlasWidth}x${input.atlasHeight}:${input.atlasByteLength}`,
+  ].join('|');
+}
+
+/**
+ * PR-14 discrete Tower spine-wave geometry key: changes only on stage/bay transitions
+ * (Embedding -> Bays 01..52 -> Final RMSNorm -> Output -> idle; ~55 transitions total
+ * across a 330-frame 5.5s instructional replay).
+ */
+export function computeSpineWaveGeometryKey(
+  progress: number | null,
+  mode: SpineWaveMode,
+  bayCount = NEMOTRON_SPEC.bays.length,
+): string {
+  if (progress === null || !Number.isFinite(progress)) {
+    return 'idle';
+  }
+  const p = Math.max(0, Math.min(1, progress));
+  if (p < SPINE_STAGE_EMBED_END) {
+    return `${mode}:embedding:none`;
+  }
+  if (p >= SPINE_STAGE_NORM_END) {
+    return `${mode}:output:none`;
+  }
+  if (p >= SPINE_STAGE_BAYS_END) {
+    return `${mode}:final_norm:none`;
+  }
+  const span = SPINE_STAGE_BAYS_END - SPINE_STAGE_EMBED_END;
+  const bayIdx = Math.min(
+    bayCount - 1,
+    Math.max(0, Math.floor(((p - SPINE_STAGE_EMBED_END) / span) * bayCount)),
+  );
+  return `${mode}:bay:${bayIdx + 1}`;
+}
+
 function boot(): void {
   const host = document.getElementById('stage-host');
   const canvas = document.getElementById('gl-canvas') as HTMLCanvasElement | null;
@@ -472,7 +625,8 @@ function boot(): void {
   const initialMetrics =
     measureHostMetrics(host) ?? makeViewportMetrics(0, 0, 960, 700, window.devicePixelRatio || 1);
   const initialPose = cameraPoseForSection('overview', initialMetrics);
-  const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+  const reducedMotionMq = window.matchMedia?.('(prefers-reduced-motion: reduce)') ?? null;
+  const reducedMotion = reducedMotionMq?.matches ?? false;
   const state: SceneState = createInitialState(initialPose, reducedMotion);
 
   let currentMetrics: ViewportMetrics = initialMetrics;
@@ -481,6 +635,16 @@ function boot(): void {
   let currentSnapshot: CameraSnapshot | null = null;
   let geometryDirty = true;
   let pendingRafId: number | null = null;
+  let pendingHoverRafId: number | null = null;
+  let latestHoverClientX = 0;
+  let latestHoverClientY = 0;
+  let lastUploadedAtlasKey = '';
+  let lastOverlayRenderKey = '';
+  let lastChromeKey = '';
+  let sceneBuildVersion = 0;
+  let lastSpineWaveGeoKey = 'idle';
+  let cachedCutawayInsets: { readonly topInsetPx: number; readonly bottomInsetPx: number } | null =
+    null;
   let flyAnim: FlyAnimation | null = null;
   let lastStepperTickMs: number | null = null;
   let lastMambaTemporalTickMs: number | null = null;
@@ -500,6 +664,18 @@ function boot(): void {
   let spineWaveClock: SpineWavePlaybackState = createIdleSpineWaveState('fast');
   let spineWaveLastTickMs: number | null = null;
 
+  const cancelPendingHover = () => {
+    if (pendingHoverRafId !== null) {
+      window.cancelAnimationFrame(pendingHoverRafId);
+      pendingHoverRafId = null;
+    }
+  };
+
+  const invalidateCutawayInsets = () => {
+    cachedCutawayInsets = null;
+    lastOverlayRenderKey = '';
+  };
+
   const applySpineWaveStateToScene = (wave: SpineWavePlaybackState) => {
     spineWaveClock = wave;
     state.spineWaveProgress = wave.progress;
@@ -509,6 +685,7 @@ function boot(): void {
 
   const clearSpineWave = (keepMode = true) => {
     spineWaveLastTickMs = null;
+    lastSpineWaveGeoKey = 'idle';
     applySpineWaveStateToScene(createIdleSpineWaveState(keepMode ? state.spineWaveMode : 'fast'));
   };
 
@@ -547,6 +724,9 @@ function boot(): void {
   const controlEls = queryControlsElements();
 
   const measureCutawayInsets = (_mode: Exclude<ViewMode, 'tower'>) => {
+    if (cachedCutawayInsets !== null) {
+      return cachedCutawayInsets;
+    }
     const isMobileStack = window.innerWidth <= 900;
     const toolbarH = !isMobileStack ? controlEls.floatingToolbar.offsetHeight || 68 : 0;
     const topInsetPx = isMobileStack ? 12 : Math.max(64, toolbarH + 16);
@@ -560,7 +740,8 @@ function boot(): void {
       : usesMathDock
         ? Math.max(106, dockH + 18)
         : 30;
-    return { topInsetPx, bottomInsetPx };
+    cachedCutawayInsets = { topInsetPx, bottomInsetPx };
+    return cachedCutawayInsets;
   };
 
   const cancelFly = () => {
@@ -929,6 +1110,75 @@ function boot(): void {
     return null;
   };
 
+  const currentExecutionIdentity = (): string =>
+    state.executionMode === 'ar_decode'
+      ? getActiveDecodeStep(activeDecodeSession()).stepExecutionId
+      : activeHybridExecution().executionId;
+
+  const currentAtlasKeyForCutaway = (cutaway: CutawaySceneGeometry): string => {
+    const atlas = cutaway.valueAtlas;
+    if (!atlas) return '';
+    const bayId =
+      state.mode === 'cutaway_mamba'
+        ? state.mambaBayId
+        : state.mode === 'cutaway_moe'
+          ? state.moeBayId
+          : state.mode === 'cutaway_gqa'
+            ? state.gqaBayId
+            : state.mode === 'cutaway_output'
+              ? NEMOTRON_SPEC.bays.length + 1
+              : 0;
+    const tokenCount = activeCutawayTokens();
+    const stepperActive =
+      state.mode === 'cutaway_gqa'
+        ? state.gqaStepperActive
+        : state.mode === 'cutaway_mamba'
+          ? state.mambaStepperActive
+          : state.mode === 'cutaway_moe'
+            ? state.moeStepperActive
+            : false;
+    const stepperStep =
+      state.mode === 'cutaway_gqa'
+        ? state.gqaStepperStep
+        : state.mode === 'cutaway_mamba'
+          ? state.mambaStepperStep
+          : state.mode === 'cutaway_moe'
+            ? state.moeStepperStep
+            : 0;
+    const stepperTermBucket =
+      state.mode === 'cutaway_gqa' && cutaway.gqaSim
+        ? gqaAccumTermBucket(cutaway.gqaSim, state.gqaStepperStep, state.gqaAccumTermProgress)
+        : state.mode === 'cutaway_mamba' && cutaway.mambaSim
+          ? mambaAccumTermBucket(cutaway.mambaSim, state.mambaStepperStep, state.mambaAccumTermProgress)
+          : state.mode === 'cutaway_moe' && cutaway.moeSim
+            ? moeAccumTermBucket(cutaway.moeSim, state.moeStepperStep, state.moeAccumTermProgress)
+            : -1;
+    return computeValueAtlasContentKey({
+      mode: state.mode,
+      bayId,
+      executionMode: state.executionMode,
+      executionId: currentExecutionIdentity(),
+      tokenCount,
+      precision: state.precision,
+      gqaGroup0Head: cutaway.gqaStats?.activeGroup0Head ?? state.gqaActiveGroup0Head,
+      gqaGroup1Head: cutaway.gqaStats?.activeGroup1Head ?? state.gqaActiveGroup1Head,
+      mambaActiveHead: cutaway.mambaStats?.activeHead ?? state.mambaActiveHead,
+      mambaStateToken: cutaway.mambaStats?.stateTokenIndex ?? activeMambaStateToken(),
+      moeFocusToken: cutaway.moeStats?.focusToken ?? activeMoeFocusToken(),
+      moeFocusExpert:
+        cutaway.moeStats?.focusExpert ??
+        (state.mode === 'cutaway_moe' ? activeMoeFocusExpert(cutaway.moeSim ?? activeMoeSim()) : 0),
+      outputFocusToken: clampedOutputFocusToken(tokenCount),
+      stepperActive,
+      stepperStep,
+      stepperTermBucket,
+      reducedMotion: state.reducedMotion,
+      atlasWidth: atlas.width,
+      atlasHeight: atlas.height,
+      atlasByteLength: atlas.data.byteLength,
+    });
+  };
+
   const rebuildSceneIfNeeded = () => {
     if (!geometryDirty && ((state.mode === 'tower' && currentTowerScene) || (state.mode !== 'tower' && currentCutawayScene))) {
       return;
@@ -950,6 +1200,8 @@ function boot(): void {
             : null,
       });
       currentCutawayScene = null;
+      lastUploadedAtlasKey = '';
+      sceneBuildVersion++;
       if (device && !device.isLost && solidsPass && linesPass && ribbonsPass) {
         solidsPass.upload(currentTowerScene.solidData, currentTowerScene.solidCount);
         linesPass.upload(currentTowerScene.lineData, currentTowerScene.lineCount);
@@ -957,6 +1209,7 @@ function boot(): void {
       }
     } else {
       currentCutawayScene = buildActiveCutaway();
+      sceneBuildVersion++;
       if (
         currentCutawayScene &&
         device &&
@@ -969,11 +1222,15 @@ function boot(): void {
       ) {
         if (currentCutawayScene.sheetData && currentCutawayScene.sheetCount && currentCutawayScene.sheetCount > 0) {
           if (currentCutawayScene.valueAtlas) {
-            sheetsPass.uploadValueAtlas(
-              currentCutawayScene.valueAtlas.width,
-              currentCutawayScene.valueAtlas.height,
-              currentCutawayScene.valueAtlas.data,
-            );
+            const atlasKey = currentAtlasKeyForCutaway(currentCutawayScene);
+            if (atlasKey !== lastUploadedAtlasKey) {
+              sheetsPass.uploadValueAtlas(
+                currentCutawayScene.valueAtlas.width,
+                currentCutawayScene.valueAtlas.height,
+                currentCutawayScene.valueAtlas.data,
+              );
+              lastUploadedAtlasKey = atlasKey;
+            }
           }
           sheetsPass.upload(
             currentCutawayScene.sheetData,
@@ -987,6 +1244,7 @@ function boot(): void {
             currentCutawayScene.flowIndices ?? new Uint32Array(0),
           );
         } else {
+          lastUploadedAtlasKey = '';
           solidsPass.upload(currentCutawayScene.solidData, currentCutawayScene.solidCount);
           linesPass.upload(currentCutawayScene.lineData, currentCutawayScene.lineCount);
           ribbonsPass.upload(currentCutawayScene.ribbonData, currentCutawayScene.ribbonCount);
@@ -1000,6 +1258,7 @@ function boot(): void {
     if (state.mode !== 'tower') return;
     const started = startSpineWavePlayback(mode, state.reducedMotion);
     applySpineWaveStateToScene(started);
+    lastSpineWaveGeoKey = computeSpineWaveGeometryKey(started.progress, started.mode);
     spineWaveLastTickMs = state.reducedMotion ? null : performance.now();
     geometryDirty = true;
     rebuildSceneIfNeeded();
@@ -1016,6 +1275,9 @@ function boot(): void {
       activeDecodeSessionOrNull(),
     );
     memoryDrawer.sync(state.memoryChartOpen, state.precision, state.memoryProbeTokens);
+    if (state.mode !== 'tower') {
+      invalidateCutawayInsets();
+    }
   };
 
   const getActiveCutawayStepper = (): { active: boolean; playing: boolean; step: number } | null => {
@@ -2667,242 +2929,274 @@ function boot(): void {
     if (!measured) return;
     currentMetrics = measured;
 
+    const canAnimate = device !== null && !device.isLost;
     let continueAnimating = false;
-    if (flyAnim) {
-      const elapsed = nowMs - flyAnim.startMs;
-      const t = Math.max(0, Math.min(1, elapsed / flyAnim.durationMs));
-      state.camera = interpolateCameraPose(flyAnim.from, flyAnim.to, t);
-      if (t >= 1) {
-        flyAnim = null;
-      } else {
-        continueAnimating = true;
-      }
-    }
-
-    // Live Math Stepper playback loop (GQA, Mamba-2 & MoE cutaways, paced ~400 ms/term, respects reducedMotion)
     let stepperChangedUi = false;
     let stepperStageAdvanced = false;
+    let stepperProgressToSync: number | null = null;
     let spineWaveHudDirty = false;
-    if (
-      state.mode === 'cutaway_gqa' &&
-      state.gqaStepperActive &&
-      state.gqaStepperPlaying &&
-      !state.reducedMotion
-    ) {
-      const dtSec =
-        lastStepperTickMs === null ? 0 : Math.max(0, Math.min(0.1, (nowMs - lastStepperTickMs) / 1000));
-      lastStepperTickMs = nowMs;
-      const sim = activeGqaSim();
-      const durationSec = gqaStepPlayDurationSec(sim, state.gqaStepperStep);
-      const nextProgress = state.gqaStepperSubProgress + dtSec / durationSec;
-      if (nextProgress >= 1) {
-        state.gqaStepperSubProgress = nextProgress % 1;
-        state.gqaStepperStep = (state.gqaStepperStep + 1) % GQA_STEPPER_STEPS.length;
-        stepperStageAdvanced = true;
-      } else {
-        state.gqaStepperSubProgress = nextProgress;
-      }
-      const termP = resolveGqaAccumTermProgress(
-        sim,
-        state.gqaStepperStep,
-        state.gqaStepperSubProgress,
-        true,
-        false,
-        state.gqaHoveredCell !== null || state.gqaSelectedCell !== null,
-      );
-      state.gqaAccumTermProgress = termP;
-      const termBucket = gqaAccumTermBucket(sim, state.gqaStepperStep, termP);
-      const cell = resolveActiveGqaCell();
-      const key = cell
-        ? `gqa:${state.gqaStepperStep}:${cell.tensor}:${cell.row}:${cell.col}:${cell.headIndex ?? -1}:t${termBucket}`
-        : '';
-      if (key !== lastStepperCellKey) {
-        lastStepperCellKey = key;
-        geometryDirty = true;
-      }
-      stepperChangedUi = true;
-      continueAnimating = true;
-    } else if (
-      state.mode === 'cutaway_mamba' &&
-      state.mambaStepperActive &&
-      state.mambaStepperPlaying &&
-      !state.reducedMotion
-    ) {
-      const dtSec =
-        lastStepperTickMs === null ? 0 : Math.max(0, Math.min(0.1, (nowMs - lastStepperTickMs) / 1000));
-      lastStepperTickMs = nowMs;
-      const sim = activeMambaSim();
-      const durationSec = mambaStepPlayDurationSec(sim, state.mambaStepperStep);
-      const nextProgress = state.mambaStepperSubProgress + dtSec / durationSec;
-      if (nextProgress >= 1) {
-        state.mambaStepperSubProgress = nextProgress % 1;
-        state.mambaStepperStep = (state.mambaStepperStep + 1) % MAMBA_STEPPER_STEPS.length;
-        stepperStageAdvanced = true;
-      } else {
-        state.mambaStepperSubProgress = nextProgress;
-      }
-      const termP = resolveMambaAccumTermProgress(
-        sim,
-        state.mambaStepperStep,
-        state.mambaStepperSubProgress,
-        true,
-        false,
-        state.mambaHoveredCell !== null || state.mambaSelectedCell !== null,
-      );
-      state.mambaAccumTermProgress = termP;
-      const termBucket = mambaAccumTermBucket(sim, state.mambaStepperStep, termP);
-      const cell = resolveActiveMambaCell();
-      const key = cell
-        ? `mamba:${state.mambaStepperStep}:${cell.tensor}:${cell.row}:${cell.col}:${cell.headIndex ?? -1}:t${termBucket}`
-        : '';
-      if (key !== lastStepperCellKey) {
-        lastStepperCellKey = key;
-        geometryDirty = true;
-      }
-      stepperChangedUi = true;
-      continueAnimating = true;
-    } else if (
-      state.mode === 'cutaway_moe' &&
-      state.moeStepperActive &&
-      state.moeStepperPlaying &&
-      !state.reducedMotion
-    ) {
-      const dtSec =
-        lastStepperTickMs === null ? 0 : Math.max(0, Math.min(0.1, (nowMs - lastStepperTickMs) / 1000));
-      lastStepperTickMs = nowMs;
-      const sim = activeMoeSim();
-      const durationSec = moeStepPlayDurationSec(sim, state.moeStepperStep);
-      const nextProgress = state.moeStepperSubProgress + dtSec / durationSec;
-      if (nextProgress >= 1) {
-        state.moeStepperSubProgress = nextProgress % 1;
-        state.moeStepperStep = (state.moeStepperStep + 1) % MOE_STEPPER_STEPS.length;
-        stepperStageAdvanced = true;
-      } else {
-        state.moeStepperSubProgress = nextProgress;
-      }
-      const termP = resolveMoeAccumTermProgress(
-        sim,
-        state.moeStepperStep,
-        state.moeStepperSubProgress,
-        true,
-        false,
-        state.moeHoveredCell !== null || state.moeSelectedCell !== null,
-      );
-      state.moeAccumTermProgress = termP;
-      const termBucket = moeAccumTermBucket(sim, state.moeStepperStep, termP);
-      const cell = resolveActiveMoeCell();
-      const key = cell
-        ? `moe:${state.moeStepperStep}:${cell.tensor}:${cell.row}:${cell.col}:${cell.expertId ?? -1}:t${termBucket}`
-        : '';
-      if (key !== lastStepperCellKey) {
-        lastStepperCellKey = key;
-        geometryDirty = true;
-      }
-      stepperChangedUi = true;
-      continueAnimating = true;
-    } else {
-      lastStepperTickMs = null;
-    }
 
-    // Mamba-2 temporal recurrence playback loop (~950 ms per token t = 0 -> T-1, respects reducedMotion)
-    if (
-      state.mode === 'cutaway_mamba' &&
-      state.mambaTemporalPlaying &&
-      !state.reducedMotion
-    ) {
-      if (lastMambaTemporalTickMs === null) {
-        lastMambaTemporalTickMs = nowMs;
-      } else if (nowMs - lastMambaTemporalTickMs >= 950) {
-        lastMambaTemporalTickMs = nowMs;
-        const tick = advanceMambaTemporalPlaybackTick(
-          state.mambaStateToken,
-          activeCutawayTokens(),
-          state.mambaSelectedCell,
-          state.mambaHoveredCell,
-        );
-        state.mambaStateToken = tick.nextToken;
-        state.mambaSelectedCell = tick.nextSelectedCell;
-        state.mambaHoveredCell = tick.nextHoveredCell;
-        geometryDirty = true;
-        stepperChangedUi = true;
-      }
-      continueAnimating = true;
-    } else {
-      lastMambaTemporalTickMs = null;
-    }
-
-    // MoE per-token routing cycle loop (~1100 ms per token t = 0 -> T-1, respects reducedMotion)
-    if (
-      state.mode === 'cutaway_moe' &&
-      state.moeTokenCycling &&
-      !state.reducedMotion
-    ) {
-      if (lastMoeCycleTickMs === null) {
-        lastMoeCycleTickMs = nowMs;
-      } else if (nowMs - lastMoeCycleTickMs >= 1100) {
-        lastMoeCycleTickMs = nowMs;
-        const sim = currentCutawayScene?.moeSim ?? activeMoeSim();
-        const tick = advanceMoeTokenCycleTick(
-          state.moeFocusToken,
-          sim,
-          state.moeSelectedCell,
-          state.moeHoveredCell,
-        );
-        state.moeFocusToken = tick.nextToken;
-        state.moeActiveExpert = null;
-        state.moeSelectedCell = tick.nextSelectedCell;
-        state.moeHoveredCell = tick.nextHoveredCell;
-        geometryDirty = true;
-        stepperChangedUi = true;
-      }
-      continueAnimating = true;
-    } else {
-      lastMoeCycleTickMs = null;
-    }
-
-    // RC3 52-Layer Spine Propagation Wave (Fast 0.9s vs Slow Instructional 5.5s, Pause/Resume & static reducedMotion summary)
-    if (spineWaveClock.progress !== null) {
-      if (state.mode !== 'tower') {
-        clearSpineWave(true);
-        geometryDirty = true;
-        stepperChangedUi = true;
-      } else if (state.reducedMotion) {
-        spineWaveLastTickMs = null;
-        if (state.spineWaveProgress !== 1.0) {
-          applySpineWaveStateToScene(startSpineWavePlayback(state.spineWaveMode, true));
-          geometryDirty = true;
-          spineWaveHudDirty = true;
-        }
-      } else if (spineWaveClock.paused) {
-        spineWaveLastTickMs = null;
-      } else {
-        const dtMs =
-          spineWaveLastTickMs === null
-            ? 0
-            : Math.max(0, Math.min(100, nowMs - spineWaveLastTickMs));
-        spineWaveLastTickMs = nowMs;
-        const stepped = advanceSpineWavePlayback(spineWaveClock, dtMs, false);
-        applySpineWaveStateToScene(stepped.next);
-        geometryDirty = true;
-        if (stepped.finished) {
-          spineWaveLastTickMs = null;
-          stepperChangedUi = true;
-        } else if (stepped.animating) {
-          spineWaveHudDirty = true;
+    if (canAnimate) {
+      if (flyAnim) {
+        const elapsed = nowMs - flyAnim.startMs;
+        const t = Math.max(0, Math.min(1, elapsed / flyAnim.durationMs));
+        state.camera = interpolateCameraPose(flyAnim.from, flyAnim.to, t);
+        if (t >= 1) {
+          flyAnim = null;
+        } else {
           continueAnimating = true;
         }
       }
+
+      // Live Math Stepper playback loop (GQA, Mamba-2 & MoE cutaways, paced ~400 ms/term, respects reducedMotion)
+      if (
+        state.mode === 'cutaway_gqa' &&
+        state.gqaStepperActive &&
+        state.gqaStepperPlaying &&
+        !state.reducedMotion
+      ) {
+        const dtSec =
+          lastStepperTickMs === null ? 0 : Math.max(0, Math.min(0.1, (nowMs - lastStepperTickMs) / 1000));
+        lastStepperTickMs = nowMs;
+        const sim = activeGqaSim();
+        const durationSec = gqaStepPlayDurationSec(sim, state.gqaStepperStep);
+        const nextProgress = state.gqaStepperSubProgress + dtSec / durationSec;
+        if (nextProgress >= 1) {
+          state.gqaStepperSubProgress = nextProgress % 1;
+          state.gqaStepperStep = (state.gqaStepperStep + 1) % GQA_STEPPER_STEPS.length;
+          stepperStageAdvanced = true;
+        } else {
+          state.gqaStepperSubProgress = nextProgress;
+        }
+        const termP = resolveGqaAccumTermProgress(
+          sim,
+          state.gqaStepperStep,
+          state.gqaStepperSubProgress,
+          true,
+          false,
+          state.gqaHoveredCell !== null || state.gqaSelectedCell !== null,
+        );
+        state.gqaAccumTermProgress = termP;
+        const termBucket = gqaAccumTermBucket(sim, state.gqaStepperStep, termP);
+        const cell = resolveActiveGqaCell();
+        const key = cell
+          ? `gqa:${state.gqaStepperStep}:${cell.tensor}:${cell.row}:${cell.col}:${cell.headIndex ?? -1}:t${termBucket}`
+          : '';
+        if (key !== lastStepperCellKey || stepperStageAdvanced) {
+          lastStepperCellKey = key;
+          geometryDirty = true;
+          stepperChangedUi = true;
+        } else {
+          stepperProgressToSync = state.gqaStepperSubProgress;
+        }
+        continueAnimating = true;
+      } else if (
+        state.mode === 'cutaway_mamba' &&
+        state.mambaStepperActive &&
+        state.mambaStepperPlaying &&
+        !state.reducedMotion
+      ) {
+        const dtSec =
+          lastStepperTickMs === null ? 0 : Math.max(0, Math.min(0.1, (nowMs - lastStepperTickMs) / 1000));
+        lastStepperTickMs = nowMs;
+        const sim = activeMambaSim();
+        const durationSec = mambaStepPlayDurationSec(sim, state.mambaStepperStep);
+        const nextProgress = state.mambaStepperSubProgress + dtSec / durationSec;
+        if (nextProgress >= 1) {
+          state.mambaStepperSubProgress = nextProgress % 1;
+          state.mambaStepperStep = (state.mambaStepperStep + 1) % MAMBA_STEPPER_STEPS.length;
+          stepperStageAdvanced = true;
+        } else {
+          state.mambaStepperSubProgress = nextProgress;
+        }
+        const termP = resolveMambaAccumTermProgress(
+          sim,
+          state.mambaStepperStep,
+          state.mambaStepperSubProgress,
+          true,
+          false,
+          state.mambaHoveredCell !== null || state.mambaSelectedCell !== null,
+        );
+        state.mambaAccumTermProgress = termP;
+        const termBucket = mambaAccumTermBucket(sim, state.mambaStepperStep, termP);
+        const cell = resolveActiveMambaCell();
+        const key = cell
+          ? `mamba:${state.mambaStepperStep}:${cell.tensor}:${cell.row}:${cell.col}:${cell.headIndex ?? -1}:t${termBucket}`
+          : '';
+        if (key !== lastStepperCellKey || stepperStageAdvanced) {
+          lastStepperCellKey = key;
+          geometryDirty = true;
+          stepperChangedUi = true;
+        } else {
+          stepperProgressToSync = state.mambaStepperSubProgress;
+        }
+        continueAnimating = true;
+      } else if (
+        state.mode === 'cutaway_moe' &&
+        state.moeStepperActive &&
+        state.moeStepperPlaying &&
+        !state.reducedMotion
+      ) {
+        const dtSec =
+          lastStepperTickMs === null ? 0 : Math.max(0, Math.min(0.1, (nowMs - lastStepperTickMs) / 1000));
+        lastStepperTickMs = nowMs;
+        const sim = activeMoeSim();
+        const durationSec = moeStepPlayDurationSec(sim, state.moeStepperStep);
+        const nextProgress = state.moeStepperSubProgress + dtSec / durationSec;
+        if (nextProgress >= 1) {
+          state.moeStepperSubProgress = nextProgress % 1;
+          state.moeStepperStep = (state.moeStepperStep + 1) % MOE_STEPPER_STEPS.length;
+          stepperStageAdvanced = true;
+        } else {
+          state.moeStepperSubProgress = nextProgress;
+        }
+        const termP = resolveMoeAccumTermProgress(
+          sim,
+          state.moeStepperStep,
+          state.moeStepperSubProgress,
+          true,
+          false,
+          state.moeHoveredCell !== null || state.moeSelectedCell !== null,
+        );
+        state.moeAccumTermProgress = termP;
+        const termBucket = moeAccumTermBucket(sim, state.moeStepperStep, termP);
+        const cell = resolveActiveMoeCell();
+        const key = cell
+          ? `moe:${state.moeStepperStep}:${cell.tensor}:${cell.row}:${cell.col}:${cell.expertId ?? -1}:t${termBucket}`
+          : '';
+        if (key !== lastStepperCellKey || stepperStageAdvanced) {
+          lastStepperCellKey = key;
+          geometryDirty = true;
+          stepperChangedUi = true;
+        } else {
+          stepperProgressToSync = state.moeStepperSubProgress;
+        }
+        continueAnimating = true;
+      } else {
+        lastStepperTickMs = null;
+      }
+
+      // Mamba-2 temporal recurrence playback loop (~950 ms per token t = 0 -> T-1, respects reducedMotion)
+      if (
+        state.mode === 'cutaway_mamba' &&
+        state.mambaTemporalPlaying &&
+        !state.reducedMotion
+      ) {
+        if (lastMambaTemporalTickMs === null) {
+          lastMambaTemporalTickMs = nowMs;
+        } else if (nowMs - lastMambaTemporalTickMs >= 950) {
+          lastMambaTemporalTickMs = nowMs;
+          const tick = advanceMambaTemporalPlaybackTick(
+            state.mambaStateToken,
+            activeCutawayTokens(),
+            state.mambaSelectedCell,
+            state.mambaHoveredCell,
+          );
+          state.mambaStateToken = tick.nextToken;
+          state.mambaSelectedCell = tick.nextSelectedCell;
+          state.mambaHoveredCell = tick.nextHoveredCell;
+          geometryDirty = true;
+          stepperChangedUi = true;
+        }
+        continueAnimating = true;
+      } else {
+        lastMambaTemporalTickMs = null;
+      }
+
+      // MoE per-token routing cycle loop (~1100 ms per token t = 0 -> T-1, respects reducedMotion)
+      if (
+        state.mode === 'cutaway_moe' &&
+        state.moeTokenCycling &&
+        !state.reducedMotion
+      ) {
+        if (lastMoeCycleTickMs === null) {
+          lastMoeCycleTickMs = nowMs;
+        } else if (nowMs - lastMoeCycleTickMs >= 1100) {
+          lastMoeCycleTickMs = nowMs;
+          const sim = currentCutawayScene?.moeSim ?? activeMoeSim();
+          const tick = advanceMoeTokenCycleTick(
+            state.moeFocusToken,
+            sim,
+            state.moeSelectedCell,
+            state.moeHoveredCell,
+          );
+          state.moeFocusToken = tick.nextToken;
+          state.moeActiveExpert = null;
+          state.moeSelectedCell = tick.nextSelectedCell;
+          state.moeHoveredCell = tick.nextHoveredCell;
+          geometryDirty = true;
+          stepperChangedUi = true;
+        }
+        continueAnimating = true;
+      } else {
+        lastMoeCycleTickMs = null;
+      }
+
+      // RC3 52-Layer Spine Propagation Wave (Fast 0.9s vs Slow Instructional 5.5s, Pause/Resume & static reducedMotion summary)
+      if (spineWaveClock.progress !== null) {
+        if (state.mode !== 'tower') {
+          clearSpineWave(true);
+          geometryDirty = true;
+          stepperChangedUi = true;
+        } else if (state.reducedMotion) {
+          spineWaveLastTickMs = null;
+          if (state.spineWaveProgress !== 1.0) {
+            const settled = startSpineWavePlayback(state.spineWaveMode, true);
+            applySpineWaveStateToScene(settled);
+            lastSpineWaveGeoKey = computeSpineWaveGeometryKey(settled.progress, settled.mode);
+            geometryDirty = true;
+            spineWaveHudDirty = true;
+          }
+        } else if (spineWaveClock.paused) {
+          spineWaveLastTickMs = null;
+        } else {
+          const dtMs =
+            spineWaveLastTickMs === null
+              ? 0
+              : Math.max(0, Math.min(100, nowMs - spineWaveLastTickMs));
+          spineWaveLastTickMs = nowMs;
+          const stepped = advanceSpineWavePlayback(spineWaveClock, dtMs, false);
+          applySpineWaveStateToScene(stepped.next);
+          const nextWaveGeoKey = computeSpineWaveGeometryKey(
+            stepped.next.progress,
+            stepped.next.mode,
+          );
+          if (nextWaveGeoKey !== lastSpineWaveGeoKey) {
+            lastSpineWaveGeoKey = nextWaveGeoKey;
+            geometryDirty = true;
+          }
+          if (stepped.finished) {
+            spineWaveLastTickMs = null;
+            lastSpineWaveGeoKey = 'idle';
+            geometryDirty = true;
+            stepperChangedUi = true;
+          } else if (stepped.animating) {
+            spineWaveHudDirty = true;
+            continueAnimating = true;
+          }
+        }
+      } else {
+        spineWaveLastTickMs = null;
+      }
     } else {
+      lastStepperTickMs = null;
+      lastMambaTemporalTickMs = null;
+      lastMoeCycleTickMs = null;
       spineWaveLastTickMs = null;
     }
 
     rebuildSceneIfNeeded();
     if (stepperChangedUi) {
       syncUi();
-    } else if (spineWaveHudDirty) {
-      controls.syncSpineWaveHud(state, activeHybridExecution(), activeDecodeSessionOrNull());
+    } else {
+      if (stepperProgressToSync !== null) {
+        controls.syncStepperProgressOnly(stepperProgressToSync);
+      }
+      if (spineWaveHudDirty) {
+        controls.syncSpineWaveHud(state, activeHybridExecution(), activeDecodeSessionOrNull());
+      }
     }
-    if (stepperStageAdvanced && state.stepperAutoFollow && !manualCameraOverride) {
+    if (stepperStageAdvanced && state.stepperAutoFollow && !manualCameraOverride && canAnimate) {
       focusCameraOnActiveOpStep(false);
     }
 
@@ -2914,16 +3208,15 @@ function boot(): void {
     currentSnapshot = buildCameraSnapshot(state.camera, activeBounds, currentMetrics);
 
     if (
-      device &&
-      !device.isLost &&
+      canAnimate &&
       solidsPass &&
       sheetsPass &&
       linesPass &&
       ribbonsPass &&
       flatFlowPass
     ) {
-      const fb = device.ensureSize(currentMetrics);
-      device.beginFrame(fb);
+      const fb = device!.ensureSize(currentMetrics);
+      device!.beginFrame(fb);
       const useSheetPipeline =
         state.mode !== 'tower' &&
         currentCutawayScene !== null &&
@@ -2938,19 +3231,7 @@ function boot(): void {
           currentMetrics.dpr,
           currentSnapshot.eye,
         );
-        const hasActivePulseRibbon =
-          !state.reducedMotion &&
-          currentCutawayScene !== null &&
-          Boolean(
-            currentCutawayScene.activeFormula ||
-            currentCutawayScene.embeddingFormula ||
-            currentCutawayScene.outputFormula ||
-            state.gqaStepperActive ||
-            state.mambaStepperActive ||
-            state.moeStepperActive ||
-            state.selectedPart !== null ||
-            state.hoveredPart !== null,
-          );
+        const hasActivePulseRibbon = shouldAnimateCutawayPulse(state);
         const pulseTime = hasActivePulseRibbon ? nowMs * 0.001 : -1;
         flatFlowPass.draw(currentSnapshot.viewProj, pulseTime);
         if (hasActivePulseRibbon) {
@@ -2967,37 +3248,46 @@ function boot(): void {
         );
         ribbonsPass.draw(currentSnapshot.viewProj);
       }
-      device.endFrame(fb);
+      device!.endFrame(fb);
     }
 
-    // Synchronous black-pill DOM/SVG overlay projection in the same animation frame
-    if (state.mode === 'tower' && currentTowerScene) {
-      overlay.update({
-        spec: NEMOTRON_SPEC,
-        scene: currentTowerScene,
-        snapshot: currentSnapshot,
-        section: state.section,
-        tokens: state.tokens,
-        selectedBay: state.selectedBay,
-        hoveredBay: state.hoveredBay,
-      });
-    } else if (state.mode !== 'tower' && currentCutawayScene) {
-      const { topInsetPx, bottomInsetPx } = measureCutawayInsets(state.mode);
-      overlay.updateCutaway({
-        scene: currentCutawayScene,
-        snapshot: currentSnapshot,
-        tokens: state.tokens,
-        selectedPart: state.selectedPart,
-        hoveredPart: state.hoveredPart,
-        topInsetPx,
-        bottomInsetPx,
-        activeOpPartIds: currentCutawayScene.activeOpPartIds ?? null,
-        cellPopover: currentCutawayScene.cellPopover ?? null,
-        activeCellGrids: currentCutawayScene.activeCellGrids ?? null,
-      });
+    // Synchronous black-pill DOM/SVG overlay projection (skipped when camera, metrics, chrome, and scene are unchanged — PR-11)
+    const cam = state.camera;
+    const overlayKey =
+      `${state.mode}|v${sceneBuildVersion}|${currentMetrics.hostWidth.toFixed(1)}x${currentMetrics.hostHeight.toFixed(1)}@${currentMetrics.dpr.toFixed(2)}|` +
+      `${cam.target[0].toFixed(4)},${cam.target[1].toFixed(4)},${cam.target[2].toFixed(4)},${cam.distance.toFixed(4)},${cam.azimuthDeg.toFixed(3)},${cam.elevationDeg.toFixed(3)},${cam.fovDeg.toFixed(2)}|` +
+      `${state.section}|${state.selectedBay ?? ''}|${state.hoveredBay ?? ''}|${state.selectedPart ?? ''}|${state.hoveredPart ?? ''}|t${state.tokens}|${lastChromeKey}`;
+
+    if (overlayKey !== lastOverlayRenderKey) {
+      lastOverlayRenderKey = overlayKey;
+      if (state.mode === 'tower' && currentTowerScene) {
+        overlay.update({
+          spec: NEMOTRON_SPEC,
+          scene: currentTowerScene,
+          snapshot: currentSnapshot,
+          section: state.section,
+          tokens: state.tokens,
+          selectedBay: state.selectedBay,
+          hoveredBay: state.hoveredBay,
+        });
+      } else if (state.mode !== 'tower' && currentCutawayScene) {
+        const { topInsetPx, bottomInsetPx } = measureCutawayInsets(state.mode);
+        overlay.updateCutaway({
+          scene: currentCutawayScene,
+          snapshot: currentSnapshot,
+          tokens: state.tokens,
+          selectedPart: state.selectedPart,
+          hoveredPart: state.hoveredPart,
+          topInsetPx,
+          bottomInsetPx,
+          activeOpPartIds: currentCutawayScene.activeOpPartIds ?? null,
+          cellPopover: currentCutawayScene.cellPopover ?? null,
+          activeCellGrids: currentCutawayScene.activeCellGrids ?? null,
+        });
+      }
     }
 
-    if (continueAnimating) {
+    if (continueAnimating && canAnimate) {
       scheduleDraw();
     }
   };
@@ -3030,6 +3320,7 @@ function boot(): void {
     ) {
       return;
     }
+    invalidateCutawayInsets();
     currentMetrics = next;
     lastHostW = next.hostWidth;
     lastHostH = next.hostHeight;
@@ -3074,11 +3365,11 @@ function boot(): void {
   resizeObserver.observe(host);
 
   // Dynamically re-measure cutaway insets whenever Math Dock (wrapped formulas) or floating toolbar resizes
-  let lastChromeKey = '';
   const chromeResizeObserver = new ResizeObserver(() => {
     const key = `${controlEls.floatingToolbar.offsetHeight}:${controlEls.gqaMathDock.offsetHeight}`;
     if (key === lastChromeKey) return;
     lastChromeKey = key;
+    invalidateCutawayInsets();
     if (state.mode !== 'tower') {
       scheduleDraw();
     }
@@ -3098,22 +3389,80 @@ function boot(): void {
   };
   watchDpr();
 
+  // Live prefers-reduced-motion subscription (PR-18)
+  const handleReducedMotionChange = (matches: boolean) => {
+    if (state.reducedMotion === matches) return;
+    state.reducedMotion = matches;
+    if (matches) {
+      if (flyAnim) {
+        state.camera = cloneCameraPose(flyAnim.to);
+        flyAnim = null;
+      }
+      state.gqaStepperPlaying = false;
+      state.mambaStepperPlaying = false;
+      state.moeStepperPlaying = false;
+      state.mambaTemporalPlaying = false;
+      state.moeTokenCycling = false;
+      state.gqaAccumTermProgress = 1;
+      state.mambaAccumTermProgress = 1;
+      state.moeAccumTermProgress = 1;
+      lastStepperTickMs = null;
+      lastMambaTemporalTickMs = null;
+      lastMoeCycleTickMs = null;
+      if (spineWaveClock.progress !== null) {
+        spineWaveLastTickMs = null;
+        const settled = startSpineWavePlayback(state.spineWaveMode, true);
+        applySpineWaveStateToScene(settled);
+        lastSpineWaveGeoKey = computeSpineWaveGeometryKey(settled.progress, settled.mode);
+      }
+    }
+    geometryDirty = true;
+    rebuildSceneIfNeeded();
+    syncUi();
+    scheduleDraw();
+  };
+  if (reducedMotionMq) {
+    const onMotionChange = (ev: MediaQueryListEvent) => handleReducedMotionChange(ev.matches);
+    if (typeof reducedMotionMq.addEventListener === 'function') {
+      reducedMotionMq.addEventListener('change', onMotionChange);
+    } else if (typeof reducedMotionMq.addListener === 'function') {
+      reducedMotionMq.addListener(onMotionChange);
+    }
+  }
+
   if (document.fonts && document.fonts.ready) {
     document.fonts.ready.then(() => {
       overlay.clearMetricCache();
+      lastOverlayRenderKey = '';
       scheduleDraw();
     });
   }
 
-  // --- WebGL Context Lost / Restored ---
+  // --- WebGL Context Lost / Restored (PR-10) ---
   canvas.addEventListener('webglcontextlost', (ev) => {
     ev.preventDefault();
     cancelFly();
+    cancelPendingHover();
     if (pendingRafId !== null) {
       window.cancelAnimationFrame(pendingRafId);
       pendingRafId = null;
     }
+    state.gqaStepperPlaying = false;
+    state.mambaStepperPlaying = false;
+    state.moeStepperPlaying = false;
+    state.mambaTemporalPlaying = false;
+    state.moeTokenCycling = false;
+    lastStepperTickMs = null;
+    lastMambaTemporalTickMs = null;
+    lastMoeCycleTickMs = null;
+    if (spineWaveClock.progress !== null) {
+      applySpineWaveStateToScene({ ...spineWaveClock, paused: true });
+    }
+    spineWaveLastTickMs = null;
+    lastUploadedAtlasKey = '';
+    lastOverlayRenderKey = '';
     if (device) device.markLost(true);
+    syncUi();
     showFallbackCard(
       fallbackEl,
       'WebGL2 Context Lost',
@@ -3126,16 +3475,25 @@ function boot(): void {
   canvas.addEventListener('webglcontextrestored', () => {
     if (!device) return;
     try {
+      const nextSolidsPass = new SolidsPass(device.gl);
+      const nextSheetsPass = new SheetsPass(device.gl);
+      const nextLinesPass = new LinesPass(device.gl);
+      const nextRibbonsPass = new RibbonsPass(device.gl);
+      const nextFlatFlowPass = new FlatFlowRibbonsPass(device.gl);
+      solidsPass = nextSolidsPass;
+      sheetsPass = nextSheetsPass;
+      linesPass = nextLinesPass;
+      ribbonsPass = nextRibbonsPass;
+      flatFlowPass = nextFlatFlowPass;
+      lastUploadedAtlasKey = '';
+      lastOverlayRenderKey = '';
       device.markLost(false);
-      solidsPass = new SolidsPass(device.gl);
-      sheetsPass = new SheetsPass(device.gl);
-      linesPass = new LinesPass(device.gl);
-      ribbonsPass = new RibbonsPass(device.gl);
-      flatFlowPass = new FlatFlowRibbonsPass(device.gl);
       hideFallbackMessage(fallbackEl);
       geometryDirty = true;
       drawNow();
     } catch {
+      device.markLost(true);
+      lastUploadedAtlasKey = '';
       showFallbackCard(
         fallbackEl,
         'WebGL2 Context Recovery Failed',
@@ -3184,6 +3542,7 @@ function boot(): void {
   };
 
   canvas.addEventListener('pointerdown', (ev) => {
+    cancelPendingHover();
     canvas.setPointerCapture(ev.pointerId);
     activePointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
 
@@ -3206,12 +3565,129 @@ function boot(): void {
     }
   });
 
+  const processHoverAt = (clientX: number, clientY: number) => {
+    const hit = pickAtClient(clientX, clientY);
+    canvas.style.cursor = hit !== null ? 'pointer' : '';
+    if (state.mode === 'tower') {
+      const hitBay = hit ? hit.bayId : null;
+      if (hitBay !== state.hoveredBay) {
+        state.hoveredBay = hitBay;
+        markDirtyAndSchedule(true);
+      }
+    } else if (state.mode === 'cutaway_embedding') {
+      const payload = activeEmbeddingPayload();
+      const hitPart = hit?.partId ?? null;
+      const hitCell = hit ? pickHitToEmbeddingCell(hit, payload.tokenIds) : null;
+      if (hitPart !== state.hoveredPart || !sameEmbeddingCell(hitCell, embeddingHoveredCell)) {
+        state.hoveredPart = hitPart;
+        embeddingHoveredCell = hitCell;
+        markDirtyAndSchedule(true);
+      }
+    } else if (state.mode === 'cutaway_output') {
+      const payload = activeOutputPayload();
+      const focusTok = clampedOutputFocusToken(payload.tokenLabels.length);
+      const hitPart = hit?.partId ?? null;
+      const hitCell = hit ? pickHitToOutputCell(hit, focusTok) : null;
+      if (hitPart !== state.hoveredPart || !sameOutputCell(hitCell, outputHoveredCell)) {
+        state.hoveredPart = hitPart;
+        outputHoveredCell = hitCell;
+        markDirtyAndSchedule(true);
+      }
+    } else if (state.mode === 'cutaway_gqa') {
+      const hitPart =
+        hit?.headIndex !== undefined ? `q-head-${hit.headIndex}` : hit?.partId ?? null;
+      const hitCell = hit
+        ? pickHitToGqaCell(hit, state.gqaActiveGroup0Head, state.gqaActiveGroup1Head)
+        : null;
+      if (hitPart !== state.hoveredPart || !sameGqaCell(hitCell, state.gqaHoveredCell)) {
+        state.hoveredPart = hitPart;
+        state.gqaHoveredCell = hitCell;
+        markDirtyAndSchedule(true);
+      }
+    } else if (state.mode === 'cutaway_mamba') {
+      const hitPart =
+        hit?.partId === 'ssm-state'
+          ? 'ssm-state'
+          : hit?.headIndex !== undefined && hit.tensorKey === 'x'
+            ? `mamba-head-${hit.headIndex}`
+            : hit?.partId ?? null;
+      const cutT = activeCutawayTokens();
+      const rawHitCell = hit
+        ? pickHitToMambaCell(hit, state.mambaActiveHead, cutT)
+        : null;
+      const resolvedHover = resolveMambaHoverDuringPlayback(
+        rawHitCell,
+        state.mambaTemporalPlaying,
+        activeMambaStateToken(),
+        cutT,
+      );
+      const hitCell = resolvedHover.hoveredCell;
+      const pausePlayback = resolvedHover.shouldPauseTemporalPlayback;
+      if (
+        pausePlayback ||
+        hitPart !== state.hoveredPart ||
+        !sameMambaCell(hitCell, state.mambaHoveredCell)
+      ) {
+        if (pausePlayback) {
+          state.mambaTemporalPlaying = false;
+          lastMambaTemporalTickMs = null;
+        }
+        state.hoveredPart = hitPart;
+        state.mambaHoveredCell = hitCell;
+        markDirtyAndSchedule(true);
+      }
+    } else if (state.mode === 'cutaway_moe') {
+      const sim = currentCutawayScene?.moeSim ?? activeMoeSim();
+      const tok = activeMoeFocusToken();
+      const exp = activeMoeFocusExpert(sim, tok);
+      const pickTok =
+        hit?.tokenIndex !== undefined
+          ? Math.max(0, Math.min(sim.tokens - 1, hit.tokenIndex))
+          : tok;
+      const topkSlice = sim.topk_indices.subarray(pickTok * sim.topK, (pickTok + 1) * sim.topK);
+      const rawHitCell = hit ? pickHitToMoeCell(hit, tok, exp, topkSlice) : null;
+      const resolvedHover = resolveMoeHoverDuringCycling(
+        rawHitCell,
+        state.moeTokenCycling,
+        tok,
+        sim,
+      );
+      const hitCell = resolvedHover.hoveredCell;
+      const pauseCycling = resolvedHover.shouldPauseTokenCycling;
+      const hitPart =
+        (hit?.tensorKey === 'router_bank' || hit?.partId === 'routed-branch') &&
+        hit.headIndex !== undefined
+          ? `moe-expert-${hit.headIndex}`
+          : hit?.partId ?? null;
+      if (
+        pauseCycling ||
+        hitPart !== state.hoveredPart ||
+        !sameMoeCell(hitCell, state.moeHoveredCell)
+      ) {
+        if (pauseCycling) {
+          state.moeTokenCycling = false;
+          lastMoeCycleTickMs = null;
+        }
+        state.hoveredPart = hitPart;
+        state.moeHoveredCell = hitCell;
+        markDirtyAndSchedule(true);
+      }
+    } else {
+      const hitPart = hit?.partId ?? null;
+      if (hitPart !== state.hoveredPart) {
+        state.hoveredPart = hitPart;
+        markDirtyAndSchedule(true);
+      }
+    }
+  };
+
   canvas.addEventListener('pointermove', (ev) => {
     if (activePointers.has(ev.pointerId)) {
       activePointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
     }
 
     if (activePointers.size === 2) {
+      cancelPendingHover();
       const pts = Array.from(activePointers.values());
       const dist = Math.max(1, Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y));
       const scale = pinchStartDist / dist;
@@ -3224,6 +3700,7 @@ function boot(): void {
     }
 
     if (primaryPointerId === ev.pointerId && activePointers.size === 1) {
+      cancelPendingHover();
       const totalDist = Math.hypot(ev.clientX - downX, ev.clientY - downY);
       if (!isDragging && totalDist >= DRAG_THRESHOLD_PX) {
         isDragging = true;
@@ -3246,118 +3723,14 @@ function boot(): void {
     }
 
     if (activePointers.size === 0 && ev.pointerType !== 'touch') {
-      const hit = pickAtClient(ev.clientX, ev.clientY);
-      canvas.style.cursor = hit !== null ? 'pointer' : '';
-      if (state.mode === 'tower') {
-        const hitBay = hit ? hit.bayId : null;
-        if (hitBay !== state.hoveredBay) {
-          state.hoveredBay = hitBay;
-          markDirtyAndSchedule(true);
-        }
-      } else if (state.mode === 'cutaway_embedding') {
-        const payload = activeEmbeddingPayload();
-        const hitPart = hit?.partId ?? null;
-        const hitCell = hit ? pickHitToEmbeddingCell(hit, payload.tokenIds) : null;
-        if (hitPart !== state.hoveredPart || !sameEmbeddingCell(hitCell, embeddingHoveredCell)) {
-          state.hoveredPart = hitPart;
-          embeddingHoveredCell = hitCell;
-          markDirtyAndSchedule(true);
-        }
-      } else if (state.mode === 'cutaway_output') {
-        const payload = activeOutputPayload();
-        const focusTok = clampedOutputFocusToken(payload.tokenLabels.length);
-        const hitPart = hit?.partId ?? null;
-        const hitCell = hit ? pickHitToOutputCell(hit, focusTok) : null;
-        if (hitPart !== state.hoveredPart || !sameOutputCell(hitCell, outputHoveredCell)) {
-          state.hoveredPart = hitPart;
-          outputHoveredCell = hitCell;
-          markDirtyAndSchedule(true);
-        }
-      } else if (state.mode === 'cutaway_gqa') {
-        const hitPart =
-          hit?.headIndex !== undefined ? `q-head-${hit.headIndex}` : hit?.partId ?? null;
-        const hitCell = hit
-          ? pickHitToGqaCell(hit, state.gqaActiveGroup0Head, state.gqaActiveGroup1Head)
-          : null;
-        if (hitPart !== state.hoveredPart || !sameGqaCell(hitCell, state.gqaHoveredCell)) {
-          state.hoveredPart = hitPart;
-          state.gqaHoveredCell = hitCell;
-          markDirtyAndSchedule(true);
-        }
-      } else if (state.mode === 'cutaway_mamba') {
-        const hitPart =
-          hit?.partId === 'ssm-state'
-            ? 'ssm-state'
-            : hit?.headIndex !== undefined && hit.tensorKey === 'x'
-              ? `mamba-head-${hit.headIndex}`
-              : hit?.partId ?? null;
-        const cutT = activeCutawayTokens();
-        const rawHitCell = hit
-          ? pickHitToMambaCell(hit, state.mambaActiveHead, cutT)
-          : null;
-        const resolvedHover = resolveMambaHoverDuringPlayback(
-          rawHitCell,
-          state.mambaTemporalPlaying,
-          activeMambaStateToken(),
-          cutT,
-        );
-        const hitCell = resolvedHover.hoveredCell;
-        const pausePlayback = resolvedHover.shouldPauseTemporalPlayback;
-        if (
-          pausePlayback ||
-          hitPart !== state.hoveredPart ||
-          !sameMambaCell(hitCell, state.mambaHoveredCell)
-        ) {
-          if (pausePlayback) {
-            state.mambaTemporalPlaying = false;
-            lastMambaTemporalTickMs = null;
-          }
-          state.hoveredPart = hitPart;
-          state.mambaHoveredCell = hitCell;
-          markDirtyAndSchedule(true);
-        }
-      } else if (state.mode === 'cutaway_moe') {
-        const sim = currentCutawayScene?.moeSim ?? activeMoeSim();
-        const tok = activeMoeFocusToken();
-        const exp = activeMoeFocusExpert(sim, tok);
-        const pickTok =
-          hit?.tokenIndex !== undefined
-            ? Math.max(0, Math.min(sim.tokens - 1, hit.tokenIndex))
-            : tok;
-        const topkSlice = sim.topk_indices.subarray(pickTok * sim.topK, (pickTok + 1) * sim.topK);
-        const rawHitCell = hit ? pickHitToMoeCell(hit, tok, exp, topkSlice) : null;
-        const resolvedHover = resolveMoeHoverDuringCycling(
-          rawHitCell,
-          state.moeTokenCycling,
-          tok,
-          sim,
-        );
-        const hitCell = resolvedHover.hoveredCell;
-        const pauseCycling = resolvedHover.shouldPauseTokenCycling;
-        const hitPart =
-          (hit?.tensorKey === 'router_bank' || hit?.partId === 'routed-branch') &&
-          hit.headIndex !== undefined
-            ? `moe-expert-${hit.headIndex}`
-            : hit?.partId ?? null;
-        if (
-          pauseCycling ||
-          hitPart !== state.hoveredPart ||
-          !sameMoeCell(hitCell, state.moeHoveredCell)
-        ) {
-          if (pauseCycling) {
-            state.moeTokenCycling = false;
-            lastMoeCycleTickMs = null;
-          }
-          state.hoveredPart = hitPart;
-          state.moeHoveredCell = hitCell;
-          markDirtyAndSchedule(true);
-        }
-      } else {
-        const hitPart = hit?.partId ?? null;
-        if (hitPart !== state.hoveredPart) {
-          state.hoveredPart = hitPart;
-          markDirtyAndSchedule(true);
-        }
+      latestHoverClientX = ev.clientX;
+      latestHoverClientY = ev.clientY;
+      if (pendingHoverRafId === null) {
+        pendingHoverRafId = window.requestAnimationFrame(() => {
+          pendingHoverRafId = null;
+          if (activePointers.size > 0 || isDragging) return;
+          processHoverAt(latestHoverClientX, latestHoverClientY);
+        });
       }
     }
   });
@@ -3546,6 +3919,7 @@ function boot(): void {
   });
 
   canvas.addEventListener('pointerleave', () => {
+    cancelPendingHover();
     canvas.style.cursor = '';
     if (
       state.hoveredBay !== null ||
@@ -3567,6 +3941,8 @@ function boot(): void {
     }
   });
 
+  window.addEventListener('pagehide', cancelPendingHover);
+
   canvas.addEventListener(
     'wheel',
     (ev) => {
@@ -3582,9 +3958,11 @@ function boot(): void {
     { passive: false },
   );
 
-  // Keyboard shortcuts (ignored when focus is inside an input/textarea/select)
+  // Keyboard shortcuts (ignored when focus is inside an input/textarea/select,
+  // and deferred on Space/Enter for focused interactive controls — RB-3)
   window.addEventListener('keydown', (ev) => {
     const target = ev.target as HTMLElement | null;
+    const key = ev.key;
     if (
       target &&
       (target.tagName === 'INPUT' ||
@@ -3592,11 +3970,16 @@ function boot(): void {
         target.tagName === 'SELECT' ||
         target.isContentEditable)
     ) {
+      if (key === 'Escape' && (state.shortcutsOpen || state.memoryChartOpen)) {
+        ev.preventDefault();
+        if (state.shortcutsOpen) state.shortcutsOpen = false;
+        else state.memoryChartOpen = false;
+        syncUi();
+      }
       return;
     }
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
-
-    const key = ev.key;
+    if (shouldDeferGlobalShortcut(key, target)) return;
 
     if (key === '?') {
       ev.preventDefault();
@@ -3808,4 +4191,6 @@ function boot(): void {
   drawNow();
 }
 
-boot();
+if (typeof document !== 'undefined' && document.getElementById('stage-host')) {
+  boot();
+}

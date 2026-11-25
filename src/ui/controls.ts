@@ -71,6 +71,179 @@ import {
 
 export type CrossBayNodeKind = 'embedding' | 'output' | BayKind;
 
+/**
+ * Interactive controls that must retain native Space/Enter activation instead of being
+ * intercepted by global canvas/tour shortcuts (RB-3).
+ */
+export const INTERACTIVE_ACTIVATION_SELECTOR =
+  'button, a[href], [role="button"], [role="tab"], summary, [tabindex]:not([tabindex="-1"]):not(#gl-canvas)';
+
+/**
+ * Returns true when the global `keydown` handler should defer without calling `preventDefault()`
+ * so native keyboard activation (`Space` / `Enter`) operates on focused interactive controls.
+ * `Escape` and `?` always remain global (return false).
+ */
+export function shouldDeferGlobalShortcut(
+  key: string,
+  target: EventTarget | null,
+): boolean {
+  if (key !== ' ' && key !== 'Enter') return false;
+  if (!target || typeof target !== 'object') return false;
+  const el = target as Partial<HTMLElement>;
+  if (typeof el.closest === 'function') {
+    return el.closest(INTERACTIVE_ACTIVATION_SELECTOR) !== null;
+  }
+  let cur: Partial<HTMLElement> | null = el;
+  while (cur) {
+    const tag = (cur.tagName ?? '').toUpperCase();
+    const role = typeof cur.getAttribute === 'function' ? cur.getAttribute('role') : null;
+    const href = typeof cur.getAttribute === 'function' ? cur.getAttribute('href') : null;
+    const tabindex = typeof cur.getAttribute === 'function' ? cur.getAttribute('tabindex') : null;
+    const id = cur.id ?? '';
+    if (
+      tag === 'BUTTON' ||
+      tag === 'SUMMARY' ||
+      (tag === 'A' && href !== null) ||
+      role === 'button' ||
+      role === 'tab' ||
+      (tabindex !== null && tabindex !== '-1' && id !== 'gl-canvas')
+    ) {
+      return true;
+    }
+    cur = (cur.parentNode as Partial<HTMLElement> | null) ?? null;
+  }
+  return false;
+}
+
+export const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+export function getFocusableElements(container: HTMLElement): HTMLElement[] {
+  if (typeof container.querySelectorAll !== 'function') return [];
+  const nodes = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+  return nodes.filter((el) => {
+    if (el.hidden) return false;
+    if ('disabled' in el && (el as HTMLButtonElement).disabled) return false;
+    let cur: HTMLElement | null =
+      (el.parentElement ?? (el.parentNode as HTMLElement | null)) ?? null;
+    while (cur && cur !== container) {
+      if (cur.hidden) return false;
+      cur = (cur.parentElement ?? (cur.parentNode as HTMLElement | null)) ?? null;
+    }
+    return true;
+  });
+}
+
+/**
+ * Trap `Tab` / `Shift+Tab` inside an open modal dialog (`aria-modal="true"`),
+ * cycling cleanly between the first and last visible focusable descendants.
+ */
+export function handleModalTabTrap(
+  container: HTMLElement,
+  ev: Pick<KeyboardEvent, 'key' | 'shiftKey' | 'preventDefault'>,
+  activeElement: Element | null = typeof document !== 'undefined' ? document.activeElement : null,
+): boolean {
+  if (ev.key !== 'Tab') return false;
+  const focusables = getFocusableElements(container);
+  if (focusables.length === 0) {
+    ev.preventDefault();
+    if (typeof container.focus === 'function') container.focus();
+    return true;
+  }
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const activeIdx = activeElement ? focusables.indexOf(activeElement as HTMLElement) : -1;
+
+  if (ev.shiftKey) {
+    if (activeIdx <= 0) {
+      ev.preventDefault();
+      if (typeof last.focus === 'function') last.focus();
+      return true;
+    }
+  } else {
+    if (activeIdx === -1 || activeIdx >= focusables.length - 1) {
+      ev.preventDefault();
+      if (typeof first.focus === 'function') first.focus();
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Restore focus to a previously focused element when closing a modal (if still connected). */
+export function restoreFocusIfConnected(el: HTMLElement | null): boolean {
+  if (!el) return false;
+  const connected = typeof el.isConnected === 'boolean' ? el.isConnected : true;
+  if (!connected || el.hidden) return false;
+  if ('disabled' in el && (el as HTMLButtonElement).disabled) return false;
+  if (typeof el.focus === 'function') {
+    el.focus();
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Full WAI-ARIA Tabs keyboard navigation (`ArrowLeft` / `ArrowRight` / `Home` / `End`)
+ * with roving `tabindex` and automatic focus + selection movement across visible enabled tabs.
+ */
+export function handleTablistKeydown(
+  tabs: readonly HTMLButtonElement[],
+  ev: Pick<KeyboardEvent, 'key' | 'target' | 'preventDefault' | 'stopPropagation'>,
+  onSelect: (tab: HTMLButtonElement, tabIndexInAll: number) => void,
+): boolean {
+  if (
+    ev.key !== 'ArrowLeft' &&
+    ev.key !== 'ArrowRight' &&
+    ev.key !== 'Home' &&
+    ev.key !== 'End'
+  ) {
+    return false;
+  }
+  const enabledEntries: { tab: HTMLButtonElement; idx: number }[] = [];
+  for (let i = 0; i < tabs.length; i++) {
+    const t = tabs[i];
+    if (!t.hidden && !t.disabled) {
+      enabledEntries.push({ tab: t, idx: i });
+    }
+  }
+  if (enabledEntries.length === 0) return false;
+
+  let curPos = enabledEntries.findIndex(
+    (e) =>
+      e.tab === ev.target ||
+      (typeof e.tab.contains === 'function' && ev.target != null && e.tab.contains(ev.target as Node)),
+  );
+  if (curPos < 0) {
+    curPos = enabledEntries.findIndex((e) => e.tab.getAttribute('aria-selected') === 'true');
+  }
+  if (curPos < 0) curPos = 0;
+
+  let nextPos = curPos;
+  if (ev.key === 'ArrowRight') {
+    nextPos = (curPos + 1) % enabledEntries.length;
+  } else if (ev.key === 'ArrowLeft') {
+    nextPos = (curPos - 1 + enabledEntries.length) % enabledEntries.length;
+  } else if (ev.key === 'Home') {
+    nextPos = 0;
+  } else if (ev.key === 'End') {
+    nextPos = enabledEntries.length - 1;
+  }
+
+  const target = enabledEntries[nextPos];
+  ev.preventDefault();
+  ev.stopPropagation();
+
+  for (let i = 0; i < tabs.length; i++) {
+    tabs[i].setAttribute('tabindex', i === target.idx ? '0' : '-1');
+  }
+  if (typeof target.tab.focus === 'function') {
+    target.tab.focus();
+  }
+  onSelect(target.tab, target.idx);
+  return true;
+}
+
 export interface CrossBayNeighbor {
   readonly kind: CrossBayNodeKind;
   /** 0 for Embedding, 1..52 for tower bays, 53 for Output LM Head. */
@@ -401,6 +574,7 @@ export interface ControlsElements {
   gqaStepPlay: HTMLButtonElement;
   gqaStepNext: HTMLButtonElement;
   gqaStepPills: HTMLButtonElement[];
+  gqaStepPillsList?: HTMLElement | null;
   gqaStepAutoFollow: HTMLButtonElement;
   gqaStepScrub: HTMLInputElement;
   editorialPanel: HTMLDivElement;
@@ -471,6 +645,7 @@ export function queryControlsElements(): ControlsElements {
     gqaStepPlay: get<HTMLButtonElement>('gqa-step-play'),
     gqaStepNext: get<HTMLButtonElement>('gqa-step-next'),
     gqaStepPills: Array.from(document.querySelectorAll<HTMLButtonElement>('[data-gqa-step]')),
+    gqaStepPillsList: document.getElementById('gqa-step-pills'),
     gqaStepAutoFollow: get<HTMLButtonElement>('gqa-step-autofollow'),
     gqaStepScrub: get<HTMLInputElement>('gqa-step-scrub'),
     editorialPanel: get<HTMLDivElement>('editorial-panel'),
@@ -728,6 +903,9 @@ export class MacroControls {
   private lastSyncedExecution: HybridExecutionResult | null = null;
   private lastSyncedDecodeSession: HybridDecodeSession | null = null;
   private spineWaveHudNodes: SpineWaveHudNodes | null = null;
+  private wasShortcutsOpen = false;
+  private shortcutsPreviouslyFocused: HTMLElement | null = null;
+  private lastStepperProgressPct = '';
 
   constructor(spec: NemotronSpec, els: ControlsElements, cb: ControlsCallbacks) {
     this.spec = spec;
@@ -778,20 +956,35 @@ export class MacroControls {
       this.cleanupFns.push(() => window.removeEventListener('resize', onResize));
     }
 
+    const activateModeBtn = (btn: HTMLButtonElement) => {
+      const rawMode = btn.dataset.mode ?? btn.dataset.view;
+      if (
+        rawMode === 'tower' ||
+        rawMode === 'cutaway_embedding' ||
+        rawMode === 'cutaway_mamba' ||
+        rawMode === 'cutaway_moe' ||
+        rawMode === 'cutaway_gqa' ||
+        rawMode === 'cutaway_output'
+      ) {
+        this.cb.onSelectMode(rawMode);
+      }
+    };
     for (const btn of this.els.modeButtons) {
-      this.on(btn, 'click', () => {
-        const rawMode = btn.dataset.mode ?? btn.dataset.view;
-        if (
-          rawMode === 'tower' ||
-          rawMode === 'cutaway_embedding' ||
-          rawMode === 'cutaway_mamba' ||
-          rawMode === 'cutaway_moe' ||
-          rawMode === 'cutaway_gqa' ||
-          rawMode === 'cutaway_output'
-        ) {
-          this.cb.onSelectMode(rawMode);
-        }
-      });
+      this.on(btn, 'click', () => activateModeBtn(btn));
+    }
+    const modeTablist =
+      (this.els.modeButtons[0]?.parentElement ??
+        (this.els.modeButtons[0]?.parentNode as HTMLElement | null)) ??
+      null;
+    const onModeTabKeydown = (ev: KeyboardEvent) => {
+      handleTablistKeydown(this.els.modeButtons, ev, (tab) => activateModeBtn(tab));
+    };
+    if (modeTablist) {
+      this.on(modeTablist, 'keydown', onModeTabKeydown);
+    } else {
+      for (const btn of this.els.modeButtons) {
+        this.on(btn, 'keydown', onModeTabKeydown);
+      }
     }
 
     for (const btn of this.els.tocButtons) {
@@ -912,23 +1105,61 @@ export class MacroControls {
       this.els.gqaFormulaNoteBtn.classList.toggle('is-open', willOpen);
     });
     const onDocPointerDown = (ev: PointerEvent) => {
-      if (this.els.gqaFormulaNote.hidden) return;
       const tgt = ev.target as Node | null;
-      if (
-        tgt &&
-        (this.els.gqaFormulaNote.contains(tgt) || this.els.gqaFormulaNoteBtn.contains(tgt))
-      ) {
-        return;
+      if (!this.els.gqaFormulaNote.hidden) {
+        const insideNote =
+          tgt &&
+          (this.els.gqaFormulaNote.contains(tgt) || this.els.gqaFormulaNoteBtn.contains(tgt));
+        if (!insideNote) {
+          this.closeFormulaNotePopover();
+        }
       }
-      this.closeFormulaNotePopover();
+      if (!this.els.shortcutsPopover.hidden) {
+        const insideShortcuts =
+          tgt &&
+          (this.els.shortcutsPopover.contains(tgt) || this.els.shortcutsBtn.contains(tgt));
+        if (!insideShortcuts) {
+          this.cb.onCloseShortcuts();
+        }
+      }
     };
     document.addEventListener('pointerdown', onDocPointerDown);
     this.cleanupFns.push(() => document.removeEventListener('pointerdown', onDocPointerDown));
+
+    this.on(this.els.shortcutsPopover, 'keydown', (ev) => {
+      if (this.els.shortcutsPopover.hidden) return;
+      handleModalTabTrap(this.els.shortcutsPopover, ev);
+    });
+    const onDocShortcutsKeydown = (ev: KeyboardEvent) => {
+      if (!this.wasShortcutsOpen || this.els.shortcutsPopover.hidden || ev.defaultPrevented) return;
+      handleModalTabTrap(this.els.shortcutsPopover, ev);
+    };
+    document.addEventListener('keydown', onDocShortcutsKeydown);
+    this.cleanupFns.push(() => document.removeEventListener('keydown', onDocShortcutsKeydown));
+
     for (const btn of this.els.gqaStepPills) {
       this.on(btn, 'click', () => {
         const step = Number.parseInt(btn.dataset.gqaStep ?? '0', 10);
         if (Number.isFinite(step)) this.cb.onGqaStepSelect(step);
       });
+    }
+    const stepTablist =
+      this.els.gqaStepPillsList ??
+      (this.els.gqaStepPills[0]?.parentElement ??
+        (this.els.gqaStepPills[0]?.parentNode as HTMLElement | null)) ??
+      null;
+    const onStepTabKeydown = (ev: KeyboardEvent) => {
+      handleTablistKeydown(this.els.gqaStepPills, ev, (tab, tabIdx) => {
+        const step = Number.parseInt(tab.dataset.gqaStep ?? String(tabIdx), 10);
+        if (Number.isFinite(step)) this.cb.onGqaStepSelect(step);
+      });
+    };
+    if (stepTablist) {
+      this.on(stepTablist, 'keydown', onStepTabKeydown);
+    } else {
+      for (const btn of this.els.gqaStepPills) {
+        this.on(btn, 'keydown', onStepTabKeydown);
+      }
     }
     this.on(this.els.gqaStepScrub, 'input', () => {
       const val = Number.parseInt(this.els.gqaStepScrub.value, 10);
@@ -976,6 +1207,7 @@ export class MacroControls {
       const isAct = btnMode === state.mode;
       btn.classList.toggle('is-active', isAct);
       btn.setAttribute('aria-selected', String(isAct));
+      btn.setAttribute('tabindex', isAct ? '0' : '-1');
     }
 
     // Contextual sub-bars
@@ -1123,10 +1355,27 @@ export class MacroControls {
     this.els.memoryChartBtn.classList.toggle('is-highlighted', highlightChartBtn);
     this.els.memoryChartBtn.setAttribute('aria-expanded', String(state.memoryChartOpen));
 
-    // Shortcuts popover
+    // Shortcuts popover (focus capture on open, focus restore on close — PR-17)
+    const wasShortcutsOpen = this.wasShortcutsOpen;
+    this.wasShortcutsOpen = state.shortcutsOpen;
     this.els.shortcutsBtn.classList.toggle('is-active', state.shortcutsOpen);
     this.els.shortcutsBtn.setAttribute('aria-expanded', String(state.shortcutsOpen));
     this.els.shortcutsPopover.hidden = !state.shortcutsOpen;
+    if (state.shortcutsOpen && !wasShortcutsOpen) {
+      const active =
+        typeof document !== 'undefined'
+          ? (document.activeElement as HTMLElement | null)
+          : null;
+      this.shortcutsPreviouslyFocused =
+        active && typeof active.focus === 'function' ? active : null;
+      if (typeof this.els.shortcutsCloseBtn.focus === 'function') {
+        this.els.shortcutsCloseBtn.focus();
+      }
+    } else if (!state.shortcutsOpen && wasShortcutsOpen) {
+      const prev = this.shortcutsPreviouslyFocused;
+      this.shortcutsPreviouslyFocused = null;
+      restoreFocusIfConnected(prev);
+    }
 
     // Memory readout (with Part A #4 static weights vs dynamic sequence cache clarification!)
     const readoutKey = `${state.tokens}:${state.precision}`;
@@ -1190,7 +1439,34 @@ export class MacroControls {
       const beatFill = this.els.editorialPanel.querySelector<HTMLElement>('.tour-beat-fill');
       if (beatFill) {
         const sub = this.activeCutawayStepperSubProgress(state, activeBeat);
-        beatFill.style.width = `${Math.round(Math.max(0, Math.min(1, sub)) * 100)}%`;
+        const pct = `${Math.round(Math.max(0, Math.min(1, sub)) * 100)}%`;
+        beatFill.style.width = pct;
+        this.lastStepperProgressPct = pct;
+      }
+    }
+  }
+
+  /**
+   * Lightweight 60fps stepper progress updater (PR-13): updates ONLY the scrubber input value
+   * and inline tour beat progress bar without running full DOM sync or editorial rebuilds.
+   */
+  syncStepperProgressOnly(progress01: number): void {
+    const clamped = Number.isFinite(progress01) ? Math.max(0, Math.min(1, progress01)) : 0;
+    const pctNum = String(Math.round(clamped * 100));
+    if (this.els.gqaStepScrub.value !== pctNum) {
+      this.els.gqaStepScrub.value = pctNum;
+    }
+    const pctWidth = `${pctNum}%`;
+    if (pctWidth !== this.lastStepperProgressPct) {
+      this.lastStepperProgressPct = pctWidth;
+      if (
+        this.lastSyncedState?.tourActive &&
+        typeof this.els.editorialPanel.querySelector === 'function'
+      ) {
+        const beatFill = this.els.editorialPanel.querySelector<HTMLElement>('.tour-beat-fill');
+        if (beatFill && beatFill.style.width !== pctWidth) {
+          beatFill.style.width = pctWidth;
+        }
       }
     }
   }
@@ -1642,6 +1918,8 @@ export class MacroControls {
         ? 'Auto-Follow ON: camera smoothly focuses each math step (manual orbit/pan/zoom always overrides)'
         : 'Auto-Follow OFF: click to automatically focus camera on each math step';
 
+    const rovingActiveIdx =
+      stepperActive && steps[stepperStep] !== undefined ? stepperStep : 0;
     for (let i = 0; i < this.els.gqaStepPills.length; i++) {
       const btn = this.els.gqaStepPills[i];
       const stepDef = steps[i];
@@ -1652,10 +1930,12 @@ export class MacroControls {
         const isAct = stepperActive && i === stepperStep;
         btn.classList.toggle('is-active', isAct);
         btn.setAttribute('aria-selected', String(isAct));
+        btn.setAttribute('tabindex', i === rovingActiveIdx ? '0' : '-1');
       } else {
         btn.hidden = true;
         btn.classList.remove('is-active');
         btn.setAttribute('aria-selected', 'false');
+        btn.setAttribute('tabindex', '-1');
       }
     }
 
@@ -1679,6 +1959,7 @@ export class MacroControls {
     const panel = this.els.editorialPanel;
     panel.classList.add('is-tour-mode');
     panel.innerHTML = '';
+    this.lastStepperProgressPct = '';
 
     // 1. Top < Act I/II/III · Beat X.Y (N / 22) > navigation bar
     const navBar = document.createElement('div');
@@ -1717,11 +1998,11 @@ export class MacroControls {
 
     navBar.append(prevBtn, counter, nextBtn);
 
-    // Chapter & Act subtitle
+    // Concise chapter subtitle (Act/Beat already shown in .toc-tour-btn and .tour-nav-bar — PR-3)
     const subRow = document.createElement('div');
     subRow.className = 'ed-sub';
     subRow.dataset.testid = 'tour-chapter-subtitle';
-    subRow.textContent = `${beat.actLabel} · ${chapter.shortTitle}`;
+    subRow.textContent = chapter.shortTitle;
 
     // 2. Non-destructive "Exploring freely · Resume Beat X.Y" pill (keeps narrative intact!)
     let exploringPill: HTMLDivElement | null = null;
