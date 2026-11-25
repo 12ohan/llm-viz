@@ -61,6 +61,10 @@ import {
   SHEET_ROLE_SOFTMAX,
   SHEET_ROLE_WEIGHT,
 } from '../render/sheets';
+import {
+  computeMambaFocusedAccumulation,
+  type FocusedAccumulationResult,
+} from './accumulation';
 import type { AtlasSlice } from './atlasPacker';
 import type {
   ActiveSheetCellGrid,
@@ -414,10 +418,23 @@ export function computeMambaSheetReveal(
         : clampIdx(stateTokIdx, cT);
     const pF =
       activeCell?.tensor === 'x'
-        ? clampIdx(activeCell.col, sim.dHead)
+        ? activeCell.headIndex !== undefined && activeCell.col >= 0 && activeCell.col < sim.dHead
+          ? activeCell.col
+          : clampIdx(activeCell.col % sim.dHead, sim.dHead)
         : activeCell?.tensor === 'conv_buf'
           ? clampIdx(activeCell.tapIndex ?? activeCell.row, sim.dHead)
           : clampIdx(Math.floor(p01 * sim.dHead), sim.dHead);
+
+    const resolveGroupCol = (cell: MambaCellRef): number => {
+      const isLocalWithGroup =
+        cell.groupIndex !== undefined &&
+        cell.col >= 0 &&
+        cell.col < sim.dState &&
+        clampIdx(cell.groupIndex, sim.nGroups) > 0;
+      return isLocalWithGroup
+        ? clampIdx(cell.groupIndex!, sim.nGroups) * sim.dState + cell.col
+        : clampIdx(cell.col, sim.nGroups * sim.dState);
+    };
 
     if (key === 'x') {
       return [SHEET_REVEAL_ROW_MAJOR, pF, rowF, pulse];
@@ -425,14 +442,14 @@ export function computeMambaSheetReveal(
     if (key === 'b') {
       const colF =
         activeCell?.tensor === 'b'
-          ? clampIdx(activeCell.col, sim.nGroups * sim.dState)
+          ? resolveGroupCol(activeCell)
           : clampIdx(activeGroup * sim.dState + pF, sim.nGroups * sim.dState);
       return [SHEET_REVEAL_ROW_MAJOR, colF, rowF, pulse];
     }
     if (key === 'c') {
       const colF =
         activeCell?.tensor === 'c'
-          ? clampIdx(activeCell.col, sim.nGroups * sim.dState)
+          ? resolveGroupCol(activeCell)
           : clampIdx(activeGroup * sim.dState + pF, sim.nGroups * sim.dState);
       return [SHEET_REVEAL_ROW_MAJOR, colF, rowF, pulse];
     }
@@ -538,6 +555,79 @@ export function computeMambaSheetReveal(
   return [SHEET_REVEAL_NONE, 0, 0, 0];
 }
 
+/**
+ * Resolve RC1 focused-cell running partial-sum state for Mamba-2 during active Stepper
+ * playback (`stepperActive && !reducedMotion && stepperStep != null && termProgress < 0.999`).
+ * Returns `null` during ordinary unrestricted inspection or when accumulation is complete.
+ */
+export function resolveMambaFocusedAccumulation(params: {
+  readonly sim: MambaSimResult;
+  readonly activeCell: MambaCellRef | null;
+  readonly stepperStep?: number | null;
+  readonly stepperActive?: boolean;
+  readonly reducedMotion?: boolean;
+  readonly termProgress?: number;
+}): FocusedAccumulationResult | null {
+  const {
+    sim,
+    activeCell,
+    stepperStep,
+    stepperActive = false,
+    reducedMotion = false,
+    termProgress,
+  } = params;
+  if (
+    !stepperActive ||
+    reducedMotion ||
+    stepperStep === undefined ||
+    stepperStep === null ||
+    termProgress === undefined ||
+    !Number.isFinite(termProgress) ||
+    termProgress >= 0.999 ||
+    !activeCell
+  ) {
+    return null;
+  }
+  return computeMambaFocusedAccumulation(sim, activeCell, stepperStep, termProgress);
+}
+
+function mambaPartIdForTensor(tensor: MambaTensorKey, headIndex?: number): string {
+  switch (tensor) {
+    case 'input':
+      return 'residual-in';
+    case 'rmsnorm':
+      return 'rmsnorm';
+    case 'w_in':
+      return 'in-proj';
+    case 'z':
+      return 'gate-branch';
+    case 'xbc_pre':
+      return 'xbc-pre';
+    case 'conv_buf':
+      return 'conv1d';
+    case 'dt':
+      return 'dt-branch';
+    case 'x':
+      return `mamba-head-${headIndex ?? 0}`;
+    case 'b':
+      return 'b-proj';
+    case 'c':
+      return 'c-proj';
+    case 'h_prev':
+      return 'ssm-state-prev';
+    case 'h_curr':
+      return 'ssm-state-curr';
+    case 'y':
+      return 'ssm-readout';
+    case 'y_norm':
+      return 'group-norm';
+    case 'w_out':
+      return 'out-proj';
+    case 'residual':
+      return 'residual-out';
+  }
+}
+
 function formatConciseMambaPopoverEquation(formula: MambaCellFormula): string {
   let eq = formula.equation.trim();
   // Strip verbose double-spaced parenthetical metadata notes so floating cards stay crisp
@@ -556,6 +646,8 @@ function formatConciseMambaPopoverEquation(formula: MambaCellFormula): string {
 /**
  * Build a V3 floating contextual cell formula popover anchored at the active/hovered cell's
  * 3D world center with concise formula, formatted value, operand swatches, and provenance targets.
+ * When RC1 `focusedAccumulation?.active` is true, renders ONLY the running partial sum and active
+ * term expression without prematurely exposing completed final values.
  */
 export function buildMambaCellPopover(
   activeFormula: MambaCellFormula | null,
@@ -564,6 +656,7 @@ export function buildMambaCellPopover(
     readonly world: readonly [number, number, number];
     readonly role: 'indigo' | 'teal';
   }[],
+  focusedAccumulation?: FocusedAccumulationResult | null,
 ): CellPopoverSpec | null {
   if (!activeFormula || !targetWorld) return null;
 
@@ -580,13 +673,24 @@ export function buildMambaCellPopover(
     .replace(/^[A-Za-z_]+\[/, '[')
     .replace(/\("[^"]*"\)/g, '');
 
+  const isAccumulating = Boolean(focusedAccumulation?.active);
+
   return {
     world: targetWorld,
     tensorLabel: compactTensorLabel,
     coordLabel: compactCoordLabel,
-    ...(activeFormula.headBadge ? { badge: activeFormula.headBadge } : {}),
-    equation: formatConciseMambaPopoverEquation(activeFormula),
-    valueText: `= ${activeFormula.valueText}`,
+    ...(isAccumulating
+      ? { badge: focusedAccumulation!.badgeText }
+      : activeFormula.headBadge
+        ? { badge: activeFormula.headBadge }
+        : {}),
+    equation: isAccumulating
+      ? focusedAccumulation!.popoverEquation
+      : formatConciseMambaPopoverEquation(activeFormula),
+    valueText: isAccumulating
+      ? focusedAccumulation!.valueBadgeText
+      : `= ${activeFormula.valueText}`,
+    ...(isAccumulating ? { isAccumulating: true } : {}),
     operandColors,
     ...(sourceWorlds.length > 0 ? { sourceWorlds } : {}),
   };
@@ -627,6 +731,8 @@ export function buildMambaActiveCellGrids(
   activeHead: number,
   stateTokIdx: number,
   activeFormula: MambaCellFormula | null,
+  revealParams: MambaRevealParams | null = null,
+  focusedAccumulation: FocusedAccumulationResult | null = null,
 ): readonly ActiveSheetCellGrid[] {
   const { d, nHeads, nGroups, dHead, dInner, dState, convDim, inProjDim, tokens: T } = sim;
   const rowsT = Math.min(clampedT, T);
@@ -961,9 +1067,52 @@ export function buildMambaActiveCellGrids(
     }
   };
 
+  const applyRevealAndOverride = (
+    grid: ActiveSheetCellGrid | null,
+    sheetMeta: {
+      readonly tensorKey: MambaTensorKey;
+      readonly partId: string;
+      readonly headIndex?: number;
+    },
+    isTargetGrid: boolean,
+  ): ActiveSheetCellGrid | null => {
+    if (!grid) return null;
+    const revealFields =
+      revealParams !== null
+        ? (() => {
+            const [revealMode, revealColFrontier, revealRowFrontier] =
+              computeMambaSheetReveal(revealParams, sheetMeta);
+            return {
+              revealMode,
+              revealColFrontier,
+              revealRowFrontier,
+            };
+          })()
+        : undefined;
+    const overrideFields =
+      isTargetGrid && focusedAccumulation?.active
+        ? { activeValueOverride: focusedAccumulation.partialSum }
+        : undefined;
+
+    if (!revealFields && !overrideFields) return grid;
+    return {
+      ...grid,
+      ...revealFields,
+      ...overrideFields,
+    };
+  };
+
   const grids: ActiveSheetCellGrid[] = [];
-  const hCurrGrid = buildHCurrGrid();
-  const hPrevGrid = buildHPrevGrid();
+  const hCurrGrid = applyRevealAndOverride(
+    buildHCurrGrid(),
+    { tensorKey: 'h_curr', partId: 'ssm-state-curr', headIndex: activeHead },
+    activeFormula?.targetSpan.tensor === 'h_curr',
+  );
+  const hPrevGrid = applyRevealAndOverride(
+    buildHPrevGrid(),
+    { tensorKey: 'h_prev', partId: 'ssm-state-prev', headIndex: activeHead },
+    false,
+  );
 
   if (activeFormula) {
     const tgt = activeFormula.targetSpan.tensor;
@@ -971,17 +1120,31 @@ export function buildMambaActiveCellGrids(
       if (hCurrGrid) grids.push(hCurrGrid);
       if (hPrevGrid) grids.push(hPrevGrid);
       const upX = activeFormula.upstreamSpans.find((s) => s.tensor === 'x');
-      const xGrid = buildXHeadGrid(
-        activeHead,
-        upX?.colStart,
-        upX?.rowStart ?? stateTokIdx,
+      const xGrid = applyRevealAndOverride(
+        buildXHeadGrid(
+          activeHead,
+          upX?.colStart,
+          upX?.rowStart ?? stateTokIdx,
+        ),
+        { tensorKey: 'x', partId: `mamba-head-${activeHead}`, headIndex: activeHead },
+        false,
       );
       if (xGrid) grids.push(xGrid);
     } else if (tgt === 'h_prev') {
       if (hPrevGrid) grids.push(hPrevGrid);
       if (hCurrGrid) grids.push(hCurrGrid);
     } else {
-      const targetGrid = buildTargetTensorGrid(activeFormula.targetSpan);
+      const span = activeFormula.targetSpan;
+      const targetHead = span.headIndex ?? activeHead;
+      const targetGrid = applyRevealAndOverride(
+        buildTargetTensorGrid(span),
+        {
+          tensorKey: span.tensor,
+          partId: mambaPartIdForTensor(span.tensor, targetHead),
+          headIndex: targetHead,
+        },
+        true,
+      );
       if (targetGrid) grids.push(targetGrid);
       if (hCurrGrid) grids.push(hCurrGrid);
       if (hPrevGrid) grids.push(hPrevGrid);
@@ -1201,6 +1364,7 @@ export interface BuildMambaSpatialContext {
   readonly stepperStep?: number | null;
   readonly stepperActive?: boolean;
   readonly stepperSubProgress?: number;
+  readonly termProgress?: number;
   readonly reducedMotion?: boolean;
   readonly sim: MambaSimResult;
   readonly atlas: MambaValueAtlas;
@@ -1279,6 +1443,7 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
     stepperStep,
     stepperActive = false,
     stepperSubProgress = 0.25,
+    termProgress,
     reducedMotion = false,
     sim,
     atlas,
@@ -1298,6 +1463,15 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
           sim,
         }
       : null;
+
+  const focusedAccumulation = resolveMambaFocusedAccumulation({
+    sim,
+    activeCell,
+    stepperStep,
+    stepperActive,
+    reducedMotion,
+    termProgress,
+  });
 
   const b = new SpatialMambaBuilder(bayId, revealParams, focusSet.active);
   const hasCellTrace = focusSet.active;
@@ -2571,7 +2745,12 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
     }
   }
 
-  const cellPopover = buildMambaCellPopover(activeFormula, popoverTargetWorld, popoverSources);
+  const cellPopover = buildMambaCellPopover(
+    activeFormula,
+    popoverTargetWorld,
+    popoverSources,
+    focusedAccumulation,
+  );
   const activeCellGrids = buildMambaActiveCellGrids(
     b.sheetRegistry,
     sim,
@@ -2579,6 +2758,8 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
     activeHead,
     stateTokIdx,
     activeFormula,
+    revealParams,
+    focusedAccumulation,
   );
 
   // ==========================================================================
@@ -2762,6 +2943,7 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
     ...(focusSet.active ? { activeOpPartIds: b.activeOpPartIds } : {}),
     cellPopover,
     activeCellGrids,
+    focusedAccumulation,
     fitBounds: MAMBA_SPATIAL_FIT_BOUNDS,
     opFocusBounds,
     landmarks: b.landmarks,

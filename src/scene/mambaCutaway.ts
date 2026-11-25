@@ -65,6 +65,7 @@ import {
   computeMambaSheetReveal,
   fitSpatialMambaCamera,
   MAMBA_SPATIAL_FIT_BOUNDS,
+  resolveMambaFocusedAccumulation,
   type MambaRevealParams,
 } from './mambaSpatial';
 import {
@@ -126,6 +127,8 @@ export interface MambaCutawayOptions {
   readonly stepperActive?: boolean;
   /** Optional stepper sub-progress `0..1` for active frontier cell pulse animation. */
   readonly stepperSubProgress?: number;
+  /** Optional focused-cell term accumulation progress `0..1` (default `1` = complete). */
+  readonly termProgress?: number;
   /** Honors `prefers-reduced-motion`: omits `sheetRevealData` so sheets remain 100% revealed statically. Defaults to false. */
   readonly reducedMotion?: boolean;
   /** Layout mode: `'three_quarter'` builds the 3D Spatial Mamba-2 architecture; `'near_plan'` (default) keeps the coplanar XZ schematic. */
@@ -700,6 +703,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
       stepperStep: opts.stepperStep,
       stepperActive: opts.stepperActive ?? false,
       stepperSubProgress: opts.stepperSubProgress,
+      termProgress: opts.termProgress,
       reducedMotion: opts.reducedMotion ?? false,
       sim,
       atlas,
@@ -723,6 +727,15 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
           sim,
         }
       : null;
+
+  const focusedAccumulation = resolveMambaFocusedAccumulation({
+    sim,
+    activeCell: opts.activeCell ?? null,
+    stepperStep: opts.stepperStep,
+    stepperActive: opts.stepperActive ?? false,
+    reducedMotion: opts.reducedMotion ?? false,
+    termProgress: opts.termProgress,
+  });
 
   const b = new MambaSheetBuilder(bayId, revealParams, focusSet.active);
   const hasCellTrace = focusSet.active;
@@ -1701,7 +1714,12 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     }
   }
 
-  const cellPopover = buildMambaCellPopover(activeFormula, popoverTargetWorld, popoverSources);
+  const cellPopover = buildMambaCellPopover(
+    activeFormula,
+    popoverTargetWorld,
+    popoverSources,
+    focusedAccumulation,
+  );
   const activeCellGrids = buildMambaActiveCellGrids(
     b.sheetRegistry,
     sim,
@@ -1709,6 +1727,8 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     activeHead,
     stateTokIdx,
     activeFormula,
+    revealParams,
+    focusedAccumulation,
   );
 
   // ==========================================================================
@@ -1855,6 +1875,7 @@ export function buildMambaCutaway(opts: MambaCutawayOptions): CutawaySceneGeomet
     ...(focusSet.active ? { activeOpPartIds: b.activeOpPartIds } : {}),
     cellPopover,
     activeCellGrids,
+    focusedAccumulation,
     fitBounds: MAMBA_FIT_BOUNDS,
     opFocusBounds,
     landmarks: b.landmarks,

@@ -8,6 +8,7 @@ import {
 } from '../src/math/incrementalDecode';
 import {
   mambaStepperCellForState,
+  readMambaPriorSsmValue,
   runMambaSim,
   type MambaCellRef,
 } from '../src/math/mambaSim';
@@ -28,6 +29,8 @@ import {
   MAMBA_SPATIAL_FIT_BOUNDS,
   type CutawaySceneGeometry,
 } from '../src/scene/cutaways';
+import { fmtSigned } from '../src/scene/sheetInspector';
+import { isCellHiddenByReveal } from '../src/ui/overlay';
 
 function revealTupleAt(scene: CutawaySceneGeometry, sheetIdx: number): [number, number, number, number] {
   const rd = scene.sheetRevealData!;
@@ -609,5 +612,516 @@ describe('V3 · Mamba-2 activeOpPartIds, Floating cellPopover & Zoom-Adaptive ac
     expect(idle.cellPopover).toBeNull();
     expect(idle.activeOpPartIds).toBeUndefined();
     expect(idle.activeCellGrids).toHaveLength(2);
+  });
+});
+
+describe('RC1 · Mamba-2 Focused-Cell Accumulation & Non-Spoiling Active Cell Grids', () => {
+  it('wires Step 3 (Causal Conv1D 4-tap) partial sums without spoiling x/B/C/conv_buf and propagates reveal frontiers', () => {
+    const sim = runMambaSim(8);
+
+    // 1. Post-SiLU x target cell at tok=5, head=1, p=1
+    const h = 1;
+    const p = 1;
+    const tok = 5;
+    const ch = h * sim.dHead + p;
+    const exactX = sim.x[ch * sim.tokens + tok];
+    const exactXText = fmtSigned(exactX, 3);
+    const xCell: MambaCellRef = { tensor: 'x', row: tok, col: p, headIndex: h, groupIndex: 0, tokenIndex: tok };
+
+    for (const viewAngle of ['three_quarter', 'near_plan'] as const) {
+      const scene = buildMambaCutaway({
+        bayId: 1,
+        tokens: 8,
+        precision: 'bf16',
+        selectedPart: null,
+        hoveredPart: null,
+        activeHead: h,
+        activeCell: xCell,
+        stepperStep: 2,
+        stepperActive: true,
+        stepperSubProgress: 0.6,
+        termProgress: 0.25,
+        reducedMotion: false,
+        viewAngle,
+        simOverride: sim,
+      });
+
+      const accum = scene.focusedAccumulation;
+      expect(accum).not.toBeNull();
+      expect(accum!.active).toBe(true);
+      expect(accum!.totalTerms).toBe(4);
+      expect(accum!.currentTermIndex).toBe(1);
+      expect(accum!.partialEquation).not.toContain(exactXText);
+      expect(accum!.popoverEquation).not.toContain(exactXText);
+      expect(accum!.valueBadgeText).not.toContain(exactXText);
+
+      // Popover carries running partial sum + .is-accumulating metadata with zero premature spoiling
+      const pop = scene.cellPopover!;
+      expect(pop).not.toBeNull();
+      expect(pop.isAccumulating).toBe(true);
+      expect(pop.badge).toBe(accum!.badgeText);
+      expect(pop.equation).toBe(accum!.popoverEquation);
+      expect(pop.valueText).toBe(accum!.valueBadgeText);
+      expect(pop.equation).not.toContain(exactXText);
+      expect(pop.valueText).not.toContain(exactXText);
+
+      // activeCellGrids: [x (target), H_t (UNCOMPUTED), H_{t-1} (NONE)]
+      const grids = scene.activeCellGrids!;
+      expect(grids).toHaveLength(3);
+      const [xGrid, hCurrGrid, hPrevGrid] = grids;
+
+      expect(xGrid.activeCol).toBe(p);
+      expect(xGrid.activeRow).toBe(tok);
+      expect(xGrid.revealMode).toBe(SHEET_REVEAL_ROW_MAJOR);
+      expect(xGrid.revealColFrontier).toBe(p);
+      expect(xGrid.revealRowFrontier).toBe(tok);
+      expect(xGrid.activeValueOverride).toBe(accum!.partialSum);
+      expect(isCellHiddenByReveal(p, tok, xGrid)).toBe(false);
+      expect(isCellHiddenByReveal(p + 1, tok, xGrid)).toBe(true);
+      expect(isCellHiddenByReveal(0, tok + 1, xGrid)).toBe(true);
+
+      // Downstream H_t grid MUST be fully masked (UNCOMPUTED), while H_{t-1} stays NONE
+      expect(hCurrGrid.revealMode).toBe(SHEET_REVEAL_UNCOMPUTED);
+      expect(hCurrGrid.activeValueOverride).toBeUndefined();
+      expect(isCellHiddenByReveal(0, 0, hCurrGrid)).toBe(true);
+
+      expect(hPrevGrid.revealMode).toBe(SHEET_REVEAL_NONE);
+      expect(hPrevGrid.activeValueOverride).toBeUndefined();
+      expect(isCellHiddenByReveal(0, 0, hPrevGrid)).toBe(false);
+
+      // Final tap (termProgress = 0.9) converges to exact post-SiLU x
+      const finalScene = buildMambaCutaway({
+        bayId: 1,
+        tokens: 8,
+        precision: 'bf16',
+        selectedPart: null,
+        hoveredPart: null,
+        activeHead: h,
+        activeCell: xCell,
+        stepperStep: 2,
+        stepperActive: true,
+        termProgress: 0.9,
+        reducedMotion: false,
+        viewAngle,
+        simOverride: sim,
+      });
+      expect(Math.abs(finalScene.focusedAccumulation!.partialSum - exactX)).toBeLessThan(1e-5);
+      expect(finalScene.activeCellGrids![0].activeValueOverride).toBe(
+        finalScene.focusedAccumulation!.partialSum,
+      );
+    }
+
+    // 2. Also verify Conv1D rolling buffer (conv_buf), B, and C targets wire partial sums & reveal cleanly
+    const extraTargets: readonly { readonly cell: MambaCellRef; readonly expectedReveal: number; readonly exactVal: number }[] = [
+      {
+        cell: { tensor: 'conv_buf', row: 2, col: ch, tapIndex: 2, tokenIndex: tok },
+        expectedReveal: SHEET_REVEAL_NONE,
+        exactVal: sim.xBC[ch * sim.tokens + tok],
+      },
+      {
+        cell: { tensor: 'b', row: tok, col: 5, groupIndex: 1, tokenIndex: tok },
+        expectedReveal: SHEET_REVEAL_ROW_MAJOR,
+        exactVal: sim.B[5 * sim.tokens + tok],
+      },
+      {
+        cell: { tensor: 'c', row: tok, col: 9, groupIndex: 2, tokenIndex: tok },
+        expectedReveal: SHEET_REVEAL_ROW_MAJOR,
+        exactVal: sim.C[9 * sim.tokens + tok],
+      },
+    ];
+    for (const { cell, expectedReveal, exactVal } of extraTargets) {
+      const s = buildMambaCutaway({
+        bayId: 1,
+        tokens: 8,
+        precision: 'bf16',
+        selectedPart: null,
+        hoveredPart: null,
+        activeCell: cell,
+        stepperStep: 2,
+        stepperActive: true,
+        termProgress: 0.25,
+        viewAngle: 'three_quarter',
+        simOverride: sim,
+      });
+      expect(s.focusedAccumulation?.active).toBe(true);
+      expect(s.cellPopover?.isAccumulating).toBe(true);
+      expect(s.cellPopover?.valueText).not.toContain(fmtSigned(exactVal, 3));
+      expect(s.activeCellGrids![0].revealMode).toBe(expectedReveal);
+      expect(s.activeCellGrids![0].activeValueOverride).toBe(s.focusedAccumulation!.partialSum);
+      expect(s.activeCellGrids![1].revealMode).toBe(SHEET_REVEAL_UNCOMPUTED);
+      expect(s.activeCellGrids![2].revealMode).toBe(SHEET_REVEAL_NONE);
+    }
+  });
+
+  it('wires Step 4 (SSM Update 2-term) in Full Seq and seeded AR Decode without spoiling H_t and keeps carried H_{t-1} unmasked', () => {
+    // 1. Full Seq (T=8) Step 4
+    const sim = runMambaSim(8);
+    const stateStride = sim.nHeads * sim.dHead * sim.dState;
+    const tokIdx = 6;
+    // Find a cell with distinct decayed prior vs final H_t so non-spoiling assertion is airtight
+    let bestH = 0;
+    let bestP = 1;
+    let bestN = 1;
+    let bestDelta = -1;
+    for (let hh = 0; hh < sim.nHeads; hh++) {
+      for (let pp = 0; pp < sim.dHead; pp++) {
+        for (let nn = 0; nn < sim.dState; nn++) {
+          const idx = (hh * sim.dHead + pp) * sim.dState + nn;
+          const prev = readMambaPriorSsmValue(sim, tokIdx, idx).value;
+          const decayed = Math.fround(sim.dA[hh * sim.tokens + tokIdx] * prev);
+          const cur = sim.H_history[tokIdx * stateStride + idx];
+          const delta = Math.abs(cur - decayed);
+          if (delta > bestDelta) {
+            bestDelta = delta;
+            bestH = hh;
+            bestP = pp;
+            bestN = nn;
+          }
+        }
+      }
+    }
+    expect(bestDelta).toBeGreaterThan(0.05);
+
+    const localIdx = (bestH * sim.dHead + bestP) * sim.dState + bestN;
+    const exactH = sim.H_history[tokIdx * stateStride + localIdx];
+    const exactHText = fmtSigned(exactH, 3);
+    const expectedDecay = Math.fround(
+      sim.dA[bestH * sim.tokens + tokIdx] * readMambaPriorSsmValue(sim, tokIdx, localIdx).value,
+    );
+
+    const fullCell: MambaCellRef = {
+      tensor: 'h_curr',
+      row: bestP,
+      col: bestN,
+      headIndex: bestH,
+      tokenIndex: tokIdx,
+    };
+
+    for (const viewAngle of ['three_quarter', 'near_plan'] as const) {
+      const s0 = buildMambaCutaway({
+        bayId: 1,
+        tokens: 8,
+        precision: 'bf16',
+        selectedPart: null,
+        hoveredPart: null,
+        activeHead: bestH,
+        activeCell: fullCell,
+        stepperStep: 3,
+        stepperActive: true,
+        termProgress: 0.25,
+        reducedMotion: false,
+        viewAngle,
+        simOverride: sim,
+      });
+
+      const accum = s0.focusedAccumulation!;
+      expect(accum).not.toBeNull();
+      expect(accum.active).toBe(true);
+      expect(accum.totalTerms).toBe(2);
+      expect(accum.currentTermIndex).toBe(0);
+      expect(Math.abs(accum.partialSum - expectedDecay)).toBeLessThan(1e-5);
+
+      const pop = s0.cellPopover!;
+      expect(pop.isAccumulating).toBe(true);
+      expect(pop.badge).toBe('Term 1/2 · Running');
+      expect(pop.equation).toBe(accum.popoverEquation);
+      expect(pop.valueText).toBe(accum.valueBadgeText);
+      expect(pop.equation).not.toContain(exactHText);
+      expect(pop.valueText).not.toContain(exactHText);
+
+      // activeCellGrids: [H_t, H_{t-1}, x]
+      const [hCurrGrid, hPrevGrid, xGrid] = s0.activeCellGrids!;
+      expect(hCurrGrid.revealMode).toBe(SHEET_REVEAL_ROW_MAJOR);
+      expect(hCurrGrid.revealColFrontier).toBe(bestN);
+      expect(hCurrGrid.revealRowFrontier).toBe(bestP);
+      expect(hCurrGrid.activeValueOverride).toBe(accum.partialSum);
+      expect(isCellHiddenByReveal(bestN, bestP, hCurrGrid)).toBe(false);
+      // Any cell strictly past (bestN, bestP) in row-major order is hidden
+      const futureCol = bestN + 1 < sim.dState ? bestN + 1 : 0;
+      const futureRow = bestN + 1 < sim.dState ? bestP : bestP + 1;
+      if (futureRow < sim.dHead) {
+        expect(isCellHiddenByReveal(futureCol, futureRow, hCurrGrid)).toBe(true);
+      }
+
+      // H_{t-1} is NEVER masked and never overridden
+      expect(hPrevGrid.revealMode).toBe(SHEET_REVEAL_NONE);
+      expect(hPrevGrid.activeValueOverride).toBeUndefined();
+      for (let rp = 0; rp < 4; rp++) {
+        for (let cn = 0; cn < 4; cn++) {
+          expect(isCellHiddenByReveal(cn, rp, hPrevGrid)).toBe(false);
+        }
+      }
+      // Upstream x grid is already computed (NONE) with no activeValueOverride
+      expect(xGrid.revealMode).toBe(SHEET_REVEAL_NONE);
+      expect(xGrid.activeValueOverride).toBeUndefined();
+
+      // Term 2/2 (termProgress = 0.75) completes H_t = dA·H_{t-1} + Δt·x·B
+      const s1 = buildMambaCutaway({
+        bayId: 1,
+        tokens: 8,
+        precision: 'bf16',
+        selectedPart: null,
+        hoveredPart: null,
+        activeHead: bestH,
+        activeCell: fullCell,
+        stepperStep: 3,
+        stepperActive: true,
+        termProgress: 0.75,
+        reducedMotion: false,
+        viewAngle,
+        simOverride: sim,
+      });
+      expect(s1.focusedAccumulation!.currentTermIndex).toBe(1);
+      expect(Math.abs(s1.focusedAccumulation!.partialSum - exactH)).toBeLessThan(1e-5);
+      expect(s1.activeCellGrids![0].activeValueOverride).toBe(s1.focusedAccumulation!.partialSum);
+    }
+
+    // 2. Seeded AR Decode (P=4, S=1 -> abs t4): carried FP32 prior state H_{t-1}
+    const model = createDefaultHybridModel();
+    let session = createDecodeSession(model, { promptTokenIds: [0, 1, 2, 3] });
+    session = stepDecodeSessionGreedy(session);
+    const decodeStep = getActiveDecodeStep(session);
+    const arSim = decodeStep.getMambaTrace(1);
+    expect(arSim.hasInitialState).toBe(true);
+
+    let arH = 0;
+    let arP = 0;
+    let arN = 0;
+    let arBestDelta = -1;
+    for (let hh = 0; hh < arSim.nHeads; hh++) {
+      for (let pp = 0; pp < arSim.dHead; pp++) {
+        for (let nn = 0; nn < arSim.dState; nn++) {
+          const idx = (hh * arSim.dHead + pp) * arSim.dState + nn;
+          const prev = readMambaPriorSsmValue(arSim, 0, idx).value;
+          const decayed = Math.fround(arSim.dA[hh] * prev);
+          const cur = arSim.H[idx];
+          const delta = Math.min(Math.abs(cur - prev), Math.abs(cur - decayed));
+          if (delta > arBestDelta) {
+            arBestDelta = delta;
+            arH = hh;
+            arP = pp;
+            arN = nn;
+          }
+        }
+      }
+    }
+    expect(arBestDelta).toBeGreaterThan(0.05);
+
+    const arIdx = (arH * arSim.dHead + arP) * arSim.dState + arN;
+    const arExactH = arSim.H[arIdx];
+    const arExactText = fmtSigned(arExactH, 3);
+    const arPriorVal = arSim.initialSsmState![arIdx];
+    const arExpectedDecay = Math.fround(arSim.dA[arH] * arPriorVal);
+    const arCell: MambaCellRef = { tensor: 'h_curr', row: arP, col: arN, headIndex: arH, tokenIndex: 0 };
+
+    for (const viewAngle of ['three_quarter', 'near_plan'] as const) {
+      const arScene = buildMambaCutaway({
+        bayId: 1,
+        tokens: arSim.tokens,
+        precision: 'fp8_selective',
+        selectedPart: null,
+        hoveredPart: null,
+        activeHead: arH,
+        activeCell: arCell,
+        stepperStep: 3,
+        stepperActive: true,
+        termProgress: 0.25,
+        reducedMotion: false,
+        viewAngle,
+        simOverride: arSim,
+      });
+
+      const accum = arScene.focusedAccumulation!;
+      expect(accum).not.toBeNull();
+      expect(accum.currentTermIndex).toBe(0);
+      expect(accum.partialSubEquation).toContain('carried FP32 state');
+      expect(Math.abs(accum.partialSum - arExpectedDecay)).toBeLessThan(1e-5);
+      expect(arScene.cellPopover!.isAccumulating).toBe(true);
+      expect(arScene.cellPopover!.valueText).not.toContain(arExactText);
+      expect(arScene.cellPopover!.equation).not.toContain(arExactText);
+
+      const [arHCurrGrid, arHPrevGrid] = arScene.activeCellGrids!;
+      expect(arHCurrGrid.revealMode).toBe(SHEET_REVEAL_ROW_MAJOR);
+      expect(arHCurrGrid.revealColFrontier).toBe(arN);
+      expect(arHCurrGrid.revealRowFrontier).toBe(arP);
+      expect(arHCurrGrid.activeValueOverride).toBe(accum.partialSum);
+
+      // Carried H_{t-1} grid stays strictly unmasked (SHEET_REVEAL_NONE) with exact seeded values
+      expect(arHPrevGrid.revealMode).toBe(SHEET_REVEAL_NONE);
+      expect(arHPrevGrid.activeValueOverride).toBeUndefined();
+      expect(arHPrevGrid.values[arP * arSim.dState + arN]).toBe(arPriorVal);
+    }
+  });
+
+  it('wires Step 5 (Readout + D) partial sums at termProgress=0.25 without spoiling y and masks future y cells', () => {
+    const sim = runMambaSim(8);
+    const tok = 4;
+    const h = 3;
+    const p = 2;
+    const col = h * sim.dHead + p;
+    const exactY = sim.y[col * sim.tokens + tok];
+    const exactYText = fmtSigned(exactY, 3);
+    const yCell: MambaCellRef = { tensor: 'y', row: tok, col, headIndex: h, tokenIndex: tok };
+
+    for (const viewAngle of ['three_quarter', 'near_plan'] as const) {
+      const scene = buildMambaCutaway({
+        bayId: 1,
+        tokens: 8,
+        precision: 'bf16',
+        selectedPart: null,
+        hoveredPart: null,
+        activeHead: h,
+        activeCell: yCell,
+        stepperStep: 4,
+        stepperActive: true,
+        termProgress: 0.25,
+        reducedMotion: false,
+        viewAngle,
+        simOverride: sim,
+      });
+
+      const accum = scene.focusedAccumulation!;
+      expect(accum).not.toBeNull();
+      expect(accum.active).toBe(true);
+      expect(accum.totalTerms).toBe(sim.dState + 1); // 4 state terms + D·x skip = 5
+      expect(accum.currentTermIndex).toBe(1); // floor(0.25 * 5) = 1 (2/5)
+      expect(accum.partialEquation).not.toContain(exactYText);
+
+      const pop = scene.cellPopover!;
+      expect(pop.isAccumulating).toBe(true);
+      expect(pop.badge).toBe('Term 2/5 · Running');
+      expect(pop.equation).toBe(accum.popoverEquation);
+      expect(pop.valueText).toBe(accum.valueBadgeText);
+      expect(pop.equation).not.toContain(exactYText);
+      expect(pop.valueText).not.toContain(exactYText);
+
+      // activeCellGrids: [y (ROW_MAJOR + override), H_t (NONE), H_{t-1} (NONE)]
+      const [yGrid, hCurrGrid, hPrevGrid] = scene.activeCellGrids!;
+      expect(yGrid.revealMode).toBe(SHEET_REVEAL_ROW_MAJOR);
+      expect(yGrid.revealColFrontier).toBe(col);
+      expect(yGrid.revealRowFrontier).toBe(tok);
+      expect(yGrid.activeValueOverride).toBe(accum.partialSum);
+      expect(isCellHiddenByReveal(col, tok, yGrid)).toBe(false);
+      expect(isCellHiddenByReveal(col + 1, tok, yGrid)).toBe(true);
+      expect(isCellHiddenByReveal(0, tok + 1, yGrid)).toBe(true);
+
+      expect(hCurrGrid.revealMode).toBe(SHEET_REVEAL_NONE);
+      expect(hCurrGrid.activeValueOverride).toBeUndefined();
+      expect(hPrevGrid.revealMode).toBe(SHEET_REVEAL_NONE);
+      expect(hPrevGrid.activeValueOverride).toBeUndefined();
+
+      // Final skip term (termProgress = 0.9) converges to exact y
+      const finalScene = buildMambaCutaway({
+        bayId: 1,
+        tokens: 8,
+        precision: 'bf16',
+        selectedPart: null,
+        hoveredPart: null,
+        activeHead: h,
+        activeCell: yCell,
+        stepperStep: 4,
+        stepperActive: true,
+        termProgress: 0.9,
+        reducedMotion: false,
+        viewAngle,
+        simOverride: sim,
+      });
+      expect(finalScene.focusedAccumulation!.currentTermIndex).toBe(4);
+      expect(Math.abs(finalScene.focusedAccumulation!.partialSum - exactY)).toBeLessThan(1e-5);
+    }
+  });
+
+  it('preserves ordinary unrestricted inspection when stepperActive is false, reducedMotion is true, or termProgress >= 0.999', () => {
+    const sim = runMambaSim(8);
+    const activeCell: MambaCellRef = {
+      tensor: 'h_curr',
+      row: 2,
+      col: 1,
+      headIndex: 2,
+      groupIndex: 1,
+      tokenIndex: 6,
+    };
+
+    for (const viewAngle of ['three_quarter', 'near_plan'] as const) {
+      // 1. stepperActive: false -> fully unrestricted (no reveal masking, no focusedAccumulation, no override)
+      const inactive = buildMambaCutaway({
+        bayId: 1,
+        tokens: 8,
+        precision: 'bf16',
+        selectedPart: null,
+        hoveredPart: null,
+        activeHead: 2,
+        activeCell,
+        stepperStep: 3,
+        stepperActive: false,
+        termProgress: 0.25,
+        reducedMotion: false,
+        viewAngle,
+        simOverride: sim,
+      });
+      expect(inactive.focusedAccumulation).toBeNull();
+      expect(inactive.sheetRevealData).toBeUndefined();
+      expect(inactive.cellPopover!.isAccumulating).toBeUndefined();
+      expect(inactive.cellPopover!.valueText).toBe(`= ${inactive.activeFormula!.valueText}`);
+      for (const grid of inactive.activeCellGrids!) {
+        expect(grid.revealMode).toBeUndefined();
+        expect(grid.revealColFrontier).toBeUndefined();
+        expect(grid.revealRowFrontier).toBeUndefined();
+        expect(grid.activeValueOverride).toBeUndefined();
+      }
+
+      // 2. reducedMotion: true -> fully unrestricted even while stepperActive is true
+      const reduced = buildMambaCutaway({
+        bayId: 1,
+        tokens: 8,
+        precision: 'bf16',
+        selectedPart: null,
+        hoveredPart: null,
+        activeHead: 2,
+        activeCell,
+        stepperStep: 3,
+        stepperActive: true,
+        termProgress: 0.25,
+        reducedMotion: true,
+        viewAngle,
+        simOverride: sim,
+      });
+      expect(reduced.focusedAccumulation).toBeNull();
+      expect(reduced.sheetRevealData).toBeUndefined();
+      expect(reduced.cellPopover!.isAccumulating).toBeUndefined();
+      expect(reduced.cellPopover!.valueText).toBe(`= ${reduced.activeFormula!.valueText}`);
+      for (const grid of reduced.activeCellGrids!) {
+        expect(grid.revealMode).toBeUndefined();
+        expect(grid.activeValueOverride).toBeUndefined();
+      }
+
+      // 3. termProgress >= 0.999 or omitted -> focusedAccumulation null & popover unrestricted, while stepper reveal still masks future cells
+      for (const tp of [0.999, 1, undefined] as const) {
+        const settled = buildMambaCutaway({
+          bayId: 1,
+          tokens: 8,
+          precision: 'bf16',
+          selectedPart: null,
+          hoveredPart: null,
+          activeHead: 2,
+          activeCell,
+          stepperStep: 3,
+          stepperActive: true,
+          termProgress: tp,
+          reducedMotion: false,
+          viewAngle,
+          simOverride: sim,
+        });
+        expect(settled.focusedAccumulation).toBeNull();
+        expect(settled.cellPopover!.isAccumulating).toBeUndefined();
+        expect(settled.cellPopover!.valueText).toBe(`= ${settled.activeFormula!.valueText}`);
+        const [hCurrGrid, hPrevGrid] = settled.activeCellGrids!;
+        expect(hCurrGrid.activeValueOverride).toBeUndefined();
+        expect(hCurrGrid.revealMode).toBe(SHEET_REVEAL_ROW_MAJOR);
+        expect(hCurrGrid.revealColFrontier).toBe(1);
+        expect(hCurrGrid.revealRowFrontier).toBe(2);
+        expect(hPrevGrid.revealMode).toBe(SHEET_REVEAL_NONE);
+      }
+    }
   });
 });
