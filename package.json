@@ -14,7 +14,8 @@
     "test": "vitest run",
     "test:e2e": "playwright test",
     "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "verify:isolation": "node scripts/verify_bundle_isolation.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.65.1",

@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nemotron-Labs-TwoTower 30B-A3B · Diagnostic Visualization</title>
+    <meta
+      name="description"
+      content="Interactive dual-tower architecture diagnostic for NVIDIA Nemotron-Labs-TwoTower 30B-A3B-Base-BF16: causal Context Tower + masked block-diffusion Denoiser Tower across 29 aligned stateful transfer bays."
+    />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231B2340'/%3E%3Crect x='5' y='6' width='8' height='20' rx='1.5' fill='%2338BDF8'/%3E%3Crect x='19' y='6' width='8' height='20' rx='1.5' fill='%23A78BFA'/%3E%3Cpath d='M13 11h6M13 16h6M13 21h6' stroke='%234ADE80' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        background: #f8fafc;
+        color: #0f172a;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+      .tt-shell {
+        max-width: 960px;
+        width: 100%;
+        margin: 0 auto;
+        padding: 32px 24px 48px;
+      }
+      .tt-header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        padding-bottom: 16px;
+        border-bottom: 1px solid #cbd5e1;
+      }
+      .tt-title {
+        margin: 0;
+        font-size: 1.5rem;
+        line-height: 1.25;
+        letter-spacing: -0.01em;
+      }
+      .tt-back-link {
+        color: #1d4ed8;
+        text-decoration: none;
+        font-size: 0.875rem;
+        font-weight: 500;
+      }
+      .tt-back-link:hover {
+        text-decoration: underline;
+      }
+      .tt-card {
+        margin-top: 20px;
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 10px;
+        padding: 20px;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+      }
+      .tt-card h2 {
+        margin: 0 0 12px;
+        font-size: 1rem;
+        color: #1e293b;
+      }
+      .tt-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        gap: 12px;
+        margin: 0;
+      }
+      .tt-metric {
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 12px 14px;
+      }
+      .tt-metric dt {
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #475569;
+        margin-bottom: 4px;
+      }
+      .tt-metric dd {
+        margin: 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 0.9rem;
+        font-weight: 600;
+        color: #0f172a;
+        word-break: break-word;
+      }
+      .tt-note {
+        margin: 16px 0 0;
+        font-size: 0.875rem;
+        line-height: 1.55;
+        color: #334155;
+      }
+      .tt-pill {
+        display: inline-block;
+        margin-top: 8px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: #eff6ff;
+        border: 1px solid #bfdbfe;
+        color: #1e40af;
+        font-size: 0.75rem;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="twotower-app" data-testid="twotower-app"></div>
+    <script type="module" src="/src/twotower/app/main.ts"></script>
+  </body>
+</html>
