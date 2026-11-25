@@ -55,6 +55,10 @@ import {
   SHEET_ROLE_WEIGHT,
 } from '../render/sheets';
 import type { ActiveSheetCellGrid, CellPopoverSpec } from '../ui/overlay';
+import {
+  computeMoeFocusedAccumulation,
+  type FocusedAccumulationResult,
+} from './accumulation';
 import type { AtlasSlice } from './atlasPacker';
 import type { CutawayPartInfo, CutawaySceneGeometry, MoECutawayStats } from './cutaways';
 import type { MoeValueAtlas } from './moeAtlas';
@@ -337,6 +341,7 @@ export function computeMoeSheetReveal(
     case 'routed_act': {
       if (step < 3) return REVEAL_UNCOMPUTED_TUPLE;
       if (step > 3) return REVEAL_NONE_TUPLE;
+      if (activeCell?.tensor === 'routed_sum') return REVEAL_NONE_TUPLE;
       const activeH =
         activeCell?.tensor === 'routed_act' ||
         activeCell?.tensor === 'routed_pre' ||
@@ -351,6 +356,7 @@ export function computeMoeSheetReveal(
     case 'routed_branch': {
       if (step < 3) return REVEAL_UNCOMPUTED_TUPLE;
       if (step > 3) return REVEAL_NONE_TUPLE;
+      if (activeCell?.tensor === 'routed_sum') return REVEAL_NONE_TUPLE;
       const j = opts?.branchRank ?? 0;
       const activeRank = activeRankMap.get(focusExpert) ?? 0;
       if (j < activeRank) return REVEAL_NONE_TUPLE;
@@ -368,7 +374,17 @@ export function computeMoeSheetReveal(
     }
 
     case 'routed_sum': {
-      return step <= 3 ? REVEAL_UNCOMPUTED_TUPLE : REVEAL_NONE_TUPLE;
+      if (step < 3) return REVEAL_UNCOMPUTED_TUPLE;
+      if (step > 3) return REVEAL_NONE_TUPLE;
+      if (activeCell?.tensor === 'routed_sum') {
+        return [
+          SHEET_REVEAL_ROW_MAJOR,
+          clampInt(activeCell.col, 0, d - 1),
+          clampInt(activeCell.row, 0, T - 1),
+          pulsePhase,
+        ];
+      }
+      return REVEAL_UNCOMPUTED_TUPLE;
     }
 
     case 'shared_act': {
@@ -538,8 +554,17 @@ export function buildMoeCellPopover(params: {
     readonly world: readonly [number, number, number];
     readonly role: 'indigo' | 'teal';
   }[];
+  readonly focusedAccumulation?: FocusedAccumulationResult | null;
 }): CellPopoverSpec | null {
-  const { activeFormula, sim, focusToken, focusExpert, targetWorld, sourceWorlds } = params;
+  const {
+    activeFormula,
+    sim,
+    focusToken,
+    focusExpert,
+    targetWorld,
+    sourceWorlds,
+    focusedAccumulation,
+  } = params;
   if (!activeFormula || !targetWorld) return null;
 
   const c = activeFormula.cell;
@@ -687,16 +712,22 @@ export function buildMoeCellPopover(params: {
   if (sourceWorlds.some((s) => s.role === 'teal')) operandColors.push('teal');
   operandColors.push('red');
 
+  const isAccumulating = Boolean(focusedAccumulation?.active);
   const rawVal = activeFormula.valueText;
-  const valueText = rawVal.startsWith('=') ? rawVal : `= ${rawVal}`;
+  const valueText = isAccumulating
+    ? focusedAccumulation!.valueBadgeText
+    : rawVal.startsWith('=')
+      ? rawVal
+      : `= ${rawVal}`;
 
   return {
     world: targetWorld,
     tensorLabel: activeFormula.tensorLabel,
     coordLabel,
-    badge,
-    equation,
+    badge: isAccumulating ? focusedAccumulation!.badgeText : badge,
+    equation: isAccumulating ? focusedAccumulation!.popoverEquation : equation,
     valueText,
+    ...(isAccumulating ? { isAccumulating: true } : {}),
     operandColors,
     sourceWorlds: sourceWorlds.length > 0 ? sourceWorlds : undefined,
   };
@@ -717,6 +748,8 @@ export function buildMoeActiveCellGrids(params: {
   readonly focusedRank: number | null;
   readonly focusedEval: ReturnType<typeof evaluateSingleRoutedExpert>;
   readonly activeFormula: MoeCellFormula | null;
+  readonly revealCtx?: MoeRevealContext;
+  readonly focusedAccumulation?: FocusedAccumulationResult | null;
 }): readonly ActiveSheetCellGrid[] {
   const {
     sheetRegistry,
@@ -727,6 +760,8 @@ export function buildMoeActiveCellGrids(params: {
     focusedRank,
     focusedEval,
     activeFormula,
+    revealCtx,
+    focusedAccumulation,
   } = params;
 
   const T = sim.tokens;
@@ -737,6 +772,63 @@ export function buildMoeActiveCellGrids(params: {
   const expertLabels = activeExpertIds.map(formatExpertId);
   const chLabels = Array.from({ length: d }, (_, ch) => `c${ch}`);
   const activeTensor = activeFormula?.cell.tensor ?? null;
+  const revealActive = Boolean(revealCtx?.enabled);
+  const isAccumulating = Boolean(focusedAccumulation?.active);
+
+  const directRevealFields = (
+    tag: MoeRevealTag,
+  ): Pick<ActiveSheetCellGrid, 'revealMode' | 'revealColFrontier' | 'revealRowFrontier'> => {
+    if (!revealActive || !revealCtx) return {};
+    const [mode, colFrontier, rowFrontier] = computeMoeSheetReveal(revealCtx, tag);
+    return {
+      revealMode: mode,
+      revealColFrontier: colFrontier,
+      revealRowFrontier: rowFrontier,
+    };
+  };
+
+  const tokenRowSliceRevealFields = (
+    tag: MoeRevealTag,
+    sliceTok: number,
+  ): Pick<ActiveSheetCellGrid, 'revealMode' | 'revealColFrontier' | 'revealRowFrontier'> => {
+    if (!revealActive || !revealCtx) return {};
+    const [mode, colFrontier, rowFrontier] = computeMoeSheetReveal(revealCtx, tag);
+    if (mode < 0.5) {
+      return {
+        revealMode: SHEET_REVEAL_NONE,
+        revealColFrontier: 0,
+        revealRowFrontier: 0,
+      };
+    }
+    if (mode >= 2.5) {
+      return {
+        revealMode: SHEET_REVEAL_UNCOMPUTED,
+        revealColFrontier: 0,
+        revealRowFrontier: 0,
+      };
+    }
+    // Full sheet is row-major over tokens [0..T-1]; this 1-row grid slices token `sliceTok` at row=0.
+    const rFrontier = Math.round(rowFrontier);
+    if (sliceTok < rFrontier) {
+      return {
+        revealMode: SHEET_REVEAL_NONE,
+        revealColFrontier: 0,
+        revealRowFrontier: 0,
+      };
+    }
+    if (sliceTok > rFrontier) {
+      return {
+        revealMode: SHEET_REVEAL_UNCOMPUTED,
+        revealColFrontier: 0,
+        revealRowFrontier: 0,
+      };
+    }
+    return {
+      revealMode: SHEET_REVEAL_ROW_MAJOR,
+      revealColFrontier: colFrontier,
+      revealRowFrontier: 0,
+    };
+  };
 
   const frameAxes = (rec: SheetGeomRecord) => ({
     originWorld: rec.frame ? rec.frame.center : ([rec.cx, rec.cy, rec.cz] as const),
@@ -747,10 +839,12 @@ export function buildMoeActiveCellGrids(params: {
 
   const makeTokenRowSliceGrid = (
     key: string,
+    revealTag: MoeRevealTag,
     tensorData: Float32Array,
     tok: number,
     colDimLabel: string,
     activeCol?: number,
+    activeValueOverride?: number,
   ): ActiveSheetCellGrid | null => {
     const rec = sheetRegistry.get(key);
     if (!rec) return null;
@@ -773,6 +867,8 @@ export function buildMoeActiveCellGrids(params: {
       format: 'signed',
       activeCol,
       activeRow: activeCol !== undefined ? 0 : undefined,
+      ...tokenRowSliceRevealFields(revealTag, clampedTok),
+      ...(activeValueOverride !== undefined ? { activeValueOverride } : {}),
       colLabels: chLabels,
       rowLabels: [`t${absTok}`],
       colDimLabel,
@@ -794,6 +890,10 @@ export function buildMoeActiveCellGrids(params: {
       activeTensor === 'topk_weights'
         ? clampInt(activeFormula!.cell.rankSlot ?? activeFormula!.cell.col, 0, sim.topK - 1)
         : (focusedRank ?? undefined);
+    const topkOverride =
+      isAccumulating && activeTensor === 'topk_weights'
+        ? focusedAccumulation!.partialSum
+        : undefined;
     grids.push({
       key: 'topk_weights',
       grid: {
@@ -804,6 +904,8 @@ export function buildMoeActiveCellGrids(params: {
         format: 'prob',
         activeCol,
         activeRow: activeCol !== undefined ? 0 : undefined,
+        ...directRevealFields('topk_weights'),
+        ...(topkOverride !== undefined ? { activeValueOverride: topkOverride } : {}),
         colLabels: expertLabels,
         rowLabels: [`t${absFocusToken}`],
         colDimLabel: 'Top-6 (×2.5)',
@@ -834,6 +936,7 @@ export function buildMoeActiveCellGrids(params: {
         format: 'prob',
         activeCol,
         activeRow: activeCol !== undefined ? 0 : undefined,
+        ...directRevealFields('topk_unbiased'),
         colLabels: expertLabels,
         rowLabels: [`t${absFocusToken}`],
         colDimLabel: 'Unbiased σ',
@@ -858,6 +961,7 @@ export function buildMoeActiveCellGrids(params: {
         format: 'prob',
         activeCol: activeRow !== undefined ? 0 : undefined,
         activeRow,
+        ...directRevealFields('routed_act'),
         colLabels: [`${focusExpTag} · t${absFocusToken}`],
         rowLabels: Array.from({ length: sim.dExp }, (_, h) => `h${h}`),
         rowDimLabel: `ReLU² (${sim.dExp})`,
@@ -867,12 +971,18 @@ export function buildMoeActiveCellGrids(params: {
 
   // 4. Routed Sum [cols=8, rows=1] for focused token t${absFocusToken}
   const routedSumTok = activeTensor === 'routed_sum' ? activeFormula!.cell.row : focusToken;
+  const routedSumOverride =
+    isAccumulating && activeTensor === 'routed_sum'
+      ? focusedAccumulation!.partialSum
+      : undefined;
   const routedSumGrid = makeTokenRowSliceGrid(
+    'routed_sum',
     'routed_sum',
     sim.y_routed,
     routedSumTok,
     'Routed Σ₆',
     activeTensor === 'routed_sum' ? clampInt(activeFormula!.cell.col, 0, d - 1) : undefined,
+    routedSumOverride,
   );
   if (routedSumGrid) {
     grids.push({ key: 'routed_sum', grid: routedSumGrid });
@@ -881,6 +991,7 @@ export function buildMoeActiveCellGrids(params: {
   // 5. Shared Out [cols=8, rows=1] for focused token t${absFocusToken}
   const sharedOutTok = activeTensor === 'shared_out' ? activeFormula!.cell.row : focusToken;
   const sharedOutGrid = makeTokenRowSliceGrid(
+    'shared_out',
     'shared_out',
     sim.y_shared,
     sharedOutTok,
@@ -895,6 +1006,7 @@ export function buildMoeActiveCellGrids(params: {
   let priorityGrid: ActiveSheetCellGrid | null = null;
   if (activeTensor === 'rmsnorm') {
     priorityGrid = makeTokenRowSliceGrid(
+      'rmsnorm',
       'rmsnorm',
       sim.U,
       activeFormula!.cell.row,
@@ -913,6 +1025,7 @@ export function buildMoeActiveCellGrids(params: {
         format: 'signed',
         activeCol: 0,
         activeRow: clampInt(activeFormula!.cell.row, 0, sim.dExp - 1),
+        ...directRevealFields('routed_pre'),
         colLabels: [`${focusExpTag} · t${absFocusToken}`],
         rowLabels: Array.from({ length: sim.dExp }, (_, h) => `h${h}`),
         rowDimLabel: 'Pre-Act h',
@@ -934,21 +1047,26 @@ export function buildMoeActiveCellGrids(params: {
         format: 'prob',
         activeCol: 0,
         activeRow: clampInt(activeFormula!.cell.row, 0, sim.dShared - 1),
+        ...directRevealFields('shared_act'),
         colLabels: [`t${absFocusToken}`],
         rowLabels: Array.from({ length: sim.dShared }, (_, s) => `s${s}`),
         rowDimLabel: 'Shared 2×',
       };
     }
   } else if (activeTensor === 'moe_out') {
+    const moeOutOverride = isAccumulating ? focusedAccumulation!.partialSum : undefined;
     priorityGrid = makeTokenRowSliceGrid(
+      'moe_out',
       'moe_out',
       sim.y_moe,
       activeFormula!.cell.row,
       'MoE Out',
       clampInt(activeFormula!.cell.col, 0, d - 1),
+      moeOutOverride,
     );
   } else if (activeTensor === 'residual') {
     priorityGrid = makeTokenRowSliceGrid(
+      'residual',
       'residual',
       sim.Y,
       activeFormula!.cell.row,
@@ -1211,6 +1329,7 @@ export interface BuildMoeSpatialContext {
   readonly stepperActive: boolean;
   readonly reducedMotion: boolean;
   readonly stepperSubProgress?: number;
+  readonly termProgress?: number;
   readonly sim: MoeSimResult;
   readonly atlas: MoeValueAtlas;
   readonly partCatalog: Readonly<Record<string, CutawayPartInfo>>;
@@ -1286,6 +1405,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     stepperActive,
     reducedMotion,
     stepperSubProgress,
+    termProgress,
     sim,
     atlas,
     partCatalog,
@@ -1294,6 +1414,24 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
 
   const revealEnabled =
     stepperActive && !reducedMotion && stepperStep !== null && stepperStep !== undefined;
+  const focusedAccumulation: FocusedAccumulationResult | null =
+    stepperActive &&
+    !reducedMotion &&
+    stepperStep !== null &&
+    stepperStep !== undefined &&
+    termProgress !== undefined &&
+    Number.isFinite(termProgress) &&
+    termProgress < 0.999 &&
+    activeCell
+      ? computeMoeFocusedAccumulation(
+          sim,
+          activeCell,
+          stepperStep,
+          termProgress,
+          focusToken,
+          focusExpert,
+        )
+      : null;
   const pulsePhase =
     stepperSubProgress !== undefined && Number.isFinite(stepperSubProgress)
       ? ((stepperSubProgress * 6) % 1 + 1) % 1
@@ -3010,7 +3148,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     ),
   };
 
-  // V3: Active-op label dimming set, floating contextual cell popover, and zoom-adaptive cell grids
+  // V3 + RC1: Active-op label dimming set, non-spoiling floating popover, and reveal-guarded cell grids
   const activeOpPartIds = buildMoeActiveOpPartIds(focusSet, activeFormula, activeRankMap);
   const cellPopover = buildMoeCellPopover({
     activeFormula,
@@ -3019,6 +3157,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     focusExpert,
     targetWorld: popoverTargetWorld,
     sourceWorlds: popoverSources,
+    focusedAccumulation,
   });
   const activeCellGrids = buildMoeActiveCellGrids({
     sheetRegistry: b.sheetRegistry,
@@ -3029,6 +3168,8 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     focusedRank,
     focusedEval,
     activeFormula,
+    revealCtx,
+    focusedAccumulation,
   });
 
   const packed = b.pack();
@@ -3043,6 +3184,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     activeOpPartIds,
     cellPopover,
     activeCellGrids,
+    focusedAccumulation,
     fitBounds: MOE_SPATIAL_FIT_BOUNDS,
     opFocusBounds,
     landmarks: b.landmarks,

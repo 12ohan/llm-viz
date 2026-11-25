@@ -60,6 +60,10 @@ import {
   SHEET_ROLE_SOFTMAX,
   SHEET_ROLE_WEIGHT,
 } from '../render/sheets';
+import {
+  computeMoeFocusedAccumulation,
+  type FocusedAccumulationResult,
+} from './accumulation';
 import type { AtlasSlice } from './atlasPacker';
 import type { CutawayPartInfo, CutawaySceneGeometry, MoECutawayStats } from './cutaways';
 import { buildMoeValueAtlas } from './moeAtlas';
@@ -146,6 +150,8 @@ export interface BuildMoECutawayOptions {
   readonly reducedMotion?: boolean;
   /** Optional sub-step progress [0..1) for smooth frontier pulse phase. */
   readonly stepperSubProgress?: number;
+  /** RC1: Focused-cell term-by-term accumulation progress [0..1]; defaults to 1 (unrestricted). */
+  readonly termProgress?: number;
   /** Layout mode: `'three_quarter'` builds the 3D Spatial MoE architecture; `'near_plan'` (default) keeps the coplanar XZ schematic. */
   readonly viewAngle?: GqaViewAngle;
   /** Optional authoritative simulator result from a unified `HybridExecutionResult`. */
@@ -707,6 +713,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
   const stepperActive = opts.stepperActive ?? false;
   const reducedMotion = opts.reducedMotion ?? false;
   const stepperStep = opts.stepperStep ?? null;
+  const termProgress = opts.termProgress;
 
   if (opts.viewAngle === 'three_quarter') {
     return buildMoeSpatialScene({
@@ -726,6 +733,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
       stepperActive,
       reducedMotion,
       stepperSubProgress: opts.stepperSubProgress,
+      termProgress,
       sim,
       atlas,
       partCatalog,
@@ -735,6 +743,24 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
 
   const revealEnabled =
     stepperActive && !reducedMotion && stepperStep !== null && stepperStep !== undefined;
+  const focusedAccumulation: FocusedAccumulationResult | null =
+    stepperActive &&
+    !reducedMotion &&
+    stepperStep !== null &&
+    stepperStep !== undefined &&
+    termProgress !== undefined &&
+    Number.isFinite(termProgress) &&
+    termProgress < 0.999 &&
+    effectiveActiveCell
+      ? computeMoeFocusedAccumulation(
+          sim,
+          effectiveActiveCell,
+          stepperStep,
+          termProgress,
+          focusToken,
+          focusExpert,
+        )
+      : null;
   const pulsePhase =
     opts.stepperSubProgress !== undefined && Number.isFinite(opts.stepperSubProgress)
       ? ((opts.stepperSubProgress * 6) % 1 + 1) % 1
@@ -1983,6 +2009,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     focusExpert,
     targetWorld: popoverTargetWorld,
     sourceWorlds: popoverSources,
+    focusedAccumulation,
   });
   const activeCellGrids = buildMoeActiveCellGrids({
     sheetRegistry: b.sheetRegistry,
@@ -1993,6 +2020,8 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     focusedRank,
     focusedEval,
     activeFormula,
+    revealCtx,
+    focusedAccumulation,
   });
 
   const packed = b.pack();
@@ -2017,6 +2046,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     activeOpPartIds,
     cellPopover,
     activeCellGrids,
+    focusedAccumulation,
     fitBounds: MOE_FIT_BOUNDS,
     opFocusBounds,
     landmarks: b.landmarks,

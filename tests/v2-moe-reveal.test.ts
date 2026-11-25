@@ -33,8 +33,9 @@ import {
   fitSpatialMoeCamera,
   type CutawaySceneGeometry,
 } from '../src/scene/cutaways';
+import { fmtSigned } from '../src/scene/sheetInspector';
 import type { LandmarkAnchor } from '../src/scene/spine';
-import { computeSheetCellWorldPos } from '../src/ui/overlay';
+import { computeSheetCellWorldPos, isCellHiddenByReveal } from '../src/ui/overlay';
 
 interface Rect2D {
   readonly x0: number;
@@ -684,5 +685,356 @@ describe('V3 · Active-Op Part IDs, Floating Cell Popover & Live Zoom-Adaptive C
     expect(sUp.extent[2]).toBeCloseTo(rUp.extent[2] * 2, 5);
     expect(sDown.extent[0]).toBeCloseTo(rDown.extent[0] * 2, 5);
     expect(sDown.extent[2]).toBeCloseTo(rDown.extent[2], 5);
+  });
+});
+
+describe('RC1 · Focused-Cell Partial-Sum Accumulation & Non-Spoiling Active Cell Grids', () => {
+  it('accumulates Step 3 Top-6 6-term unbiased denominator without spoiling final ×2.5 weight and masks future grid cells in both views', () => {
+    const T = 8;
+    const focusTok = 5;
+    const slot = 2;
+    const sim = runMoeSim(T);
+    const winners = Array.from(sim.topk_indices.subarray(focusTok * 6, (focusTok + 1) * 6));
+    const slotExp = winners[slot];
+    const exactW = sim.topk_weights[focusTok * 6 + slot];
+    const exactWText = exactW.toFixed(3);
+
+    for (const viewAngle of ['three_quarter', 'near_plan'] as const) {
+      const scene = buildMoECutaway({
+        bayId: 2,
+        tokens: T,
+        precision: 'bf16',
+        selectedPart: null,
+        hoveredPart: null,
+        focusToken: focusTok,
+        activeExpert: slotExp,
+        stepperStep: 2,
+        stepperActive: true,
+        termProgress: 0.25,
+        activeCell: {
+          tensor: 'topk_weights',
+          row: 0,
+          col: slot,
+          tokenIndex: focusTok,
+          expertId: slotExp,
+          rankSlot: slot,
+        },
+        viewAngle,
+      });
+
+      const accum = scene.focusedAccumulation;
+      expect(accum, `${viewAngle} focusedAccumulation`).not.toBeNull();
+      expect(accum!.active).toBe(true);
+      expect(accum!.totalTerms).toBe(6);
+      expect(accum!.currentTermIndex).toBe(1);
+      expect(accum!.partialSum).not.toBeCloseTo(exactW, 3);
+
+      // Popover displays running partial sum ONLY — never spoils completed final weight
+      const pop = scene.cellPopover;
+      expect(pop, `${viewAngle} cellPopover`).not.toBeNull();
+      expect(pop!.isAccumulating).toBe(true);
+      expect(pop!.badge).toBe(accum!.badgeText);
+      expect(pop!.equation).toBe(accum!.popoverEquation);
+      expect(pop!.valueText).toBe(accum!.valueBadgeText);
+      expect(pop!.equation).not.toContain(exactWText);
+      expect(pop!.valueText).not.toContain(exactWText);
+
+      const grids = scene.activeCellGrids!;
+      const topkGrid = grids.find((g) => g.colDimLabel === 'Top-6 (×2.5)')!;
+      const reluGrid = grids.find((g) => g.rowDimLabel?.startsWith('ReLU²'))!;
+      const routedSumGrid = grids.find((g) => g.colDimLabel === 'Routed Σ₆')!;
+      const sharedOutGrid = grids.find((g) => g.colDimLabel === 'Shared 1×')!;
+
+      // Top-6 grid: frontier at slot, activeValueOverride = running partialSum, future slots strictly masked
+      expect(topkGrid.revealMode).toBe(SHEET_REVEAL_ROW_MAJOR);
+      expect(topkGrid.revealColFrontier).toBe(slot);
+      expect(topkGrid.revealRowFrontier).toBe(0);
+      expect(topkGrid.activeCol).toBe(slot);
+      expect(topkGrid.activeRow).toBe(0);
+      expect(topkGrid.activeValueOverride).toBe(accum!.partialSum);
+      for (let j = 0; j < 6; j++) {
+        expect(isCellHiddenByReveal(j, 0, topkGrid), `${viewAngle} topk col ${j}`).toBe(j > slot);
+      }
+
+      // Unbiased σ grid (Spatial 3/4) stays 100% revealed (SHEET_REVEAL_NONE) during Step 3!
+      if (viewAngle === 'three_quarter') {
+        const unbiasedGrid = grids.find((g) => g.colDimLabel === 'Unbiased σ')!;
+        expect(unbiasedGrid.revealMode).toBe(SHEET_REVEAL_NONE);
+        expect(unbiasedGrid.activeValueOverride).toBeUndefined();
+        for (let j = 0; j < 6; j++) {
+          expect(isCellHiddenByReveal(j, 0, unbiasedGrid)).toBe(false);
+        }
+
+        // Safeguard #7 2× Shared Expert proportions remain exact during RC1 accumulation
+        const rUp = scene.solidPickBoxes.find((b) => b.tensorKey === 'routed_w_up')!.frame!;
+        const sUp = scene.solidPickBoxes.find((b) => b.tensorKey === 'shared_w_up')!.frame!;
+        const rDown = scene.solidPickBoxes.find((b) => b.tensorKey === 'routed_w_down')!.frame!;
+        const sDown = scene.solidPickBoxes.find((b) => b.tensorKey === 'shared_w_down')!.frame!;
+        expect(sUp.extent[0]).toBeCloseTo(rUp.extent[0], 5);
+        expect(sUp.extent[2]).toBeCloseTo(rUp.extent[2] * 2, 5);
+        expect(sDown.extent[0]).toBeCloseTo(rDown.extent[0] * 2, 5);
+        expect(sDown.extent[2]).toBeCloseTo(rDown.extent[2], 5);
+      }
+
+      // Downstream grids remain strictly UNCOMPUTED so zero future numbers can leak
+      expect(reluGrid.revealMode).toBe(SHEET_REVEAL_UNCOMPUTED);
+      expect(isCellHiddenByReveal(0, 0, reluGrid)).toBe(true);
+      expect(routedSumGrid.revealMode).toBe(SHEET_REVEAL_UNCOMPUTED);
+      expect(isCellHiddenByReveal(0, 0, routedSumGrid)).toBe(true);
+      expect(sharedOutGrid.revealMode).toBe(SHEET_REVEAL_UNCOMPUTED);
+      expect(isCellHiddenByReveal(0, 0, sharedOutGrid)).toBe(true);
+
+      // At termProgress >= 0.999, accumulation clears while reveal frontiers remain intact
+      const settled = buildMoECutaway({
+        bayId: 2,
+        tokens: T,
+        precision: 'bf16',
+        selectedPart: null,
+        hoveredPart: null,
+        focusToken: focusTok,
+        activeExpert: slotExp,
+        stepperStep: 2,
+        stepperActive: true,
+        termProgress: 0.999,
+        activeCell: {
+          tensor: 'topk_weights',
+          row: 0,
+          col: slot,
+          tokenIndex: focusTok,
+          expertId: slotExp,
+          rankSlot: slot,
+        },
+        viewAngle,
+      });
+      expect(settled.focusedAccumulation).toBeNull();
+      expect(settled.cellPopover?.isAccumulating).toBeFalsy();
+      expect(settled.cellPopover?.valueText).toContain(exactWText);
+      const settledTopk = settled.activeCellGrids!.find((g) => g.colDimLabel === 'Top-6 (×2.5)')!;
+      expect(settledTopk.activeValueOverride).toBeUndefined();
+      expect(settledTopk.revealMode).toBe(SHEET_REVEAL_ROW_MAJOR);
+      expect(settledTopk.revealColFrontier).toBe(slot);
+    }
+  });
+
+  it('accumulates Step 4 Routed Sum and Step 6 MoE Out 6-branch sums without spoiling and propagates token-slice reveal frontiers', () => {
+    const T = 8;
+    const focusTok = 6;
+    const ch = 3;
+    const sim = runMoeSim(T);
+    const rank0Exp = sim.topk_indices[focusTok * 6];
+    const exactRouted = sim.y_routed[ch * T + focusTok];
+    const exactRoutedText = fmtSigned(exactRouted, 3);
+    const exactMoe = sim.y_moe[ch * T + focusTok];
+    const exactMoeText = fmtSigned(exactMoe, 3);
+
+    for (const viewAngle of ['three_quarter', 'near_plan'] as const) {
+      // --- Step 4 (stepperStep = 3): Routed Sum 6-branch weighted aggregation ---
+      const s4 = buildMoECutaway({
+        bayId: 2,
+        tokens: T,
+        precision: 'bf16',
+        selectedPart: null,
+        hoveredPart: null,
+        focusToken: focusTok,
+        activeExpert: rank0Exp,
+        stepperStep: 3,
+        stepperActive: true,
+        termProgress: 0.25,
+        activeCell: {
+          tensor: 'routed_sum',
+          row: focusTok,
+          col: ch,
+          tokenIndex: focusTok,
+          expertId: rank0Exp,
+        },
+        viewAngle,
+      });
+
+      const s4Acc = s4.focusedAccumulation;
+      expect(s4Acc, `${viewAngle} s4 accum`).not.toBeNull();
+      expect(s4Acc!.active).toBe(true);
+      expect(s4Acc!.totalTerms).toBe(6);
+      expect(s4Acc!.currentTermIndex).toBe(1);
+      expect(s4.cellPopover?.isAccumulating).toBe(true);
+      expect(s4.cellPopover?.badge).toBe(s4Acc!.badgeText);
+      expect(s4.cellPopover?.equation).toBe(s4Acc!.popoverEquation);
+      expect(s4.cellPopover?.valueText).toBe(s4Acc!.valueBadgeText);
+      expect(s4.cellPopover?.equation).not.toContain(exactRoutedText);
+      expect(s4.cellPopover?.valueText).not.toContain(exactRoutedText);
+
+      // Token-row slice reveal on Routed Σ₆ maps full-sheet rowFrontier=focusTok cleanly onto row=0
+      const s4Grids = s4.activeCellGrids!;
+      const routedGrid = s4Grids.find((g) => g.colDimLabel === 'Routed Σ₆')!;
+      const sharedOutGrid = s4Grids.find((g) => g.colDimLabel === 'Shared 1×')!;
+      expect(routedGrid.revealMode).toBe(SHEET_REVEAL_ROW_MAJOR);
+      expect(routedGrid.revealColFrontier).toBe(ch);
+      expect(routedGrid.revealRowFrontier).toBe(0);
+      expect(routedGrid.activeCol).toBe(ch);
+      expect(routedGrid.activeRow).toBe(0);
+      expect(routedGrid.activeValueOverride).toBe(s4Acc!.partialSum);
+      for (let c = 0; c < sim.d; c++) {
+        expect(isCellHiddenByReveal(c, 0, routedGrid), `${viewAngle} routed_sum col ${c}`).toBe(c > ch);
+      }
+      // Downstream Shared 1× remains UNCOMPUTED during Step 4
+      expect(sharedOutGrid.revealMode).toBe(SHEET_REVEAL_UNCOMPUTED);
+      expect(isCellHiddenByReveal(0, 0, sharedOutGrid)).toBe(true);
+
+      // GPU sheetRevealData for routed_sum agrees with frontier (col=ch, row=focusTok)
+      const rsIdx = s4.solidPickBoxes.findIndex((b) => b.tensorKey === 'routed_sum');
+      expect(rsIdx).toBeGreaterThanOrEqual(0);
+      const rsGpuRev = revealAt(s4, rsIdx);
+      expect(rsGpuRev[0]).toBe(SHEET_REVEAL_ROW_MAJOR);
+      expect(rsGpuRev[1]).toBe(ch);
+      expect(rsGpuRev[2]).toBe(focusTok);
+
+      // --- Step 6 (stepperStep = 5): MoE Out 6-branch sum + shared merge ---
+      const s6 = buildMoECutaway({
+        bayId: 52,
+        tokens: T,
+        precision: 'fp8_selective',
+        selectedPart: null,
+        hoveredPart: null,
+        focusToken: focusTok,
+        activeExpert: rank0Exp,
+        stepperStep: 5,
+        stepperActive: true,
+        termProgress: 0.25,
+        activeCell: {
+          tensor: 'moe_out',
+          row: focusTok,
+          col: ch,
+          tokenIndex: focusTok,
+        },
+        viewAngle,
+      });
+
+      const s6Acc = s6.focusedAccumulation;
+      expect(s6Acc, `${viewAngle} s6 accum`).not.toBeNull();
+      expect(s6Acc!.active).toBe(true);
+      expect(s6Acc!.totalTerms).toBe(6);
+      expect(s6Acc!.currentTermIndex).toBe(1);
+      expect(s6.cellPopover?.isAccumulating).toBe(true);
+      expect(s6.cellPopover?.badge).toBe(s6Acc!.badgeText);
+      expect(s6.cellPopover?.equation).toBe(s6Acc!.popoverEquation);
+      expect(s6.cellPopover?.valueText).toBe(s6Acc!.valueBadgeText);
+      expect(s6.cellPopover?.equation).not.toContain(exactMoeText);
+      expect(s6.cellPopover?.valueText).not.toContain(exactMoeText);
+
+      const s6Grids = s6.activeCellGrids!;
+      const moeOutGrid = s6Grids.find((g) => g.colDimLabel === 'MoE Out')!;
+      const s6RoutedGrid = s6Grids.find((g) => g.colDimLabel === 'Routed Σ₆')!;
+      const s6SharedGrid = s6Grids.find((g) => g.colDimLabel === 'Shared 1×')!;
+      expect(moeOutGrid.revealMode).toBe(SHEET_REVEAL_ROW_MAJOR);
+      expect(moeOutGrid.revealColFrontier).toBe(ch);
+      expect(moeOutGrid.revealRowFrontier).toBe(0);
+      expect(moeOutGrid.activeCol).toBe(ch);
+      expect(moeOutGrid.activeRow).toBe(0);
+      expect(moeOutGrid.activeValueOverride).toBe(s6Acc!.partialSum);
+      for (let c = 0; c < sim.d; c++) {
+        expect(isCellHiddenByReveal(c, 0, moeOutGrid), `${viewAngle} moe_out col ${c}`).toBe(c > ch);
+      }
+      // Upstream Routed Σ₆ and Shared 1× are fully computed (SHEET_REVEAL_NONE) in Step 6
+      expect(s6RoutedGrid.revealMode).toBe(SHEET_REVEAL_NONE);
+      expect(s6SharedGrid.revealMode).toBe(SHEET_REVEAL_NONE);
+
+      // Final term (termProgress = 0.95) converges cleanly to exact Float32 y_moe
+      const s6Final = buildMoECutaway({
+        bayId: 52,
+        tokens: T,
+        precision: 'fp8_selective',
+        selectedPart: null,
+        hoveredPart: null,
+        focusToken: focusTok,
+        activeExpert: rank0Exp,
+        stepperStep: 5,
+        stepperActive: true,
+        termProgress: 0.95,
+        activeCell: {
+          tensor: 'moe_out',
+          row: focusTok,
+          col: ch,
+          tokenIndex: focusTok,
+        },
+        viewAngle,
+      });
+      expect(s6Final.focusedAccumulation?.currentTermIndex).toBe(5);
+      expect(Math.abs(s6Final.focusedAccumulation!.partialSum - exactMoe)).toBeLessThan(1e-5);
+    }
+  });
+
+  it('keeps ordinary unrestricted inspection intact when stepperActive is false or reducedMotion is true', () => {
+    const T = 8;
+    const focusTok = 6;
+    const slot = 1;
+    const sim = runMoeSim(T);
+    const slotExp = sim.topk_indices[focusTok * 6 + slot];
+    const exactWText = sim.topk_weights[focusTok * 6 + slot].toFixed(3);
+
+    for (const viewAngle of ['three_quarter', 'near_plan'] as const) {
+      const hoverUnrestricted = buildMoECutaway({
+        bayId: 2,
+        tokens: T,
+        precision: 'bf16',
+        selectedPart: null,
+        hoveredPart: 'router',
+        focusToken: focusTok,
+        activeExpert: slotExp,
+        stepperStep: 2,
+        stepperActive: false,
+        termProgress: 0.25,
+        activeCell: {
+          tensor: 'topk_weights',
+          row: 0,
+          col: slot,
+          tokenIndex: focusTok,
+          expertId: slotExp,
+          rankSlot: slot,
+        },
+        viewAngle,
+      });
+
+      expect(hoverUnrestricted.focusedAccumulation).toBeNull();
+      expect(hoverUnrestricted.sheetRevealData).toBeUndefined();
+      expect(hoverUnrestricted.cellPopover?.isAccumulating).toBeFalsy();
+      expect(hoverUnrestricted.cellPopover?.valueText).toContain(exactWText);
+      for (const g of hoverUnrestricted.activeCellGrids!) {
+        expect(g.revealMode).toBeUndefined();
+        expect(g.revealColFrontier).toBeUndefined();
+        expect(g.revealRowFrontier).toBeUndefined();
+        expect(g.activeValueOverride).toBeUndefined();
+      }
+
+      const reducedUnrestricted = buildMoECutaway({
+        bayId: 2,
+        tokens: T,
+        precision: 'bf16',
+        selectedPart: null,
+        hoveredPart: null,
+        focusToken: focusTok,
+        activeExpert: slotExp,
+        stepperStep: 2,
+        stepperActive: true,
+        reducedMotion: true,
+        termProgress: 0.25,
+        activeCell: {
+          tensor: 'topk_weights',
+          row: 0,
+          col: slot,
+          tokenIndex: focusTok,
+          expertId: slotExp,
+          rankSlot: slot,
+        },
+        viewAngle,
+      });
+
+      expect(reducedUnrestricted.focusedAccumulation).toBeNull();
+      expect(reducedUnrestricted.sheetRevealData).toBeUndefined();
+      expect(reducedUnrestricted.cellPopover?.isAccumulating).toBeFalsy();
+      expect(reducedUnrestricted.cellPopover?.valueText).toContain(exactWText);
+      for (const g of reducedUnrestricted.activeCellGrids!) {
+        expect(g.revealMode).toBeUndefined();
+        expect(g.activeValueOverride).toBeUndefined();
+      }
+    }
   });
 });
