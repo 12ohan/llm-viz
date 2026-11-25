@@ -28,6 +28,8 @@ export interface CellPopoverSpec {
   readonly badge?: string;
   readonly equation: string; // concise primary formula
   readonly valueText: string; // e.g. "= +3.294" or "= −∞"
+  /** True while actively accumulating a focused-cell running partial sum (toggles `.is-accumulating`). */
+  readonly isAccumulating?: boolean;
   readonly operandColors?: readonly ('indigo' | 'teal' | 'red')[];
   readonly sourceWorlds?: readonly {
     readonly world: readonly [number, number, number];
@@ -47,6 +49,14 @@ export interface ActiveSheetCellGrid {
   readonly format?: 'signed' | 'prob';
   readonly activeCol?: number;
   readonly activeRow?: number;
+  /** Progressive reveal mode matching `SHEET_REVEAL_*`: 0=NONE, 1=ROW_MAJOR, 2=COL_MAJOR, 3=UNCOMPUTED. */
+  readonly revealMode?: number;
+  /** Inclusive active column frontier for progressive reveal modes (`1` or `2`). */
+  readonly revealColFrontier?: number;
+  /** Inclusive active row frontier for progressive reveal modes (`1` or `2`). */
+  readonly revealRowFrontier?: number;
+  /** Running partial-sum override for the actively accumulating frontier cell (`col === activeCol && row === activeRow`). */
+  readonly activeValueOverride?: number | null;
   readonly colLabels?: readonly string[];
   readonly rowLabels?: readonly string[];
   readonly colDimLabel?: string; // e.g. "K = 6"
@@ -181,6 +191,41 @@ export function shouldShowAxisHeaders(cellW: number, cellH: number): boolean {
     Number.isFinite(cellH) &&
     (cellW >= AXIS_HEADER_MIN_WIDTH_PX || cellH >= AXIS_HEADER_MIN_HEIGHT_PX)
   );
+}
+
+/**
+ * Returns true when logical cell `(col, row)` sits strictly past the sheet's progressive
+ * reveal frontier and must NOT expose its final numeric value in `.ov-cell-num`.
+ * Matches `SHEETS_FS` progressive reveal modes (`0=NONE, 1=ROW_MAJOR, 2=COL_MAJOR, 3=UNCOMPUTED`).
+ */
+export function isCellHiddenByReveal(
+  col: number,
+  row: number,
+  grid: Pick<ActiveSheetCellGrid, 'revealMode' | 'revealColFrontier' | 'revealRowFrontier'>,
+): boolean {
+  const mode = grid.revealMode;
+  if (mode === undefined || !Number.isFinite(mode) || mode < 0.5) {
+    return false;
+  }
+  if (mode >= 2.5) {
+    // SHEET_REVEAL_UNCOMPUTED (3): entire sheet is uncomputed future state
+    return true;
+  }
+  const colFrontier =
+    grid.revealColFrontier !== undefined && Number.isFinite(grid.revealColFrontier)
+      ? Math.round(grid.revealColFrontier)
+      : 0;
+  const rowFrontier =
+    grid.revealRowFrontier !== undefined && Number.isFinite(grid.revealRowFrontier)
+      ? Math.round(grid.revealRowFrontier)
+      : 0;
+
+  if (mode >= 1.5) {
+    // SHEET_REVEAL_COL_MAJOR (2): reveal column by column
+    return col > colFrontier || (col === colFrontier && row > rowFrontier);
+  }
+  // SHEET_REVEAL_ROW_MAJOR (1): reveal row by row
+  return row > rowFrontier || (row === rowFrontier && col > colFrontier);
 }
 
 /**
@@ -733,8 +778,14 @@ function ensureOverlayV3Styles(): void {
     font-size: 10.5px; line-height: 14px; font-weight: 700;
     font-variant-numeric: tabular-nums;
   }
+  .ov-cell-popover.is-accumulating {
+    border-color: rgba(217, 119, 6, 0.55);
+  }
   .ov-cell-popover-val.is-masked {
     background-color: rgba(100, 116, 139, 0.45); color: #E2E8F0;
+  }
+  .ov-cell-popover-val.is-accumulating {
+    background-color: #B45309; color: #FFFFFF;
   }
   .ov-cell-num {
     position: absolute; top: 0; left: 0; height: 13px; padding: 0 3px;
@@ -750,6 +801,10 @@ function ensureOverlayV3Styles(): void {
   .ov-cell-num.is-active {
     background-color: #DC4C34; color: #FFFFFF; font-weight: 700; z-index: 5;
     box-shadow: 0 1px 3px rgba(220, 76, 52, 0.35);
+  }
+  .ov-cell-num.is-accumulating {
+    background-color: #B45309; color: #FFFFFF; font-weight: 700; z-index: 6;
+    box-shadow: 0 1px 3px rgba(180, 83, 9, 0.38);
   }
   .ov-cell-num.is-masked {
     background-color: rgba(241, 245, 249, 0.74); color: #64748B; font-weight: 500;
@@ -1032,10 +1087,15 @@ export class MacroOverlay {
     for (const el of this.phaseNodes) el.style.display = 'none';
     for (const el of this.bayMiniNodes.values()) el.style.display = 'none';
     for (const el of this.kvTickNodes.values()) el.style.display = 'none';
-    for (const el of this.cellNumNodes) el.style.display = 'none';
+    for (const el of this.cellNumNodes) {
+      el.style.display = 'none';
+      el.classList.remove('is-accumulating');
+    }
     for (const el of this.axisHeaderNodes) el.style.display = 'none';
     this.activePill.style.display = 'none';
     this.cellPopover.style.display = 'none';
+    this.cellPopover.classList.remove('is-accumulating');
+    this.popoverValEl.classList.remove('is-accumulating');
     this.caliperPath.setAttribute('d', '');
     this.popoverLeaderPath.setAttribute('d', '');
     this.popoverSourceIndigoPath.setAttribute('d', '');
@@ -1677,7 +1737,10 @@ export class MacroOverlay {
 
     this.popoverEqEl.textContent = spec.equation;
     this.popoverValEl.textContent = spec.valueText;
+    const isAccumulating = Boolean(spec.isAccumulating);
     const isMaskedVal = spec.valueText.includes('∞') || spec.valueText.toLowerCase().includes('mask');
+    this.cellPopover.classList.toggle('is-accumulating', isAccumulating);
+    this.popoverValEl.classList.toggle('is-accumulating', isAccumulating);
     this.popoverValEl.classList.toggle('is-masked', isMaskedVal);
 
     const headW =
@@ -1823,6 +1886,7 @@ export class MacroOverlay {
     const placeCellNum = (pg: PreparedGrid, col: number, row: number): boolean => {
       if (cellNumCursor >= MAX_OVERLAY_CELL_NUM_NODES) return false;
       const { grid, frame, faceLy } = pg;
+      if (isCellHiddenByReveal(col, row, grid)) return false;
       const idx = row * grid.cols + col;
       if (idx < 0 || idx >= grid.values.length) return false;
 
@@ -1854,17 +1918,25 @@ export class MacroOverlay {
         return false;
       }
 
+      const isActive = col === grid.activeCol && row === grid.activeRow;
       const isMasked = Boolean(grid.masked && idx < grid.masked.length && grid.masked[idx] !== 0);
-      const text = formatCellOverlayValue(grid.values[idx], grid.format ?? 'signed', isMasked);
+      const isAccumulating =
+        isActive &&
+        !isMasked &&
+        grid.activeValueOverride !== undefined &&
+        grid.activeValueOverride !== null &&
+        Number.isFinite(grid.activeValueOverride);
+      const rawValue = isAccumulating ? grid.activeValueOverride! : grid.values[idx];
+      const text = formatCellOverlayValue(rawValue, grid.format ?? 'signed', isMasked);
       const w = this.measureText(text, cellNumFont) + 6;
       const h = 13;
       const lx = pt.x - w * 0.5;
       const ly = pt.y - h * 0.5;
 
-      const isActive = col === grid.activeCol && row === grid.activeRow;
       const el = this.cellNumNodes[cellNumCursor++];
       el.textContent = text;
       el.classList.toggle('is-active', isActive);
+      el.classList.toggle('is-accumulating', isAccumulating);
       el.classList.toggle('is-masked', isMasked);
       el.style.display = 'inline-flex';
       el.style.transform = `translate3d(${lx.toFixed(1)}px, ${ly.toFixed(1)}px, 0)`;
