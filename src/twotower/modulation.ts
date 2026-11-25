@@ -406,7 +406,9 @@ export function createTimeConditioningWeights(
 
 /**
  * Compute sinusoidal timestep embedding with outer scaling (`t * maxPeriodScale`),
- * Float64 frequency progression `exp(-ln(maxPeriod) * k / half)`, and COS-FIRST ordering:
+ * IEEE-754 Float32 frequency progression `exp(-ln(maxPeriod) * k / half)` and Float32
+ * phase argument `tScaled * omega` (matching PyTorch `TimestepEmbedder` `dtype=torch.float32`),
+ * and COS-FIRST ordering:
  *   `phi[0..half-1] = cos(tScaled * omega_k)`
  *   `phi[half..freqDim-1] = sin(tScaled * omega_k)`
  */
@@ -430,15 +432,16 @@ export function computeSinusoidalTimestepEmbedding(
   }
 
   const half = freqDim / 2;
-  const tScaled = t * maxPeriodScale;
-  const logMaxPeriod = Math.log(maxPeriod);
+  const tScaledF32 = Math.fround(Math.fround(t) * Math.fround(maxPeriodScale));
+  const negLogMaxPeriodF32 = Math.fround(-Math.log(maxPeriod));
   const out = new Float32Array(freqDim);
 
   for (let k = 0; k < half; k++) {
-    const omega = Math.exp((-logMaxPeriod * k) / half);
-    const arg = tScaled * omega;
-    out[k] = Math.fround(Math.cos(arg));
-    out[half + k] = Math.fround(Math.sin(arg));
+    const exponentF32 = Math.fround(Math.fround(negLogMaxPeriodF32 * k) / half);
+    const omegaF32 = Math.fround(Math.exp(exponentF32));
+    const argF32 = Math.fround(tScaledF32 * omegaF32);
+    out[k] = Math.fround(Math.cos(argF32));
+    out[half + k] = Math.fround(Math.sin(argF32));
   }
 
   return out;

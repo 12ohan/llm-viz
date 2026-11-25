@@ -234,7 +234,7 @@ describe('TwoTower Timestep Embedding & PixArt-alpha adaLN-single (src/twotower/
       expect(phi0[8 + k]).toBe(0.0);
     }
 
-    // Verify exact t * 1000 scaling and exp(-ln(10000) * k / half) progression at t = 0.75
+    // Verify exact t * 1000 scaling and FP32 exp(-ln(10000) * k / half) progression at t = 0.75
     const t = 0.75;
     const freqDim = 16;
     const half = freqDim / 2;
@@ -244,9 +244,12 @@ describe('TwoTower Timestep Embedding & PixArt-alpha adaLN-single (src/twotower/
       DEFAULT_TIMESTEP_MAX_PERIOD_SCALE,
       DEFAULT_TIMESTEP_MAX_PERIOD,
     );
+    const tScaledF32 = Math.fround(Math.fround(t) * Math.fround(1000));
+    const negLogMaxPeriodF32 = Math.fround(-Math.log(10000));
     for (let k = 0; k < half; k++) {
-      const omega = Math.exp((-Math.log(10000) * k) / half);
-      const arg = t * 1000 * omega;
+      const exponentF32 = Math.fround(Math.fround(negLogMaxPeriodF32 * k) / half);
+      const omega = Math.fround(Math.exp(exponentF32));
+      const arg = Math.fround(tScaledF32 * omega);
       expect(phi[k]).toBe(Math.fround(Math.cos(arg)));
       expect(phi[half + k]).toBe(Math.fround(Math.sin(arg)));
     }
