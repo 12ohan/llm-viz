@@ -373,7 +373,8 @@ describe('V4 Bookend Cutaways — Dedicated 3D Thin-Sheet Embedding (NoPE) & Out
     const top5 = fullExec.lmHead.topKByToken[focusToken];
     expect(top5).toHaveLength(5);
     const probsZ = scene.solidPickBoxes[probsIdx].frame!.center[2];
-    for (const cand of top5) {
+    for (let rank = 0; rank < top5.length; rank++) {
+      const cand = top5[rank];
       const expectedPart = `output-cand-${cand.tokenId}`;
       expect(parseOutputCandidatePartId(expectedPart)).toBe(cand.tokenId);
       const cIdx = scene.solidPickBoxes.findIndex((b) => b.partId === expectedPart);
@@ -381,6 +382,12 @@ describe('V4 Bookend Cutaways — Dedicated 3D Thin-Sheet Embedding (NoPE) & Out
       expect(scene.solidPickBoxes[cIdx].frame!.center[2]).toBeGreaterThan(probsZ + 0.10);
       expect(sd[cIdx * SHEET_INSTANCE_FLOATS + 18]).toBe(1);
       expect(Object.is(sampleAtlasTexel(atlas, sd, cIdx, 0, 0).r, fullExec.lmHead.probs[cand.tokenId * 8 + focusToken])).toBe(true);
+
+      // PR-1: All 5 Top-5 candidate landmarks must be primary tier so #4 and #5 stay readable at overview zoom
+      const lm = scene.landmarks.find((l) => l.id === `out-top5-${rank}`);
+      expect(lm, `out-top5-${rank}`).toBeDefined();
+      expect(lm!.tier).toBe('primary');
+      expect(lm!.align).toBe('right');
     }
 
     // Explicit untied weight badge & synthetic miniature metadata landmarks
@@ -611,5 +618,72 @@ describe('V4 Bookend Cutaways — Dedicated 3D Thin-Sheet Embedding (NoPE) & Out
     expect(Object.is(probsGrid.values[top0.tokenId], exec.lmHead.probs[top0.tokenId * 8 + 7])).toBe(true);
     const logitsGrid = outScene.activeCellGrids![1];
     expect(Object.is(logitsGrid.values[top0.tokenId], exec.lmHead.logits[top0.tokenId * 8 + 7])).toBe(true);
+  });
+
+  it('PR-1: keeps all 5 Output Top-5 landmarks primary and unclamped to the right of bar faces at 1440×900 and 1024×800', () => {
+    const focusToken = 7;
+    const scene = buildOutputCutaway({
+      model,
+      residualIn: fullExec.residualStreams[52],
+      finalNorm: fullExec.finalNorm,
+      lmHead: fullExec.lmHead,
+      tokenLabels: fullExec.tokenLabels,
+      startTokenOffset: 0,
+      precision: 'bf16',
+      selectedPart: null,
+      hoveredPart: null,
+      focusToken,
+      isArDecode: false,
+    });
+
+    const top5 = fullExec.lmHead.topKByToken[focusToken];
+    expect(top5).toHaveLength(5);
+    expect(OUTPUT_SPATIAL_FIT_BOUNDS.max[0]).toBeGreaterThanOrEqual(9.1);
+
+    const viewports = [
+      { name: '1440x900-full', w: 1440, h: 900, minRightGutterPx: 140 },
+      { name: '1440x900-stage', w: 1112, h: 900, minRightGutterPx: 115 },
+      { name: '1024x800-full', w: 1024, h: 800, minRightGutterPx: 110 },
+      { name: '1024x800-stage', w: 696, h: 800, minRightGutterPx: 75 },
+    ];
+
+    for (const vp of viewports) {
+      const metrics = makeViewportMetrics(0, 0, vp.w, vp.h, 1);
+      const pose = fitSpatialOutputCamera(metrics);
+      const snap = buildCameraSnapshot(pose, OUTPUT_SPATIAL_FIT_BOUNDS, metrics);
+
+      for (let rank = 0; rank < 5; rank++) {
+        const cand = top5[rank];
+        const lm = scene.landmarks.find((l) => l.id === `out-top5-${rank}`);
+        expect(lm, `out-top5-${rank} @ ${vp.name}`).toBeDefined();
+        expect(lm!.tier, `out-top5-${rank} tier`).toBe('primary');
+        expect(lm!.align, `out-top5-${rank} align`).toBe('right');
+
+        const barBox = scene.solidPickBoxes.find((b) => b.partId === `output-cand-${cand.tokenId}`)!;
+        const barAabb = sheetFrameWorldAabb(barBox.frame!);
+        const barRightPt = projectWorldToInnerCss(
+          [barAabb.max[0], barBox.frame!.center[1], barBox.frame!.center[2]],
+          snap,
+        );
+        const anchorPt = projectWorldToInnerCss(lm!.world, snap);
+
+        expect(barRightPt.visible, `bar ${rank} @ ${vp.name}`).toBe(true);
+        expect(anchorPt.visible, `anchor ${rank} @ ${vp.name}`).toBe(true);
+        // Landmark anchor sits strictly to the right of its candidate bar's right edge
+        expect(anchorPt.x, `anchor right of bar ${rank} @ ${vp.name}`).toBeGreaterThan(barRightPt.x + 2);
+
+        // Right gutter from bar end to viewport edge keeps align:'right' pills off green bar faces
+        const rightGutter = vp.w - barRightPt.x;
+        expect(rightGutter, `gutter ${rank} @ ${vp.name}`).toBeGreaterThanOrEqual(vp.minRightGutterPx);
+
+        // Simulate realistic desktop pill placement (~108px on full/1112px stage) without clamping onto bar face
+        if (vp.w >= 1024) {
+          const estPillW = Math.min(118, Math.ceil(lm!.label.length * 6.0) + 12);
+          const padX = 8;
+          const clampedLx = Math.min(Math.max(anchorPt.x + 4, padX), vp.w - estPillW - padX);
+          expect(clampedLx, `pill ${rank} unclamped off bar @ ${vp.name}`).toBeGreaterThan(barRightPt.x);
+        }
+      }
+    }
   });
 });

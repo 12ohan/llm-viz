@@ -246,7 +246,7 @@ void main() {
     if (vSheetKind == 3) {
       sideCol = vec3(0.80, 0.84, 0.89);
       if (vHighlight == 3) {
-        sideCol = mix(sideCol, PAPER_BG, 0.60);
+        sideCol = mix(sideCol, PAPER_BG, 0.48);
       }
     } else if (isFullUncomputed) {
       sideCol = mix(vec3(0.78, 0.82, 0.88), PAPER_BG, 0.48);
@@ -261,7 +261,7 @@ void main() {
     } else if (vHighlight == 4) {
       sideCol = mix(sideCol, BF16_GOLD, 0.58);
     } else if (vHighlight == 3) {
-      sideCol = mix(sideCol, PAPER_BG, 0.62);
+      sideCol = mix(sideCol, PAPER_BG, 0.48);
     }
     float sideShade = 0.84 + 0.14 * (0.5 + 0.5 * ndl);
     fragColor = vec4(sideCol * sideShade, 1.0);
@@ -288,8 +288,8 @@ void main() {
     } else if (vHighlight == 6) {
       lineCol = mix(lineCol, OPERAND_B, 0.50);
     } else if (vHighlight == 3) {
-      fill = mix(fill, PAPER_BG, 0.60);
-      lineCol = mix(lineCol, PAPER_BG, 0.55);
+      fill = mix(fill, PAPER_BG, 0.48);
+      lineCol = mix(lineCol, PAPER_BG, 0.44);
     }
     vec3 col = mix(fill, lineCol, clamp(max(grid * 0.55, border * 0.85), 0.0, 1.0));
     fragColor = vec4(col * faceShade, 1.0);
@@ -490,8 +490,8 @@ void main() {
     borderCol = BF16_GOLD;
   } else if (vHighlight == 3) {
     // Unrelated sheets clearly recede toward paper background while remaining readable
-    col = mix(col, PAPER_BG, 0.62);
-    borderCol = mix(borderCol, PAPER_BG, 0.58);
+    col = mix(col, PAPER_BG, 0.48);
+    borderCol = mix(borderCol, PAPER_BG, 0.44);
   }
 
   // Subtle FP8 diagonal corner tick in top-right of KV cache sheets
@@ -643,6 +643,9 @@ export class SheetsPass {
     this.revealVbo = revealVbo;
     this.dummyValueTex = dummyTex;
     this.liveValueTex = liveTex;
+    this.boundValueTex = null;
+    this.hasBasisBuffer = false;
+    this.hasRevealBuffer = false;
 
     // 1x1 neutral zero texture fallback
     gl.bindTexture(gl.TEXTURE_2D, this.dummyValueTex);

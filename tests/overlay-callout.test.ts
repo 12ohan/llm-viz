@@ -1,17 +1,22 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { NEMOTRON_SPEC } from '../src/model/spec';
 import { createPerspectivePose } from '../src/model/state';
 import {
   buildCameraSnapshot,
   makeViewportMetrics,
+  projectWorldToHostCss,
   type AABB,
 } from '../src/render/camera';
 import {
   FRAME_XY_AXES,
   FRAME_XZ_AXES,
   FRAME_YZ_AXES,
+  localToWorldOnFrame,
+  makeSheetFrame3D,
 } from '../src/render/sheetFrame';
 import type { CutawaySceneGeometry } from '../src/scene/cutaways';
+import type { MacroSceneGeometry } from '../src/scene/spine';
 import {
   buildElbowLeaderPath,
   buildQuadraticPointerPath,
@@ -22,6 +27,7 @@ import {
   MacroOverlay,
   MAX_OVERLAY_AXIS_HEADER_NODES,
   MAX_OVERLAY_CELL_NUM_NODES,
+  MAX_OVERLAY_WIDTH_CACHE_ENTRIES,
   pickPopoverPlacement,
   prioritizeSheetCellCoords,
   shouldShowAxisHeaders,
@@ -417,6 +423,80 @@ describe('V1/V3 Overlay Pure Helpers & Cutaway Callouts', () => {
         placed.y + placed.height > occupied[0].y0;
       expect(intersectsObstacle).toBe(false);
     });
+
+    it('PR-2: places popover cleanly off zoomed targetSheetRect and upstream avoidRects', () => {
+      const targetSheetRect: OverlayRect = { x0: 360, y0: 210, x1: 880, y1: 530 };
+      const upstreamOperandRect: OverlayRect = { x0: 140, y0: 290, x1: 280, y1: 420 };
+      const midpointAvoidRect: OverlayRect = { x0: 380, y0: 330, x1: 440, y1: 390 };
+      const avoidRects: OverlayRect[] = [targetSheetRect, upstreamOperandRect, midpointAvoidRect];
+
+      const placed = pickPopoverPlacement({
+        anchorX: 620,
+        anchorY: 370,
+        width: 340,
+        height: 48,
+        hostWidth: 1112,
+        minY: 84,
+        maxY: 782,
+        avoidRects,
+        targetSheetRect,
+      });
+
+      const placedRect: OverlayRect = {
+        x0: placed.x,
+        y0: placed.y,
+        x1: placed.x + placed.width,
+        y1: placed.y + placed.height,
+      };
+      expect(placedRect.x0).toBeGreaterThanOrEqual(8);
+      expect(placedRect.x1).toBeLessThanOrEqual(1112 - 8);
+      expect(placedRect.y0).toBeGreaterThanOrEqual(84);
+      expect(placedRect.y1).toBeLessThanOrEqual(782);
+
+      for (const avoid of avoidRects) {
+        const intersects =
+          placedRect.x0 < avoid.x1 &&
+          placedRect.x1 > avoid.x0 &&
+          placedRect.y0 < avoid.y1 &&
+          placedRect.y1 > avoid.y0;
+        expect(intersects).toBe(false);
+      }
+    });
+
+    it('PR-2: penalizes avoidRects more heavily than exterior occupied labels when constrained', () => {
+      const targetSheetRect: OverlayRect = { x0: 300, y0: 140, x1: 780, y1: 540 };
+      // Exterior label sitting directly above the target sheet
+      const occupiedLabel: OverlayRect = { x0: 360, y0: 84, x1: 720, y1: 120 };
+      // Block below sheet as another active sheet in avoidRects
+      const lowerSheet: OverlayRect = { x0: 200, y0: 550, x1: 900, y1: 740 };
+
+      const placed = pickPopoverPlacement({
+        anchorX: 540,
+        anchorY: 340,
+        width: 280,
+        height: 48,
+        hostWidth: 1024,
+        minY: 84,
+        maxY: 680,
+        occupied: [occupiedLabel],
+        avoidRects: [targetSheetRect, lowerSheet],
+        targetSheetRect,
+      });
+
+      // Must stay off both active sheets even if space is tight
+      const overlapsTarget =
+        placed.x < targetSheetRect.x1 &&
+        placed.x + placed.width > targetSheetRect.x0 &&
+        placed.y < targetSheetRect.y1 &&
+        placed.y + placed.height > targetSheetRect.y0;
+      const overlapsLower =
+        placed.x < lowerSheet.x1 &&
+        placed.x + placed.width > lowerSheet.x0 &&
+        placed.y < lowerSheet.y1 &&
+        placed.y + placed.height > lowerSheet.y0;
+      expect(overlapsTarget).toBe(false);
+      expect(overlapsLower).toBe(false);
+    });
   });
 
   describe('buildElbowLeaderPath & prioritizeSheetCellCoords', () => {
@@ -657,6 +737,246 @@ describe('V1/V3 Overlay Pure Helpers & Cutaway Callouts', () => {
       }
       const activeEl = visibleCellNums.find((el) => el.classList.contains('is-active'));
       expect(activeEl?.textContent).toBe('0.35');
+    });
+
+    it('PR-2 / PR-3 / PR-18: avoids zoomed active sheet + upstream sources in renderCellPopover and injects AA/reduced-motion styles', () => {
+      const { svg, labelLayer } = installMockDocument();
+      const overlay = new MacroOverlay(
+        svg as unknown as SVGSVGElement,
+        labelLayer as unknown as HTMLDivElement,
+      );
+
+      // PR-3 & PR-18: verify dimmed opacity = 0.46, AA red #C83E27, and reduced-motion override in injected style
+      expect(DIMMED_LABEL_OPACITY).toBe('0.46');
+      const head = (globalThis as unknown as { document: { head: MockElement } }).document.head;
+      const injectedStyle = head.children.find((c) => c.id === 'nemotron-overlay-v3-defaults');
+      expect(injectedStyle?.textContent).toContain('opacity: 0.46');
+      expect(injectedStyle?.textContent).toContain('#C83E27');
+      expect(injectedStyle?.textContent).toContain('@media (prefers-reduced-motion: reduce)');
+      expect(injectedStyle?.textContent).toContain('.ov-sheet-label { transition: none !important; }');
+
+      const scene = makeSheetScene([]);
+      const metrics = makeViewportMetrics(0, 0, 1440, 900, 1);
+      const snap = buildCameraSnapshot(
+        createPerspectivePose([0, 0, 0], 7.5, 0, 56, 36),
+        SCENE_BOUNDS,
+        metrics,
+      );
+
+      const targetGrid: ActiveSheetCellGrid = {
+        originWorld: [0, 0, 0],
+        extent: [2.8, 0.06, 2.0],
+        axisU: FRAME_XZ_AXES.axisU,
+        axisN: FRAME_XZ_AXES.axisN,
+        cols: 4,
+        rows: 4,
+        values: new Float32Array(16),
+        activeCol: 2,
+        activeRow: 2,
+      };
+      const sourceWorldA: readonly [number, number, number] = [-2.2, 0.04, 0];
+      const popoverSpec: CellPopoverSpec = {
+        world: computeSheetCellWorldPos(targetGrid, 2, 2),
+        tensorLabel: 'Scores',
+        coordLabel: '[Q00, t2→k2]',
+        badge: 'BF16',
+        equation: 'dot(Q00[t2, :], K0[k2, :]) / √d_head + causal_mask(t2, k2)',
+        valueText: '= +2.841',
+        isAccumulating: true,
+        operandColors: ['indigo', 'teal', 'red'],
+        sourceWorlds: [{ world: sourceWorldA, role: 'indigo' }],
+      };
+
+      overlay.updateCutaway({
+        scene,
+        snapshot: snap,
+        tokens: 4,
+        selectedPart: null,
+        hoveredPart: null,
+        cellPopover: popoverSpec,
+        activeCellGrids: [targetGrid],
+      });
+
+      const popEl = labelLayer.children.find((el) => el.classList.contains('ov-cell-popover'))!;
+      expect(popEl.style.display).toBe('flex');
+      const m = /translate3d\(([-\d.]+)px,\s*([-\d.]+)px/.exec(popEl.style.transform);
+      expect(m).not.toBeNull();
+      const px = Number(m![1]);
+      const py = Number(m![2]);
+      const pw = Number.parseFloat(popEl.style.width);
+      expect(pw).toBeLessThanOrEqual(396);
+
+      // Compute projected target sheet screen AABB and assert popover does not overlap it
+      const frame = makeSheetFrame3D(
+        targetGrid.originWorld,
+        targetGrid.extent,
+        targetGrid.axisU,
+        targetGrid.axisN,
+      );
+      let sx0 = Infinity, sy0 = Infinity, sx1 = -Infinity, sy1 = -Infinity;
+      for (const [lx, lz] of [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]] as const) {
+        const cPt = projectWorldToHostCss(localToWorldOnFrame(frame, lx, 0.5, lz), snap);
+        sx0 = Math.min(sx0, cPt.x);
+        sy0 = Math.min(sy0, cPt.y);
+        sx1 = Math.max(sx1, cPt.x);
+        sy1 = Math.max(sy1, cPt.y);
+      }
+      // Height is 66 when wrapped (bodyW > maxCardW) or 48 single-line
+      const ph = pw >= 396 ? 66 : 48;
+      const overlapsSheet = px < sx1 && px + pw > sx0 && py < sy1 && py + ph > sy0;
+      expect(overlapsSheet).toBe(false);
+
+      // Verify popover also stays clear of the upstream source point
+      const srcPt = projectWorldToHostCss(sourceWorldA, snap);
+      const coversSource =
+        srcPt.x >= px - 12 && srcPt.x <= px + pw + 12 && srcPt.y >= py - 12 && srcPt.y <= py + ph + 12;
+      expect(coversSource).toBe(false);
+    });
+
+    it('PR-16: bounds MacroOverlay widthCache to MAX_OVERLAY_WIDTH_CACHE_ENTRIES (2048) via FIFO eviction', () => {
+      const { svg, labelLayer } = installMockDocument();
+      const overlay = new MacroOverlay(
+        svg as unknown as SVGSVGElement,
+        labelLayer as unknown as HTMLDivElement,
+      );
+
+      expect(MAX_OVERLAY_WIDTH_CACHE_ENTRIES).toBe(2048);
+
+      const metrics = makeViewportMetrics(0, 0, 1440, 900, 1);
+      const snap = buildCameraSnapshot(
+        createPerspectivePose([0, 0, 0], 14, 15, 35, 36),
+        SCENE_BOUNDS,
+        metrics,
+      );
+
+      // Drive > 2,200 unique landmark strings across frames to exercise eviction
+      for (let batch = 0; batch < 115; batch++) {
+        const landmarks = Array.from({ length: 20 }, (_, i) => ({
+          id: `lm-cap-${i}`,
+          label: `Tensor_${batch}_${i}_val=${(batch * 20 + i).toFixed(2)}`,
+          world: [-3 + (i % 5) * 1.4, 0.1, -2 + Math.floor(i / 5) * 1.2] as const,
+          align: 'top' as const,
+          tier: 'primary' as const,
+        }));
+        overlay.updateCutaway({
+          scene: makeSheetScene(landmarks),
+          snapshot: snap,
+          tokens: 8,
+          selectedPart: null,
+          hoveredPart: null,
+        });
+        expect(overlay.metricCacheSize).toBeLessThanOrEqual(MAX_OVERLAY_WIDTH_CACHE_ENTRIES);
+      }
+
+      expect(overlay.metricCacheSize).toBe(MAX_OVERLAY_WIDTH_CACHE_ENTRIES);
+      overlay.clearMetricCache();
+      expect(overlay.metricCacheSize).toBe(0);
+    });
+
+    it('PR-19: respects explicit topInsetPx/bottomInsetPx and compact viewport safe area in Tower update()', () => {
+      const { svg, labelLayer } = installMockDocument();
+      const overlay = new MacroOverlay(
+        svg as unknown as SVGSVGElement,
+        labelLayer as unknown as HTMLDivElement,
+      );
+
+      const bayAnchors = NEMOTRON_SPEC.bays.map((b, i) => ({
+        id: b.id,
+        kind: b.kind,
+        pillWorld: [2, 3.8 - i * 0.2, 0] as const,
+        centerWorld: [0, 3.8 - i * 0.2, 0] as const,
+        bounds: { min: [-1, 3.6 - i * 0.2, -1] as const, max: [1, 4.0 - i * 0.2, 1] as const },
+      }));
+
+      // Landmark positioned high near the top of the tower viewport (projects around y ~ 36px in 326px stage)
+      const towerScene: MacroSceneGeometry = {
+        solidData: new Float32Array(0),
+        solidCount: 0,
+        lineData: new Float32Array(0),
+        lineCount: 0,
+        ribbonData: new Float32Array(0),
+        ribbonCount: 0,
+        fitBounds: SCENE_BOUNDS,
+        bayAnchors,
+        phaseSections: [],
+        landmarks: [{ id: 'embed', label: 'Embedding (NoPE)', world: [0, 3.6, 0] }],
+        kvDepthTicks: [],
+        solidPickBoxes: [],
+        fasciaPickBoxes: [],
+      };
+
+      const parseY = (el: MockElement): number => {
+        const m = /translate3d\(([-\d.]+)px,\s*([-\d.]+)px/.exec(el.style.transform);
+        return m ? Number(m[2]) : NaN;
+      };
+
+      // 1. Desktop 1440×900 default safe area keeps upper landmark >= 84px
+      const desktopSnap = buildCameraSnapshot(
+        createPerspectivePose([0, 0, 0], 12, 0, 0, 42),
+        SCENE_BOUNDS,
+        makeViewportMetrics(0, 0, 1440, 900, 1),
+      );
+      overlay.update({
+        spec: NEMOTRON_SPEC,
+        scene: towerScene,
+        snapshot: desktopSnap,
+        section: 'overview',
+        tokens: 8,
+        selectedBay: null,
+        hoveredBay: null,
+      });
+      const embedPill = labelLayer.children.find((el) => el.textContent === 'Embedding (NoPE)')!;
+      expect(embedPill.style.display).toBe('inline-flex');
+      expect(parseY(embedPill)).toBeGreaterThanOrEqual(84);
+
+      // 2. Compact mobile stage 390×326 (hostHeight <= 440) auto-lowers top safe inset to 12px
+      const mobileSnap = buildCameraSnapshot(
+        createPerspectivePose([0, 0, 0], 11.5, 0, 0, 42),
+        SCENE_BOUNDS,
+        makeViewportMetrics(0, 0, 390, 326, 1),
+      );
+      overlay.update({
+        spec: NEMOTRON_SPEC,
+        scene: towerScene,
+        snapshot: mobileSnap,
+        section: 'overview',
+        tokens: 8,
+        selectedBay: null,
+        hoveredBay: null,
+      });
+      expect(embedPill.style.display).toBe('inline-flex');
+      const mobileY = parseY(embedPill);
+      expect(mobileY).toBeGreaterThanOrEqual(12);
+      expect(mobileY).toBeLessThan(84);
+
+      // 3. Explicit topInsetPx override clamps near-boundary landmark down to >= topInsetPx
+      overlay.update({
+        spec: NEMOTRON_SPEC,
+        scene: towerScene,
+        snapshot: mobileSnap,
+        section: 'overview',
+        tokens: 8,
+        selectedBay: null,
+        hoveredBay: null,
+        topInsetPx: 38,
+        bottomInsetPx: 20,
+      });
+      expect(embedPill.style.display).toBe('inline-flex');
+      expect(parseY(embedPill)).toBeGreaterThanOrEqual(38);
+
+      // 4. Larger explicit topInsetPx suppresses landmarks strictly above the safe inset band
+      overlay.update({
+        spec: NEMOTRON_SPEC,
+        scene: towerScene,
+        snapshot: mobileSnap,
+        section: 'overview',
+        tokens: 8,
+        selectedBay: null,
+        hoveredBay: null,
+        topInsetPx: 84,
+        bottomInsetPx: 20,
+      });
+      expect(embedPill.style.display).toBe('none');
     });
   });
 });

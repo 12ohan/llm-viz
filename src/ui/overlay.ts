@@ -19,6 +19,8 @@ export interface OverlayUpdateInput {
   readonly tokens: number;
   readonly selectedBay: number | null;
   readonly hoveredBay: number | null;
+  readonly topInsetPx?: number;
+  readonly bottomInsetPx?: number;
 }
 
 export interface CellPopoverSpec {
@@ -77,7 +79,7 @@ export interface CutawayOverlayUpdateInput {
   readonly hoveredPart: string | null;
   readonly topInsetPx?: number;
   readonly bottomInsetPx?: number;
-  /** When present and non-empty, non-participating sheet labels dim cleanly to opacity 0.34. */
+  /** When present and non-empty, non-participating sheet labels dim cleanly to opacity 0.46. */
   readonly activeOpPartIds?: ReadonlySet<string> | null;
   /** Floating contextual cell formula popover + curved provenance pointers. */
   readonly cellPopover?: CellPopoverSpec | null;
@@ -101,6 +103,8 @@ export interface PopoverPlacementInput {
   readonly minY: number;
   readonly maxY: number;
   readonly occupied?: readonly OverlayRect[];
+  readonly avoidRects?: readonly OverlayRect[];
+  readonly targetSheetRect?: OverlayRect | null;
   readonly marginX?: number;
 }
 
@@ -137,7 +141,8 @@ export const CELL_NUM_MIN_HEIGHT_PX = 16;
 export const AXIS_HEADER_MIN_WIDTH_PX = 22;
 export const AXIS_HEADER_MIN_HEIGHT_PX = 15;
 export const LABEL_NUDGE_LEADER_THRESHOLD_PX = 10;
-export const DIMMED_LABEL_OPACITY = '0.34';
+export const DIMMED_LABEL_OPACITY = '0.46';
+export const MAX_OVERLAY_WIDTH_CACHE_ENTRIES = 2048;
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const OVERLAY_V3_STYLE_ID = 'nemotron-overlay-v3-defaults';
@@ -471,7 +476,8 @@ function pickRectBorderPoint(
 
 /**
  * Intelligently place the floating contextual cell popover offset above/beside the active 3D
- * cell anchor, avoiding `occupied` label rectangles and clamping strictly inside
+ * cell anchor, avoiding `occupied` label rectangles, `avoidRects` (active sheets, upstream
+ * operands, and provenance midpoints), and clamping strictly inside
  * `[marginX .. hostWidth - width - marginX] × [minY .. maxY - height]`.
  */
 export function pickPopoverPlacement(input: PopoverPlacementInput): PopoverPlacement {
@@ -486,11 +492,29 @@ export function pickPopoverPlacement(input: PopoverPlacementInput): PopoverPlace
   const minY = input.minY;
   const maxTopY = Math.max(minY, input.maxY - height);
   const occupied = input.occupied ?? [];
+  const rawAvoid = input.avoidRects ?? [];
+  const targetSheet = input.targetSheetRect ?? null;
+
+  // Ensure targetSheetRect is penalized even when passed without duplicating it in avoidRects
+  let avoidRects: readonly OverlayRect[] = rawAvoid;
+  if (targetSheet) {
+    const alreadyPresent = rawAvoid.some(
+      (r) =>
+        r.x0 === targetSheet.x0 &&
+        r.y0 === targetSheet.y0 &&
+        r.x1 === targetSheet.x1 &&
+        r.y1 === targetSheet.y1,
+    );
+    if (!alreadyPresent) {
+      avoidRects = [...rawAvoid, targetSheet];
+    }
+  }
 
   const gapX = 22;
   const gapY = 26;
+  const outerGapX = gapX + 48;
 
-  const candidates: readonly {
+  const candidates: {
     readonly side: PopoverPlacement['side'];
     readonly rawX: number;
     readonly rawY: number;
@@ -502,7 +526,38 @@ export function pickPopoverPlacement(input: PopoverPlacementInput): PopoverPlace
     { side: 'bottom-right', rawX: input.anchorX + gapX, rawY: input.anchorY + gapY, bias: 12 },
     { side: 'bottom-left', rawX: input.anchorX - width - gapX, rawY: input.anchorY + gapY, bias: 16 },
     { side: 'bottom', rawX: input.anchorX - width * 0.5, rawY: input.anchorY + gapY + 4, bias: 20 },
+    // Outer-ring ±(gapX + 48) horizontal fallbacks
+    { side: 'top-right', rawX: input.anchorX + outerGapX, rawY: input.anchorY - height - gapY, bias: 26 },
+    { side: 'top-left', rawX: input.anchorX - width - outerGapX, rawY: input.anchorY - height - gapY, bias: 30 },
+    { side: 'top-right', rawX: input.anchorX + outerGapX, rawY: input.anchorY - height * 0.5, bias: 32 },
+    { side: 'bottom-right', rawX: input.anchorX + outerGapX, rawY: input.anchorY + gapY, bias: 34 },
+    { side: 'top-left', rawX: input.anchorX - width - outerGapX, rawY: input.anchorY - height * 0.5, bias: 36 },
+    { side: 'bottom-left', rawX: input.anchorX - width - outerGapX, rawY: input.anchorY + gapY, bias: 38 },
   ];
+
+  // Target-sheet-exterior candidates keep the popover cleanly OFF zoomed active matrices
+  if (targetSheet) {
+    const sheetGap = 14;
+    const aboveY = targetSheet.y0 - height - sheetGap;
+    const belowY = targetSheet.y1 + sheetGap;
+    const leftX = targetSheet.x0 - width - sheetGap;
+    const rightX = targetSheet.x1 + sheetGap;
+    const centeredX = input.anchorX - width * 0.5;
+    const centeredY = input.anchorY - height * 0.5;
+
+    candidates.push(
+      { side: 'top', rawX: centeredX, rawY: aboveY, bias: 22 },
+      { side: 'top-right', rawX: rightX, rawY: centeredY, bias: 24 },
+      { side: 'top-right', rawX: targetSheet.x1 - width, rawY: aboveY, bias: 25 },
+      { side: 'top-left', rawX: leftX, rawY: centeredY, bias: 26 },
+      { side: 'top-left', rawX: targetSheet.x0, rawY: aboveY, bias: 27 },
+      { side: 'bottom', rawX: centeredX, rawY: belowY, bias: 28 },
+      { side: 'top-right', rawX: rightX, rawY: targetSheet.y0, bias: 29 },
+      { side: 'bottom-right', rawX: targetSheet.x1 - width, rawY: belowY, bias: 31 },
+      { side: 'top-left', rawX: leftX, rawY: targetSheet.y0, bias: 31 },
+      { side: 'bottom-left', rawX: targetSheet.x0, rawY: belowY, bias: 33 },
+    );
+  }
 
   let bestX = clamp(candidates[0].rawX, minX, maxX);
   let bestY = clamp(candidates[0].rawY, minY, maxTopY);
@@ -528,7 +583,15 @@ export function pickPopoverPlacement(input: PopoverPlacementInput): PopoverPlace
       score += 10000;
     }
 
-    // Penalize collisions with existing labels / rects
+    // Strongly penalize overlapping active sheets, upstream operands, or dataflow midpoints
+    for (const avoid of avoidRects) {
+      const area = rectOverlapArea(rect, avoid, 3);
+      if (area > 0) {
+        score += 1200 + area * 1.2;
+      }
+    }
+
+    // Penalize collisions with existing exterior labels / rects
     for (const occ of occupied) {
       const area = rectOverlapArea(rect, occ, 3);
       if (area > 0) {
@@ -718,7 +781,10 @@ function ensureOverlayV3Styles(): void {
   style.id = OVERLAY_V3_STYLE_ID;
   style.textContent = `@layer overlay-v3-defaults {
   .ov-sheet-label { transition: opacity 110ms ease; }
-  .ov-sheet-label.is-dimmed { opacity: 0.34; }
+  .ov-sheet-label.is-dimmed { opacity: 0.46; }
+  @media (prefers-reduced-motion: reduce) {
+    .ov-sheet-label { transition: none !important; }
+  }
   .overlay-popover-leader { fill: none; stroke: #14181F; stroke-width: 1.5; stroke-linecap: round; }
   .overlay-popover-dot { fill: #DC4C34; stroke: #FFFFFF; stroke-width: 1.4; }
   .overlay-popover-source { fill: none; stroke-width: 1.25; stroke-dasharray: 3 2.5; stroke-linecap: round; stroke-opacity: 0.68; }
@@ -726,7 +792,7 @@ function ensureOverlayV3Styles(): void {
   .overlay-popover-source-teal { stroke: #1A8A7A; }
   .ov-cell-popover {
     position: absolute; top: 0; left: 0; pointer-events: none; z-index: 8;
-    display: flex; flex-direction: column; gap: 3px; max-width: 360px;
+    display: flex; flex-direction: column; gap: 3px; max-width: 396px;
     padding: 5px 8px; border-radius: 6px;
     background-color: rgba(20, 24, 31, 0.95);
     border: 1px solid rgba(255, 255, 255, 0.14);
@@ -775,7 +841,7 @@ function ensureOverlayV3Styles(): void {
   }
   .ov-cell-popover-val {
     margin-left: auto; flex-shrink: 0; padding: 1px 5px; border-radius: 3px;
-    background-color: #DC4C34; color: #FFFFFF;
+    background-color: #C83E27; color: #FFFFFF;
     font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
     font-size: 10.5px; line-height: 14px; font-weight: 700;
     font-variant-numeric: tabular-nums;
@@ -801,15 +867,15 @@ function ensureOverlayV3Styles(): void {
     will-change: transform;
   }
   .ov-cell-num.is-active {
-    background-color: #DC4C34; color: #FFFFFF; font-weight: 700; z-index: 5;
-    box-shadow: 0 1px 3px rgba(220, 76, 52, 0.35);
+    background-color: #C83E27; color: #FFFFFF; font-weight: 700; z-index: 5;
+    box-shadow: 0 1px 3px rgba(200, 62, 39, 0.35);
   }
   .ov-cell-num.is-accumulating {
     background-color: #B45309; color: #FFFFFF; font-weight: 700; z-index: 6;
     box-shadow: 0 1px 3px rgba(180, 83, 9, 0.38);
   }
   .ov-cell-num.is-masked {
-    background-color: rgba(241, 245, 249, 0.74); color: #64748B; font-weight: 500;
+    background-color: rgba(241, 245, 249, 0.74); color: #475569; font-weight: 500;
   }
   .ov-axis-header {
     position: absolute; top: 0; left: 0; height: 15px; padding: 0 4px;
@@ -1109,6 +1175,10 @@ export class MacroOverlay {
     this.widthCache.clear();
   }
 
+  get metricCacheSize(): number {
+    return this.widthCache.size;
+  }
+
   private measureText(text: string, font: string): number {
     const key = `${font}|${text}`;
     const cached = this.widthCache.get(key);
@@ -1119,6 +1189,12 @@ export class MacroOverlay {
       w = Math.ceil(this.measureCtx.measureText(text).width);
     } else {
       w = Math.ceil(text.length * 6.8);
+    }
+    if (this.widthCache.size >= MAX_OVERLAY_WIDTH_CACHE_ENTRIES) {
+      const oldestKey = this.widthCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.widthCache.delete(oldestKey);
+      }
     }
     this.widthCache.set(key, w);
     return w;
@@ -1135,9 +1211,9 @@ export class MacroOverlay {
     const leaderSegs: string[] = [];
     const phaseSegs: string[] = [];
 
-    // Safe drawing area avoiding floating two-row mode/preset toolbar (~84px) and bottom hint (~30px)
-    const minY = 84;
-    const maxY = Math.max(minY + 40, hostHeight - 30);
+    // Safe drawing area avoiding floating two-row mode/preset toolbar (~84px desktop, ~12px stacked/compact) and bottom hint (~30px)
+    const minY = Math.max(8, input.topInsetPx ?? (hostWidth <= 900 || hostHeight <= 440 ? 12 : 84));
+    const maxY = Math.max(minY + 40, hostHeight - Math.max(8, input.bottomInsetPx ?? 30));
 
     const pillFont = '600 11px system-ui, -apple-system, sans-serif';
     const monoFont = '500 10.5px ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -1426,7 +1502,14 @@ export class MacroOverlay {
     }
 
     // Floating cell popover & zoom-adaptive cell readouts (supported on any cutaway)
-    const popoverRect = this.renderCellPopover(input.cellPopover, snapshot, occupied, minY, maxY);
+    const popoverRect = this.renderCellPopover(
+      input.cellPopover,
+      snapshot,
+      occupied,
+      minY,
+      maxY,
+      input.activeCellGrids,
+    );
 
     // KV depth ticks (1, 8, 16, T=N) in GQA Cutaway
     if (scene.kvDepthTicks.length > 0) {
@@ -1574,7 +1657,7 @@ export class MacroOverlay {
       else if (lm.tone === 'cyan') el.classList.add('is-cyan');
       else if (lm.tone === 'muted') el.classList.add('is-muted');
 
-      // V1 Active-op label dimming: dim secondary/non-participating labels to 0.34
+      // V1 Active-op label dimming: dim secondary/non-participating labels to 0.46
       el.classList.toggle('is-dimmed', !isParticipating);
       el.style.opacity = isParticipating ? '1' : DIMMED_LABEL_OPACITY;
 
@@ -1603,7 +1686,14 @@ export class MacroOverlay {
     }
 
     // V3: Floating contextual formula popover + curved provenance pointers
-    const popoverRect = this.renderCellPopover(input.cellPopover, snapshot, occupied, minY, maxY);
+    const popoverRect = this.renderCellPopover(
+      input.cellPopover,
+      snapshot,
+      occupied,
+      minY,
+      maxY,
+      input.activeCellGrids,
+    );
 
     // Subtle KV depth ticks along right side of KV1
     if (scene.kvDepthTicks.length > 0 && pxPerWorldUnit >= 36) {
@@ -1695,9 +1785,10 @@ export class MacroOverlay {
     occupied: PlacedRect[],
     minY: number,
     maxY: number,
+    activeCellGrids?: readonly ActiveSheetCellGrid[] | null,
   ): PlacedRect | null {
     if (!spec) return null;
-    const { hostWidth } = snapshot.metrics;
+    const { hostWidth, hostHeight } = snapshot.metrics;
     const pt = projectWorldToHostCss(spec.world, snapshot);
     if (!pt.visible || pt.x < -30 || pt.x > hostWidth + 30 || pt.y < minY - 30 || pt.y > maxY + 30) {
       return null;
@@ -1749,20 +1840,120 @@ export class MacroOverlay {
       this.measureText(spec.tensorLabel, headFont) +
       this.measureText(spec.coordLabel, coordFont) +
       (spec.badge ? this.measureText(spec.badge, badgeFont) + 14 : 0) +
-      28;
+      34;
     const dotsW = dotCount > 0 ? dotCount * 9 + 6 : 0;
     const bodyW =
       dotsW +
       this.measureText(spec.equation, eqFont) +
       this.measureText(spec.valueText, valFont) +
-      36;
+      48;
 
-    const maxCardW = Math.max(120, Math.min(360, hostWidth - 16));
+    const maxCardW = Math.max(120, Math.min(396, hostWidth - 16));
     const cardW = clamp(Math.max(headW, bodyW), Math.min(148, maxCardW), maxCardW);
-    const cardH = 48;
+    const cardH = bodyW > maxCardW ? 66 : 48;
 
     const anchorX = clamp(pt.x, 6, hostWidth - 6);
     const anchorY = clamp(pt.y, minY, maxY);
+
+    // Project upstream source points BEFORE placement so popover avoids upstream operands & provenance threads
+    const projectedSources: {
+      readonly sx: number;
+      readonly sy: number;
+      readonly role: 'indigo' | 'teal';
+    }[] = [];
+    const avoidRects: OverlayRect[] = [];
+    let targetSheetRect: OverlayRect | null = null;
+    let bestTargetNormalDist = Infinity;
+    let fallbackTargetArea = Infinity;
+
+    if (activeCellGrids && activeCellGrids.length > 0) {
+      const sheetCorners: readonly (readonly [number, number])[] = [
+        [-0.5, -0.5],
+        [0.5, -0.5],
+        [0.5, 0.5],
+        [-0.5, 0.5],
+      ];
+      for (const grid of activeCellGrids) {
+        if (grid.cols <= 0 || grid.rows <= 0) continue;
+        const frame = makeSheetFrame3D(grid.originWorld, grid.extent, grid.axisU, grid.axisN);
+        const faceLy = dot3(sub3(snapshot.eye, frame.center), frame.axisN) >= 0 ? 0.5 : -0.5;
+        let sx0 = Infinity;
+        let sy0 = Infinity;
+        let sx1 = -Infinity;
+        let sy1 = -Infinity;
+        let visibleCorners = 0;
+        for (const [lx, lz] of sheetCorners) {
+          const cPt = projectWorldToHostCss(localToWorldOnFrame(frame, lx, faceLy, lz), snapshot);
+          if (!cPt.visible) continue;
+          visibleCorners++;
+          if (cPt.x < sx0) sx0 = cPt.x;
+          if (cPt.y < sy0) sy0 = cPt.y;
+          if (cPt.x > sx1) sx1 = cPt.x;
+          if (cPt.y > sy1) sy1 = cPt.y;
+        }
+        if (visibleCorners < 2) continue;
+        if (sx1 <= 0 || sx0 >= hostWidth || sy1 <= 0 || sy0 >= hostHeight) continue;
+        const sheetRect: OverlayRect = { x0: sx0, y0: sy0, x1: sx1, y1: sy1 };
+        avoidRects.push(sheetRect);
+
+        // Identify the active target sheet via 3D local-frame containment (with 2D AABB fallback)
+        const dVec = sub3(spec.world, frame.center);
+        const uNorm = Math.abs(dot3(dVec, frame.axisU)) / Math.max(1e-4, frame.extent[0]);
+        const vNorm = Math.abs(dot3(dVec, frame.axisV)) / Math.max(1e-4, frame.extent[2]);
+        const nDist = Math.abs(dot3(dVec, frame.axisN));
+        if (uNorm <= 0.56 && vNorm <= 0.56 && nDist <= frame.extent[1] * 0.5 + 0.18) {
+          if (nDist < bestTargetNormalDist) {
+            bestTargetNormalDist = nDist;
+            targetSheetRect = sheetRect;
+          }
+        } else if (
+          bestTargetNormalDist === Infinity &&
+          anchorX >= sheetRect.x0 - 4 &&
+          anchorX <= sheetRect.x1 + 4 &&
+          anchorY >= sheetRect.y0 - 4 &&
+          anchorY <= sheetRect.y1 + 4
+        ) {
+          const area = (sheetRect.x1 - sheetRect.x0) * (sheetRect.y1 - sheetRect.y0);
+          if (area < fallbackTargetArea) {
+            fallbackTargetArea = area;
+            targetSheetRect = sheetRect;
+          }
+        }
+      }
+    }
+
+    if (spec.sourceWorlds && spec.sourceWorlds.length > 0) {
+      const sourcePad = 28;
+      for (const src of spec.sourceWorlds) {
+        const spt = projectWorldToHostCss(src.world, snapshot);
+        if (
+          !spt.visible ||
+          spt.x < -40 ||
+          spt.x > hostWidth + 40 ||
+          spt.y < minY - 40 ||
+          spt.y > maxY + 40
+        ) {
+          continue;
+        }
+        const sx = clamp(spt.x, 4, hostWidth - 4);
+        const sy = clamp(spt.y, minY, maxY);
+        projectedSources.push({ sx, sy, role: src.role });
+        avoidRects.push({
+          x0: sx - sourcePad,
+          y0: sy - sourcePad,
+          x1: sx + sourcePad,
+          y1: sy + sourcePad,
+        });
+        const mx = (sx + anchorX) * 0.5;
+        const my = (sy + anchorY) * 0.5;
+        avoidRects.push({
+          x0: mx - sourcePad,
+          y0: my - sourcePad,
+          x1: mx + sourcePad,
+          y1: my + sourcePad,
+        });
+      }
+    }
 
     const placed = pickPopoverPlacement({
       anchorX,
@@ -1773,6 +1964,8 @@ export class MacroOverlay {
       minY,
       maxY,
       occupied,
+      avoidRects,
+      targetSheetRect,
       marginX: 8,
     });
 
@@ -1803,28 +1996,16 @@ export class MacroOverlay {
     this.popoverAnchorDot.style.display = 'inline';
 
     // Optional subtle indigo / teal curved provenance pointers to upstream source 3D cells
-    if (spec.sourceWorlds && spec.sourceWorlds.length > 0) {
+    if (projectedSources.length > 0) {
       const indigoSegs: string[] = [];
       const tealSegs: string[] = [];
-      for (const src of spec.sourceWorlds) {
-        const spt = projectWorldToHostCss(src.world, snapshot);
-        if (
-          !spt.visible ||
-          spt.x < -40 ||
-          spt.x > hostWidth + 40 ||
-          spt.y < minY - 40 ||
-          spt.y > maxY + 40
-        ) {
-          continue;
-        }
-        const sx = clamp(spt.x, 4, hostWidth - 4);
-        const sy = clamp(spt.y, minY, maxY);
-        const border = pickRectBorderPoint(placedRect, sx, sy);
+      for (const src of projectedSources) {
+        const border = pickRectBorderPoint(placedRect, src.sx, src.sy);
         const curve = buildQuadraticPointerPath(
           border.edgeX,
           border.edgeY,
-          sx,
-          sy,
+          src.sx,
+          src.sy,
           border.orientation,
         );
         if (!curve) continue;

@@ -164,7 +164,7 @@ export interface SpatialOutputFitOptions {
  */
 export const OUTPUT_SPATIAL_FIT_BOUNDS: AABB = {
   min: [-8.35, -0.06, -1.95],
-  max: [7.65, 3.40, 1.85],
+  max: [9.10, 3.40, 1.85],
 };
 
 export const OUTPUT_STEPPER_STEPS: readonly StepperStepDef[] = Object.freeze([
@@ -1512,7 +1512,7 @@ export function buildOutputCutaway(
       world: [xTop5Left + barW + 0.16, barY, barZ],
       partId,
       align: 'right',
-      tier: rank < 3 || isSelectedCand ? 'primary' : 'detail',
+      tier: 'primary',
       tone: isSelectedCand || rank === 0 ? 'cyan' : 'default',
     });
   }
