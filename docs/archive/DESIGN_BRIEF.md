@@ -1,3 +1,11 @@
+> **ARCHIVED — SUPERSEDED MILESTONE 1 BRIEF**
+>
+> This document is preserved for historical reference from the initial Milestone 1 concept phase (orthographic 6-beat schematic prototype). The shipped Nemotron 3 Nano v1.0 release has evolved significantly beyond this brief — including a perspective 3D 5-pass WebGL2 thin-sheet engine, unified 52-layer Float32 miniature simulation with PyTorch `2.15.0` parity, cached incremental AR decoding with branching, 5 exploded cutaways, focused-cell partial-sum accumulation, and a 22-beat 3-Act guided walkthrough.
+>
+> For current v1.0 documentation, see [`README.md`](../../README.md), [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md), and [`docs/VERIFICATION.md`](../VERIFICATION.md).
+
+---
+
 # NVIDIA Nemotron 3 Nano 30B-A3B — architectural explainer
 
 **Verification flag.** Table 1 of NVIDIA’s report lists two shared experts. The released BF16 checkpoint specifies one shared expert of width 3,712, exactly twice the routed width of 1,856. Draw one double-width shared branch per MoE layer. The supplied 52-character layer order matches the checkpoint. Use NoPE despite the rotary fields in the config. Qualify the parameter caption as “31.6B total · 3.2B active per token excluding embeddings · 3.6B active including embeddings.” [Report, §2.1 and Table 1](https://arxiv.org/html/2512.20848v1) · [Checkpoint config](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/main/config.json)

@@ -1,3 +1,11 @@
+> **ARCHIVED — SUPERSEDED MILESTONE 1 ENGINEERING PLAN**
+>
+> This document is preserved for historical reference from the initial Milestone 1 engineering plan (orthographic 3-pass schematic prototype). The shipped Nemotron 3 Nano v1.0 implementation supersedes the coordinate tables, palette tokens, and 3-pass pipeline described below with a 5-pass WebGL2 engine (`SolidsPass`, `LinesPass` with shared `linePacking.ts`, `RG32F` `SheetsPass`, `RibbonsPass`, `FlatFlowRibbonsPass`), a unified 52-layer Float32 miniature simulator with cached incremental AR decoding and PyTorch `2.15.0` parity, 5 exploded cutaways, and a 22-beat 3-Act walkthrough.
+>
+> For current v1.0 engineering and verification documentation, see [`README.md`](../../README.md), [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md), and [`docs/VERIFICATION.md`](../VERIFICATION.md).
+
+---
+
 # Nemotron 3 Nano · engineering plan
 
 Build a static Vite + TypeScript explainer with native WebGL2, an orthographic camera and a DOM/SVG annotation layer. Ship only schematic geometry, checkpoint metadata and deterministic examples. Begin with the full-spine view. The first review should already explain which bays accumulate token history.
