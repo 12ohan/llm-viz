@@ -1,4 +1,18 @@
 import { describe, expect, it } from 'vitest';
+import {
+  createDefaultHybridModel,
+  MINI_VOCAB,
+  runHybridExecution,
+} from '../src/math/hybridFlow';
+import {
+  createDecodeSession,
+  getActiveDecodeBranch,
+  getActiveDecodeStep,
+  navigateDecodeSession,
+  stepDecodeSession,
+  stepDecodeSessionGreedy,
+  type HybridDecodeSession,
+} from '../src/math/incrementalDecode';
 import { NEMOTRON_SPEC } from '../src/model/spec';
 import {
   MAX_TOKENS,
@@ -16,10 +30,14 @@ import {
   nextChapterIndex,
   prevBeatIndex,
   prevChapterIndex,
+  resolveBeatDisplayCopy,
+  TOUR_PREFILL_TOKEN_IDS,
+  TOUR_PREFILL_TOKENS,
   WALKTHROUGH_BEAT_COUNT,
   WALKTHROUGH_BEATS,
   WALKTHROUGH_CHAPTERS,
   WALKTHROUGH_COUNT,
+  type LiveDecodeBeatSummary,
   type WalkthroughAct,
   type WalkthroughArAction,
   type WalkthroughBeatMode,
@@ -204,30 +222,46 @@ describe('Increment V5: Reassessed 22-Beat, 3-Act Unified + AR Decode Walkthroug
     expect(ch4Beat4Text).toMatch(/Shared Expert/);
     expect(ch4Beat4Text).toMatch(/0 B/);
 
-    // Ch 5 uses Bay 06 GQA at T=12 and showcases Q00 -> KV_0 vs Q16 -> KV_1
+    // Ch 5 uses Bay 06 GQA at unified T=8 and showcases Q00 -> KV_0 vs Q16 -> KV_1
     const ch5 = beatsForChapter(4);
-    expect(ch5.every((b) => b.mode === 'cutaway_gqa' && b.gqaBayId === 6 && b.tokens === 12)).toBe(
-      true,
-    );
+    expect(
+      ch5.every(
+        (b) => b.mode === 'cutaway_gqa' && b.gqaBayId === 6 && b.tokens === TOUR_PREFILL_TOKENS,
+      ),
+    ).toBe(true);
     expect(ch5[0].gqaHead).toBe(0);
+    expect(ch5[0].badge).toMatch(/T=8/);
     expect(ch5[1].gqaHead).toBe(16);
     expect(ch5[1].title + ' ' + ch5[1].paragraphs.join(' ')).toMatch(/Q00.*KV₀/);
     expect(ch5[1].title + ' ' + ch5[1].paragraphs.join(' ')).toMatch(/Q16.*KV₁/);
     expect(ch5[2].paragraphs.join(' ')).toMatch(/−∞/);
+    expect(ch5[2].paragraphs.join(' ')).toMatch(/t₇\s*=\s*"layers"/);
+    expect(ch5[3].paragraphs.join(' ')).toMatch(/8 KiB/);
+    expect(ch5[3].paragraphs.join(' ')).toMatch(/48 KiB/);
+    expect(ch5[3].paragraphs.join(' ')).toMatch(/416 KiB/);
     expect(ch5[3].paragraphs.join(' ')).toMatch(/8\.7×/);
 
-    // Act II (Ch 6): Selective FP8 boundary on Tower Bays 42–43
+    // Act II (Ch 6): Selective FP8 boundary on Tower Bays 42–43 at unified T=8
     const ch6 = beatsForChapter(5);
-    expect(ch6.every((b) => b.act === 2 && b.executionMode === 'full_sequence')).toBe(true);
+    expect(
+      ch6.every(
+        (b) =>
+          b.act === 2 &&
+          b.executionMode === 'full_sequence' &&
+          b.tokens === TOUR_PREFILL_TOKENS,
+      ),
+    ).toBe(true);
     expect(ch6.every((b) => b.mode === 'tower' && b.precision === 'fp8_selective')).toBe(true);
     expect(ch6[0].selectedBay).toBe(42);
     expect(ch6[1].selectedBay).toBe(43);
     expect(ch6[0].paragraphs.join(' ')).toMatch(/12 bays/);
     expect(ch6[0].paragraphs.join(' ')).toMatch(/23 Conv1D/);
     expect(ch6[1].paragraphs.join(' ')).toMatch(/\+3 KiB\/tok/);
+    expect(ch6[1].paragraphs.join(' ')).toMatch(/24 KiB/);
+    expect(ch6[1].paragraphs.join(' ')).toMatch(/48 KiB/);
     expect(ch6[1].paragraphs.join(' ')).toMatch(/~99%/);
 
-    // Act III (Ch 7): Dedicated cutaway_output -> live ar_decode spine wave -> [1×(P+1)] Bay 43 GQA -> branching + 1M chart
+    // Act III (Ch 7): Dedicated cutaway_output (T=8) -> live ar_decode spine wave (T=9, 8P+1S) -> [1×9] Bay 43 GQA -> branching + 1M chart
     const ch7 = beatsForChapter(6);
     expect(ch7.every((b) => b.act === 3 && b.precision === 'fp8_selective')).toBe(true);
 
@@ -235,18 +269,24 @@ describe('Increment V5: Reassessed 22-Beat, 3-Act Unified + AR Decode Walkthroug
       id: '7.1',
       mode: 'cutaway_output',
       executionMode: 'full_sequence',
+      tokens: TOUR_PREFILL_TOKENS,
       arAction: 'ensure_prefill',
     });
     expect(ch7[0].paragraphs.join(' ')).toMatch(/Final RMSNorm/);
     expect(ch7[0].paragraphs.join(' ')).toMatch(/W_lm_head/);
+    expect(ch7[0].paragraphs.join(' ')).toMatch(/t₇\s*=\s*"layers"/);
+    expect(ch7[0].paragraphs.join(' ')).toMatch(/t₈/);
 
     expect(ch7[1]).toMatchObject({
       id: '7.2',
       mode: 'tower',
       executionMode: 'ar_decode',
+      tokens: TOUR_PREFILL_TOKENS + 1,
       arAction: 'step_once_with_wave',
     });
-    expect(ch7[1].paragraphs.join(' ')).toMatch(/t₄/);
+    expect(ch7[1].paragraphs.join(' ')).toMatch(/t₈/);
+    expect(ch7[1].paragraphs.join(' ')).toMatch(/8-token prefill/);
+    expect(ch7[1].paragraphs.join(' ')).toMatch(/8P \+ 1S = 9/);
     expect(ch7[1].paragraphs.join(' ')).toMatch(/69 KiB/);
     expect(ch7[1].paragraphs.join(' ')).toMatch(/47\.1 MiB/);
 
@@ -254,17 +294,22 @@ describe('Increment V5: Reassessed 22-Beat, 3-Act Unified + AR Decode Walkthroug
       id: '7.3',
       mode: 'cutaway_gqa',
       executionMode: 'ar_decode',
+      tokens: TOUR_PREFILL_TOKENS + 1,
       gqaBayId: 43,
       selectedBay: 43,
       arAction: 'inspect_cached_gqa',
     });
-    expect(ch7[2].paragraphs.join(' ')).toMatch(/\[1 × \(P\+1\)\]/);
+    expect(ch7[2].badge).toMatch(/\[1 × 9\]/);
+    expect(ch7[2].paragraphs.join(' ')).toMatch(/\[1 × 9\]/);
+    expect(ch7[2].paragraphs.join(' ')).toMatch(/8 reused cached prefix KV slices \(t₀\.\.t₇\)/);
+    expect(ch7[2].paragraphs.join(' ')).toMatch(/t₈/);
     expect(ch7[2].paragraphs.join(' ')).toMatch(/zero prefix recompute/i);
 
     expect(ch7[3]).toMatchObject({
       id: '7.4',
       mode: 'tower',
       executionMode: 'ar_decode',
+      tokens: TOUR_PREFILL_TOKENS + 1,
       arAction: 'invite_branch_and_chart',
       highlightMemoryChart: true,
     });
@@ -337,5 +382,214 @@ describe('Increment V5: Reassessed 22-Beat, 3-Act Unified + AR Decode Walkthroug
     expect(nextChapterIndex(0)).toBe(1);
     expect(prevChapterIndex(6)).toBe(5);
     expect(nextChapterIndex(6)).toBeNull();
+  });
+});
+
+function summarizeDecodeSession(session: HybridDecodeSession): LiveDecodeBeatSummary {
+  const branch = getActiveDecodeBranch(session);
+  const step = getActiveDecodeStep(session);
+  return {
+    stepIndex: session.activeStepIndex,
+    totalSteps: branch.steps.length,
+    branchId: session.activeBranchId,
+    prefixTokens: step.prefixTokens,
+    newTokens: step.tokens,
+    totalTokens: step.totalTokens,
+    lastTokenPos: step.totalTokens - 1,
+    lastTokenLabel: step.sequenceTokenLabels[step.totalTokens - 1],
+    greedyNextLabel: step.greedyNextToken.label,
+  };
+}
+
+describe('Refinement #2: Unified 8-Token Guided Walkthrough Continuity & Dynamic Act III Copy', () => {
+  it('exports canonical frozen 8-token prefill constants matching the unified tour prompt', () => {
+    expect(TOUR_PREFILL_TOKENS).toBe(8);
+    expect(Object.isFrozen(TOUR_PREFILL_TOKEN_IDS)).toBe(true);
+    expect([...TOUR_PREFILL_TOKEN_IDS]).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(TOUR_PREFILL_TOKEN_IDS.map((id) => MINI_VOCAB[id]).join(' ')).toBe(
+      'How does Nemotron use only six attention layers',
+    );
+  });
+
+  it('enforces strictly coherent tokens === 8 across Beats 1.1..7.1 and tokens === 9 across Beats 7.2..7.4', () => {
+    // Beats 1.1..7.1 (indices 0..18)
+    for (let i = 0; i <= 18; i++) {
+      const beat = WALKTHROUGH_BEATS[i];
+      expect(beat.tokens).toBe(8);
+      expect(beat.executionMode).toBe('full_sequence');
+    }
+
+    // Beats 7.2..7.4 (indices 19..21)
+    for (let i = 19; i <= 21; i++) {
+      const beat = WALKTHROUGH_BEATS[i];
+      expect(beat.tokens).toBe(9);
+      expect(beat.executionMode).toBe('ar_decode');
+    }
+
+    // Monotonic token count across all 22 beats (zero 8 -> 12 -> 9 -> 4 regressions)
+    for (let i = 1; i < WALKTHROUGH_BEATS.length; i++) {
+      expect(WALKTHROUGH_BEATS[i].tokens).toBeGreaterThanOrEqual(WALKTHROUGH_BEATS[i - 1].tokens);
+    }
+  });
+
+  it('contains zero stale 4-token prefill, t4, or T=12 copy regressions in walkthrough beats', () => {
+    for (const beat of WALKTHROUGH_BEATS) {
+      const fullText = [
+        beat.title,
+        beat.badge,
+        ...beat.paragraphs,
+        ...beat.takeaways,
+        beat.interactivePrompt ?? '',
+      ].join(' ');
+
+      expect(fullText).not.toMatch(/T\s*=\s*12\b/);
+      expect(fullText).not.toMatch(/\b72 KiB\b/);
+      expect(fullText).not.toMatch(/\b624 KiB\b/);
+      expect(fullText).not.toMatch(/\bt(?:11|₁₁)\b/);
+    }
+
+    // Act III (Beats 7.1..7.4) must have zero stale "4-token prefill" or "t4"/"t₄" copy
+    for (const beat of beatsForChapter(6)) {
+      const act3Text = [
+        beat.title,
+        beat.badge,
+        ...beat.paragraphs,
+        ...beat.takeaways,
+        beat.interactivePrompt ?? '',
+      ].join(' ');
+
+      expect(act3Text).not.toMatch(/4-token prefill/i);
+      expect(act3Text).not.toMatch(/\bt(?:4|₄)\b/);
+    }
+  });
+
+  it('matches Beat 7.1 Output top-1 prediction bit-for-bit with Beat 7.2 cached AR generation from the 8-token prefix', () => {
+    const model = createDefaultHybridModel();
+    const prefillExec = runHybridExecution(model, { tokenIds: TOUR_PREFILL_TOKEN_IDS });
+    const outputTop1 = prefillExec.lmHead.topKByToken[TOUR_PREFILL_TOKENS - 1][0];
+
+    let session = createDecodeSession(model, {
+      promptTokenIds: TOUR_PREFILL_TOKEN_IDS,
+      precisionMetadata: 'fp8_selective',
+    });
+    const prefillStep = getActiveDecodeStep(session);
+    expect(prefillStep.totalTokens).toBe(8);
+    expect(prefillStep.greedyNextToken.tokenId).toBe(outputTop1.tokenId);
+    expect(prefillStep.greedyNextToken.label).toBe(outputTop1.label);
+
+    session = stepDecodeSessionGreedy(session);
+    const step1 = getActiveDecodeStep(session);
+    expect(step1.prefixTokens).toBe(8);
+    expect(step1.tokens).toBe(1);
+    expect(step1.totalTokens).toBe(9);
+    expect(step1.newTokenIds[0]).toBe(outputTop1.tokenId);
+    expect(step1.newTokenLabels[0]).toBe(outputTop1.label);
+    expect(step1.sequenceTokenLabels[8]).toBe(outputTop1.label);
+  });
+
+  it('formats Act III copy dynamically via resolveBeatDisplayCopy for canonical 8P+1S, forked/advanced branch-1 (10P+1S), and non-AR fallbacks', () => {
+    const model = createDefaultHybridModel();
+
+    // 1. Canonical 8P + 1S (branch-0, t8, [1 × 9])
+    let session = createDecodeSession(model, {
+      promptTokenIds: TOUR_PREFILL_TOKEN_IDS,
+      precisionMetadata: 'fp8_selective',
+    });
+    session = stepDecodeSessionGreedy(session);
+    const canonicalSummary = summarizeDecodeSession(session);
+    expect(canonicalSummary.branchId).toBe('branch-0');
+    expect(canonicalSummary.prefixTokens).toBe(8);
+    expect(canonicalSummary.newTokens).toBe(1);
+    expect(canonicalSummary.totalTokens).toBe(9);
+    expect(canonicalSummary.lastTokenPos).toBe(8);
+
+    // Non-AR beats (1.1, 5.1, 7.1) and null liveDecode return original copy untouched
+    for (const nonArIdx of [0, 12, 18]) {
+      const beat = WALKTHROUGH_BEATS[nonArIdx];
+      expect(resolveBeatDisplayCopy(beat, canonicalSummary)).toEqual({
+        badge: beat.badge,
+        paragraphs: beat.paragraphs,
+        takeaways: beat.takeaways,
+      });
+    }
+    for (const arIdx of [19, 20, 21]) {
+      const beat = WALKTHROUGH_BEATS[arIdx];
+      expect(resolveBeatDisplayCopy(beat, null)).toEqual({
+        badge: beat.badge,
+        paragraphs: beat.paragraphs,
+        takeaways: beat.takeaways,
+      });
+      expect(resolveBeatDisplayCopy(beat)).toEqual({
+        badge: beat.badge,
+        paragraphs: beat.paragraphs,
+        takeaways: beat.takeaways,
+      });
+    }
+
+    // Verify canonical 8P+1S formatting across Beats 7.2, 7.3, 7.4
+    const beat72 = WALKTHROUGH_BEATS[19];
+    const beat73 = WALKTHROUGH_BEATS[20];
+    const beat74 = WALKTHROUGH_BEATS[21];
+
+    for (const beat of [beat72, beat73, beat74]) {
+      const resolved = resolveBeatDisplayCopy(beat, canonicalSummary);
+      const combined = [resolved.badge, ...resolved.paragraphs, ...resolved.takeaways].join(' ');
+      expect(combined).toContain('branch-0');
+      expect(combined).toContain(`t8 "${canonicalSummary.lastTokenLabel}"`);
+      expect(combined).toContain('[1 × 9]');
+      expect(combined).toContain('8 reused prefix + 1 new');
+      expect(combined).toContain(`"${canonicalSummary.greedyNextLabel}"`);
+      expect(combined).not.toMatch(/4-token prefill|\bt4\b|\bt₄\b/);
+    }
+    expect(resolveBeatDisplayCopy(beat73, canonicalSummary).badge).toBe('Bay 43 · branch-0 · [1 × 9]');
+
+    // 2. Forked & advanced branch (branch-1, 10P + 1S = 11, t10)
+    const prefillStateSession = navigateDecodeSession(session, 0);
+    const altCandidate = getActiveDecodeStep(prefillStateSession).predictedNextTokens[1];
+    let forked = stepDecodeSession(prefillStateSession, altCandidate.tokenId);
+    forked = stepDecodeSessionGreedy(forked); // 9P + 1S = 10
+    forked = stepDecodeSessionGreedy(forked); // 10P + 1S = 11 (t10)
+    const forkedSummary = summarizeDecodeSession(forked);
+    expect(forkedSummary.branchId).toBe('branch-1');
+    expect(forkedSummary.prefixTokens).toBe(10);
+    expect(forkedSummary.newTokens).toBe(1);
+    expect(forkedSummary.totalTokens).toBe(11);
+    expect(forkedSummary.lastTokenPos).toBe(10);
+
+    for (const beat of [beat72, beat73, beat74]) {
+      const resolved = resolveBeatDisplayCopy(beat, forkedSummary);
+      const combined = [resolved.badge, ...resolved.paragraphs, ...resolved.takeaways].join(' ');
+      expect(combined).toContain('branch-1');
+      expect(combined).toContain(`t10 "${forkedSummary.lastTokenLabel}"`);
+      expect(combined).toContain('[1 × 11]');
+      expect(combined).toContain('10 reused prefix + 1 new');
+      expect(combined).toContain(`"${forkedSummary.greedyNextLabel}"`);
+      expect(combined).not.toContain('branch-0');
+      expect(combined).not.toContain('[1 × 9]');
+      expect(combined).not.toContain('t8 ');
+    }
+    expect(resolveBeatDisplayCopy(beat72, forkedSummary).badge).toContain('branch-1');
+    expect(resolveBeatDisplayCopy(beat72, forkedSummary).badge).toContain('10P+1S');
+    expect(resolveBeatDisplayCopy(beat73, forkedSummary).badge).toBe('Bay 43 · branch-1 · [1 × 11]');
+    expect(resolveBeatDisplayCopy(beat74, forkedSummary).badge).toContain(
+      `branch-1 · t10 "${forkedSummary.lastTokenLabel}"`,
+    );
+
+    // 3. Edge case: navigating back to prefill step 0 (0P + 8S, t7 "layers", [8 × 8])
+    const prefillSummary = summarizeDecodeSession(prefillStateSession);
+    expect(prefillSummary.prefixTokens).toBe(0);
+    expect(prefillSummary.newTokens).toBe(8);
+    expect(prefillSummary.totalTokens).toBe(8);
+    expect(prefillSummary.lastTokenPos).toBe(7);
+    expect(prefillSummary.lastTokenLabel).toBe('layers');
+
+    for (const beat of [beat72, beat73, beat74]) {
+      const resolved = resolveBeatDisplayCopy(beat, prefillSummary);
+      const combined = [resolved.badge, ...resolved.paragraphs, ...resolved.takeaways].join(' ');
+      expect(combined).toContain('t7 "layers"');
+      expect(combined).toContain('[8 × 8]');
+      expect(combined).toContain('0 reused prefix + 8 new');
+      expect(combined).not.toContain('t0..t-1');
+    }
   });
 });

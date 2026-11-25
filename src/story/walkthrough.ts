@@ -242,6 +242,16 @@ const ACT_1_LABEL = 'Act I · Full-Sequence Prefill';
 const ACT_2_LABEL = 'Act II · Precision Boundary';
 const ACT_3_LABEL = 'Act III · Live Cached AR Decode & 1M Scaling';
 
+/**
+ * Canonical guided-walkthrough prompt length (`T = 8`: "How does Nemotron use only six attention
+ * layers", positions `t0..t7`). Every Act I, Act II, and Beat 7.1 Output beat shares this exact
+ * 8-token prefill prefix, and Act III Beats 7.2–7.4 step directly from it (`8P + 1S = 9`).
+ */
+export const TOUR_PREFILL_TOKENS = 8 as const;
+
+/** Canonical token IDs (`t0..t7`) for the unified 8-token guided walkthrough prompt. */
+export const TOUR_PREFILL_TOKEN_IDS: readonly number[] = Object.freeze([0, 1, 2, 3, 4, 5, 6, 7]);
+
 export const WALKTHROUGH_BEATS: readonly WalkthroughBeat[] = Object.freeze([
   // --------------------------------------------------------------------------
   // ACT I · FULL-SEQUENCE PREFILL — Ch 1: Hybrid 52-Layer Spine (2 beats)
@@ -611,24 +621,24 @@ export const WALKTHROUGH_BEATS: readonly WalkthroughBeat[] = Object.freeze([
     act: 1,
     actLabel: ACT_1_LABEL,
     title: 'NoPE & 16:1 Query-to-KV Asymmetry',
-    badge: 'Bay 06 · Steps 1–2 · 32Q / 2KV',
+    badge: 'Bay 06 · 32Q / 2KV · T=8',
     mode: 'cutaway_gqa',
     section: 'gqa',
     executionMode: 'full_sequence',
     precision: 'bf16',
-    tokens: 12,
+    tokens: TOUR_PREFILL_TOKENS,
     selectedBay: 6,
     gqaBayId: 6,
     gqaHead: 0,
     stepperStep: 1,
     stepperAutoPlay: true,
     paragraphs: [
-      'Only six layers perform exact token-to-token retrieval (T = 12 here). Entering Bay 06 from Bay 05 Mamba-2, Pre-RMSNorm feeds Q/K/V projections directly under NoPE — zero positional rotations needed.',
+      'Only six layers perform exact token-to-token retrieval across our 8-token prompt (t₀..t₇, T = 8). Entering Bay 06 from Bay 05 Mamba-2, Pre-RMSNorm feeds Q/K/V projections directly under NoPE — zero positional rotations needed.',
       'Contrast the projection geometry: upright W_Q emits 32 Query heads (4,096 channels), whereas W_K and W_V emit just 2 shared KV heads (256 each) — a 16:1 width asymmetry.',
     ],
     takeaways: [
       '32 Q heads (head_dim 128) share just 2 KV heads — shrinking per-layer KV storage 16×',
-      'Preceding Mamba-2 feeder Bay 05 supplies positional context so GQA operates cleanly with NoPE',
+      'Preceding Mamba-2 feeder Bay 05 supplies positional context so GQA operates cleanly with NoPE at T = 8',
     ],
     interactivePrompt: 'Compare wide W_Q against narrow W_K / W_V · Press Space to compare Q00 vs Q16',
   },
@@ -641,24 +651,24 @@ export const WALKTHROUGH_BEATS: readonly WalkthroughBeat[] = Object.freeze([
     act: 1,
     actLabel: ACT_1_LABEL,
     title: '16:1 Verbatim KV Sharing: Q00→KV₀ vs. Q16→KV₁',
-    badge: 'Bay 06 · Q16 → KV₁ · 16:1 Share',
+    badge: 'Bay 06 · Q16 → KV₁ · T=8',
     mode: 'cutaway_gqa',
     section: 'gqa',
     executionMode: 'full_sequence',
     precision: 'bf16',
-    tokens: 12,
+    tokens: TOUR_PREFILL_TOKENS,
     selectedBay: 6,
     gqaBayId: 6,
     gqaHead: 16,
     stepperStep: 1,
     stepperAutoPlay: false,
     paragraphs: [
-      'Watch the highlight shift from Group 0 (Q00..Q15 → KV₀) onto Group 1 (Q16..Q31 → KV₁): sixteen independent Query heads read the exact same verbatim K and V token stack.',
-      'Every token still appends one verbatim K and V slice along +Z, but storing only 2 KV heads keeps each attention bay to 1 KiB/token in BF16 (0.5 KiB/token in FP8).',
+      'Watch the highlight shift from Group 0 (Q00..Q15 → KV₀) onto Group 1 (Q16..Q31 → KV₁): sixteen independent Query heads read the exact same verbatim K and V token stack across t₀..t₇.',
+      'Every token still appends one verbatim K and V slice along +Z, but storing only 2 KV heads keeps each attention bay to 1 KiB/token in BF16 (8 KiB in Bay 06 at T = 8 · 0.5 KiB/token in FP8).',
     ],
     takeaways: [
       'Group 0 (Q00..Q15) shares KV₀; Group 1 (Q16..Q31) shares KV₁ verbatim without duplicating keys',
-      '32 specialized query patterns at 1/16th the KV memory cost of Multi-Head Attention',
+      '32 specialized query patterns at 1/16th the KV memory cost of Multi-Head Attention (8 KiB in Bay 06 at T = 8)',
     ],
     interactivePrompt: 'Click any head comb (Q00..Q31) to flip KV₀ ↔ KV₁ · Press Space for QKᵀ/√d',
   },
@@ -676,15 +686,15 @@ export const WALKTHROUGH_BEATS: readonly WalkthroughBeat[] = Object.freeze([
     section: 'gqa',
     executionMode: 'full_sequence',
     precision: 'bf16',
-    tokens: 12,
+    tokens: TOUR_PREFILL_TOKENS,
     selectedBay: 6,
     gqaBayId: 6,
     gqaHead: 0,
     stepperStep: 2,
     stepperAutoPlay: true,
     paragraphs: [
-      'Watch Scores populate cell-by-cell across causal keys k ≤ q via dot(Q_h[:, q], K_g[:, k]) / √d_h, while every future position k > q stays strictly masked at −∞.',
-      'Row Softmax then normalizes each causal row into attention probabilities summing to 1.000 — determining exactly which earlier tokens contribute verbatim details.',
+      'Watch the 8 × 8 Scores sheet populate cell-by-cell across causal keys k ≤ q via dot(Q_h[:, q], K_g[:, k]) / √d_h, while every future position k > q stays strictly masked at −∞.',
+      'Row Softmax then normalizes each causal row — including query t₇ = "layers" attending back over t₀..t₇ — into attention probabilities summing to 1.000.',
     ],
     takeaways: [
       'Causal mask forces upper-triangle keys (k > q) to −∞ so future tokens contribute 0.000 probability',
@@ -701,12 +711,12 @@ export const WALKTHROUGH_BEATS: readonly WalkthroughBeat[] = Object.freeze([
     act: 1,
     actLabel: ACT_1_LABEL,
     title: 'Weighted Shared V, W_O & 8.7× KV Reduction',
-    badge: 'Bay 06 · Steps 5–6 · 8.7× Less KV',
+    badge: 'Bay 06 · 48 KiB vs 416 KiB · 8.7×',
     mode: 'cutaway_gqa',
     section: 'gqa',
     executionMode: 'full_sequence',
     precision: 'bf16',
-    tokens: 12,
+    tokens: TOUR_PREFILL_TOKENS,
     selectedBay: 6,
     gqaBayId: 6,
     gqaHead: 0,
@@ -714,10 +724,10 @@ export const WALKTHROUGH_BEATS: readonly WalkthroughBeat[] = Object.freeze([
     stepperAutoPlay: true,
     paragraphs: [
       'Softmax probabilities blend shared V_g slices into V_out, all 32 heads concatenate (4,096 prod · 128 mini), and W_O projects the retrieved update back onto the emerald residual spine.',
-      'Across all 6 attention bays at T = 12 in BF16, verbatim KV tracks cost 72 KiB (+6 KiB/tok) versus 624 KiB (+52 KiB/tok) for a 52-layer pure GQA Transformer — an 8.7× reduction.',
+      'Across all 6 attention bays at T = 8 in BF16, verbatim KV tracks cost 48 KiB (8 KiB in Bay 06 · +6 KiB/tok) versus 416 KiB (+52 KiB/tok) for a 52-layer pure GQA Transformer — an 8.7× reduction.',
     ],
     takeaways: [
-      '6 GQA bays (+6 KiB/tok BF16) vs. 52-layer GQA (+52 KiB/tok) = 8.7× smaller linear KV growth',
+      'At T = 8 in BF16: 8 KiB in Bay 06 · 48 KiB across 6 GQA bays vs. 416 KiB for 52-layer pure GQA (8.7× smaller)',
       'Zoom into V₀ or Scores at close range to read live Float32 cell numbers directly on the sheet',
     ],
     interactivePrompt: 'Zoom onto V₀ or Scores to inspect cell values · Press Space for Act II (FP8)',
@@ -740,10 +750,10 @@ export const WALKTHROUGH_BEATS: readonly WalkthroughBeat[] = Object.freeze([
     section: 'kv_fp8',
     executionMode: 'full_sequence',
     precision: 'fp8_selective',
-    tokens: 9,
+    tokens: TOUR_PREFILL_TOKENS,
     selectedBay: 42,
     paragraphs: [
-      'Selective FP8 is now active: watch NVIDIA §4.2–4.3’s sensitivity boundary glow gold around Bay 42 (Mamba feeder) and Bay 43 (GQA). Quantizing all 52 layers uniformly degrades long-context attention.',
+      'Selective FP8 is now active over our same 8-token prompt (t₀..t₇): watch NVIDIA §4.2–4.3’s sensitivity boundary glow gold around Bay 42 (Mamba feeder) and Bay 43 (GQA). Quantizing all 52 layers uniformly degrades long-context attention.',
       'To protect fidelity, NVIDIA keeps BF16 compute on exactly 12 bays — all 6 GQA layers (06, 13, 20, 27, 34, 43) plus their 6 preceding Mamba-2 feeder bays (05, 12, 19, 26, 33, 42) — and preserves all 23 Conv1D strips in BF16 with FP32 SSM states.',
     ],
     takeaways: [
@@ -761,19 +771,19 @@ export const WALKTHROUGH_BEATS: readonly WalkthroughBeat[] = Object.freeze([
     act: 2,
     actLabel: ACT_2_LABEL,
     title: 'Frosted FP8 KV Tracks & ~99% Accuracy Recovery',
-    badge: 'FP8 KV · +3 KiB/tok · ~99% BF16',
+    badge: 'FP8 KV · 24 KiB vs 48 KiB · ~99%',
     mode: 'tower',
     section: 'kv_fp8',
     executionMode: 'full_sequence',
     precision: 'fp8_selective',
-    tokens: 9,
+    tokens: TOUR_PREFILL_TOKENS,
     selectedBay: 43,
     paragraphs: [
-      'The remaining 40 bays (17 Mamba + 23 MoE) and all 6 KV caches quantize cleanly to FP8 — halving linear KV cache growth from +6 KiB/tok to +3 KiB/tok even beside BF16 attention bodies.',
+      'The remaining 40 bays (17 Mamba + 23 MoE) and all 6 KV caches quantize cleanly to FP8 — halving linear KV cache growth from +6 KiB/tok to +3 KiB/tok (24 KiB FP8 vs. 48 KiB BF16 across T = 8 tokens) even beside BF16 attention bodies.',
       'This targeted boundary recovers ~99% median BF16 accuracy across reasoning benchmarks (MMLU-Pro 78.30 → 78.10 · AIME25 w/ tools 99.17 → 98.80).',
     ],
     takeaways: [
-      'KV cache halves from +6 KiB/tok (BF16) to +3 KiB/tok (FP8) across all 6 attention bays',
+      'At T = 8: FP8 KV drops all 6 attention bays to 24 KiB (+3 KiB/tok) vs. 48 KiB (+6 KiB/tok) in BF16',
       '~99% median BF16 accuracy recovery: MMLU-Pro 78.30 → 78.10 · AIME25 w/ tools 99.17 → 98.80',
     ],
     interactivePrompt: 'Toggle BF16 ↔ FP8 Selective below to compare KV bytes · Press Space for Act III',
@@ -791,25 +801,25 @@ export const WALKTHROUGH_BEATS: readonly WalkthroughBeat[] = Object.freeze([
     act: 3,
     actLabel: ACT_3_LABEL,
     title: 'Final RMSNorm, Untied LM Head & Top-5 Strip',
-    badge: 'Bay 52 Y → 131K Logits · Untied',
+    badge: 'Bay 52 Y · t₇ "layers" → t₈ Top-5',
     mode: 'cutaway_output',
     section: 'output',
     executionMode: 'full_sequence',
     precision: 'fp8_selective',
-    tokens: 9,
+    tokens: TOUR_PREFILL_TOKENS,
     selectedBay: null,
     stepperStep: 0,
     stepperAutoPlay: false,
     arAction: 'ensure_prefill',
     paragraphs: [
-      'At the bottom of the 52-layer tower, Bay 52 MoE’s emerald residual stream Y passes through Final RMSNorm (ε = 1e−5) and projects through the untied W_lm_head (2,688 → 131,072 prod · 8 → 32 live mini).',
-      'Raw vocabulary logits pass through Softmax to produce next-token probabilities, elevating the Top-5 candidate strip ready to feed back into autoregressive generation.',
+      'At the bottom of the 52-layer tower, Bay 52 MoE’s emerald residual stream Y for final prompt token t₇ = "layers" passes through Final RMSNorm (ε = 1e−5) and projects through the untied W_lm_head (2,688 → 131,072 prod · 8 → 32 live mini).',
+      'Raw vocabulary logits pass through Softmax to produce the exact Top-5 next-token distribution for position t₈ — the #1 greedy candidate shown here is the exact token Beat 7.2 will emit via cached AR decode.',
     ],
     takeaways: [
-      'Bay 52 Y → Final RMSNorm (ε = 1e−5) → Untied W_lm_head (≠ W_embed) → Logits → Softmax → Top-5 Strip',
-      'Prefill finishes with all 52 layers synced and ready to launch cached single-token AR decoding',
+      'Bay 52 Y(t₇="layers") → Final RMSNorm (ε = 1e−5) → Untied W_lm_head (≠ W_embed) → Softmax → Top-5 for t₈',
+      '8-token prefill (t₀..t₇) finishes synced across all 52 layers — ready to emit t₈ directly from cache',
     ],
-    interactivePrompt: 'Hover Logits or elevated Top-5 Probs bars · Press Space for Live AR Decode',
+    interactivePrompt: 'Hover Logits or elevated Top-5 Probs bars for t₈ · Press Space for Live AR Decode',
   },
   {
     index: 19,
@@ -820,23 +830,23 @@ export const WALKTHROUGH_BEATS: readonly WalkthroughBeat[] = Object.freeze([
     act: 3,
     actLabel: ACT_3_LABEL,
     title: 'Live Cached AR Decode Step & 52-Layer Spine Wave',
-    badge: 'AR Decode · t₄ · 52-Layer Wave',
+    badge: 'AR Decode · branch-0 · t₈ (8P+1S)',
     mode: 'tower',
     section: 'overview',
     executionMode: 'ar_decode',
     precision: 'fp8_selective',
-    tokens: 5,
+    tokens: TOUR_PREFILL_TOKENS + 1,
     selectedBay: null,
     arAction: 'step_once_with_wave',
     paragraphs: [
-      'Live cached AR Decode just stepped token t₄ from the 4-token prefill: watch the 52-layer propagation wave sweep down the emerald spine from Embedding through every bay to Output.',
-      'Each bay reveals its true scaling law in real time — 23 Mamba-2 bays refresh in place (69 KiB mini / 47.1 MiB prod fixed), 23 MoE bays hold 0 B, and only 6 GQA bays snap +1 new KV slice onto +Z.',
+      'Live cached AR Decode just stepped Beat 7.1’s #1 greedy prediction as token t₈ directly from the 8-token prefill (t₀..t₇, 8P + 1S = 9 total tokens): watch the 52-layer propagation wave sweep down the emerald spine from Embedding through every bay to Output.',
+      'Each bay reveals its true scaling law in real time — 23 Mamba-2 bays refresh in place (69 KiB mini / 47.1 MiB prod fixed), 23 MoE bays hold 0 B, and only 6 GQA bays snap +1 new KV slice for t₈ onto +Z.',
     ],
     takeaways: [
-      'Single-token step t₄ updates 23 fixed Mamba registers (69 KiB mini / 47.1 MiB prod) without growing memory',
-      '23 MoE bays add 0 B; only 6 GQA bays append +1 KV slice (+3 KiB/tok FP8 prod · +0.375 KiB/tok mini)',
+      'Single-token step t₈ (8P + 1S = 9) updates 23 fixed Mamba registers (69 KiB mini / 47.1 MiB prod) without growing memory',
+      '23 MoE bays add 0 B; only 6 GQA bays append +1 KV slice (+3 KiB/tok FP8 prod · +0.375 KiB/tok mini · 27 KiB at T=9)',
     ],
-    interactivePrompt: 'Watch the 52-layer wave land · Press Space to inspect Bay 43 Cached GQA',
+    interactivePrompt: 'Watch the 52-layer wave land · Press Space to inspect Bay 43 [1 × 9] Cached GQA',
   },
   {
     index: 20,
@@ -847,12 +857,12 @@ export const WALKTHROUGH_BEATS: readonly WalkthroughBeat[] = Object.freeze([
     act: 3,
     actLabel: ACT_3_LABEL,
     title: 'Cached [1 × (P+1)] GQA Decode (Zero Prefix Recompute)',
-    badge: 'Bay 43 · AR Decode · [1 × (P+1)]',
+    badge: 'Bay 43 · AR Decode · [1 × 9]',
     mode: 'cutaway_gqa',
     section: 'gqa',
     executionMode: 'ar_decode',
     precision: 'fp8_selective',
-    tokens: 5,
+    tokens: TOUR_PREFILL_TOKENS + 1,
     selectedBay: 43,
     gqaBayId: 43,
     gqaHead: 0,
@@ -860,14 +870,14 @@ export const WALKTHROUGH_BEATS: readonly WalkthroughBeat[] = Object.freeze([
     stepperAutoPlay: true,
     arAction: 'inspect_cached_gqa',
     paragraphs: [
-      'Inside Bay 43 GQA during cached AR decode, prefill’s square lower triangle collapses into one truthful rectangular [1 × (P+1)] query row: only token t₄ computes Q, K, and V.',
-      'The single new query attends across P reused cached prefix KV slices plus 1 newly appended KV slice — zero prefix recompute, matching full-sequence attention bit-exact (0 ulp).',
+      'Inside Bay 43 GQA during cached AR decode, prefill’s square lower triangle collapses into one truthful rectangular [1 × 9] query row ([1 × (P+1)]): only newly generated token t₈ computes Q, K, and V.',
+      'The single new query attends across 8 reused cached prefix KV slices (t₀..t₇) plus 1 newly appended KV slice (t₈) — zero prefix recompute, matching full-sequence attention bit-exact (0 ulp).',
     ],
     takeaways: [
-      'Rectangular [1 × (P+1)] scores: P reused prefix KV slices + 1 new KV slice (zero prefix recompute)',
+      'Rectangular [1 × 9] scores: 8 reused prefix KV slices (t₀..t₇) + 1 new KV slice (t₈) with zero prefix recompute',
       'Bit-exact (0 ulp) parity with full-sequence execution across all 52 layers — contrast Bay 01 carried H_{t−1}',
     ],
-    interactivePrompt: 'Scrub the [1 × (P+1)] decode row or inspect Bay 01 H_{t−1} · Press Space',
+    interactivePrompt: 'Scrub the [1 × 9] decode row or inspect Bay 01 H_{t−1} · Press Space',
   },
   {
     index: 21,
@@ -883,12 +893,12 @@ export const WALKTHROUGH_BEATS: readonly WalkthroughBeat[] = Object.freeze([
     section: 'overview',
     executionMode: 'ar_decode',
     precision: 'fp8_selective',
-    tokens: 5,
+    tokens: TOUR_PREFILL_TOKENS + 1,
     selectedBay: null,
     arAction: 'invite_branch_and_chart',
     highlightMemoryChart: true,
     paragraphs: [
-      'Every decode cache snapshot is strictly immutable (copy-on-step): click any alternative Top-5 candidate in the AR panel to fork branch-1 and compare divergent generations without mutating branch-0.',
+      'Every decode cache snapshot is strictly immutable (copy-on-step): from branch-0 at t₈ (8P + 1S = 9 tokens), click any alternative Top-5 candidate in the AR panel to fork branch-1 and compare divergent generations without mutating branch-0.',
       'Scale this exact hybrid architecture to 1,048,576 tokens and total sequence state reaches just 3.05 GiB in FP8 (6.05 GiB BF16) versus 26.0 GiB FP8 (52.0 GiB BF16) for a 52-layer GQA Transformer — 8.5× smaller.',
     ],
     takeaways: [
@@ -997,4 +1007,112 @@ export function findMatchingBeat(
     }
   }
   return best ?? candidates[0];
+}
+
+export interface LiveDecodeBeatSummary {
+  readonly stepIndex: number;
+  readonly totalSteps: number;
+  readonly branchId: string;
+  readonly prefixTokens: number;
+  readonly newTokens: number;
+  readonly totalTokens: number;
+  readonly lastTokenPos: number;
+  readonly lastTokenLabel: string;
+  readonly greedyNextLabel: string;
+}
+
+export function resolveBeatDisplayCopy(
+  beat: WalkthroughBeat,
+  liveDecode?: LiveDecodeBeatSummary | null,
+): {
+  readonly badge: string;
+  readonly paragraphs: readonly string[];
+  readonly takeaways: readonly string[];
+} {
+  if (!liveDecode || beat.executionMode !== 'ar_decode') {
+    return {
+      badge: beat.badge,
+      paragraphs: beat.paragraphs,
+      takeaways: beat.takeaways,
+    };
+  }
+
+  const prefixTokens = Math.max(0, Math.trunc(liveDecode.prefixTokens));
+  const newTokens = Math.max(1, Math.trunc(liveDecode.newTokens));
+  const totalTokens = Math.max(prefixTokens + newTokens, Math.trunc(liveDecode.totalTokens));
+  const lastTokenPos = Math.max(0, Math.trunc(liveDecode.lastTokenPos));
+  const stepIndex = Math.max(0, Math.trunc(liveDecode.stepIndex));
+  const maxStepIndex = Math.max(stepIndex, Math.trunc(liveDecode.totalSteps) - 1);
+  const branchId = liveDecode.branchId.trim() || 'branch-0';
+  const lastTokenLabel = liveDecode.lastTokenLabel;
+  const greedyNextLabel = liveDecode.greedyNextLabel;
+  const tokenTag = `t${lastTokenPos} "${lastTokenLabel}"`;
+  const nextPos = lastTokenPos + 1;
+  const matrixShape = `[${newTokens} × ${totalTokens}]`;
+  const stepSplit = `${prefixTokens}P+${newTokens}S`;
+  const kvReusePhrase = `${prefixTokens} reused prefix + ${newTokens} new`;
+  const prefixSpan =
+    prefixTokens > 1 ? `t0..t${prefixTokens - 1}` : prefixTokens === 1 ? 't0' : 'no cached prefix';
+  const kvFp8KiB = totalTokens * 3;
+
+  if (beat.id === '7.2') {
+    return {
+      badge: `AR Decode · ${branchId} · ${tokenTag} · ${stepSplit}`,
+      paragraphs:
+        prefixTokens > 0
+          ? [
+              `Live cached AR Decode on ${branchId} (step ${stepIndex}/${maxStepIndex}) just processed ${tokenTag} using ${kvReusePhrase} (${stepSplit} = ${totalTokens} total tokens, ${matrixShape}): watch the 52-layer propagation wave sweep down the emerald spine from Embedding through every bay to Output.`,
+              `Each bay reveals its true scaling law in real time — 23 Mamba-2 bays refresh in place (69 KiB mini / 47.1 MiB prod fixed), 23 MoE bays hold 0 B, and only 6 GQA bays snap +${newTokens} new KV slice onto +Z (${kvFp8KiB} KiB FP8 total). Next greedy candidate for t${nextPos}: "${greedyNextLabel}".`,
+            ]
+          : [
+              `Inspecting prefill step 0/${maxStepIndex} on ${branchId} (${kvReusePhrase} = ${totalTokens} tokens ending at ${tokenTag}, ${matrixShape}): all 52 layers are primed to emit the next token directly from cache.`,
+              `Each bay reveals its true scaling law — 23 Mamba-2 bays hold fixed recurrent state (69 KiB mini / 47.1 MiB prod), 23 MoE bays store 0 B, and 6 GQA bays populate ${totalTokens} verbatim KV slices (${kvFp8KiB} KiB FP8). Next greedy candidate for t${nextPos}: "${greedyNextLabel}".`,
+            ],
+      takeaways: [
+        `${branchId} step ${stepIndex}/${maxStepIndex} (${tokenTag}, ${stepSplit} = ${totalTokens} tokens): 23 fixed Mamba registers (69 KiB mini / 47.1 MiB prod) update in place without growing memory`,
+        `23 MoE bays add 0 B; only 6 GQA bays append KV slices (+3 KiB/tok FP8 prod · +0.375 KiB/tok mini · ${kvFp8KiB} KiB at T=${totalTokens}) · next greedy t${nextPos}: "${greedyNextLabel}"`,
+      ],
+    };
+  }
+
+  if (beat.id === '7.3') {
+    return {
+      badge: `Bay 43 · ${branchId} · ${matrixShape}`,
+      paragraphs:
+        prefixTokens > 0
+          ? [
+              `Inside Bay 43 GQA on ${branchId} during cached AR decode, prefill’s square lower triangle collapses into one truthful rectangular ${matrixShape} query row: only newly generated ${tokenTag} computes Q, K, and V.`,
+              `That single query attends across ${kvReusePhrase} KV slices (${prefixSpan} reused + t${lastTokenPos} appended, ${totalTokens} total) — zero prefix recompute, matching full-sequence attention bit-exact (0 ulp) before predicting t${nextPos} "${greedyNextLabel}".`,
+            ]
+          : [
+              `Inside Bay 43 GQA on ${branchId} at prefill step 0, attention runs as a full causal ${matrixShape} sheet across ${newTokens} tokens ending at ${tokenTag} (${kvReusePhrase}).`,
+              `Step forward to emit t${nextPos} "${greedyNextLabel}" and watch this triangle collapse into a single rectangular [1 × ${totalTokens + 1}] cached decode row with zero prefix recompute (0 ulp parity).`,
+            ],
+      takeaways: [
+        `Rectangular ${matrixShape} scores on ${branchId}: ${kvReusePhrase} KV slices (${totalTokens} total, zero prefix recompute)`,
+        `Bit-exact (0 ulp) parity with full-sequence execution for ${tokenTag} across all 52 layers · next greedy t${nextPos}: "${greedyNextLabel}"`,
+      ],
+    };
+  }
+
+  if (beat.id === '7.4') {
+    return {
+      badge: `${branchId} · ${tokenTag} · 3.05 vs 26.0 GiB`,
+      paragraphs: [
+        `Every decode cache snapshot is strictly immutable (copy-on-step): on ${branchId} at ${tokenTag} (${kvReusePhrase} = ${totalTokens} tokens, ${matrixShape}), greedy continues with t${nextPos} "${greedyNextLabel}" — click any alternative Top-5 candidate in the AR panel to fork a new branch without mutating prior snapshots.`,
+        `Scale this exact hybrid architecture to 1,048,576 tokens and total sequence state reaches just 3.05 GiB in FP8 (6.05 GiB BF16) versus 26.0 GiB FP8 (52.0 GiB BF16) for a 52-layer GQA Transformer — 8.5× smaller.`,
+      ],
+      takeaways: [
+        `Active snapshot: ${branchId} step ${stepIndex}/${maxStepIndex} (${tokenTag}, ${stepSplit} = ${totalTokens} tokens, next greedy "${greedyNextLabel}") — copy-on-step keeps branches isolated`,
+        `At 1M tokens: 3.05 GiB FP8 (6.05 GiB BF16) vs. 26.0 GiB / 52.0 GiB pure GQA (8.5× smaller)`,
+        `Open Memory Scaling 1 → 1M ↗ (or press M) to inspect crossovers at 1,048 / 2,096 and 8,035 / 16,070 tokens`,
+      ],
+    };
+  }
+
+  return {
+    badge: beat.badge,
+    paragraphs: beat.paragraphs,
+    takeaways: beat.takeaways,
+  };
 }
