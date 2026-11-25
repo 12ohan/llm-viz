@@ -16,6 +16,7 @@ import {
   type ExecutionMode,
   type GqaViewAngle,
   type SceneState,
+  type SpineWaveMode,
   type TocSectionId,
   type ViewMode,
 } from './model/state';
@@ -46,14 +47,33 @@ import {
   type HybridExecutionResult,
 } from './math/hybridFlow';
 import {
-  createDecodeSession,
   getActiveDecodeStep,
-  navigateDecodeSession,
-  stepDecodeSession,
-  stepDecodeSessionGreedy,
-  switchDecodeSessionBranch,
   type HybridDecodeSession,
 } from './math/incrementalDecode';
+import {
+  advanceSpineWavePlayback,
+  applyDecodeActionToActiveSession,
+  createDualDecodeSessionStore,
+  createIdleSpineWaveState,
+  ensureTourArDecodeSession,
+  gqaAccumTermBucket,
+  gqaStepPlayDurationSec,
+  mambaAccumTermBucket,
+  mambaStepPlayDurationSec,
+  moeAccumTermBucket,
+  moeStepPlayDurationSec,
+  resetTourOnlyDecodeSession,
+  resolveActiveDecodeSession,
+  resolveGqaAccumTermProgress,
+  resolveMambaAccumTermProgress,
+  resolveMoeAccumTermProgress,
+  resolveMoeStepperCellForAccum,
+  startSpineWavePlayback,
+  toggleSpineWavePlaybackPause,
+  type DecodeSessionAction,
+  type DualDecodeSessionStore,
+  type SpineWavePlaybackState,
+} from './model/rcPlayback';
 import {
   inferMambaCellHead,
   MAMBA_STEPPER_STEPS,
@@ -477,8 +497,20 @@ function boot(): void {
   let embeddingHoveredCell: EmbeddingCellRef | null = null;
   let outputHoveredCell: OutputCellRef | null = null;
   let bookendStepIndex: number | null = null;
-  let spineWaveStartMs: number | null = null;
-  const SPINE_WAVE_DURATION_MS = 900;
+  let spineWaveClock: SpineWavePlaybackState = createIdleSpineWaveState('fast');
+  let spineWaveLastTickMs: number | null = null;
+
+  const applySpineWaveStateToScene = (wave: SpineWavePlaybackState) => {
+    spineWaveClock = wave;
+    state.spineWaveProgress = wave.progress;
+    state.spineWaveMode = wave.mode;
+    state.spineWavePaused = wave.paused;
+  };
+
+  const clearSpineWave = (keepMode = true) => {
+    spineWaveLastTickMs = null;
+    applySpineWaveStateToScene(createIdleSpineWaveState(keepMode ? state.spineWaveMode : 'fast'));
+  };
 
   let device: RenderDevice | null = null;
   let solidsPass: SolidsPass | null = null;
@@ -596,13 +628,28 @@ function boot(): void {
           ? state.moeViewAngle
           : state.gqaViewAngle;
 
-  // Single authoritative unified 52-layer miniature model + bounded execution cache + cached AR decode session
+  // Single authoritative unified 52-layer miniature model + bounded execution cache + isolated Tour/Free-Explore AR sessions
   const hybridModel = createDefaultHybridModel();
   const hybridCache = new HybridExecutionCache(16);
-  let decodeSession: HybridDecodeSession = createDecodeSession(hybridModel, {
-    promptTokenIds: [0, 1, 2, 3],
-    precisionMetadata: state.precision,
-  });
+  let decodeSessions: DualDecodeSessionStore = createDualDecodeSessionStore(
+    hybridModel,
+    state.precision,
+  );
+
+  const activeDecodeSession = (): HybridDecodeSession => {
+    const resolved = resolveActiveDecodeSession(
+      decodeSessions,
+      state.tourActive,
+      state.tourBeat,
+      hybridModel,
+      state.precision,
+    );
+    decodeSessions = resolved.store;
+    return resolved.session;
+  };
+
+  const activeDecodeSessionOrNull = (): HybridDecodeSession | null =>
+    state.executionMode === 'ar_decode' ? activeDecodeSession() : null;
 
   const activeHybridExecution = (): HybridExecutionResult =>
     getOrRunHybridExecution(hybridModel, hybridCache, {
@@ -611,22 +658,22 @@ function boot(): void {
 
   const activeCutawayTokens = (): number =>
     state.executionMode === 'ar_decode'
-      ? getActiveDecodeStep(decodeSession).tokens
+      ? getActiveDecodeStep(activeDecodeSession()).tokens
       : state.tokens;
 
   const activeMambaSim = () =>
     state.executionMode === 'ar_decode'
-      ? getActiveDecodeStep(decodeSession).getMambaTrace(state.mambaBayId)
+      ? getActiveDecodeStep(activeDecodeSession()).getMambaTrace(state.mambaBayId)
       : activeHybridExecution().getMambaTrace(state.mambaBayId);
 
   const activeMoeSim = () =>
     state.executionMode === 'ar_decode'
-      ? getActiveDecodeStep(decodeSession).getMoeTrace(state.moeBayId)
+      ? getActiveDecodeStep(activeDecodeSession()).getMoeTrace(state.moeBayId)
       : activeHybridExecution().getMoeTrace(state.moeBayId);
 
   const activeGqaSim = () =>
     state.executionMode === 'ar_decode'
-      ? getActiveDecodeStep(decodeSession).getGqaTrace(state.gqaBayId)
+      ? getActiveDecodeStep(activeDecodeSession()).getGqaTrace(state.gqaBayId)
       : activeHybridExecution().getGqaTrace(state.gqaBayId);
 
   const activeMoeFocusToken = (): number =>
@@ -682,8 +729,20 @@ function boot(): void {
 
   const resolveActiveMoeCell = (): MoeCellRef | null => {
     if (state.mode !== 'cutaway_moe') return null;
+    const sim = activeMoeSim();
+    if (state.moeStepperActive && !state.moeHoveredCell && !state.moeSelectedCell) {
+      const tok = resolveActiveMoeFocusToken(state.moeFocusToken, sim.tokens);
+      const exp = activeMoeFocusExpert(sim, tok);
+      return resolveMoeStepperCellForAccum(
+        sim,
+        state.moeStepperStep,
+        state.moeStepperSubProgress,
+        tok,
+        exp,
+      );
+    }
     return resolveEffectiveMoeCell({
-      sim: activeMoeSim(),
+      sim,
       moeFocusToken: state.moeFocusToken,
       moeActiveExpert: state.moeActiveExpert,
       moeTokenCycling: state.moeTokenCycling,
@@ -697,7 +756,7 @@ function boot(): void {
 
   const activeEmbeddingPayload = () => {
     if (state.executionMode === 'ar_decode') {
-      const step = getActiveDecodeStep(decodeSession);
+      const step = getActiveDecodeStep(activeDecodeSession());
       return {
         embedding: { X: step.X_embed },
         tokenIds: step.newTokenIds,
@@ -716,7 +775,7 @@ function boot(): void {
 
   const activeOutputPayload = () => {
     if (state.executionMode === 'ar_decode') {
-      const step = getActiveDecodeStep(decodeSession);
+      const step = getActiveDecodeStep(activeDecodeSession());
       return {
         residualIn: step.residualStreams[step.residualStreams.length - 1],
         finalNorm: step.finalNorm,
@@ -781,6 +840,15 @@ function boot(): void {
     }
     if (state.mode === 'cutaway_mamba') {
       const sim = activeMambaSim();
+      const termProgress = resolveMambaAccumTermProgress(
+        sim,
+        state.mambaStepperStep,
+        state.mambaStepperSubProgress,
+        state.mambaStepperActive,
+        state.reducedMotion,
+        state.mambaHoveredCell !== null || state.mambaSelectedCell !== null,
+      );
+      state.mambaAccumTermProgress = termProgress;
       return buildMambaCutaway({
         bayId: state.mambaBayId,
         tokens: sim.tokens,
@@ -792,6 +860,7 @@ function boot(): void {
         stepperStep: state.mambaStepperActive ? state.mambaStepperStep : null,
         stepperActive: state.mambaStepperActive,
         stepperSubProgress: state.mambaStepperSubProgress,
+        termProgress,
         reducedMotion: state.reducedMotion,
         viewAngle: state.mambaViewAngle,
         stateTokenIndex: state.mambaStateToken,
@@ -801,6 +870,15 @@ function boot(): void {
     if (state.mode === 'cutaway_moe') {
       const sim = activeMoeSim();
       const tok = activeMoeFocusToken();
+      const termProgress = resolveMoeAccumTermProgress(
+        sim,
+        state.moeStepperStep,
+        state.moeStepperSubProgress,
+        state.moeStepperActive,
+        state.reducedMotion,
+        state.moeHoveredCell !== null || state.moeSelectedCell !== null,
+      );
+      state.moeAccumTermProgress = termProgress;
       return buildMoECutaway({
         bayId: state.moeBayId,
         tokens: sim.tokens,
@@ -813,6 +891,7 @@ function boot(): void {
         stepperStep: state.moeStepperActive ? state.moeStepperStep : null,
         stepperActive: state.moeStepperActive,
         stepperSubProgress: state.moeStepperSubProgress,
+        termProgress,
         reducedMotion: state.reducedMotion,
         viewAngle: state.moeViewAngle,
         simOverride: sim,
@@ -820,6 +899,15 @@ function boot(): void {
     }
     if (state.mode === 'cutaway_gqa') {
       const sim = activeGqaSim();
+      const termProgress = resolveGqaAccumTermProgress(
+        sim,
+        state.gqaStepperStep,
+        state.gqaStepperSubProgress,
+        state.gqaStepperActive,
+        state.reducedMotion,
+        state.gqaHoveredCell !== null || state.gqaSelectedCell !== null,
+      );
+      state.gqaAccumTermProgress = termProgress;
       return buildGqaCutaway({
         bayId: state.gqaBayId,
         tokens: sim.tokens,
@@ -832,6 +920,7 @@ function boot(): void {
         stepperStep: state.gqaStepperActive ? state.gqaStepperStep : null,
         stepperActive: state.gqaStepperActive,
         stepperPulsePhase: state.gqaStepperSubProgress,
+        termProgress,
         reducedMotion: state.reducedMotion,
         viewAngle: state.gqaViewAngle,
         simOverride: sim,
@@ -856,6 +945,7 @@ function boot(): void {
             ? {
                 progress: state.spineWaveProgress,
                 activeTokenIndex: Math.max(0, state.tokens - 1),
+                mode: state.spineWaveMode,
               }
             : null,
       });
@@ -906,19 +996,11 @@ function boot(): void {
     geometryDirty = false;
   };
 
-  const startSpineWave = () => {
+  const startSpineWave = (mode: SpineWaveMode = 'fast') => {
     if (state.mode !== 'tower') return;
-    if (state.reducedMotion) {
-      spineWaveStartMs = null;
-      state.spineWaveProgress = null;
-      geometryDirty = true;
-      rebuildSceneIfNeeded();
-      syncUi();
-      scheduleDraw();
-      return;
-    }
-    spineWaveStartMs = performance.now();
-    state.spineWaveProgress = 0;
+    const started = startSpineWavePlayback(mode, state.reducedMotion);
+    applySpineWaveStateToScene(started);
+    spineWaveLastTickMs = state.reducedMotion ? null : performance.now();
     geometryDirty = true;
     rebuildSceneIfNeeded();
     syncUi();
@@ -931,7 +1013,7 @@ function boot(): void {
       currentCutawayScene,
       manualCameraOverride,
       activeHybridExecution(),
-      state.executionMode === 'ar_decode' ? decodeSession : null,
+      activeDecodeSessionOrNull(),
     );
     memoryDrawer.sync(state.memoryChartOpen, state.precision, state.memoryProbeTokens);
   };
@@ -1256,26 +1338,29 @@ function boot(): void {
     state.gqaSelectedCell = null;
     state.gqaStepperActive = false;
     state.gqaStepperPlaying = false;
+    state.gqaAccumTermProgress = 1;
     state.mambaHoveredCell = null;
     state.mambaSelectedCell = null;
     state.mambaStepperActive = false;
     state.mambaStepperPlaying = false;
     state.mambaTemporalPlaying = false;
+    state.mambaAccumTermProgress = 1;
     state.moeHoveredCell = null;
     state.moeSelectedCell = null;
     state.moeStepperActive = false;
     state.moeStepperPlaying = false;
     state.moeTokenCycling = false;
+    state.moeAccumTermProgress = 1;
     state.embeddingActiveCell = null;
     state.outputActiveCell = null;
     embeddingHoveredCell = null;
     outputHoveredCell = null;
     bookendStepIndex = beat.stepperStep ?? null;
     lastStepperTickMs = null;
+    lastStepperCellKey = '';
     lastMambaTemporalTickMs = null;
     lastMoeCycleTickMs = null;
-    spineWaveStartMs = null;
-    state.spineWaveProgress = null;
+    clearSpineWave(false);
 
     if (beat.mambaBayId) state.mambaBayId = beat.mambaBayId;
     if (beat.moeBayId) state.moeBayId = beat.moeBayId;
@@ -1286,22 +1371,23 @@ function boot(): void {
     }
 
     state.executionMode = beat.executionMode;
-    if (beat.arAction === 'step_once_with_wave') {
-      if (getActiveDecodeStep(decodeSession).totalTokens <= 4) {
-        decodeSession = stepDecodeSessionGreedy(decodeSession);
-      }
-      state.tokens = getActiveDecodeStep(decodeSession).totalTokens;
-    } else if (beat.arAction === 'inspect_cached_gqa' || beat.arAction === 'invite_branch_and_chart') {
-      if (getActiveDecodeStep(decodeSession).totalTokens <= 4) {
-        decodeSession = stepDecodeSessionGreedy(decodeSession);
-      }
-      state.tokens = getActiveDecodeStep(decodeSession).totalTokens;
+    if (
+      beat.executionMode === 'ar_decode' ||
+      beat.arAction === 'step_once_with_wave' ||
+      beat.arAction === 'inspect_cached_gqa' ||
+      beat.arAction === 'invite_branch_and_chart'
+    ) {
+      decodeSessions = ensureTourArDecodeSession(decodeSessions, hybridModel, beat.precision);
+      const activeStep = getActiveDecodeStep(decodeSessions.tour!);
+      state.tokens = activeStep.totalTokens;
+      state.embeddingFocusToken = Math.max(0, activeStep.tokens - 1);
+      state.outputFocusToken = Math.max(0, activeStep.tokens - 1);
     } else {
       state.tokens = beat.tokens;
+      state.embeddingFocusToken = Math.max(0, state.tokens - 1);
+      state.outputFocusToken = Math.max(0, state.tokens - 1);
     }
 
-    state.embeddingFocusToken = Math.max(0, state.tokens - 1);
-    state.outputFocusToken = Math.max(0, state.tokens - 1);
     state.mambaStateToken = null;
     state.moeFocusToken = null;
     state.moeActiveExpert = null;
@@ -1335,7 +1421,7 @@ function boot(): void {
     flyCameraForBeat(beat.index);
 
     if (beat.arAction === 'step_once_with_wave' && state.mode === 'tower') {
-      startSpineWave();
+      startSpineWave('instructional');
     } else {
       scheduleDraw();
     }
@@ -1345,7 +1431,29 @@ function boot(): void {
     if (!state.tourActive && !state.tourExploring) return;
     state.tourActive = false;
     state.tourExploring = false;
+    if (state.executionMode === 'ar_decode') {
+      const activeStep = getActiveDecodeStep(activeDecodeSession());
+      state.tokens = activeStep.totalTokens;
+      state.embeddingFocusToken = Math.max(0, activeStep.tokens - 1);
+      state.outputFocusToken = Math.max(0, activeStep.tokens - 1);
+      state.mambaStateToken = null;
+      state.mambaSelectedCell = null;
+      state.mambaHoveredCell = null;
+      state.moeFocusToken = null;
+      state.moeActiveExpert = null;
+      state.moeSelectedCell = null;
+      state.moeHoveredCell = null;
+      state.gqaSelectedCell = null;
+      state.gqaHoveredCell = null;
+      state.embeddingActiveCell = null;
+      state.outputActiveCell = null;
+      embeddingHoveredCell = null;
+      outputHoveredCell = null;
+      geometryDirty = true;
+      rebuildSceneIfNeeded();
+    }
     syncUi();
+    scheduleDraw();
   };
 
   const selectMode = (nextMode: ViewMode, customPose?: CameraPose, keepTour = false) => {
@@ -1376,8 +1484,7 @@ function boot(): void {
       state.outputActiveCell = null;
       bookendStepIndex = null;
       if (nextMode !== 'tower') {
-        spineWaveStartMs = null;
-        state.spineWaveProgress = null;
+        clearSpineWave(true);
       }
       if (nextMode !== 'cutaway_gqa') {
         state.gqaStepperPlaying = false;
@@ -1393,6 +1500,7 @@ function boot(): void {
         lastMoeCycleTickMs = null;
       }
       lastStepperTickMs = null;
+      lastStepperCellKey = '';
     }
     if (nextMode === 'cutaway_embedding') state.section = 'embedding';
     else if (nextMode === 'cutaway_mamba') state.section = 'mamba';
@@ -1549,10 +1657,7 @@ function boot(): void {
 
   const resetAll = () => {
     state.executionMode = 'full_sequence';
-    decodeSession = createDecodeSession(hybridModel, {
-      promptTokenIds: [0, 1, 2, 3],
-      precisionMetadata: 'bf16',
-    });
+    decodeSessions = createDualDecodeSessionStore(hybridModel, 'bf16');
     state.tokens = DEFAULT_TOKENS;
     state.precision = 'bf16';
     state.selectedBay = null;
@@ -1568,6 +1673,7 @@ function boot(): void {
     state.mambaStepperPlaying = false;
     state.mambaStepperStep = 0;
     state.mambaStepperSubProgress = 0;
+    state.mambaAccumTermProgress = 1;
     state.gqaHoveredCell = null;
     state.gqaSelectedCell = null;
     state.gqaActiveGroup0Head = 0;
@@ -1576,6 +1682,7 @@ function boot(): void {
     state.gqaStepperPlaying = false;
     state.gqaStepperStep = 0;
     state.gqaStepperSubProgress = 0;
+    state.gqaAccumTermProgress = 1;
     state.moeFocusToken = null;
     state.moeActiveExpert = null;
     state.moeTokenCycling = false;
@@ -1585,6 +1692,7 @@ function boot(): void {
     state.moeStepperPlaying = false;
     state.moeStepperStep = 0;
     state.moeStepperSubProgress = 0;
+    state.moeAccumTermProgress = 1;
     state.embeddingFocusToken = DEFAULT_TOKENS - 1;
     state.outputFocusToken = DEFAULT_TOKENS - 1;
     state.embeddingActiveCell = null;
@@ -1592,8 +1700,7 @@ function boot(): void {
     embeddingHoveredCell = null;
     outputHoveredCell = null;
     bookendStepIndex = null;
-    state.spineWaveProgress = null;
-    spineWaveStartMs = null;
+    clearSpineWave(false);
     state.savedEmbedPose = null;
     state.savedOutputPose = null;
     state.tourExploring = false;
@@ -1601,6 +1708,7 @@ function boot(): void {
     manualCameraOverride = false;
     lastAutoFollowedStepKey = '';
     lastStepperTickMs = null;
+    lastStepperCellKey = '';
     lastMambaTemporalTickMs = null;
     lastMoeCycleTickMs = null;
     savedGqaSpatialPose = null;
@@ -1661,7 +1769,58 @@ function boot(): void {
     },
   });
 
-  const controls = new MacroControls(NEMOTRON_SPEC, controlEls, {
+  const applyActiveDecodeAction = (
+    action: DecodeSessionAction,
+    triggerFastWave = false,
+  ) => {
+    markTourExploring();
+    const result = applyDecodeActionToActiveSession(
+      decodeSessions,
+      state.tourActive,
+      state.tourBeat,
+      hybridModel,
+      state.precision,
+      action,
+    );
+    decodeSessions = result.store;
+    const activeStep = getActiveDecodeStep(result.session);
+    state.tokens = activeStep.totalTokens;
+    state.embeddingFocusToken = Math.max(0, activeStep.tokens - 1);
+    state.outputFocusToken = Math.max(0, activeStep.tokens - 1);
+    state.mambaStateToken = null;
+    state.mambaTemporalPlaying = false;
+    state.mambaSelectedCell = null;
+    state.mambaHoveredCell = null;
+    state.moeFocusToken = null;
+    state.moeActiveExpert = null;
+    state.moeTokenCycling = false;
+    state.moeSelectedCell = null;
+    state.moeHoveredCell = null;
+    state.gqaSelectedCell = null;
+    state.gqaHoveredCell = null;
+    state.embeddingActiveCell = null;
+    state.outputActiveCell = null;
+    embeddingHoveredCell = null;
+    outputHoveredCell = null;
+    if (action.type === 'reset') {
+      clearSpineWave(true);
+    }
+    if (triggerFastWave && state.mode === 'tower') {
+      startSpineWave('fast');
+    } else {
+      markDirtyAndSchedule(true);
+    }
+  };
+
+  const controls = new MacroControls(
+    NEMOTRON_SPEC,
+    {
+      ...controlEls,
+      spineWaveHud:
+        controlEls.spineWaveHud ??
+        (document.getElementById('spine-wave-hud') as HTMLDivElement | null),
+    },
+    {
     onSelectMode: (mode) => selectMode(mode),
     onSelectSection: selectSection,
     onSelectMambaBay: (bayId) => {
@@ -2115,7 +2274,10 @@ function boot(): void {
       scheduleDraw();
     },
     onTourToggleBeatPlay: () => toggleCutawayStepperPlay(true),
-    onTourRestart: () => applyTourBeat(0),
+    onTourRestart: () => {
+      decodeSessions = resetTourOnlyDecodeSession(decodeSessions);
+      applyTourBeat(0);
+    },
     onTourExit: exitTourToFreeExplore,
     onSelectEmbeddingToken: (tokenIdx: number) => {
       markTourExploring();
@@ -2163,7 +2325,26 @@ function boot(): void {
       if (state.mode !== 'tower') {
         selectMode('tower', cameraPoseForSection('overview', currentMetrics), true);
       }
-      startSpineWave();
+      startSpineWave('fast');
+    },
+    onReplaySpineWaveMode: (mode: SpineWaveMode) => {
+      if (state.mode !== 'tower') {
+        selectMode('tower', cameraPoseForSection('overview', currentMetrics), true);
+      }
+      startSpineWave(mode);
+    },
+    onToggleSpineWavePause: () => {
+      if (state.mode !== 'tower' || spineWaveClock.progress === null || state.reducedMotion) return;
+      const toggled = toggleSpineWavePlaybackPause(spineWaveClock, state.reducedMotion);
+      applySpineWaveStateToScene(toggled);
+      spineWaveLastTickMs = toggled.paused ? null : performance.now();
+      controls.syncSpineWaveHud(state, activeHybridExecution(), activeDecodeSessionOrNull());
+      scheduleDraw();
+    },
+    onDismissSpineWaveHud: () => {
+      if (spineWaveClock.progress === null && state.spineWaveProgress === null) return;
+      clearSpineWave(true);
+      markDirtyAndSchedule(true);
     },
     onToggleMemoryChart: () => {
       state.memoryChartOpen = !state.memoryChartOpen;
@@ -2182,6 +2363,7 @@ function boot(): void {
     onGqaStepPrev: () => {
       markTourExploring();
       lastStepperTickMs = null;
+      lastStepperCellKey = '';
       manualCameraOverride = false;
       if (state.mode === 'cutaway_embedding') {
         const cur = bookendStepIndex ?? 0;
@@ -2241,6 +2423,7 @@ function boot(): void {
     onGqaStepNext: () => {
       markTourExploring();
       lastStepperTickMs = null;
+      lastStepperCellKey = '';
       manualCameraOverride = false;
       if (state.mode === 'cutaway_embedding') {
         const cur = bookendStepIndex ?? -1;
@@ -2298,6 +2481,7 @@ function boot(): void {
     onGqaStepSelect: (step: number) => {
       markTourExploring();
       lastStepperTickMs = null;
+      lastStepperCellKey = '';
       manualCameraOverride = false;
       if (state.mode === 'cutaway_embedding' || state.mode === 'cutaway_output') {
         applyBookendStepFocus(step);
@@ -2334,10 +2518,12 @@ function boot(): void {
     onGqaStepScrub: (progress01: number) => {
       markTourExploring();
       lastStepperTickMs = null;
+      lastStepperCellKey = '';
+      const clampedProgress = Math.max(0, Math.min(1, progress01));
       if (state.mode === 'cutaway_embedding') {
         const step = Math.min(
           EMBEDDING_STEPPER_STEPS.length - 1,
-          Math.floor(Math.max(0, Math.min(0.9999, progress01)) * EMBEDDING_STEPPER_STEPS.length),
+          Math.floor(Math.max(0, Math.min(0.9999, clampedProgress)) * EMBEDDING_STEPPER_STEPS.length),
         );
         applyBookendStepFocus(step);
         return;
@@ -2345,7 +2531,7 @@ function boot(): void {
       if (state.mode === 'cutaway_output') {
         const step = Math.min(
           OUTPUT_STEPPER_STEPS.length - 1,
-          Math.floor(Math.max(0, Math.min(0.9999, progress01)) * OUTPUT_STEPPER_STEPS.length),
+          Math.floor(Math.max(0, Math.min(0.9999, clampedProgress)) * OUTPUT_STEPPER_STEPS.length),
         );
         applyBookendStepFocus(step);
         return;
@@ -2355,19 +2541,19 @@ function boot(): void {
         state.mambaHoveredCell = null;
         state.mambaStepperActive = true;
         state.mambaStepperPlaying = false;
-        state.mambaStepperSubProgress = Math.max(0, Math.min(0.9999, progress01));
+        state.mambaStepperSubProgress = clampedProgress;
       } else if (state.mode === 'cutaway_moe') {
         state.moeSelectedCell = null;
         state.moeHoveredCell = null;
         state.moeStepperActive = true;
         state.moeStepperPlaying = false;
-        state.moeStepperSubProgress = Math.max(0, Math.min(0.9999, progress01));
+        state.moeStepperSubProgress = clampedProgress;
       } else {
         state.gqaSelectedCell = null;
         state.gqaHoveredCell = null;
         state.gqaStepperActive = true;
         state.gqaStepperPlaying = false;
-        state.gqaStepperSubProgress = Math.max(0, Math.min(0.9999, progress01));
+        state.gqaStepperSubProgress = clampedProgress;
       }
       markDirtyAndSchedule(true);
     },
@@ -2381,23 +2567,27 @@ function boot(): void {
       state.gqaHoveredCell = null;
       state.gqaStepperActive = false;
       state.gqaStepperPlaying = false;
+      state.gqaAccumTermProgress = 1;
       state.mambaSelectedCell = null;
       state.mambaHoveredCell = null;
       state.mambaStepperActive = false;
       state.mambaStepperPlaying = false;
       state.mambaTemporalPlaying = false;
+      state.mambaAccumTermProgress = 1;
       lastMambaTemporalTickMs = null;
       state.moeSelectedCell = null;
       state.moeHoveredCell = null;
       state.moeStepperActive = false;
       state.moeStepperPlaying = false;
       state.moeTokenCycling = false;
+      state.moeAccumTermProgress = 1;
       state.embeddingActiveCell = null;
       state.outputActiveCell = null;
       embeddingHoveredCell = null;
       outputHoveredCell = null;
       bookendStepIndex = null;
       lastStepperTickMs = null;
+      lastStepperCellKey = '';
       lastMoeCycleTickMs = null;
       manualCameraOverride = false;
       lastAutoFollowedStepKey = '';
@@ -2450,7 +2640,7 @@ function boot(): void {
       lastMambaTemporalTickMs = null;
       lastMoeCycleTickMs = null;
       if (mode === 'ar_decode') {
-        const activeStep = getActiveDecodeStep(decodeSession);
+        const activeStep = getActiveDecodeStep(activeDecodeSession());
         state.tokens = activeStep.totalTokens;
         state.embeddingFocusToken = Math.max(0, activeStep.tokens - 1);
         state.outputFocusToken = Math.max(0, activeStep.tokens - 1);
@@ -2460,133 +2650,14 @@ function boot(): void {
       }
       markDirtyAndSchedule(true);
     },
-    onDecodeStepToken: (tokenId: number) => {
-      markTourExploring();
-      decodeSession = stepDecodeSession(decodeSession, tokenId);
-      const activeStep = getActiveDecodeStep(decodeSession);
-      state.tokens = activeStep.totalTokens;
-      state.embeddingFocusToken = Math.max(0, activeStep.tokens - 1);
-      state.outputFocusToken = Math.max(0, activeStep.tokens - 1);
-      state.mambaStateToken = null;
-      state.mambaTemporalPlaying = false;
-      state.mambaSelectedCell = null;
-      state.mambaHoveredCell = null;
-      state.moeFocusToken = null;
-      state.moeActiveExpert = null;
-      state.moeTokenCycling = false;
-      state.moeSelectedCell = null;
-      state.moeHoveredCell = null;
-      state.gqaSelectedCell = null;
-      state.gqaHoveredCell = null;
-      state.embeddingActiveCell = null;
-      state.outputActiveCell = null;
-      embeddingHoveredCell = null;
-      outputHoveredCell = null;
-      if (state.mode === 'tower') {
-        startSpineWave();
-      } else {
-        markDirtyAndSchedule(true);
-      }
-    },
-    onDecodeStepGreedy: () => {
-      markTourExploring();
-      decodeSession = stepDecodeSessionGreedy(decodeSession);
-      const activeStep = getActiveDecodeStep(decodeSession);
-      state.tokens = activeStep.totalTokens;
-      state.embeddingFocusToken = Math.max(0, activeStep.tokens - 1);
-      state.outputFocusToken = Math.max(0, activeStep.tokens - 1);
-      state.mambaStateToken = null;
-      state.mambaTemporalPlaying = false;
-      state.mambaSelectedCell = null;
-      state.mambaHoveredCell = null;
-      state.moeFocusToken = null;
-      state.moeActiveExpert = null;
-      state.moeTokenCycling = false;
-      state.moeSelectedCell = null;
-      state.moeHoveredCell = null;
-      state.gqaSelectedCell = null;
-      state.gqaHoveredCell = null;
-      state.embeddingActiveCell = null;
-      state.outputActiveCell = null;
-      embeddingHoveredCell = null;
-      outputHoveredCell = null;
-      if (state.mode === 'tower') {
-        startSpineWave();
-      } else {
-        markDirtyAndSchedule(true);
-      }
-    },
-    onDecodeNavStep: (stepIndex: number) => {
-      markTourExploring();
-      decodeSession = navigateDecodeSession(decodeSession, stepIndex);
-      const activeStep = getActiveDecodeStep(decodeSession);
-      state.tokens = activeStep.totalTokens;
-      state.embeddingFocusToken = Math.max(0, activeStep.tokens - 1);
-      state.outputFocusToken = Math.max(0, activeStep.tokens - 1);
-      state.mambaStateToken = null;
-      state.mambaSelectedCell = null;
-      state.mambaHoveredCell = null;
-      state.moeFocusToken = null;
-      state.moeActiveExpert = null;
-      state.moeSelectedCell = null;
-      state.moeHoveredCell = null;
-      state.gqaSelectedCell = null;
-      state.gqaHoveredCell = null;
-      state.embeddingActiveCell = null;
-      state.outputActiveCell = null;
-      embeddingHoveredCell = null;
-      outputHoveredCell = null;
-      markDirtyAndSchedule(true);
-    },
-    onDecodeSwitchBranch: (branchId: string) => {
-      markTourExploring();
-      decodeSession = switchDecodeSessionBranch(decodeSession, branchId);
-      const activeStep = getActiveDecodeStep(decodeSession);
-      state.tokens = activeStep.totalTokens;
-      state.embeddingFocusToken = Math.max(0, activeStep.tokens - 1);
-      state.outputFocusToken = Math.max(0, activeStep.tokens - 1);
-      state.mambaStateToken = null;
-      state.mambaSelectedCell = null;
-      state.mambaHoveredCell = null;
-      state.moeFocusToken = null;
-      state.moeActiveExpert = null;
-      state.moeSelectedCell = null;
-      state.moeHoveredCell = null;
-      state.gqaSelectedCell = null;
-      state.gqaHoveredCell = null;
-      state.embeddingActiveCell = null;
-      state.outputActiveCell = null;
-      embeddingHoveredCell = null;
-      outputHoveredCell = null;
-      markDirtyAndSchedule(true);
-    },
-    onDecodeReset: () => {
-      markTourExploring();
-      decodeSession = createDecodeSession(hybridModel, {
-        promptTokenIds: [0, 1, 2, 3],
-        precisionMetadata: state.precision,
-      });
-      const activeStep = getActiveDecodeStep(decodeSession);
-      state.tokens = activeStep.totalTokens;
-      state.embeddingFocusToken = Math.max(0, activeStep.tokens - 1);
-      state.outputFocusToken = Math.max(0, activeStep.tokens - 1);
-      state.mambaStateToken = null;
-      state.mambaSelectedCell = null;
-      state.mambaHoveredCell = null;
-      state.moeFocusToken = null;
-      state.moeActiveExpert = null;
-      state.moeSelectedCell = null;
-      state.moeHoveredCell = null;
-      state.gqaSelectedCell = null;
-      state.gqaHoveredCell = null;
-      state.embeddingActiveCell = null;
-      state.outputActiveCell = null;
-      embeddingHoveredCell = null;
-      outputHoveredCell = null;
-      spineWaveStartMs = null;
-      state.spineWaveProgress = null;
-      markDirtyAndSchedule(true);
-    },
+    onDecodeStepToken: (tokenId: number) =>
+      applyActiveDecodeAction({ type: 'step_token', tokenId }, true),
+    onDecodeStepGreedy: () => applyActiveDecodeAction({ type: 'step_greedy' }, true),
+    onDecodeNavStep: (stepIndex: number) =>
+      applyActiveDecodeAction({ type: 'nav_step', stepIndex }, false),
+    onDecodeSwitchBranch: (branchId: string) =>
+      applyActiveDecodeAction({ type: 'switch_branch', branchId }, false),
+    onDecodeReset: () => applyActiveDecodeAction({ type: 'reset' }, false),
   });
 
   const drawFrame = (nowMs: number) => {
@@ -2608,9 +2679,10 @@ function boot(): void {
       }
     }
 
-    // Live Math Stepper playback loop (GQA, Mamba-2 & MoE cutaways, respects reducedMotion)
+    // Live Math Stepper playback loop (GQA, Mamba-2 & MoE cutaways, paced ~400 ms/term, respects reducedMotion)
     let stepperChangedUi = false;
     let stepperStageAdvanced = false;
+    let spineWaveHudDirty = false;
     if (
       state.mode === 'cutaway_gqa' &&
       state.gqaStepperActive &&
@@ -2620,7 +2692,9 @@ function boot(): void {
       const dtSec =
         lastStepperTickMs === null ? 0 : Math.max(0, Math.min(0.1, (nowMs - lastStepperTickMs) / 1000));
       lastStepperTickMs = nowMs;
-      const nextProgress = state.gqaStepperSubProgress + dtSec / 2.2;
+      const sim = activeGqaSim();
+      const durationSec = gqaStepPlayDurationSec(sim, state.gqaStepperStep);
+      const nextProgress = state.gqaStepperSubProgress + dtSec / durationSec;
       if (nextProgress >= 1) {
         state.gqaStepperSubProgress = nextProgress % 1;
         state.gqaStepperStep = (state.gqaStepperStep + 1) % GQA_STEPPER_STEPS.length;
@@ -2628,9 +2702,19 @@ function boot(): void {
       } else {
         state.gqaStepperSubProgress = nextProgress;
       }
+      const termP = resolveGqaAccumTermProgress(
+        sim,
+        state.gqaStepperStep,
+        state.gqaStepperSubProgress,
+        true,
+        false,
+        state.gqaHoveredCell !== null || state.gqaSelectedCell !== null,
+      );
+      state.gqaAccumTermProgress = termP;
+      const termBucket = gqaAccumTermBucket(sim, state.gqaStepperStep, termP);
       const cell = resolveActiveGqaCell();
       const key = cell
-        ? `gqa:${state.gqaStepperStep}:${cell.tensor}:${cell.row}:${cell.col}:${cell.headIndex ?? -1}`
+        ? `gqa:${state.gqaStepperStep}:${cell.tensor}:${cell.row}:${cell.col}:${cell.headIndex ?? -1}:t${termBucket}`
         : '';
       if (key !== lastStepperCellKey) {
         lastStepperCellKey = key;
@@ -2647,7 +2731,9 @@ function boot(): void {
       const dtSec =
         lastStepperTickMs === null ? 0 : Math.max(0, Math.min(0.1, (nowMs - lastStepperTickMs) / 1000));
       lastStepperTickMs = nowMs;
-      const nextProgress = state.mambaStepperSubProgress + dtSec / 2.2;
+      const sim = activeMambaSim();
+      const durationSec = mambaStepPlayDurationSec(sim, state.mambaStepperStep);
+      const nextProgress = state.mambaStepperSubProgress + dtSec / durationSec;
       if (nextProgress >= 1) {
         state.mambaStepperSubProgress = nextProgress % 1;
         state.mambaStepperStep = (state.mambaStepperStep + 1) % MAMBA_STEPPER_STEPS.length;
@@ -2655,9 +2741,19 @@ function boot(): void {
       } else {
         state.mambaStepperSubProgress = nextProgress;
       }
+      const termP = resolveMambaAccumTermProgress(
+        sim,
+        state.mambaStepperStep,
+        state.mambaStepperSubProgress,
+        true,
+        false,
+        state.mambaHoveredCell !== null || state.mambaSelectedCell !== null,
+      );
+      state.mambaAccumTermProgress = termP;
+      const termBucket = mambaAccumTermBucket(sim, state.mambaStepperStep, termP);
       const cell = resolveActiveMambaCell();
       const key = cell
-        ? `mamba:${state.mambaStepperStep}:${cell.tensor}:${cell.row}:${cell.col}:${cell.headIndex ?? -1}`
+        ? `mamba:${state.mambaStepperStep}:${cell.tensor}:${cell.row}:${cell.col}:${cell.headIndex ?? -1}:t${termBucket}`
         : '';
       if (key !== lastStepperCellKey) {
         lastStepperCellKey = key;
@@ -2674,7 +2770,9 @@ function boot(): void {
       const dtSec =
         lastStepperTickMs === null ? 0 : Math.max(0, Math.min(0.1, (nowMs - lastStepperTickMs) / 1000));
       lastStepperTickMs = nowMs;
-      const nextProgress = state.moeStepperSubProgress + dtSec / 2.2;
+      const sim = activeMoeSim();
+      const durationSec = moeStepPlayDurationSec(sim, state.moeStepperStep);
+      const nextProgress = state.moeStepperSubProgress + dtSec / durationSec;
       if (nextProgress >= 1) {
         state.moeStepperSubProgress = nextProgress % 1;
         state.moeStepperStep = (state.moeStepperStep + 1) % MOE_STEPPER_STEPS.length;
@@ -2682,9 +2780,19 @@ function boot(): void {
       } else {
         state.moeStepperSubProgress = nextProgress;
       }
+      const termP = resolveMoeAccumTermProgress(
+        sim,
+        state.moeStepperStep,
+        state.moeStepperSubProgress,
+        true,
+        false,
+        state.moeHoveredCell !== null || state.moeSelectedCell !== null,
+      );
+      state.moeAccumTermProgress = termP;
+      const termBucket = moeAccumTermBucket(sim, state.moeStepperStep, termP);
       const cell = resolveActiveMoeCell();
       const key = cell
-        ? `moe:${state.moeStepperStep}:${cell.tensor}:${cell.row}:${cell.col}:${cell.expertId ?? -1}`
+        ? `moe:${state.moeStepperStep}:${cell.tensor}:${cell.row}:${cell.col}:${cell.expertId ?? -1}:t${termBucket}`
         : '';
       if (key !== lastStepperCellKey) {
         lastStepperCellKey = key;
@@ -2752,34 +2860,47 @@ function boot(): void {
       lastMoeCycleTickMs = null;
     }
 
-    // V4 52-Layer Spine Propagation Wave (~900 ms sweep along Tower emerald spine, instant under reducedMotion)
-    if (spineWaveStartMs !== null) {
-      if (state.reducedMotion || state.mode !== 'tower') {
-        spineWaveStartMs = null;
-        if (state.spineWaveProgress !== null) {
-          state.spineWaveProgress = null;
+    // RC3 52-Layer Spine Propagation Wave (Fast 0.9s vs Slow Instructional 5.5s, Pause/Resume & static reducedMotion summary)
+    if (spineWaveClock.progress !== null) {
+      if (state.mode !== 'tower') {
+        clearSpineWave(true);
+        geometryDirty = true;
+        stepperChangedUi = true;
+      } else if (state.reducedMotion) {
+        spineWaveLastTickMs = null;
+        if (state.spineWaveProgress !== 1.0) {
+          applySpineWaveStateToScene(startSpineWavePlayback(state.spineWaveMode, true));
           geometryDirty = true;
-          stepperChangedUi = true;
+          spineWaveHudDirty = true;
         }
+      } else if (spineWaveClock.paused) {
+        spineWaveLastTickMs = null;
       } else {
-        const elapsedWave = nowMs - spineWaveStartMs;
-        const p = Math.max(0, Math.min(1, elapsedWave / SPINE_WAVE_DURATION_MS));
-        if (p >= 1) {
-          spineWaveStartMs = null;
-          state.spineWaveProgress = null;
-          geometryDirty = true;
+        const dtMs =
+          spineWaveLastTickMs === null
+            ? 0
+            : Math.max(0, Math.min(100, nowMs - spineWaveLastTickMs));
+        spineWaveLastTickMs = nowMs;
+        const stepped = advanceSpineWavePlayback(spineWaveClock, dtMs, false);
+        applySpineWaveStateToScene(stepped.next);
+        geometryDirty = true;
+        if (stepped.finished) {
+          spineWaveLastTickMs = null;
           stepperChangedUi = true;
-        } else {
-          state.spineWaveProgress = p;
-          geometryDirty = true;
+        } else if (stepped.animating) {
+          spineWaveHudDirty = true;
           continueAnimating = true;
         }
       }
+    } else {
+      spineWaveLastTickMs = null;
     }
 
     rebuildSceneIfNeeded();
     if (stepperChangedUi) {
       syncUi();
+    } else if (spineWaveHudDirty) {
+      controls.syncSpineWaveHud(state, activeHybridExecution(), activeDecodeSessionOrNull());
     }
     if (stepperStageAdvanced && state.stepperAutoFollow && !manualCameraOverride) {
       focusCameraOnActiveOpStep(false);
@@ -3273,8 +3394,16 @@ function boot(): void {
         const candId = parseOutputCandidatePartId(hit?.partId);
         if (candId !== null && state.executionMode === 'ar_decode') {
           markTourExploring();
-          decodeSession = stepDecodeSession(decodeSession, candId);
-          const activeStep = getActiveDecodeStep(decodeSession);
+          const result = applyDecodeActionToActiveSession(
+            decodeSessions,
+            state.tourActive,
+            state.tourBeat,
+            hybridModel,
+            state.precision,
+            { type: 'step_token', tokenId: candId },
+          );
+          decodeSessions = result.store;
+          const activeStep = getActiveDecodeStep(result.session);
           state.tokens = activeStep.totalTokens;
           state.embeddingFocusToken = Math.max(0, activeStep.tokens - 1);
           state.outputFocusToken = Math.max(0, activeStep.tokens - 1);
@@ -3532,23 +3661,27 @@ function boot(): void {
         state.gqaHoveredCell = null;
         state.gqaStepperActive = false;
         state.gqaStepperPlaying = false;
+        state.gqaAccumTermProgress = 1;
         state.mambaSelectedCell = null;
         state.mambaHoveredCell = null;
         state.mambaStepperActive = false;
         state.mambaStepperPlaying = false;
         state.mambaTemporalPlaying = false;
+        state.mambaAccumTermProgress = 1;
         lastMambaTemporalTickMs = null;
         state.moeSelectedCell = null;
         state.moeHoveredCell = null;
         state.moeStepperActive = false;
         state.moeStepperPlaying = false;
         state.moeTokenCycling = false;
+        state.moeAccumTermProgress = 1;
         state.embeddingActiveCell = null;
         state.outputActiveCell = null;
         embeddingHoveredCell = null;
         outputHoveredCell = null;
         bookendStepIndex = null;
         lastStepperTickMs = null;
+        lastStepperCellKey = '';
         lastMoeCycleTickMs = null;
         manualCameraOverride = false;
         lastAutoFollowedStepKey = '';
@@ -3559,6 +3692,10 @@ function boot(): void {
           fitActiveView();
         }
         scheduleDraw();
+      } else if (state.mode === 'tower' && state.spineWaveProgress !== null) {
+        ev.preventDefault();
+        clearSpineWave(true);
+        markDirtyAndSchedule(true);
       } else if (state.selectedPart !== null || state.hoveredPart !== null) {
         ev.preventDefault();
         state.selectedPart = null;
