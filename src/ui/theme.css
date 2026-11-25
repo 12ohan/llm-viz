@@ -332,13 +332,16 @@ body {
 
 .ed-header {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 8px;
+  gap: 4px 8px;
   margin-bottom: 3px;
 }
 
 .ed-title {
+  flex: 1 1 170px;
+  min-width: 0;
   margin: 0;
   font-family: var(--font-sans);
   font-size: 13.2px;
@@ -348,7 +351,12 @@ body {
 }
 
 .ed-badge {
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  box-sizing: border-box;
   font-family: var(--font-mono);
   font-size: 9.8px;
   font-weight: 600;
@@ -3408,10 +3416,10 @@ input:focus-visible {
 /* RC3: Floating In-Canvas Tower Spine Propagation Replay HUD */
 .spine-wave-hud {
   position: absolute;
-  left: 50%;
-  bottom: 42px;
-  transform: translateX(-50%);
-  width: min(560px, calc(100% - 24px));
+  left: 12px;
+  bottom: 38px;
+  transform: none;
+  width: min(440px, calc(100% - 24px));
   padding: 7.5px 11px 6.5px;
   border-radius: 8px;
   background-color: rgba(22, 27, 38, 0.94);
@@ -3653,8 +3661,10 @@ input:focus-visible {
 
 @media (max-width: 1280px) and (min-width: 901px) {
   .spine-wave-hud {
-    bottom: 36px;
-    width: min(516px, calc(100% - 20px));
+    left: 10px;
+    bottom: 34px;
+    transform: none;
+    width: min(352px, calc(100% - 20px));
     padding: 6.5px 10px 5.5px;
     gap: 3.5px;
   }
@@ -3819,7 +3829,9 @@ input:focus-visible {
   }
 
   .spine-wave-hud {
+    left: 8px;
     bottom: 34px;
+    transform: none;
     width: calc(100% - 16px);
     padding: 6px 9px 5px;
   }
