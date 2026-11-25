@@ -2455,6 +2455,23 @@ export function buildTwoTowerPairedGqaScene(
   const valueAtlas: Rg32fValueAtlas | undefined = gqaAtlas ?? fallbackCacheAtlas ?? undefined;
   const atlasKey = `tt-gqa:${view.identity.recordId}:b${bayId}:f${towerFocus}:g0-${effG0}:g1-${effG1}`;
 
+  const displayFormula =
+    activeFormula && focusedAccumulation?.active
+      ? (() => {
+          const provTag = activeFormula.subEquation.split(' · ')[0] ?? '';
+          return {
+            ...activeFormula,
+            value: focusedAccumulation.partialSum,
+            valueText: focusedAccumulation.valueBadgeText,
+            equation: focusedAccumulation.partialEquation,
+            subEquation: provTag
+              ? `${provTag} · ${focusedAccumulation.partialSubEquation}`
+              : focusedAccumulation.partialSubEquation,
+            headBadge: focusedAccumulation.badgeText,
+          };
+        })()
+      : activeFormula;
+
   return {
     viewMode: 'paired_gqa',
     title: `Paired GQA Cutaway · Bay ${String(bayId).padStart(2, '0')} (Layer ${layerIndex})`,
@@ -2476,7 +2493,7 @@ export function buildTwoTowerPairedGqaScene(
     ...(b.activeOpPartIds.size > 0 ? { activeOpPartIds: b.activeOpPartIds } : {}),
     activeCellGrids,
     cellPopover,
-    activeFormula,
+    activeFormula: displayFormula,
     focusedAccumulation,
     activeSelection,
     stepperSteps: GQA_STEPPER_STEPS,

@@ -558,7 +558,7 @@ body {
   white-space: nowrap;
 }
 
-.sp-dock-pill:hover:not(:disabled) {
+.sp-dock-pill:hover:not(:disabled):not(.is-active) {
   background: #EDF2F8;
 }
 
@@ -1012,11 +1012,21 @@ body {
 
 .sp-card-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: 4px 6px;
+  min-width: 0;
   border-bottom: 1px solid var(--sp-border);
   padding-bottom: 4px;
+}
+
+.sp-card-head .sp-pill,
+.sp-card-head .sp-badge {
+  flex: 0 1 auto;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sp-card-title {

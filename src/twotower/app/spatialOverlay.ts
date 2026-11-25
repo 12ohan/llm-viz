@@ -401,7 +401,7 @@ export class TwoTowerSpatialOverlay {
 
       const isDetail = lm.tier === 'detail';
       const font = isSheetCutaway ? (isDetail ? monoFont : sheetFont) : pillFont;
-      const maxLabelW = Math.max(120, Math.min(280, hostWidth * 0.42));
+      const maxLabelW = Math.max(140, Math.min(360, hostWidth * 0.48));
       const rawW = this.measureText(lm.label, font) + (isSheetCutaway ? (isDetail ? 10 : 12) : 16);
       const w = Math.min(rawW, maxLabelW);
       const h = isSheetCutaway ? (isDetail ? 17 : 18) : 20;

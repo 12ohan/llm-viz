@@ -3255,18 +3255,18 @@ export function buildTwoTowerMacroScene(
       id: 'header-context',
       label: `Context Tower · Persistent Prefix (P = ${committedPrefixLen}/${kvCapacity})`,
       sublabel: `${formatMiB(prodMem.persistentContextMambaBytes, 1)} Mamba + ${formatKiB(prodMem.persistentContextKvBytes)} KV`,
-      world: [CONTEXT_TOWER_X, TIMESTEP_HUB_Y + 0.5, 0],
+      world: [CONTEXT_TOWER_X - 4.2, EMBED_Y + 2.0, 0],
       bayId: 0,
       partId: 'ctx-embed',
       tone: 'cyan',
-      align: 'center',
+      align: 'left',
       tier: 'primary',
     },
     {
       id: 'header-timestep',
       label: timestepRailActive ? `Timestep Rail · ${timestepStatusLabel}` : 'Timestep Rail · BYPASSED (t = null)',
       sublabel: 't = nMasked/B → φ(t) → MLP → 3d tEmb',
-      world: [TIMESTEP_RAIL_X, TIMESTEP_HUB_Y + 1.25, railZ],
+      world: [TIMESTEP_RAIL_X, TIMESTEP_HUB_Y + 1.8, railZ],
       bayId: -1,
       partId: 'timestep-hub',
       tone: timestepRailActive ? 'gold' : 'muted',
@@ -3281,11 +3281,11 @@ export function buildTwoTowerMacroScene(
           ? 'Denoiser Tower · Mock-AR Causal (S = 1)'
           : `Denoiser Tower · Ephemeral Block (B = ${activeBlockSize})`,
       sublabel: isArMode ? 'Context-only execution' : 'Scratchpad discarded every step',
-      world: [DENOISER_TOWER_X, TIMESTEP_HUB_Y + 0.5, 0],
+      world: [DENOISER_TOWER_X + 4.2, EMBED_Y + 2.0, 0],
       bayId: 0,
       partId: 'den-embed',
       tone: isArMode ? 'muted' : 'default',
-      align: 'center',
+      align: 'right',
       tier: 'primary',
     },
     {
@@ -3326,10 +3326,10 @@ export function buildTwoTowerMacroScene(
           : refinementLoopState === 'paused_ready'
             ? 'Refinement Loop (Paused · Unmasked)'
             : 'Refinement Loop (Dormant)',
-      world: [REFINEMENT_LOOP_X + 0.6, bayCenterY(26), 0.25],
+      world: [REFINEMENT_LOOP_X + 0.8, bayCenterY(26), 0.25],
       partId: 'pathway-refinement-loop',
       tone: refinementLoopState === 'active' ? 'default' : 'muted',
-      align: 'left',
+      align: 'right',
       tier: 'primary',
     },
     {
