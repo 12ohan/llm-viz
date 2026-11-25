@@ -34,7 +34,21 @@ import {
   runMoeSim,
   type MoeSimFixture,
   type MoeSimResult,
+  type RouterPrecisionPolicy,
 } from './moeSim';
+
+export type { RouterPrecisionPolicy };
+
+/**
+ * Deterministic additive Float32 weight perturbation specification applied during
+ * parameter generation (e.g. for deriving an independent TwoTower Denoiser Tower
+ * from the Context Tower's base seed without post-hoc weight mutation).
+ */
+export interface HybridWeightPerturbation {
+  readonly seed: number;
+  readonly scale: number;
+  readonly sourceFingerprint?: string;
+}
 
 /**
  * Synthetic 32-word educational miniature vocabulary (`0..15` = input sequence tokens,
@@ -112,11 +126,22 @@ function mixSeed(baseSeed: number, bayId: number, salt: number): number {
   return (h ^ (h >>> 16)) >>> 0;
 }
 
+function applyDeterministicPerturbation(
+  arr: Float32Array,
+  rng: () => number,
+  scale: number,
+): void {
+  for (let i = 0; i < arr.length; i++) {
+    arr[i] = Math.fround(arr[i] + (rng() * 2 - 1) * scale);
+  }
+}
+
 /**
  * Compute a deterministic 64-bit hex fingerprint over the COMPLETE model parameterization:
  * seed, full layer pattern, dimensions, vocab, exact IEEE-754 float64 bits of rmsNormEps and
- * residualOutputScale. Guarantees distinct fingerprints even if two differently parameterized
- * models are given the same explicit display `modelId`.
+ * residualOutputScale, plus optional routerPrecisionPolicy, perturbation, and generationPolicy.
+ * Guarantees distinct fingerprints even if two differently parameterized models share a display
+ * `modelId`, while remaining 100% bit-identical to Nano v1.0.0 under default options.
  */
 export function computeModelParameterFingerprint(params: {
   readonly seed: number;
@@ -126,6 +151,9 @@ export function computeModelParameterFingerprint(params: {
   readonly rmsNormEps: number;
   readonly residualOutputScale: number;
   readonly vocab: readonly string[];
+  readonly routerPrecisionPolicy?: RouterPrecisionPolicy;
+  readonly perturbation?: HybridWeightPerturbation;
+  readonly generationPolicy?: string;
 }): string {
   let h1 = 0x811c9dc5 >>> 0;
   let h2 = 0x9e3779b9 >>> 0;
@@ -169,6 +197,37 @@ export function computeModelParameterFingerprint(params: {
     feedStr(w);
   }
 
+  // Backward-compatible Nano v1.0.0 fingerprint preservation: only hash extension fields
+  // when at least one differs from Nano v1.0.0 defaults.
+  const routerPolicy: RouterPrecisionPolicy = params.routerPrecisionPolicy ?? 'float32_nano';
+  const hasExtendedConfig =
+    routerPolicy !== 'float32_nano' ||
+    params.perturbation !== undefined ||
+    params.generationPolicy !== undefined;
+  if (hasExtendedConfig) {
+    feedByte(0xee);
+    feedStr(routerPolicy);
+    if (params.perturbation !== undefined) {
+      feedByte(1);
+      feedU32(params.perturbation.seed);
+      feedF64(params.perturbation.scale);
+      if (params.perturbation.sourceFingerprint !== undefined) {
+        feedByte(1);
+        feedStr(params.perturbation.sourceFingerprint);
+      } else {
+        feedByte(0);
+      }
+    } else {
+      feedByte(0);
+    }
+    if (params.generationPolicy !== undefined) {
+      feedByte(1);
+      feedStr(params.generationPolicy);
+    } else {
+      feedByte(0);
+    }
+  }
+
   return `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
 }
 
@@ -178,17 +237,23 @@ export function computeModelParameterFingerprint(params: {
 
 export interface HybridModelConfig {
   readonly modelId: string;
-  /** Canonical 64-bit fingerprint covering seed, full layer pattern, rmsNormEps, residualOutputScale, and vocab. */
+  /** Canonical 64-bit fingerprint covering seed, full layer pattern, rmsNormEps, residualOutputScale, vocab, and policy extensions. */
   readonly parameterFingerprint: string;
   readonly seed: number;
   readonly pattern: string;
   readonly d: 8;
-  readonly vocabSize: 32;
+  readonly vocabSize: number;
   readonly rmsNormEps: number;
   /** Depth-aware residual branch scaling factor (~1 / sqrt(2 * L)). */
   readonly residualOutputScale: number;
   /** Bounded number of bay weight sets retained in memory inside this parameter instance. */
   readonly maxRetainedWeightBays: number;
+  /** MoE router scoring precision policy (defaults to `'float32_nano'`). */
+  readonly routerPrecisionPolicy: RouterPrecisionPolicy;
+  /** Optional deterministic additive weight perturbation applied at parameter generation time. */
+  readonly perturbation?: HybridWeightPerturbation;
+  /** Optional generation policy identifier included in fingerprint when present. */
+  readonly generationPolicy?: string;
 }
 
 export interface MambaBayWeights {
@@ -288,6 +353,7 @@ function generateMambaBayWeights(
   bayId: number,
   modelSeed: number,
   residualScale: number,
+  perturbation?: HybridWeightPerturbation,
 ): MambaBayWeights {
   const { d, nHeads, dInner, convKernel, convDim, inProjDim } = MAMBA_SIM_CONFIG;
   const rng = mulberry32(mixSeed(modelSeed, bayId, 0x11));
@@ -343,6 +409,19 @@ function generateMambaBayWeights(
     }
   }
 
+  if (perturbation && perturbation.scale > 0) {
+    const pRng = mulberry32((perturbation.seed ^ Math.imul(bayId, 0x9e3779b1)) >>> 0);
+    applyDeterministicPerturbation(gamma_in, pRng, perturbation.scale);
+    applyDeterministicPerturbation(W_in, pRng, perturbation.scale);
+    applyDeterministicPerturbation(w_conv, pRng, perturbation.scale);
+    applyDeterministicPerturbation(b_conv, pRng, perturbation.scale);
+    applyDeterministicPerturbation(A_log, pRng, perturbation.scale);
+    applyDeterministicPerturbation(dt_bias, pRng, perturbation.scale);
+    applyDeterministicPerturbation(D, pRng, perturbation.scale);
+    applyDeterministicPerturbation(gamma_gate, pRng, perturbation.scale);
+    applyDeterministicPerturbation(W_out, pRng, perturbation.scale);
+  }
+
   return {
     bayId,
     kind: 'M',
@@ -362,6 +441,7 @@ function generateMoeBayWeights(
   bayId: number,
   modelSeed: number,
   residualScale: number,
+  perturbation?: HybridWeightPerturbation,
 ): MoeBayWeights {
   const { d, nRoutedExperts, dExp, dShared } = MOE_SIM_CONFIG;
   const rng = mulberry32(mixSeed(modelSeed, bayId, 0x21));
@@ -416,6 +496,17 @@ function generateMoeBayWeights(
     W_down_s[k] = Math.fround(gauss() * sharedDownStd);
   }
 
+  if (perturbation && perturbation.scale > 0) {
+    const pRng = mulberry32((perturbation.seed ^ Math.imul(bayId, 0x9e3779b1)) >>> 0);
+    applyDeterministicPerturbation(gamma_in, pRng, perturbation.scale);
+    applyDeterministicPerturbation(W_router, pRng, perturbation.scale);
+    applyDeterministicPerturbation(e_score_correction_bias, pRng, perturbation.scale);
+    applyDeterministicPerturbation(W_up, pRng, perturbation.scale);
+    applyDeterministicPerturbation(W_down, pRng, perturbation.scale);
+    applyDeterministicPerturbation(W_up_s, pRng, perturbation.scale);
+    applyDeterministicPerturbation(W_down_s, pRng, perturbation.scale);
+  }
+
   return {
     bayId,
     kind: 'E',
@@ -433,6 +524,7 @@ function generateGqaBayWeights(
   bayId: number,
   modelSeed: number,
   residualScale: number,
+  perturbation?: HybridWeightPerturbation,
 ): GqaBayWeights {
   const { d, nQ, nKv, dHead, qConcatDim } = GQA_SIM_CONFIG;
   const rng = mulberry32(mixSeed(modelSeed, bayId, 0x31));
@@ -475,6 +567,15 @@ function generateGqaBayWeights(
     }
   }
 
+  if (perturbation && perturbation.scale > 0) {
+    const pRng = mulberry32((perturbation.seed ^ Math.imul(bayId, 0x9e3779b1)) >>> 0);
+    applyDeterministicPerturbation(gamma, pRng, perturbation.scale);
+    applyDeterministicPerturbation(W_Q, pRng, perturbation.scale);
+    applyDeterministicPerturbation(W_K, pRng, perturbation.scale);
+    applyDeterministicPerturbation(W_V, pRng, perturbation.scale);
+    applyDeterministicPerturbation(W_O, pRng, perturbation.scale);
+  }
+
   return { bayId, kind: '*', gamma, W_Q, W_K, W_V, W_O };
 }
 
@@ -486,6 +587,14 @@ export interface CreateHybridModelOptions {
   readonly residualOutputScale?: number;
   readonly maxRetainedWeightBays?: number;
   readonly pinnedWeightBays?: readonly number[];
+  /** Custom vocabulary table (defaults to 32-token `MINI_VOCAB`). */
+  readonly vocab?: readonly string[];
+  /** MoE router scoring precision policy (defaults to `'float32_nano'`). */
+  readonly routerPrecisionPolicy?: RouterPrecisionPolicy;
+  /** Optional deterministic additive perturbation applied to all generated weights. */
+  readonly perturbation?: HybridWeightPerturbation;
+  /** Optional generation policy tag hashed into `parameterFingerprint`. */
+  readonly generationPolicy?: string;
 }
 
 /**
@@ -507,6 +616,32 @@ export function createHybridModelParameters(
       throw new RangeError(`Unexpected layer kind "${ch}" at pattern index ${i}`);
     }
   }
+  const vocab = options?.vocab ? Object.freeze([...options.vocab]) : MINI_VOCAB;
+  const vocabSize = vocab.length;
+  if (vocabSize < 1) {
+    throw new RangeError('Hybrid model vocab must contain at least 1 token');
+  }
+  const routerPrecisionPolicy: RouterPrecisionPolicy =
+    options?.routerPrecisionPolicy ?? 'float32_nano';
+  let perturbation: HybridWeightPerturbation | undefined;
+  if (options?.perturbation !== undefined) {
+    if (!Number.isFinite(options.perturbation.seed)) {
+      throw new RangeError(`Invalid perturbation.seed: ${options.perturbation.seed}`);
+    }
+    if (!Number.isFinite(options.perturbation.scale) || options.perturbation.scale < 0) {
+      throw new RangeError(
+        `Invalid perturbation.scale (${options.perturbation.scale}): must be finite >= 0`,
+      );
+    }
+    perturbation = Object.freeze({
+      seed: options.perturbation.seed >>> 0,
+      scale: options.perturbation.scale,
+      ...(options.perturbation.sourceFingerprint !== undefined
+        ? { sourceFingerprint: options.perturbation.sourceFingerprint }
+        : {}),
+    });
+  }
+  const generationPolicy = options?.generationPolicy;
   const rmsNormEps = options?.rmsNormEps ?? HYBRID_UNIFIED_RMS_EPS;
   const residualOutputScale =
     options?.residualOutputScale ?? 1.42 / Math.sqrt(Math.max(2, 2 * numLayers));
@@ -518,10 +653,13 @@ export function createHybridModelParameters(
     seed,
     pattern,
     d: HYBRID_MINI_D,
-    vocabSize: HYBRID_MINI_VOCAB_SIZE,
+    vocabSize,
     rmsNormEps,
     residualOutputScale,
-    vocab: MINI_VOCAB,
+    vocab,
+    routerPrecisionPolicy,
+    perturbation,
+    generationPolicy,
   });
   const modelId =
     options?.modelId ??
@@ -533,16 +671,19 @@ export function createHybridModelParameters(
     seed,
     pattern,
     d: HYBRID_MINI_D,
-    vocabSize: HYBRID_MINI_VOCAB_SIZE,
+    vocabSize,
     rmsNormEps,
     residualOutputScale,
     maxRetainedWeightBays,
+    routerPrecisionPolicy,
+    ...(perturbation !== undefined ? { perturbation } : {}),
+    ...(generationPolicy !== undefined ? { generationPolicy } : {}),
   });
 
-  // 1. Untied Token Embeddings W_embed [32, 8], row-normalized to unit RMS (NoPE)
+  // 1. Untied Token Embeddings W_embed [vocabSize, 8], row-normalized to unit RMS (NoPE)
   const gEmbed = makeGaussian(mixSeed(seed, 0, 0x101));
-  const W_embed = new Float32Array(HYBRID_MINI_VOCAB_SIZE * HYBRID_MINI_D);
-  for (let v = 0; v < HYBRID_MINI_VOCAB_SIZE; v++) {
+  const W_embed = new Float32Array(vocabSize * HYBRID_MINI_D);
+  for (let v = 0; v < vocabSize; v++) {
     let sumSq = 0;
     for (let i = 0; i < HYBRID_MINI_D; i++) {
       const val = gEmbed();
@@ -562,12 +703,30 @@ export function createHybridModelParameters(
     finalNormGamma[i] = Math.fround(0.90 + 0.22 * rngFinal());
   }
 
-  // 3. Strictly untied LM Head W_lm_head [32, 8] (independent seed -> W_lm_head !== W_embed)
+  // 3. Strictly untied LM Head W_lm_head [vocabSize, 8] (independent seed -> W_lm_head !== W_embed)
   const gLm = makeGaussian(mixSeed(seed, numLayers + 2, 0x303));
-  const W_lm_head = new Float32Array(HYBRID_MINI_VOCAB_SIZE * HYBRID_MINI_D);
+  const W_lm_head = new Float32Array(vocabSize * HYBRID_MINI_D);
   const lmStd = 1.15 / Math.sqrt(HYBRID_MINI_D);
-  for (let k = 0; k < HYBRID_MINI_VOCAB_SIZE * HYBRID_MINI_D; k++) {
+  for (let k = 0; k < vocabSize * HYBRID_MINI_D; k++) {
     W_lm_head[k] = Math.fround(gLm() * lmStd);
+  }
+
+  if (perturbation && perturbation.scale > 0) {
+    applyDeterministicPerturbation(
+      W_embed,
+      mulberry32((perturbation.seed ^ 0x70657201) >>> 0),
+      perturbation.scale,
+    );
+    applyDeterministicPerturbation(
+      finalNormGamma,
+      mulberry32((perturbation.seed ^ 0x70657202) >>> 0),
+      perturbation.scale,
+    );
+    applyDeterministicPerturbation(
+      W_lm_head,
+      mulberry32((perturbation.seed ^ 0x70657203) >>> 0),
+      perturbation.scale,
+    );
   }
 
   // Bounded LRU cache of materialized bay weights (pinned bays prioritized to avoid regenerating inspectable cutaways)
@@ -589,10 +748,10 @@ export function createHybridModelParameters(
     const kind = pattern[bayId - 1] as Kind;
     const generated: HybridBayWeights = Object.freeze(
       kind === 'M'
-        ? generateMambaBayWeights(bayId, seed, residualOutputScale)
+        ? generateMambaBayWeights(bayId, seed, residualOutputScale, perturbation)
         : kind === 'E'
-          ? generateMoeBayWeights(bayId, seed, residualOutputScale)
-          : generateGqaBayWeights(bayId, seed, residualOutputScale),
+          ? generateMoeBayWeights(bayId, seed, residualOutputScale, perturbation)
+          : generateGqaBayWeights(bayId, seed, residualOutputScale, perturbation),
     );
 
     // Always insert newly generated bay into the bounded LRU cache and evict the oldest
@@ -633,7 +792,7 @@ export function createHybridModelParameters(
     modelId,
     parameterFingerprint,
     config,
-    vocab: MINI_VOCAB,
+    vocab,
     W_embed,
     finalNormGamma,
     W_lm_head,
@@ -709,7 +868,7 @@ export interface HybridExecutionResult {
   readonly executionId: string;
   readonly tokens: number;
   readonly d: 8;
-  readonly vocabSize: 32;
+  readonly vocabSize: number;
   readonly vocab: readonly string[];
   readonly tokenIds: Int32Array;
   readonly tokenLabels: readonly string[];
@@ -810,6 +969,7 @@ function collectTraceUniqueBytes(seen: Set<ArrayBufferLike>, trace: HybridLayerT
     return (
       addUniqueArrayBytes(seen, s.tokenIds) +
       addUniqueArrayBytes(seen, s.X) +
+      addUniqueArrayBytes(seen, s.X_mod) +
       addUniqueArrayBytes(seen, s.X_norm) +
       addUniqueArrayBytes(seen, s.rms_in) +
       addUniqueArrayBytes(seen, s.U) +
@@ -835,6 +995,7 @@ function collectTraceUniqueBytes(seen: Set<ArrayBufferLike>, trace: HybridLayerT
       addUniqueArrayBytes(seen, s.y_norm_pre) +
       addUniqueArrayBytes(seen, s.y_norm) +
       addUniqueArrayBytes(seen, s.Mamba_out) +
+      addUniqueArrayBytes(seen, s.residualGate) +
       addUniqueArrayBytes(seen, s.Y)
     );
   }
@@ -846,9 +1007,13 @@ function collectTraceUniqueBytes(seen: Set<ArrayBufferLike>, trace: HybridLayerT
       addUniqueArrayBytes(seen, s.rms) +
       addUniqueArrayBytes(seen, s.X_norm) +
       addUniqueArrayBytes(seen, s.U) +
+      addUniqueArrayBytes(seen, s.U_mod) +
       addUniqueArrayBytes(seen, s.router_logits) +
       addUniqueArrayBytes(seen, s.scores) +
       addUniqueArrayBytes(seen, s.scores_for_choice) +
+      addUniqueArrayBytes(seen, s.router_logits_f64) +
+      addUniqueArrayBytes(seen, s.router_scores_f64) +
+      addUniqueArrayBytes(seen, s.scores_for_choice_f64) +
       addUniqueArrayBytes(seen, s.topk_indices) +
       addUniqueArrayBytes(seen, s.topk_raw_scores) +
       addUniqueArrayBytes(seen, s.topk_norm_probs) +
@@ -861,6 +1026,7 @@ function collectTraceUniqueBytes(seen: Set<ArrayBufferLike>, trace: HybridLayerT
       addUniqueArrayBytes(seen, s.y_shared) +
       addUniqueArrayBytes(seen, s.y_routed) +
       addUniqueArrayBytes(seen, s.y_moe) +
+      addUniqueArrayBytes(seen, s.residualGate) +
       addUniqueArrayBytes(seen, s.Y)
     );
   }
@@ -868,6 +1034,7 @@ function collectTraceUniqueBytes(seen: Set<ArrayBufferLike>, trace: HybridLayerT
   return (
     addUniqueArrayBytes(seen, s.tokenIds) +
     addUniqueArrayBytes(seen, s.X) +
+    addUniqueArrayBytes(seen, s.X_mod) +
     addUniqueArrayBytes(seen, s.X_norm) +
     addUniqueArrayBytes(seen, s.rms) +
     addUniqueArrayBytes(seen, s.U) +
@@ -879,11 +1046,12 @@ function collectTraceUniqueBytes(seen: Set<ArrayBufferLike>, trace: HybridLayerT
     addUniqueArrayBytes(seen, s.V_out) +
     addUniqueArrayBytes(seen, s.Concat) +
     addUniqueArrayBytes(seen, s.Attn_out) +
+    addUniqueArrayBytes(seen, s.residualGate) +
     addUniqueArrayBytes(seen, s.Y)
   );
 }
 
-function runSingleBay(
+export function runSingleBay(
   model: HybridModelParameters,
   executionId: string,
   bayId: number,
@@ -925,6 +1093,7 @@ function runSingleBay(
       W_up_s: weights.W_up_s,
       W_down_s: weights.W_down_s,
       rmsNormEps: eps,
+      routerPrecisionPolicy: model.config.routerPrecisionPolicy,
       tokenIds,
       tokenLabels,
     };

@@ -39,6 +39,90 @@ export const GQA_SIM_CONFIG = {
   rmsEps: 1e-6,
 } as const;
 
+/**
+ * Channel-wise affine AdaLN modulation terms (`shift`, `scale`), each length `d`.
+ * Applied as `x * (1 + scale) + shift` in IEEE-754 Float32:
+ *   - Pre-RMSNorm for Mamba-2 (`M`) and GQA Attention (`*`) layers
+ *   - Post-RMSNorm for Granular MoE (`E`) layers
+ */
+export interface LayerModulationTerms {
+  readonly shift: Float32Array;
+  readonly scale: Float32Array;
+}
+
+/**
+ * Attention visibility mask policy shared across GQA forward pass, formula inspection,
+ * and focused-cell stepper accumulation:
+ *   - `'causal'`: Nano AR & TwoTower Context Tower (`kGlobal <= prefixLen + qLocal`)
+ *   - `'bidirectional_block'`: TwoTower Denoiser Tower (`0 <= kGlobal < keyTokens`)
+ */
+export type AttentionMaskMode = 'causal' | 'bidirectional_block';
+
+/**
+ * Authoritative key visibility predicate shared across GQA score calculation, softmax,
+ * weighted V accumulation, `describeCellFormula`, and `computeGqaFocusedAccumulation`.
+ */
+export function isAttentionKeyVisible(
+  mode: AttentionMaskMode,
+  prefixLen: number,
+  qLocal: number,
+  kGlobal: number,
+  keyTokens: number,
+): boolean {
+  if (kGlobal < 0 || kGlobal >= keyTokens) return false;
+  if (mode === 'bidirectional_block') return true;
+  return kGlobal <= prefixLen + qLocal;
+}
+
+/**
+ * Inclusive maximum visible key index `kGlobal` for query `qLocal` under `mode`.
+ * Returns `-1` when no keys are visible.
+ */
+export function maxVisibleKeyIndex(
+  mode: AttentionMaskMode,
+  prefixLen: number,
+  qLocal: number,
+  keyTokens: number,
+): number {
+  if (keyTokens <= 0) return -1;
+  if (mode === 'bidirectional_block') return keyTokens - 1;
+  return Math.max(-1, Math.min(keyTokens - 1, prefixLen + qLocal));
+}
+
+/** Validate channel-wise modulation terms (`shift` and `scale` length `d`, all finite). */
+export function validateLayerModulation(
+  mod: LayerModulationTerms,
+  d: number,
+  label: string,
+): void {
+  if (mod.shift.length !== d) {
+    throw new RangeError(`${label}.shift length (${mod.shift.length}) !== expected ${d}`);
+  }
+  if (mod.scale.length !== d) {
+    throw new RangeError(`${label}.scale length (${mod.scale.length}) !== expected ${d}`);
+  }
+  for (let i = 0; i < d; i++) {
+    if (!Number.isFinite(mod.shift[i])) {
+      throw new RangeError(`Non-finite value (${mod.shift[i]}) in ${label}.shift[${i}]`);
+    }
+    if (!Number.isFinite(mod.scale[i])) {
+      throw new RangeError(`Non-finite value (${mod.scale[i]}) in ${label}.scale[${i}]`);
+    }
+  }
+}
+
+/** Validate channel-wise residual gate (`length === d`, all finite). */
+export function validateResidualGate(gate: Float32Array, d: number, label: string): void {
+  if (gate.length !== d) {
+    throw new RangeError(`${label} length (${gate.length}) !== expected ${d}`);
+  }
+  for (let i = 0; i < d; i++) {
+    if (!Number.isFinite(gate[i])) {
+      throw new RangeError(`Non-finite value (${gate[i]}) in ${label}[${i}]`);
+    }
+  }
+}
+
 /** Format an RMSNorm epsilon concisely with typographic minus (e.g. `1e-5` -> `1e−5`). */
 export function formatEpsLabel(eps: number): string {
   if (Math.abs(eps - 1e-5) <= 1e-12) return '1e−5';
@@ -119,6 +203,12 @@ export interface GqaSimFixture {
   readonly tokenLabels?: readonly string[];
   /** Optional cached prefix KV state for true rectangular `[nQ, S, P+S]` incremental attention. */
   readonly kvCacheIn?: GqaSimKvCacheInput;
+  /** Attention key visibility policy (defaults to `'causal'`). */
+  readonly attentionMaskMode?: AttentionMaskMode;
+  /** Optional pre-RMSNorm AdaLN modulation (`X_mod = X * (1 + scale) + shift`, then RMSNorm). */
+  readonly preNormMod?: LayerModulationTerms;
+  /** Optional channel-wise residual gate (`Y = X + gate * Attn_out`, preserving unmodulated `X`). */
+  readonly residualGate?: Float32Array;
 }
 
 export type GqaTensorKey =
@@ -223,8 +313,12 @@ export interface GqaSimResult {
   readonly qConcatDim: number;
   /** Effective RMSNorm epsilon used for this simulation (1e-6 standalone default; 1e-5 unified). */
   readonly rmsEps: number;
-  /** Input hidden state X: [8, S], indexed [i * S + t] */
+  /** Effective attention visibility mask policy (`'causal'` or `'bidirectional_block'`). */
+  readonly attentionMaskMode: AttentionMaskMode;
+  /** Input hidden state X: [8, S], indexed [i * S + t] (always untouched original residual). */
   readonly X: Float32Array;
+  /** Optional pre-RMSNorm AdaLN modulated input X_mod = X * (1 + scale) + shift: [8, S]. */
+  readonly X_mod?: Float32Array;
   /** Pre-gamma unit-RMS normalized state X_norm: [8, S], indexed [i * S + t] */
   readonly X_norm: Float32Array;
   /** Per-token RMS denominators: [S] */
@@ -257,7 +351,11 @@ export interface GqaSimResult {
   readonly W_O: Float32Array;
   /** Projected attention update Attn_out = W_O @ Concat: [8, S], indexed [i * S + q] */
   readonly Attn_out: Float32Array;
-  /** Residual merge Y = X + Attn_out: [8, S], indexed [i * S + q] */
+  /** Defensive copy of channel-wise residual gate [8], if supplied. */
+  readonly residualGate?: Float32Array;
+  /** True when a channel-wise residual gate modulated `Attn_out` before adding to `X`. */
+  readonly residualGateApplied: boolean;
+  /** Residual merge Y = X + (gate ? gate * Attn_out : Attn_out): [8, S], indexed [i * S + q] */
   readonly Y: Float32Array;
 }
 
@@ -375,13 +473,29 @@ const simCache = new Map<number, GqaSimResult>();
 export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult {
   const { d, nQ, nKv, dHead, qConcatDim, maxTokens } = GQA_SIM_CONFIG;
   const kvIn = fixture?.kvCacheIn;
-  const T = kvIn
-    ? Math.max(1, Math.round(tokens))
-    : Math.max(1, Math.min(maxTokens, Math.round(tokens)));
+  const rawT = Math.round(tokens);
+  if (fixture && (!Number.isFinite(tokens) || rawT < 1 || rawT > maxTokens)) {
+    throw new RangeError(
+      `GQA query length S (${tokens}) must be in [1..${maxTokens}] (independent of prefixLen and kvCacheIn.maxTokens)`,
+    );
+  }
+  const T = Math.max(1, Math.min(maxTokens, rawT));
   if (!fixture) {
     const cached = simCache.get(T);
     if (cached) return cached;
   }
+
+  const attentionMaskMode: AttentionMaskMode = fixture?.attentionMaskMode ?? 'causal';
+  const preNormMod = fixture?.preNormMod;
+  if (preNormMod) {
+    validateLayerModulation(preNormMod, d, 'GQA preNormMod');
+  }
+  let residualGate: Float32Array | undefined;
+  if (fixture?.residualGate) {
+    validateResidualGate(fixture.residualGate, d, 'GQA residualGate');
+    residualGate = new Float32Array(fixture.residualGate);
+  }
+  const residualGateApplied = residualGate !== undefined;
 
   let P = 0;
   if (kvIn) {
@@ -448,20 +562,32 @@ export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult
     }
   }
 
-  // 2. RMSNorm: X_norm [8, T] (unit RMS per token) and U = X_norm * gamma [8, T]
+  // 2. Optional Pre-Norm AdaLN Modulation (modulate FIRST, then RMSNorm) -> X_norm [8, T] & U = X_norm * gamma [8, T]
+  let X_mod: Float32Array | undefined;
+  if (preNormMod) {
+    X_mod = new Float32Array(d * T);
+    for (let i = 0; i < d; i++) {
+      const scaleFactor = Math.fround(1 + preNormMod.scale[i]);
+      const shift = preNormMod.shift[i];
+      for (let t = 0; t < T; t++) {
+        X_mod[i * T + t] = Math.fround(Math.fround(X[i * T + t] * scaleFactor) + shift);
+      }
+    }
+  }
+  const normInput = X_mod ?? X;
   const X_norm = new Float32Array(d * T);
   const rms = new Float32Array(T);
   const U = new Float32Array(d * T);
   for (let t = 0; t < T; t++) {
     let sumSq = 0;
     for (let i = 0; i < d; i++) {
-      const v = X[i * T + t];
+      const v = normInput[i * T + t];
       sumSq += v * v;
     }
     const rVal = Math.fround(Math.sqrt(sumSq / d + rmsEps));
     rms[t] = rVal;
     for (let i = 0; i < d; i++) {
-      const xn = Math.fround(X[i * T + t] / rVal);
+      const xn = Math.fround(normInput[i * T + t] / rVal);
       X_norm[i * T + t] = xn;
       U[i * T + t] = Math.fround(xn * gamma[i]);
     }
@@ -513,7 +639,7 @@ export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult
     }
   }
 
-  // 4. Scaled Dot-Product Causal Scores [32, T, P+T] & Row-Wise Softmax [32, T, P+T]
+  // 4. Scaled Dot-Product Scores [32, T, P+T] & Row-Wise Softmax [32, T, P+T] under authoritative visibility policy
   const invSqrtD = 1 / Math.sqrt(dHead); // 1 / 2 = 0.5
   const Scores = new Float32Array(nQ * T * keyTokens);
   const Softmax = new Float32Array(nQ * T * keyTokens);
@@ -526,11 +652,11 @@ export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult
 
     for (let q = 0; q < T; q++) {
       const rowOff = headScoreOff + q * keyTokens;
-      const maxCausalK = P + q;
+      const maxVisK = maxVisibleKeyIndex(attentionMaskMode, P, q, keyTokens);
       let maxScore = -Infinity;
 
       for (let k = 0; k < keyTokens; k++) {
-        if (k > maxCausalK) {
+        if (!isAttentionKeyVisible(attentionMaskMode, P, q, k, keyTokens)) {
           Scores[rowOff + k] = -Infinity;
         } else {
           let dot = 0;
@@ -543,15 +669,16 @@ export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult
         }
       }
 
-      // Numerically stable row-wise softmax over causal keys 0..P+q
+      // Numerically stable row-wise softmax strictly over visible keys
       let sumExp = 0;
-      for (let k = 0; k <= maxCausalK; k++) {
+      for (let k = 0; k <= maxVisK; k++) {
+        if (!isAttentionKeyVisible(attentionMaskMode, P, q, k, keyTokens)) continue;
         const e = Math.exp(Scores[rowOff + k] - maxScore);
         Softmax[rowOff + k] = e;
         sumExp += e;
       }
       for (let k = 0; k < keyTokens; k++) {
-        if (k <= maxCausalK) {
+        if (isAttentionKeyVisible(attentionMaskMode, P, q, k, keyTokens)) {
           Softmax[rowOff + k] = Math.fround(Softmax[rowOff + k] / sumExp);
         } else {
           Softmax[rowOff + k] = 0;
@@ -572,10 +699,11 @@ export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult
 
     for (let q = 0; q < T; q++) {
       const softRowOff = headSoftOff + q * keyTokens;
-      const maxCausalK = P + q;
+      const maxVisK = maxVisibleKeyIndex(attentionMaskMode, P, q, keyTokens);
       for (let r = 0; r < dHead; r++) {
         let acc = 0;
-        for (let k = 0; k <= maxCausalK; k++) {
+        for (let k = 0; k <= maxVisK; k++) {
+          if (!isAttentionKeyVisible(attentionMaskMode, P, q, k, keyTokens)) continue;
           acc += Softmax[softRowOff + k] * V[vHeadOff + r * keyTokens + k];
         }
         const val = Math.fround(acc);
@@ -585,7 +713,7 @@ export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult
     }
   }
 
-  // 6. Output projection W_O [8, 128] @ Concat [128, T] -> Attn_out [8, T] & Residual Y = X + Attn_out
+  // 6. Output projection W_O [8, 128] @ Concat [128, T] -> Attn_out [8, T] & Residual Y = X + (gate ? gate * Attn_out : Attn_out)
   const Attn_out = new Float32Array(d * T);
   const Y = new Float32Array(d * T);
   for (let i = 0; i < d; i++) {
@@ -597,7 +725,8 @@ export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult
       }
       const attn = Math.fround(acc);
       Attn_out[i * T + q] = attn;
-      Y[i * T + q] = Math.fround(X[i * T + q] + attn);
+      const delta = residualGate ? Math.fround(residualGate[i] * attn) : attn;
+      Y[i * T + q] = Math.fround(X[i * T + q] + delta);
     }
   }
 
@@ -616,7 +745,9 @@ export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult
     dHead,
     qConcatDim,
     rmsEps,
+    attentionMaskMode,
     X,
+    ...(X_mod ? { X_mod } : {}),
     X_norm,
     rms,
     gamma,
@@ -633,6 +764,8 @@ export function runGqaSim(tokens: number, fixture?: GqaSimFixture): GqaSimResult
     Concat,
     W_O,
     Attn_out,
+    ...(residualGate ? { residualGate } : {}),
+    residualGateApplied,
     Y,
   };
 
@@ -791,7 +924,9 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
       const t = cell.row;
       const tAbs = P + t;
       const i = cell.col;
-      const xVal = sim.X[i * T + t];
+      const normIn = sim.X_mod ?? sim.X;
+      const inSym = sim.X_mod ? 'X_mod' : 'X';
+      const xVal = normIn[i * T + t];
       const rmsVal = sim.rms[t];
       const xn = sim.X_norm[i * T + t];
       const gVal = sim.gamma[i];
@@ -804,8 +939,8 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
         value: uVal,
         isMasked: false,
         valueText: fmtSigned(uVal),
-        equation: `(X[${i},${tAbs}] / rms) · γ[${i}] = (${fmtSigned(xVal)} / ${rmsVal.toFixed(3)}) · ${gVal.toFixed(2)} = ${fmtSigned(xn)} · ${gVal.toFixed(2)} = ${fmtSigned(uVal)}`,
-        subEquation: `Pre-γ unit-RMS X_norm[${i},${tAbs}] = ${fmtSigned(xn)} · rms(X[:,${tAbs}]) = √(mean(x²) + ${formatEpsLabel(sim.rmsEps)}) = ${rmsVal.toFixed(3)}`,
+        equation: `(${inSym}[${i},${tAbs}] / rms) · γ[${i}] = (${fmtSigned(xVal)} / ${rmsVal.toFixed(3)}) · ${gVal.toFixed(2)} = ${fmtSigned(xn)} · ${gVal.toFixed(2)} = ${fmtSigned(uVal)}`,
+        subEquation: `Pre-γ unit-RMS X_norm[${i},${tAbs}] = ${fmtSigned(xn)} · rms(${inSym}[:,${tAbs}]) = √(mean(x²) + ${formatEpsLabel(sim.rmsEps)}) = ${rmsVal.toFixed(3)}`,
         targetSpan: { tensor: 'rmsnorm', rowStart: t, rowEnd: t, colStart: i, colEnd: i, role: 'target' },
         upstreamSpans: [
           { tensor: 'input', rowStart: t, rowEnd: t, colStart: 0, colEnd: d - 1, role: 'operand_a' },
@@ -988,7 +1123,7 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
       const k = cell.col;
       const qAbs = P + q;
       const val = sim.Scores[(h * T + q) * K + k];
-      const isMasked = k > qAbs || !Number.isFinite(val);
+      const isMasked = !isAttentionKeyVisible(sim.attentionMaskMode, P, q, k, K) || !Number.isFinite(val);
 
       if (isMasked) {
         return {
@@ -1027,6 +1162,7 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
       }
       const keyOriginNote =
         P > 0 ? (k < P ? ` · Reused prefix K${g} · Rect [${T}×${K}]` : ` · Newly computed K${g} · Rect [${T}×${K}]`) : '';
+      const modeNote = sim.attentionMaskMode === 'bidirectional_block' ? ' · Bidirectional block' : '';
       return {
         cell,
         tensorLabel: `Scores · ${fmtHead(h)}`,
@@ -1036,7 +1172,7 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
         isMasked: false,
         valueText: fmtSigned(val),
         equation: `(${fmtHead(h)}[:,${qAbs}] · K${g}[:,${k}]) / √4 = [${prods.join(' + ')}] / 2 = ${fmtSigned(dot, 3)} / 2 = ${fmtSigned(val)}`,
-        subEquation: `16:1 GQA: ${fmtHead(h)} queries shared K${g} · Post-Softmax weight = ${fmtProb(sim.Softmax[(h * T + q) * K + k])}${keyOriginNote}`,
+        subEquation: `16:1 GQA: ${fmtHead(h)} queries shared K${g} · Post-Softmax weight = ${fmtProb(sim.Softmax[(h * T + q) * K + k])}${keyOriginNote}${modeNote}`,
         targetSpan: {
           tensor: 'scores',
           headIndex: h,
@@ -1081,7 +1217,7 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
       const qAbs = P + q;
       const val = sim.Softmax[(h * T + q) * K + k];
       const scoreVal = sim.Scores[(h * T + q) * K + k];
-      const isMasked = k > qAbs;
+      const isMasked = !isAttentionKeyVisible(sim.attentionMaskMode, P, q, k, K);
 
       if (isMasked) {
         return {
@@ -1119,18 +1255,22 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
         };
       }
 
+      const maxVisK = maxVisibleKeyIndex(sim.attentionMaskMode, P, q, K);
       let maxS = -Infinity;
-      for (let j = 0; j <= qAbs; j++) {
+      for (let j = 0; j <= maxVisK; j++) {
+        if (!isAttentionKeyVisible(sim.attentionMaskMode, P, q, j, K)) continue;
         const s = sim.Scores[(h * T + q) * K + j];
         if (s > maxS) maxS = s;
       }
       let sumExp = 0;
       let rowSum = 0;
-      for (let j = 0; j <= qAbs; j++) {
+      for (let j = 0; j <= maxVisK; j++) {
+        if (!isAttentionKeyVisible(sim.attentionMaskMode, P, q, j, K)) continue;
         sumExp += Math.exp(sim.Scores[(h * T + q) * K + j] - maxS);
         rowSum += sim.Softmax[(h * T + q) * K + j];
       }
       const num = Math.exp(scoreVal - maxS);
+      const rowKindLabel = sim.attentionMaskMode === 'bidirectional_block' ? 'Bidirectional' : 'Causal';
       return {
         cell,
         tensorLabel: `Softmax · ${fmtHead(h)}`,
@@ -1139,8 +1279,8 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
         value: val,
         isMasked: false,
         valueText: fmtProb(val),
-        equation: `exp(${fmtSigned(scoreVal)} − ${fmtSigned(maxS)}) / Σ_{j=0..${qAbs}} exp(s_j − max) = ${num.toFixed(3)} / ${sumExp.toFixed(3)} = ${fmtProb(val)}`,
-        subEquation: `Causal row ${qAbs} sum Σ_{k=0..${qAbs}} Softmax = ${rowSum.toFixed(4)} (${(val * 100).toFixed(1)}% weight on ${keyTokStr(sim, k)})`,
+        equation: `exp(${fmtSigned(scoreVal)} − ${fmtSigned(maxS)}) / Σ_{j=0..${maxVisK}} exp(s_j − max) = ${num.toFixed(3)} / ${sumExp.toFixed(3)} = ${fmtProb(val)}`,
+        subEquation: `${rowKindLabel} row ${qAbs} sum Σ_{k=0..${maxVisK}} Softmax = ${rowSum.toFixed(4)} (${(val * 100).toFixed(1)}% weight on ${keyTokStr(sim, k)})`,
         targetSpan: {
           tensor: 'softmax',
           headIndex: h,
@@ -1159,7 +1299,7 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
             rowStart: q,
             rowEnd: q,
             colStart: 0,
-            colEnd: qAbs,
+            colEnd: maxVisK,
             role: 'operand_a',
           },
         ],
@@ -1170,6 +1310,8 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
       const g: 0 | 1 = cell.kvHeadIndex === 1 ? 1 : 0;
       const q = cell.row;
       const qAbs = P + q;
+      const maxVisK = maxVisibleKeyIndex(sim.attentionMaskMode, P, q, K);
+      const visCount = maxVisK + 1;
       const localH = Math.floor(cell.col / dHead);
       const r = cell.col % dHead;
       const h = g * 16 + localH;
@@ -1177,11 +1319,19 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
       const vHeadOff = g * dHead * K;
       const softRowOff = (h * T + q) * K;
       const terms: string[] = [];
-      const showN = Math.min(qAbs + 1, 3);
+      const showN = Math.min(visCount, 3);
       for (let k = 0; k < showN; k++) {
         terms.push(`${fmtProb(sim.Softmax[softRowOff + k], 2)}·${fmtSigned(sim.V[vHeadOff + r * K + k], 2)}`);
       }
-      const tail = qAbs + 1 > showN ? ` + … (${qAbs + 1} terms)` : '';
+      const tail = visCount > showN ? ` + … (${visCount} terms)` : '';
+      const subEquation =
+        sim.attentionMaskMode === 'bidirectional_block'
+          ? P > 0
+            ? `Bidirectional blend of ${P} reused + ${T} block shared V${g} slices 0..${maxVisK} → Concat ch ${h * dHead + r}`
+            : `Bidirectional blend of shared V${g} slices 0..${maxVisK} → feeds Concat channel ${h * dHead + r}`
+          : P > 0
+            ? `Weighted blend of ${P} reused + ${q + 1} new shared V${g} slices 0..${maxVisK} → Concat ch ${h * dHead + r}`
+            : `Weighted blend of cached shared V${g} slices 0..${maxVisK} → feeds Concat channel ${h * dHead + r}`;
       return {
         cell,
         tensorLabel: `V Out · ${fmtHead(h)}`,
@@ -1190,11 +1340,8 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
         value: val,
         isMasked: false,
         valueText: fmtSigned(val),
-        equation: `Σ_{k=0..${qAbs}} Softmax[${fmtHead(h)},${qAbs},k]·V${g}[${r},k] = ${terms.join(' + ')}${tail} = ${fmtSigned(val)}`,
-        subEquation:
-          P > 0
-            ? `Weighted blend of ${P} reused + ${q + 1} new shared V${g} slices 0..${qAbs} → Concat ch ${h * dHead + r}`
-            : `Weighted blend of cached shared V${g} slices 0..${qAbs} → feeds Concat channel ${h * dHead + r}`,
+        equation: `Σ_{k=0..${maxVisK}} Softmax[${fmtHead(h)},${qAbs},k]·V${g}[${r},k] = ${terms.join(' + ')}${tail} = ${fmtSigned(val)}`,
+        subEquation,
         targetSpan: {
           tensor: 'v_out',
           headIndex: h,
@@ -1213,14 +1360,14 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
             rowStart: q,
             rowEnd: q,
             colStart: 0,
-            colEnd: qAbs,
+            colEnd: maxVisK,
             role: 'operand_a',
           },
           {
             tensor: 'kv_v',
             kvHeadIndex: g,
             tokenStart: 0,
-            tokenEnd: qAbs,
+            tokenEnd: maxVisK,
             rowStart: 0,
             rowEnd: 0,
             colStart: r,
@@ -1294,6 +1441,7 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
       const xVal = sim.X[i * T + t];
       const attnVal = sim.Attn_out[i * T + t];
       const yVal = sim.Y[i * T + t];
+      const gateVal = sim.residualGateApplied && sim.residualGate ? sim.residualGate[i] : null;
       return {
         cell,
         tensorLabel: '+ Residual · Y',
@@ -1302,7 +1450,10 @@ export function describeCellFormula(sim: GqaSimResult, rawCell: GqaCellRef): Gqa
         value: yVal,
         isMasked: false,
         valueText: fmtSigned(yVal),
-        equation: `Y[${i},${tAbs}] = X[${i},${tAbs}] + (W_O·Concat)[${i},${tAbs}] = ${fmtSigned(xVal)} + (${fmtSigned(attnVal)}) = ${fmtSigned(yVal)}`,
+        equation:
+          gateVal !== null
+            ? `Y[${i},${tAbs}] = X[${i},${tAbs}] + gate[${i}](${fmtSigned(gateVal)})·(W_O·Concat)[${i},${tAbs}] = ${fmtSigned(xVal)} + ${fmtSigned(gateVal)}·(${fmtSigned(attnVal)}) = ${fmtSigned(yVal)}`
+            : `Y[${i},${tAbs}] = X[${i},${tAbs}] + (W_O·Concat)[${i},${tAbs}] = ${fmtSigned(xVal)} + (${fmtSigned(attnVal)}) = ${fmtSigned(yVal)}`,
         subEquation: `Attn_out[${i},${tAbs}] = Σ_{c=0..127} W_O[${i},c]·Concat[c,${tAbs}] = ${fmtSigned(attnVal)}`,
         targetSpan: { tensor: 'residual', rowStart: t, rowEnd: t, colStart: i, colEnd: i, role: 'target' },
         upstreamSpans: [

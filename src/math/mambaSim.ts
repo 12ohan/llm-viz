@@ -15,10 +15,17 @@
  * Precision toggles (BF16 / FP8 Selective) are displayed strictly as production metadata.
  */
 
-import { EDUCATIONAL_TOKENS, formatEpsLabel, resolveSimTokens } from './gqaSim';
+import {
+  EDUCATIONAL_TOKENS,
+  formatEpsLabel,
+  resolveSimTokens,
+  validateLayerModulation,
+  validateResidualGate,
+  type LayerModulationTerms,
+} from './gqaSim';
 import { fmtSigned, type LayerFormulaReadout, type StepperStepDef } from './formulaFormat';
 
-export { EDUCATIONAL_TOKENS };
+export { EDUCATIONAL_TOKENS, type LayerModulationTerms };
 
 export const MAMBA_SIM_CONFIG = {
   d: 8,
@@ -118,6 +125,10 @@ export interface MambaSimFixture {
   readonly initialSsmState?: Float32Array;
   /** Absolute starting token position offset P >= 0 for incremental steps (defaults to 0). */
   readonly startTokenOffset?: number;
+  /** Optional pre-RMSNorm AdaLN modulation (`X_mod = X * (1 + scale) + shift`, then RMSNorm). */
+  readonly preNormMod?: LayerModulationTerms;
+  /** Optional channel-wise residual gate (`Y = X + gate * Mamba_out`, preserving unmodulated `X`). */
+  readonly residualGate?: Float32Array;
 }
 
 export interface MambaSimResult {
@@ -145,8 +156,10 @@ export interface MambaSimResult {
   readonly eps: number;
   readonly tokenLabels: readonly string[];
 
-  /** Input hidden state X: [d, T] -> X[i * T + t] */
+  /** Input hidden state X: [d, T] -> X[i * T + t] (always untouched original residual) */
   readonly X: Float32Array;
+  /** Optional pre-RMSNorm AdaLN modulated input X_mod = X * (1 + scale) + shift: [d, T] */
+  readonly X_mod?: Float32Array;
   /** Pre-gamma RMSNorm: [d, T] */
   readonly X_norm: Float32Array;
   /** Per-token RMS denominator: [T] */
@@ -226,7 +239,11 @@ export interface MambaSimResult {
   readonly W_out: Float32Array;
   /** Layer delta Mamba_out = W_out @ y_norm: [d, T] */
   readonly Mamba_out: Float32Array;
-  /** Residual output Y = X + Mamba_out: [d, T] */
+  /** Defensive copy of channel-wise residual gate [d], if supplied. */
+  readonly residualGate?: Float32Array;
+  /** True when a channel-wise residual gate modulated `Mamba_out` before adding to `X`. */
+  readonly residualGateApplied: boolean;
+  /** Residual output Y = X + (gate ? gate * Mamba_out : Mamba_out): [d, T] */
   readonly Y: Float32Array;
 }
 
@@ -432,7 +449,11 @@ const DEFAULT_SIM_CACHE = new Map<number, MambaSimResult>();
  * Default calls (no fixture) are memoized per T for instant hover/scrubber updates.
  */
 export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSimResult {
-  const T = Math.max(1, Math.min(16, Math.round(tokens)));
+  const rawT = Math.round(tokens);
+  if (fixture && (!Number.isFinite(tokens) || rawT < 1 || rawT > 16)) {
+    throw new RangeError(`Mamba query length S (${tokens}) must be in [1..16]`);
+  }
+  const T = Math.max(1, Math.min(16, rawT));
   if (!fixture) {
     const cached = DEFAULT_SIM_CACHE.get(T);
     if (cached) return cached;
@@ -452,6 +473,17 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
     groupSize,
   } = MAMBA_SIM_CONFIG;
   const eps = fixture?.eps ?? MAMBA_SIM_CONFIG.rmsEps;
+
+  const preNormMod = fixture?.preNormMod;
+  if (preNormMod) {
+    validateLayerModulation(preNormMod, d, 'Mamba preNormMod');
+  }
+  let residualGate: Float32Array | undefined;
+  if (fixture?.residualGate) {
+    validateResidualGate(fixture.residualGate, d, 'Mamba residualGate');
+    residualGate = new Float32Array(fixture.residualGate);
+  }
+  const residualGateApplied = residualGate !== undefined;
 
   const gamma_in = fixture?.gamma_in ?? DEFAULT_WEIGHTS.gamma_in;
   const W_in = fixture?.W_in ?? DEFAULT_WEIGHTS.W_in;
@@ -518,20 +550,32 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
     }
   }
 
-  // 2. Pre-Layer RMSNorm (eps = 1e-5) -> X_norm [d, T] & U = X_norm * gamma_in [d, T]
+  // 2. Optional Pre-Norm AdaLN Modulation (modulate FIRST, then RMSNorm eps = 1e-5) -> X_norm [d, T] & U = X_norm * gamma_in [d, T]
+  let X_mod: Float32Array | undefined;
+  if (preNormMod) {
+    X_mod = new Float32Array(d * T);
+    for (let i = 0; i < d; i++) {
+      const scaleFactor = Math.fround(1 + preNormMod.scale[i]);
+      const shift = preNormMod.shift[i];
+      for (let t = 0; t < T; t++) {
+        X_mod[i * T + t] = Math.fround(Math.fround(X[i * T + t] * scaleFactor) + shift);
+      }
+    }
+  }
+  const normInput = X_mod ?? X;
   const rms_in = new Float32Array(T);
   const X_norm = new Float32Array(d * T);
   const U = new Float32Array(d * T);
   for (let t = 0; t < T; t++) {
     let sumSq = 0;
     for (let i = 0; i < d; i++) {
-      const val = X[i * T + t];
+      const val = normInput[i * T + t];
       sumSq += val * val;
     }
     const r = Math.fround(Math.sqrt(sumSq / d + eps));
     rms_in[t] = r;
     for (let i = 0; i < d; i++) {
-      const xn = Math.fround(X[i * T + t] / r);
+      const xn = Math.fround(normInput[i * T + t] / r);
       X_norm[i * T + t] = xn;
       U[i * T + t] = Math.fround(xn * gamma_in[i]);
     }
@@ -701,7 +745,7 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
     eps,
   );
 
-  // 7. Output Projection W_out [8, 64] @ y_norm [64, T] + Residual X [8, T]
+  // 7. Output Projection W_out [8, 64] @ y_norm [64, T] + Residual X [8, T] (optional residual gate)
   const Mamba_out = new Float32Array(d * T);
   const Y = new Float32Array(d * T);
   for (let i = 0; i < d; i++) {
@@ -713,7 +757,8 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
       }
       const mOut = Math.fround(acc);
       Mamba_out[i * T + t] = mOut;
-      Y[i * T + t] = Math.fround(X[i * T + t] + mOut);
+      const delta = residualGate ? Math.fround(residualGate[i] * mOut) : mOut;
+      Y[i * T + t] = Math.fround(X[i * T + t] + delta);
     }
   }
 
@@ -738,6 +783,7 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
     eps,
     tokenLabels,
     X,
+    ...(X_mod ? { X_mod } : {}),
     X_norm,
     rms_in,
     gamma_in,
@@ -772,6 +818,8 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
     y_norm,
     W_out,
     Mamba_out,
+    ...(residualGate ? { residualGate } : {}),
+    residualGateApplied,
     Y,
   };
 
@@ -971,7 +1019,9 @@ export function describeMambaCellFormula(
       const t = clampT(cell.row);
       const absT = sim.startTokenOffset + t;
       const i = clampC(cell.col, d);
-      const xVal = sim.X[i * T + t];
+      const normIn = sim.X_mod ?? sim.X;
+      const inSym = sim.X_mod ? 'X_mod' : 'X';
+      const xVal = normIn[i * T + t];
       const rms = sim.rms_in[t];
       const xn = sim.X_norm[i * T + t];
       const g = sim.gamma_in[i];
@@ -985,7 +1035,7 @@ export function describeMambaCellFormula(
         isMasked: false,
         valueText: fmtSigned(uVal),
         equation: `U[${i}, t=${absT}] = (${fmtSigned(xVal)} / ${rms.toFixed(3)}) · γ[${i}](${g.toFixed(3)}) = ${fmtSigned(uVal)}`,
-        subEquation: `X_norm = ${fmtSigned(xn)} · √(mean(X[:, t=${absT}]²) + ${formatEpsLabel(sim.eps)}) = ${rms.toFixed(4)}`,
+        subEquation: `X_norm = ${fmtSigned(xn)} · √(mean(${inSym}[:, t=${absT}]²) + ${formatEpsLabel(sim.eps)}) = ${rms.toFixed(4)}`,
         targetSpan: { tensor: 'rmsnorm', rowStart: t, rowEnd: t, colStart: i, colEnd: i, role: 'target' },
         upstreamSpans: [
           { tensor: 'input', rowStart: t, rowEnd: t, colStart: 0, colEnd: d - 1, role: 'operand_a' },
@@ -1440,6 +1490,7 @@ export function describeMambaCellFormula(
       const xVal = sim.X[i * T + t];
       const delta = sim.Mamba_out[i * T + t];
       const yVal = sim.Y[i * T + t];
+      const gateVal = sim.residualGateApplied && sim.residualGate ? sim.residualGate[i] : null;
       return {
         cell,
         tensorLabel: '+ Residual Y',
@@ -1448,7 +1499,10 @@ export function describeMambaCellFormula(
         value: yVal,
         isMasked: false,
         valueText: fmtSigned(yVal),
-        equation: `Y[${i}, t=${absT}] = X(${fmtSigned(xVal)}) + (W_out·y_norm)(${fmtSigned(delta)}) = ${fmtSigned(yVal)}`,
+        equation:
+          gateVal !== null
+            ? `Y[${i}, t=${absT}] = X(${fmtSigned(xVal)}) + gate[${i}](${fmtSigned(gateVal)})·(W_out·y_norm)(${fmtSigned(delta)}) = ${fmtSigned(yVal)}`
+            : `Y[${i}, t=${absT}] = X(${fmtSigned(xVal)}) + (W_out·y_norm)(${fmtSigned(delta)}) = ${fmtSigned(yVal)}`,
         subEquation: `Adds Mamba-2 output delta into the continuous 2,688-channel emerald residual stream`,
         targetSpan: { tensor: 'residual', rowStart: t, rowEnd: t, colStart: i, colEnd: i, role: 'target' },
         upstreamSpans: [

@@ -29,6 +29,7 @@
     "src/scene/**/*.ts",
     "src/ui/**/*.ts",
     "src/story/**/*.ts",
+    "src/twotower/**/*.ts",
     "tests/**/*.ts",
     "vite.config.ts"
   ],

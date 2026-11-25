@@ -18,12 +18,28 @@
  * weights are d=2,688, moe_intermediate_size=1,856, moe_shared_expert_intermediate_size=3,712.
  */
 
-import { formatEpsLabel, resolveSimTokens } from './gqaSim';
+import {
+  formatEpsLabel,
+  resolveSimTokens,
+  validateLayerModulation,
+  validateResidualGate,
+  type LayerModulationTerms,
+} from './gqaSim';
 import {
   fmtSigned,
   type LayerFormulaReadout,
   type StepperStepDef,
 } from './formulaFormat';
+
+export type { LayerModulationTerms };
+
+/**
+ * Router scoring precision policy:
+ *   - `'float32_nano'`: preserves Nemotron 3 Nano v1.0.0 Float32 rounding points (0 ULP invariance)
+ *   - `'float64_reference'`: keeps router projection, sigmoid, biased choice scores, Top-6 selection,
+ *     and unbiased normalization/scaling in IEEE-754 Float64, rounding to Float32 only at final weights
+ */
+export type RouterPrecisionPolicy = 'float32_nano' | 'float64_reference';
 
 export const MOE_SIM_CONFIG = {
   d: 8,
@@ -123,6 +139,12 @@ export interface MoeSimFixture {
   readonly tokenLabels?: readonly string[];
   /** Absolute starting token position offset P >= 0 for incremental steps (defaults to 0). */
   readonly startTokenOffset?: number;
+  /** Router precision policy (defaults to `'float32_nano'` for 0-ULP Nano v1.0.0 invariance). */
+  readonly routerPrecisionPolicy?: RouterPrecisionPolicy;
+  /** Optional post-RMSNorm AdaLN modulation (`RMSNorm(X) -> U`, then `U_mod = U * (1 + scale) + shift`). */
+  readonly postNormMod?: LayerModulationTerms;
+  /** Optional channel-wise residual gate (`Y = X + gate * y_moe`, preserving unmodulated `X`). */
+  readonly residualGate?: Float32Array;
 }
 
 export interface SingleRoutedExpertEval {
@@ -160,6 +182,8 @@ export interface MoeSimResult {
   readonly dShared: number;
   readonly routedScalingFactor: number;
   readonly eps: number;
+  /** Effective router scoring precision policy used for this execution. */
+  readonly routerPrecisionPolicy: RouterPrecisionPolicy;
 
   // Learned / synthetic deterministic parameters
   readonly gamma_in: Float32Array; // [d]
@@ -171,14 +195,22 @@ export interface MoeSimResult {
   readonly W_down_s: Float32Array; // [d, dShared]
 
   // Forward-pass tensors (row-major by channel/expert, then token t)
-  readonly X: Float32Array; // [d, T]
+  readonly X: Float32Array; // [d, T] (always untouched original residual)
   readonly rms: Float32Array; // [T]
   readonly X_norm: Float32Array; // [d, T]
-  readonly U: Float32Array; // [d, T]
+  readonly U: Float32Array; // [d, T] (RMSNorm(X))
+  /** Optional post-RMSNorm AdaLN modulated input U_mod = U * (1 + scale) + shift: [d, T]. */
+  readonly U_mod?: Float32Array;
 
   readonly router_logits: Float32Array; // [128, T]
   readonly scores: Float32Array; // [128, T] unbiased sigmoid(logits)
   readonly scores_for_choice: Float32Array; // [128, T] scores + e_score_correction_bias
+  /** Full Float64 router logits [128, T] when `routerPrecisionPolicy === 'float64_reference'`. */
+  readonly router_logits_f64?: Float64Array;
+  /** Full Float64 unbiased sigmoid router scores [128, T] when `routerPrecisionPolicy === 'float64_reference'`. */
+  readonly router_scores_f64?: Float64Array;
+  /** Full Float64 biased choice scores [128, T] when `routerPrecisionPolicy === 'float64_reference'`. */
+  readonly scores_for_choice_f64?: Float64Array;
 
   /** Top-6 winning expert IDs per token, indexed [t * topK + j], sorted descending by choice score. */
   readonly topk_indices: Int32Array; // [T, 6]
@@ -202,6 +234,10 @@ export interface MoeSimResult {
   /** Parallel aggregation & residual outputs. */
   readonly y_routed: Float32Array; // [d, T]
   readonly y_moe: Float32Array; // [d, T]
+  /** Defensive copy of channel-wise residual gate [d], if supplied. */
+  readonly residualGate?: Float32Array;
+  /** True when a channel-wise residual gate modulated `y_moe` before adding to `X`. */
+  readonly residualGateApplied: boolean;
   readonly Y: Float32Array; // [d, T]
 }
 
@@ -370,12 +406,14 @@ export function evaluateSingleRoutedExpert(
   }
 
   // Compute full 0..127 rank under scores_for_choice (deterministic tie-break: lower index wins)
+  const choiceArr = sim.scores_for_choice_f64 ?? sim.scores_for_choice;
+  const myChoiceRankScore = choiceArr[e * T + t];
   const myChoice = sim.scores_for_choice[e * T + t];
   let choiceRank = 0;
   for (let other = 0; other < nRoutedExperts; other++) {
     if (other === e) continue;
-    const oc = sim.scores_for_choice[other * T + t];
-    if (oc > myChoice || (oc === myChoice && other < e)) {
+    const oc = choiceArr[other * T + t];
+    if (oc > myChoiceRankScore || (oc === myChoiceRankScore && other < e)) {
       choiceRank++;
     }
   }
@@ -395,11 +433,12 @@ export function evaluateSingleRoutedExpert(
       y[o] = sim.active_y[yBase + o];
     }
   } else {
+    const expertInput = sim.U_mod ?? sim.U;
     for (let k = 0; k < dExp; k++) {
       let sum = 0;
       const wRow = (e * dExp + k) * d;
       for (let i = 0; i < d; i++) {
-        sum += sim.W_up[wRow + i] * sim.U[i * T + t];
+        sum += sim.W_up[wRow + i] * expertInput[i * T + t];
       }
       const hv = Math.fround(sum);
       h[k] = hv;
@@ -437,7 +476,13 @@ export function evaluateSingleRoutedExpert(
  * Strictly per-token independent (0 B token cache).
  */
 export function runMoeSim(tokens: number, fixture?: MoeSimFixture): MoeSimResult {
-  const T = Math.max(1, Math.min(MOE_SIM_CONFIG.maxTokens, Math.round(tokens)));
+  const rawT = Math.round(tokens);
+  if (fixture && (!Number.isFinite(tokens) || rawT < 1 || rawT > MOE_SIM_CONFIG.maxTokens)) {
+    throw new RangeError(
+      `MoE query length S (${tokens}) must be in [1..${MOE_SIM_CONFIG.maxTokens}]`,
+    );
+  }
+  const T = Math.max(1, Math.min(MOE_SIM_CONFIG.maxTokens, rawT));
   if (!fixture) {
     const cached = defaultSimCache.get(T);
     if (cached) return cached;
@@ -447,6 +492,18 @@ export function runMoeSim(tokens: number, fixture?: MoeSimFixture): MoeSimResult
   const { d, nRoutedExperts, topK, dExp, dShared, routedScalingFactor, probDenomEps } =
     MOE_SIM_CONFIG;
   const rmsNormEps = fixture?.rmsNormEps ?? MOE_SIM_CONFIG.rmsNormEps;
+  const routerPrecisionPolicy: RouterPrecisionPolicy =
+    fixture?.routerPrecisionPolicy ?? 'float32_nano';
+  const postNormMod = fixture?.postNormMod;
+  if (postNormMod) {
+    validateLayerModulation(postNormMod, d, 'MoE postNormMod');
+  }
+  let residualGate: Float32Array | undefined;
+  if (fixture?.residualGate) {
+    validateResidualGate(fixture.residualGate, d, 'MoE residualGate');
+    residualGate = new Float32Array(fixture.residualGate);
+  }
+  const residualGateApplied = residualGate !== undefined;
   const { tokenIds, tokenLabels } = resolveSimTokens(T, fixture?.tokenIds, fixture?.tokenLabels);
 
   const gamma_in = fixture?.gamma_in ?? def.gamma_in;
@@ -473,10 +530,16 @@ export function runMoeSim(tokens: number, fixture?: MoeSimFixture): MoeSimResult
   const rms = new Float32Array(T);
   const X_norm = new Float32Array(d * T);
   const U = new Float32Array(d * T);
+  const U_mod = postNormMod ? new Float32Array(d * T) : undefined;
+  const U_in = U_mod ?? U;
 
   const router_logits = new Float32Array(nRoutedExperts * T);
   const scores = new Float32Array(nRoutedExperts * T);
   const scores_for_choice = new Float32Array(nRoutedExperts * T);
+  const useFloat64Router = routerPrecisionPolicy === 'float64_reference';
+  const router_logits_f64 = useFloat64Router ? new Float64Array(nRoutedExperts * T) : undefined;
+  const router_scores_f64 = useFloat64Router ? new Float64Array(nRoutedExperts * T) : undefined;
+  const scores_for_choice_f64 = useFloat64Router ? new Float64Array(nRoutedExperts * T) : undefined;
 
   const topk_indices = new Int32Array(T * topK);
   const topk_raw_scores = new Float32Array(T * topK);
@@ -499,7 +562,8 @@ export function runMoeSim(tokens: number, fixture?: MoeSimFixture): MoeSimResult
 
   // Per-token independent loop (0 B cross-token cache)
   for (let t = 0; t < T; t++) {
-    // 1. Pre-Layer RMSNorm (eps = 1e-5) + learned non-unit gamma_in
+    // 1. Pre-Layer RMSNorm (eps = 1e-5) + learned non-unit gamma_in -> U
+    //    Followed by optional post-RMSNorm AdaLN modulation -> U_mod = U * (1 + scale) + shift
     let meanSq = 0;
     for (let i = 0; i < d; i++) {
       const xv = X[i * T + t];
@@ -512,59 +576,124 @@ export function runMoeSim(tokens: number, fixture?: MoeSimFixture): MoeSimResult
     for (let i = 0; i < d; i++) {
       const xn = X[i * T + t] / denom;
       X_norm[i * T + t] = Math.fround(xn);
-      U[i * T + t] = Math.fround(xn * gamma_in[i]);
-    }
-
-    // 2. NemotronHTopkRouter: logits = W_router @ U[:, t], sigmoid, + e_score_correction_bias
-    for (let e = 0; e < nRoutedExperts; e++) {
-      let logit = 0;
-      const wOff = e * d;
-      for (let i = 0; i < d; i++) {
-        logit += W_router[wOff + i] * U[i * T + t];
+      const uVal = Math.fround(xn * gamma_in[i]);
+      U[i * T + t] = uVal;
+      if (postNormMod && U_mod) {
+        const scaleFactor = Math.fround(1 + postNormMod.scale[i]);
+        U_mod[i * T + t] = Math.fround(Math.fround(uVal * scaleFactor) + postNormMod.shift[i]);
       }
-      const l32 = Math.fround(logit);
-      const s32 = Math.fround(stableSigmoid(l32));
-      const c32 = Math.fround(s32 + e_score_correction_bias[e]);
-      router_logits[e * T + t] = l32;
-      scores[e * T + t] = s32;
-      scores_for_choice[e * T + t] = c32;
-      candidateOrder[e] = e;
     }
 
-    // Select Top-6 strictly via scores_for_choice (deterministic tie-break: lower expert index)
-    for (let j = 0; j < topK; j++) {
-      let bestPos = j;
-      let bestExpert = candidateOrder[j];
-      let bestScore = scores_for_choice[bestExpert * T + t];
-      for (let m = j + 1; m < nRoutedExperts; m++) {
-        const cand = candidateOrder[m];
-        const candScore = scores_for_choice[cand * T + t];
-        if (candScore > bestScore || (candScore === bestScore && cand < bestExpert)) {
-          bestPos = m;
-          bestExpert = cand;
-          bestScore = candScore;
+    // 2. NemotronHTopkRouter: logits = W_router @ U_in[:, t], sigmoid, + e_score_correction_bias
+    if (useFloat64Router && router_logits_f64 && router_scores_f64 && scores_for_choice_f64) {
+      for (let e = 0; e < nRoutedExperts; e++) {
+        let z64 = 0;
+        const wOff = e * d;
+        for (let i = 0; i < d; i++) {
+          z64 += W_router[wOff + i] * U_in[i * T + t];
         }
+        const s64 = stableSigmoid(z64);
+        const c64 = s64 + e_score_correction_bias[e];
+        router_logits_f64[e * T + t] = z64;
+        router_scores_f64[e * T + t] = s64;
+        scores_for_choice_f64[e * T + t] = c64;
+        router_logits[e * T + t] = Math.fround(z64);
+        scores[e * T + t] = Math.fround(s64);
+        scores_for_choice[e * T + t] = Math.fround(c64);
+        candidateOrder[e] = e;
       }
-      if (bestPos !== j) {
-        const tmp = candidateOrder[j];
-        candidateOrder[j] = candidateOrder[bestPos];
-        candidateOrder[bestPos] = tmp;
-      }
-      topk_indices[t * topK + j] = bestExpert;
-      // Gather UNBIASED sigmoid scores (NOT scores_for_choice!)
-      topk_raw_scores[t * topK + j] = scores[bestExpert * T + t];
-    }
 
-    // Normalize gathered unbiased probabilities & apply routed_scaling_factor = 2.5
-    let rawSum = 0;
-    for (let j = 0; j < topK; j++) {
-      rawSum += topk_raw_scores[t * topK + j];
-    }
-    const probDenom = rawSum + probDenomEps;
-    for (let j = 0; j < topK; j++) {
-      const pNorm = topk_raw_scores[t * topK + j] / probDenom;
-      topk_norm_probs[t * topK + j] = Math.fround(pNorm);
-      topk_weights[t * topK + j] = Math.fround(pNorm * routedScalingFactor);
+      // Select Top-6 strictly via Float64 scores_for_choice_f64 (deterministic exact tie-break: lower expert index)
+      for (let j = 0; j < topK; j++) {
+        let bestPos = j;
+        let bestExpert = candidateOrder[j];
+        let bestScore = scores_for_choice_f64[bestExpert * T + t];
+        for (let m = j + 1; m < nRoutedExperts; m++) {
+          const cand = candidateOrder[m];
+          const candScore = scores_for_choice_f64[cand * T + t];
+          if (candScore > bestScore || (candScore === bestScore && cand < bestExpert)) {
+            bestPos = m;
+            bestExpert = cand;
+            bestScore = candScore;
+          }
+        }
+        if (bestPos !== j) {
+          const tmp = candidateOrder[j];
+          candidateOrder[j] = candidateOrder[bestPos];
+          candidateOrder[bestPos] = tmp;
+        }
+        topk_indices[t * topK + j] = bestExpert;
+        topk_raw_scores[t * topK + j] = scores[bestExpert * T + t];
+      }
+
+      // Normalize gathered unbiased Float64 probabilities & apply routed_scaling_factor = 2.5 in Float64,
+      // rounding to Float32 ONLY at final routing weight conversion.
+      let sum64 = 0;
+      for (let j = 0; j < topK; j++) {
+        const bestExpert = topk_indices[t * topK + j];
+        sum64 += router_scores_f64[bestExpert * T + t];
+      }
+      const denom64 = sum64 + probDenomEps;
+      for (let j = 0; j < topK; j++) {
+        const bestExpert = topk_indices[t * topK + j];
+        const s64 = router_scores_f64[bestExpert * T + t];
+        const pNorm64 = s64 / denom64;
+        const w64 = pNorm64 * routedScalingFactor;
+        topk_norm_probs[t * topK + j] = Math.fround(pNorm64);
+        topk_weights[t * topK + j] = Math.fround(w64);
+      }
+    } else {
+      // Nano v1.0.0 Float32 reference router (preserves exact Float32 rounding points, 0 ULP diff)
+      for (let e = 0; e < nRoutedExperts; e++) {
+        let logit = 0;
+        const wOff = e * d;
+        for (let i = 0; i < d; i++) {
+          logit += W_router[wOff + i] * U_in[i * T + t];
+        }
+        const l32 = Math.fround(logit);
+        const s32 = Math.fround(stableSigmoid(l32));
+        const c32 = Math.fround(s32 + e_score_correction_bias[e]);
+        router_logits[e * T + t] = l32;
+        scores[e * T + t] = s32;
+        scores_for_choice[e * T + t] = c32;
+        candidateOrder[e] = e;
+      }
+
+      // Select Top-6 strictly via scores_for_choice (deterministic tie-break: lower expert index)
+      for (let j = 0; j < topK; j++) {
+        let bestPos = j;
+        let bestExpert = candidateOrder[j];
+        let bestScore = scores_for_choice[bestExpert * T + t];
+        for (let m = j + 1; m < nRoutedExperts; m++) {
+          const cand = candidateOrder[m];
+          const candScore = scores_for_choice[cand * T + t];
+          if (candScore > bestScore || (candScore === bestScore && cand < bestExpert)) {
+            bestPos = m;
+            bestExpert = cand;
+            bestScore = candScore;
+          }
+        }
+        if (bestPos !== j) {
+          const tmp = candidateOrder[j];
+          candidateOrder[j] = candidateOrder[bestPos];
+          candidateOrder[bestPos] = tmp;
+        }
+        topk_indices[t * topK + j] = bestExpert;
+        // Gather UNBIASED sigmoid scores (NOT scores_for_choice!)
+        topk_raw_scores[t * topK + j] = scores[bestExpert * T + t];
+      }
+
+      // Normalize gathered unbiased probabilities & apply routed_scaling_factor = 2.5
+      let rawSum = 0;
+      for (let j = 0; j < topK; j++) {
+        rawSum += topk_raw_scores[t * topK + j];
+      }
+      const probDenom = rawSum + probDenomEps;
+      for (let j = 0; j < topK; j++) {
+        const pNorm = topk_raw_scores[t * topK + j] / probDenom;
+        topk_norm_probs[t * topK + j] = Math.fround(pNorm);
+        topk_weights[t * topK + j] = Math.fround(pNorm * routedScalingFactor);
+      }
     }
 
     // 3. Parallel Non-Gated ReLU² Routed Experts (ONLY top-6 active; 122 idle = 0 contribution)
@@ -578,7 +707,7 @@ export function runMoeSim(tokens: number, fixture?: MoeSimFixture): MoeSimResult
         let sum = 0;
         const wRow = (e * dExp + k) * d;
         for (let i = 0; i < d; i++) {
-          sum += W_up[wRow + i] * U[i * T + t];
+          sum += W_up[wRow + i] * U_in[i * T + t];
         }
         const hv = Math.fround(sum);
         active_h[hBase + k] = hv;
@@ -602,7 +731,7 @@ export function runMoeSim(tokens: number, fixture?: MoeSimFixture): MoeSimResult
       let sum = 0;
       const wRow = k * d;
       for (let i = 0; i < d; i++) {
-        sum += W_up_s[wRow + i] * U[i * T + t];
+        sum += W_up_s[wRow + i] * U_in[i * T + t];
       }
       const hv = Math.fround(sum);
       shared_h[k * T + t] = hv;
@@ -618,10 +747,11 @@ export function runMoeSim(tokens: number, fixture?: MoeSimFixture): MoeSimResult
       const ysv = Math.fround(sum);
       y_shared[o * T + t] = ysv;
 
-      // 5. Parallel Merge + Residual
+      // 5. Parallel Merge + Residual (optional channel-wise residual gate applied to y_moe)
       const moeSum = Math.fround(y_routed[o * T + t] + ysv);
       y_moe[o * T + t] = moeSum;
-      Y[o * T + t] = Math.fround(X[o * T + t] + moeSum);
+      const delta = residualGate ? Math.fround(residualGate[o] * moeSum) : moeSum;
+      Y[o * T + t] = Math.fround(X[o * T + t] + delta);
     }
   }
 
@@ -637,6 +767,7 @@ export function runMoeSim(tokens: number, fixture?: MoeSimFixture): MoeSimResult
     dShared,
     routedScalingFactor,
     eps: rmsNormEps,
+    routerPrecisionPolicy,
     gamma_in,
     W_router,
     e_score_correction_bias,
@@ -648,9 +779,13 @@ export function runMoeSim(tokens: number, fixture?: MoeSimFixture): MoeSimResult
     rms,
     X_norm,
     U,
+    ...(U_mod ? { U_mod } : {}),
     router_logits,
     scores,
     scores_for_choice,
+    ...(router_logits_f64 ? { router_logits_f64 } : {}),
+    ...(router_scores_f64 ? { router_scores_f64 } : {}),
+    ...(scores_for_choice_f64 ? { scores_for_choice_f64 } : {}),
     topk_indices,
     topk_raw_scores,
     topk_norm_probs,
@@ -663,6 +798,8 @@ export function runMoeSim(tokens: number, fixture?: MoeSimFixture): MoeSimResult
     y_shared,
     y_routed,
     y_moe,
+    ...(residualGate ? { residualGate } : {}),
+    residualGateApplied,
     Y,
   };
 
@@ -793,6 +930,9 @@ export function describeMoeCellFormula(
       const g = sim.gamma_in[ch];
       const uv = sim.U[ch * T + t];
       const tl = sim.tokenLabels[t] ?? `t${absTok(t)}`;
+      const modNote = sim.U_mod
+        ? ` · Post-norm AdaLN U_mod = ${fmtSigned(sim.U_mod[ch * T + t], 3)} feeds Router & Experts.`
+        : ' · Forks in parallel to Router & Shared Expert.';
       return {
         cell: { ...rawCell, row: t, col: ch, tokenIndex: t },
         tensorLabel: 'RMSNorm U',
@@ -802,7 +942,7 @@ export function describeMoeCellFormula(
         isMasked: false,
         valueText: fmtSigned(uv, 3),
         equation: `U[${ch}, t${absTok(t)}] = (${fmtSigned(xv, 3)} / ${sim.rms[t].toFixed(3)}) × γ[${ch}](${g.toFixed(2)}) = ${fmtSigned(uv, 3)}`,
-        subEquation: `X_norm = ${fmtSigned(xn, 3)} · RMS = √(mean(X²) + ${formatEpsLabel(sim.eps)}) = ${sim.rms[t].toFixed(3)} · Forks in parallel to Router & Shared Expert.`,
+        subEquation: `X_norm = ${fmtSigned(xn, 3)} · RMS = √(mean(X²) + ${formatEpsLabel(sim.eps)}) = ${sim.rms[t].toFixed(3)}${modNote}`,
         upstreamSpans: [
           { tensor: 'input', rowStart: t, rowEnd: t, colStart: 0, colEnd: d - 1, tokenIndex: t },
         ],
@@ -920,6 +1060,8 @@ export function describeMoeCellFormula(
       const iCol = Math.max(0, Math.min(d - 1, rawCell.col));
       const ev = evaluateSingleRoutedExpert(sim, expId, tokIdx);
       const wv = sim.W_up[(expId * dExp + hRow) * d + iCol];
+      const expertIn = sim.U_mod ?? sim.U;
+      const inSym = sim.U_mod ? 'U_mod' : 'U';
       return {
         cell: { tensor: 'routed_w_up', row: hRow, col: iCol, tokenIndex: tokIdx, expertId: expId },
         tensorLabel: `${expTag} W_up`,
@@ -928,7 +1070,7 @@ export function describeMoeCellFormula(
         value: wv,
         isMasked: !ev.isActive,
         valueText: fmtSigned(wv, 3),
-        equation: `W_up[${expTag}, ${hRow}, ${iCol}] = ${fmtSigned(wv, 3)} × U[${iCol}, t${absTok(tokIdx)}](${fmtSigned(sim.U[iCol * T + tokIdx], 3)})`,
+        equation: `W_up[${expTag}, ${hRow}, ${iCol}] = ${fmtSigned(wv, 3)} × ${inSym}[${iCol}, t${absTok(tokIdx)}](${fmtSigned(expertIn[iCol * T + tokIdx], 3)})`,
         subEquation: ev.isActive
           ? `Only 2 matrices per expert (W_up + W_down, zero bias). Contributes to h[${hRow}] = ${fmtSigned(ev.h[hRow], 3)}.`
           : `Idle expert (${expTag}, rank #${ev.choiceRank + 1}): previewing weights only; zero compute/contribution in layer sum.`,
@@ -1063,6 +1205,8 @@ export function describeMoeCellFormula(
       const hRow = Math.max(0, Math.min(dShared - 1, rawCell.row));
       const iCol = Math.max(0, Math.min(d - 1, rawCell.col));
       const wv = sim.W_up_s[hRow * d + iCol];
+      const expertIn = sim.U_mod ?? sim.U;
+      const inSym = sim.U_mod ? 'U_mod' : 'U';
       return {
         cell: { tensor: 'shared_w_up', row: hRow, col: iCol, tokenIndex: tokIdx },
         tensorLabel: 'Shared W_up (2×)',
@@ -1071,7 +1215,7 @@ export function describeMoeCellFormula(
         value: wv,
         isMasked: false,
         valueText: fmtSigned(wv, 3),
-        equation: `W_up_s[${hRow}, ${iCol}] = ${fmtSigned(wv, 3)} × U[${iCol}, t${absTok(tokIdx)}](${fmtSigned(sim.U[iCol * T + tokIdx], 3)})`,
+        equation: `W_up_s[${hRow}, ${iCol}] = ${fmtSigned(wv, 3)} × ${inSym}[${iCol}, t${absTok(tokIdx)}](${fmtSigned(expertIn[iCol * T + tokIdx], 3)})`,
         subEquation: `Always-on double-width shared expert (d_shared=8 = 2×d_exp; prod 3,712 = 2×1,856, fused in checkpoint).`,
         upstreamSpans: [
           { tensor: 'rmsnorm', rowStart: tokIdx, rowEnd: tokIdx, colStart: iCol, colEnd: iCol, tokenIndex: tokIdx },
@@ -1186,15 +1330,19 @@ export function describeMoeCellFormula(
       const ym = sim.y_moe[ch * T + t];
       const yv = sim.Y[ch * T + t];
       const tl = sim.tokenLabels[t] ?? `t${absTok(t)}`;
+      const gateVal = sim.residualGateApplied && sim.residualGate ? sim.residualGate[ch] : null;
       return {
         cell: { tensor: 'residual', row: t, col: ch, tokenIndex: t },
         tensorLabel: 'Residual Out Y',
         coordLabel: `t${absTok(t)} "${tl}" · ch ${ch}`,
-        headBadge: 'X + y_routed + y_shared',
+        headBadge: gateVal !== null ? 'X + gate·(y_routed + y_shared)' : 'X + y_routed + y_shared',
         value: yv,
         isMasked: false,
         valueText: fmtSigned(yv, 3),
-        equation: `Y[${ch}, t${absTok(t)}] = X(${fmtSigned(xv, 3)}) + y_moe(${fmtSigned(ym, 3)}) = ${fmtSigned(yv, 3)}`,
+        equation:
+          gateVal !== null
+            ? `Y[${ch}, t${absTok(t)}] = X(${fmtSigned(xv, 3)}) + gate[${ch}](${fmtSigned(gateVal, 3)})·y_moe(${fmtSigned(ym, 3)}) = ${fmtSigned(yv, 3)}`
+            : `Y[${ch}, t${absTok(t)}] = X(${fmtSigned(xv, 3)}) + y_moe(${fmtSigned(ym, 3)}) = ${fmtSigned(yv, 3)}`,
         subEquation: `Returns to the 2,688-channel emerald residual spine. 0 B sequence cache allocated.`,
         upstreamSpans: [
           { tensor: 'moe_out', rowStart: t, rowEnd: t, colStart: ch, colEnd: ch, tokenIndex: t },

@@ -109,7 +109,7 @@ export interface HybridIncrementalStepResult extends IncrementalDecodeStepResult
   /** Total sequence length `P + S` after this step. */
   readonly totalTokens: number;
   readonly d: 8;
-  readonly vocabSize: 32;
+  readonly vocabSize: number;
   readonly vocab: readonly string[];
   /** Token IDs newly processed in this step (length `S`). */
   readonly newTokenIds: Int32Array;
@@ -954,6 +954,7 @@ function collectIncrementalTraceBytes(
       addUniqueBytes(seen, s.initialConvState) +
       addUniqueBytes(seen, s.initialSsmState) +
       addUniqueBytes(seen, s.X) +
+      addUniqueBytes(seen, s.X_mod) +
       addUniqueBytes(seen, s.X_norm) +
       addUniqueBytes(seen, s.rms_in) +
       addUniqueBytes(seen, s.U) +
@@ -979,6 +980,7 @@ function collectIncrementalTraceBytes(
       addUniqueBytes(seen, s.y_norm_pre) +
       addUniqueBytes(seen, s.y_norm) +
       addUniqueBytes(seen, s.Mamba_out) +
+      addUniqueBytes(seen, s.residualGate) +
       addUniqueBytes(seen, s.Y)
     );
   }
@@ -990,9 +992,13 @@ function collectIncrementalTraceBytes(
       addUniqueBytes(seen, s.rms) +
       addUniqueBytes(seen, s.X_norm) +
       addUniqueBytes(seen, s.U) +
+      addUniqueBytes(seen, s.U_mod) +
       addUniqueBytes(seen, s.router_logits) +
       addUniqueBytes(seen, s.scores) +
       addUniqueBytes(seen, s.scores_for_choice) +
+      addUniqueBytes(seen, s.router_logits_f64) +
+      addUniqueBytes(seen, s.router_scores_f64) +
+      addUniqueBytes(seen, s.scores_for_choice_f64) +
       addUniqueBytes(seen, s.topk_indices) +
       addUniqueBytes(seen, s.topk_raw_scores) +
       addUniqueBytes(seen, s.topk_norm_probs) +
@@ -1005,6 +1011,7 @@ function collectIncrementalTraceBytes(
       addUniqueBytes(seen, s.y_shared) +
       addUniqueBytes(seen, s.y_routed) +
       addUniqueBytes(seen, s.y_moe) +
+      addUniqueBytes(seen, s.residualGate) +
       addUniqueBytes(seen, s.Y)
     );
   }
@@ -1013,6 +1020,7 @@ function collectIncrementalTraceBytes(
     addUniqueBytes(seen, s.tokenIds) +
     addUniqueBytes(seen, s.keyTokenIds) +
     addUniqueBytes(seen, s.X) +
+    addUniqueBytes(seen, s.X_mod) +
     addUniqueBytes(seen, s.X_norm) +
     addUniqueBytes(seen, s.rms) +
     addUniqueBytes(seen, s.U) +
@@ -1024,6 +1032,7 @@ function collectIncrementalTraceBytes(
     addUniqueBytes(seen, s.V_out) +
     addUniqueBytes(seen, s.Concat) +
     addUniqueBytes(seen, s.Attn_out) +
+    addUniqueBytes(seen, s.residualGate) +
     addUniqueBytes(seen, s.Y)
   );
 }
@@ -1089,6 +1098,7 @@ function runSingleIncrementalBay(
       W_up_s: weights.W_up_s,
       W_down_s: weights.W_down_s,
       rmsNormEps: eps,
+      routerPrecisionPolicy: model.config.routerPrecisionPolicy,
       tokenIds: newTokenIds,
       tokenLabels: newTokenLabels,
       startTokenOffset: P,

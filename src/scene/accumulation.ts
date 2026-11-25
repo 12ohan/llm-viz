@@ -10,6 +10,8 @@
 import {
   clampCellToSim,
   fmtProb,
+  isAttentionKeyVisible,
+  maxVisibleKeyIndex,
   type GqaCellRef,
   type GqaSimResult,
 } from '../math/gqaSim';
@@ -143,7 +145,7 @@ export function computeGqaFocusedAccumulation(
     const k = clamped.col;
     const qAbs = P + q;
     const exactScore = sim.Scores[(h * T + q) * K + k];
-    if (k > qAbs || !Number.isFinite(exactScore)) {
+    if (!isAttentionKeyVisible(sim.attentionMaskMode, P, q, k, K) || !Number.isFinite(exactScore)) {
       return null;
     }
 
@@ -210,11 +212,12 @@ export function computeGqaFocusedAccumulation(
     };
   }
 
-  // Step 4 (5. Weighted V): causal value blend across keys k = 0..P+q
+  // Step 4 (5. Weighted V): visible value blend across keys k = 0..maxVisibleKeyIndex
   if (stepperStep === 4 && clamped.tensor === 'v_out') {
     const g: 0 | 1 = clamped.kvHeadIndex === 1 ? 1 : 0;
     const q = clamped.row;
-    const keyEnd = P + q;
+    const qAbs = P + q;
+    const keyEnd = maxVisibleKeyIndex(sim.attentionMaskMode, P, q, K);
     const totalTerms = keyEnd + 1;
     const currentTermIndex = resolveTermIndex(termProgress, totalTerms);
     if (currentTermIndex === null) return null;
@@ -261,13 +264,14 @@ export function computeGqaFocusedAccumulation(
         : `Σ_{k=0..${currentTermIndex - 1}}(${fmtSigned(prevPartial, 3)}) + ${fmtProb(curW, 2)}·${fmtSigned(curV, 2)}`;
 
     const partialEquation = isFinal
-      ? `V_out[${fmtHead(h)}, d=${r}, q=${keyEnd}] = ${termsBody} = ${fmtSigned(partialSum, 3)} (${stepNum}/${totalTerms})`
-      : `V_out[${fmtHead(h)}, d=${r}, q=${keyEnd}] = ${termsBody} + … = ${fmtSigned(partialSum, 3)} (running ${stepNum}/${totalTerms})`;
+      ? `V_out[${fmtHead(h)}, d=${r}, q=${qAbs}] = ${termsBody} = ${fmtSigned(partialSum, 3)} (${stepNum}/${totalTerms})`
+      : `V_out[${fmtHead(h)}, d=${r}, q=${qAbs}] = ${termsBody} + … = ${fmtSigned(partialSum, 3)} (running ${stepNum}/${totalTerms})`;
 
     const keyLabel = sim.keyTokenLabels[currentTermIndex] ?? `k${currentTermIndex}`;
     const cacheTag = P > 0 ? (currentTermIndex < P ? ' · cached' : ' · new') : '';
+    const keyScope = sim.attentionMaskMode === 'bidirectional_block' ? 'bidirectional' : 'causal';
     const partialSubEquation = isFinal
-      ? `Accumulated all ${totalTerms}/${totalTerms} causal keys (k=0..${keyEnd}) · exact weighted V_out`
+      ? `Accumulated all ${totalTerms}/${totalTerms} ${keyScope} keys (k=0..${keyEnd}) · exact weighted V_out`
       : `Accumulating term ${stepNum}/${totalTerms} (k=${currentTermIndex} "${keyLabel}"${cacheTag}) · running partial sum (${pending} ${pending === 1 ? 'term' : 'terms'} pending)`;
 
     const popoverEquation = isFinal
@@ -653,7 +657,9 @@ export function computeMoeFocusedAccumulation(
     const slot = clampInt(cell.rankSlot ?? cell.col, 0, topK - 1);
     const winnerId = sim.topk_indices[tokIdx * topK + slot];
     const winnerTag = formatExpertId(winnerId);
-    const targetRawSigma = sim.topk_raw_scores[tokIdx * topK + slot];
+    const targetRawSigma = sim.router_scores_f64
+      ? sim.router_scores_f64[winnerId * T + tokIdx]
+      : sim.topk_raw_scores[tokIdx * topK + slot];
 
     let rawDenom = 0;
     let curSigma = 0;
@@ -662,7 +668,9 @@ export function computeMoeFocusedAccumulation(
 
     for (let m = 0; m <= currentTermIndex; m++) {
       const expId = sim.topk_indices[tokIdx * topK + m];
-      const sigma = sim.topk_raw_scores[tokIdx * topK + m];
+      const sigma = sim.router_scores_f64
+        ? sim.router_scores_f64[expId * T + tokIdx]
+        : sim.topk_raw_scores[tokIdx * topK + m];
       rawDenom += sigma;
       shownSigmas.push(sigma.toFixed(3));
       if (m === currentTermIndex) {
