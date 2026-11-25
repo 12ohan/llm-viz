@@ -44,6 +44,12 @@ export interface PickBox {
   readonly tokenIndex?: number;
   readonly tapIndex?: number;
   readonly stateTokenIndex?: number;
+  /** Optional multi-tower ownership metadata (used by TwoTower spatial views; omitted in Nano). */
+  readonly towerRole?: 'context' | 'denoiser' | 'shared';
+  readonly executionId?: string;
+  readonly traceOrigin?: string;
+  readonly semanticTag?: string;
+  readonly absoluteTokenOffset?: number;
   readonly min: Vec3;
   readonly max: Vec3;
   /** Optional oriented 3D sheet frame. When provided, exact nonuniform-extent OBB picking is used. */
@@ -60,6 +66,12 @@ export interface PickHit {
   readonly tokenIndex?: number;
   readonly tapIndex?: number;
   readonly stateTokenIndex?: number;
+  /** Optional multi-tower ownership metadata propagated from PickBox. */
+  readonly towerRole?: 'context' | 'denoiser' | 'shared';
+  readonly executionId?: string;
+  readonly traceOrigin?: string;
+  readonly semanticTag?: string;
+  readonly absoluteTokenOffset?: number;
   readonly hitRow?: number;
   readonly hitCol?: number;
   readonly t: number;
@@ -224,6 +236,13 @@ function findNearestBoxHit(ray: Ray, boxes: readonly PickBox[], isFascia: boolea
     tokenIndex: bestBox.tokenIndex,
     tapIndex: bestBox.tapIndex,
     stateTokenIndex: bestBox.stateTokenIndex,
+    ...(bestBox.towerRole !== undefined ? { towerRole: bestBox.towerRole } : {}),
+    ...(bestBox.executionId !== undefined ? { executionId: bestBox.executionId } : {}),
+    ...(bestBox.traceOrigin !== undefined ? { traceOrigin: bestBox.traceOrigin } : {}),
+    ...(bestBox.semanticTag !== undefined ? { semanticTag: bestBox.semanticTag } : {}),
+    ...(bestBox.absoluteTokenOffset !== undefined
+      ? { absoluteTokenOffset: bestBox.absoluteTokenOffset }
+      : {}),
     hitRow,
     hitCol,
     t: bestT,
