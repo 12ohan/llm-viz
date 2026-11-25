@@ -7,19 +7,35 @@ import {
 } from '../src/math/hybridFlow';
 import {
   createDecodeSession,
+  getActiveDecodeBranch,
   getActiveDecodeStep,
+  navigateDecodeSession,
+  stepDecodeSession,
   stepDecodeSessionGreedy,
 } from '../src/math/incrementalDecode';
 import { NEMOTRON_SPEC } from '../src/model/spec';
 import { createInitialState, createPerspectivePose, type ViewMode } from '../src/model/state';
 import {
+  computeGqaFocusedAccumulation,
+  computeMambaFocusedAccumulation,
+  computeMoeFocusedAccumulation,
+} from '../src/scene/accumulation';
+import {
   buildEmbeddingCutaway,
+  buildGqaCutaway,
+  buildMambaCutaway,
+  buildMoECutaway,
   buildOutputCutaway,
   type CutawaySceneGeometry,
   type EmbeddingCellFormula,
   type OutputCellFormula,
 } from '../src/scene/cutaways';
-import { WALKTHROUGH_BEAT_COUNT, WALKTHROUGH_BEATS } from '../src/story/walkthrough';
+import { describeSpineWaveStage, SPINE_REPLAY_DISCLAIMER } from '../src/scene/spine';
+import {
+  TOUR_PREFILL_TOKEN_IDS,
+  WALKTHROUGH_BEAT_COUNT,
+  WALKTHROUGH_BEATS,
+} from '../src/story/walkthrough';
 import {
   buildCrossBayNeighbors,
   computeEditorialCacheKey,
@@ -260,6 +276,7 @@ function createMockControlsElements(): {
     gqaStepPills: MockElement[];
     floatingBadge: MockElement;
     orbitHint: MockElement;
+    spineWaveHud: MockElement;
   };
 } {
   const modeValues: ViewMode[] = [
@@ -293,6 +310,11 @@ function createMockControlsElements(): {
   const gqaCellClear = makeButton({ id: 'gqa-cell-clear' });
   const floatingBadge = new MockElement('div');
   const orbitHint = new MockElement('div');
+  const spineWaveHud = new MockElement('div');
+  spineWaveHud.id = 'spine-wave-hud';
+  spineWaveHud.className = 'spine-wave-hud';
+  spineWaveHud.dataset.testid = 'spine-wave-hud';
+  spineWaveHud.hidden = true;
 
   const els = {
     sidebarTop: new MockElement('section'),
@@ -355,6 +377,7 @@ function createMockControlsElements(): {
     shortcutsBtn: makeButton(),
     shortcutsPopover: new MockElement('div'),
     shortcutsCloseBtn: makeButton(),
+    spineWaveHud,
   } as unknown as ControlsElements;
 
   return {
@@ -374,6 +397,7 @@ function createMockControlsElements(): {
       gqaStepPills,
       floatingBadge,
       orbitHint,
+      spineWaveHud,
     },
   };
 }
@@ -683,7 +707,7 @@ describe('V4/V5 MacroControls UI integration', () => {
     expect(raw.editorialPanel.findOne((el) => el.dataset.testid === 'ar-decode-panel')).not.toBeNull();
     const replayBtn = raw.editorialPanel.findOne((el) => el.dataset.testid === 'ar-replay-wave');
     expect(replayBtn).not.toBeNull();
-    expect(replayBtn!.textContent).toContain('Replay Wave');
+    expect(replayBtn!.textContent).toContain('Fast Wave (0.9s)');
     replayBtn!.click();
     expect(onReplaySpineWave).toHaveBeenCalledTimes(1);
 
@@ -863,6 +887,410 @@ describe('V4/V5 MacroControls UI integration', () => {
     expect(moeBc.textContent).toContain('Bay 01 M');
     expect(moeBc.textContent).toContain('Bay 02 MoE');
     expect(moeBc.textContent).toContain('Bay 03 M');
+
+    controls.dispose();
+  });
+});
+
+// ============================================================================
+// 4. RC1 / RC2 / RC3 Refinements (Math Dock, Live Act III Copy, Spine HUD)
+// ============================================================================
+
+describe('RC1/RC2/RC3 MacroControls refinements', () => {
+  const defaultPose = createPerspectivePose([0, 0, 0], 18);
+
+  it('tracks spineWaveMode and active AR decode step digest in computeEditorialCacheKey', () => {
+    const model = createDefaultHybridModel();
+    let session = createDecodeSession(model, { promptTokenIds: [...TOUR_PREFILL_TOKEN_IDS] });
+    session = stepDecodeSessionGreedy(session);
+
+    const state = createInitialState(defaultPose, false);
+    state.tourActive = true;
+    state.tourBeat = 19; // Beat 7.2
+    state.mode = 'tower';
+    state.executionMode = 'ar_decode';
+    state.spineWaveMode = 'fast';
+    state.spineWaveProgress = 0.25;
+
+    const kFastWave = computeEditorialCacheKey(state, null, null, null, session);
+
+    // Intermediate progress ticks within the same mode keep editorial cache key stable for 60fps RAF
+    state.spineWaveProgress = 0.72;
+    expect(computeEditorialCacheKey(state, null, null, null, session)).toBe(kFastWave);
+
+    // Switching fast -> instructional immediately invalidates the cache key
+    state.spineWaveMode = 'instructional';
+    const kSlowWave = computeEditorialCacheKey(state, null, null, null, session);
+    expect(kSlowWave).not.toBe(kFastWave);
+
+    // Stepping greedy further changes step index & state digest
+    const stepped = stepDecodeSessionGreedy(session);
+    const kStepped = computeEditorialCacheKey(state, null, null, null, stepped);
+    expect(kStepped).not.toBe(kSlowWave);
+
+    // Navigating back & forking branch-1 immediately invalidates cache key
+    const atPrefill = navigateDecodeSession(stepped, 0);
+    const altCand = getActiveDecodeStep(atPrefill).predictedNextTokens[1];
+    const branched = stepDecodeSession(atPrefill, altCand.tokenId);
+    const kBranched = computeEditorialCacheKey(state, null, null, null, branched);
+    expect(kBranched).not.toBe(kSlowWave);
+    expect(kBranched).not.toBe(kStepped);
+  });
+
+  it('RC1: renders non-spoiling partial Math Dock equations, badges, and .is-accumulating across GQA, Mamba-2, and MoE', () => {
+    installMockDocument();
+    const { els, raw } = createMockControlsElements();
+    const controls = new MacroControls(NEMOTRON_SPEC, els, createSpyCallbacks());
+
+    const model = createDefaultHybridModel();
+    const exec = runHybridExecution(model, { tokenIds: defaultTokenIdsForLength(8) });
+    const state = createInitialState(defaultPose, false);
+    state.tourActive = false;
+
+    // 1. GQA Step 2 (scores, term 2/4 running)
+    const gqaSim = exec.getGqaTrace(6);
+    const gqaCell = {
+      tensor: 'scores' as const,
+      row: 5,
+      col: 3,
+      headIndex: 0,
+      kvHeadIndex: 0 as const,
+    };
+    const gqaAccum = computeGqaFocusedAccumulation(gqaSim, gqaCell, 2, 0.35);
+    expect(gqaAccum).not.toBeNull();
+    expect(gqaAccum!.active).toBe(true);
+
+    const gqaBase = buildGqaCutaway({
+      bayId: 6,
+      tokens: 8,
+      precision: 'bf16',
+      viewAngle: 'three_quarter',
+      selectedPart: null,
+      hoveredPart: null,
+      simOverride: gqaSim,
+      activeCell: gqaCell,
+      stepperActive: true,
+      stepperStep: 2,
+    });
+    const gqaWithAccum: CutawaySceneGeometry = {
+      ...gqaBase,
+      focusedAccumulation: gqaAccum,
+    };
+
+    state.mode = 'cutaway_gqa';
+    state.gqaBayId = 6;
+    state.gqaSelectedCell = gqaCell;
+    controls.sync(state, gqaWithAccum, false, exec, null);
+
+    expect(raw.gqaFormulaEq.textContent).toBe(gqaAccum!.partialEquation);
+    expect(raw.gqaFormulaEq.textContent).toContain('…');
+    expect(raw.gqaFormulaSub.textContent).toBe(gqaAccum!.partialSubEquation);
+    expect(raw.gqaFormulaValue.textContent).toBe(gqaAccum!.valueBadgeText);
+    expect(raw.gqaFormulaValue.textContent).toContain('(2/4)');
+    expect(raw.gqaFormulaValue.classList.contains('is-accumulating')).toBe(true);
+    expect(raw.gqaFormulaHead.textContent).toBe(gqaAccum!.badgeText);
+    expect(raw.gqaFormulaHead.textContent).toBe('Term 2/4 · Running');
+    expect(raw.gqaFormulaHead.hidden).toBe(false);
+    // Ensure completed total is NOT leaked while running (when partial differs from final)
+    if (gqaBase.activeFormula && gqaAccum!.partialSum !== gqaBase.activeFormula.value) {
+      expect(raw.gqaFormulaEq.textContent).not.toBe(gqaBase.activeFormula.equation);
+      expect(raw.gqaFormulaValue.textContent).not.toBe(`= ${gqaBase.activeFormula.valueText}`);
+    }
+
+    // Clearing focusedAccumulation restores complete unrestricted formula & removes .is-accumulating
+    controls.sync(state, { ...gqaBase, focusedAccumulation: null }, false, exec, null);
+    expect(raw.gqaFormulaValue.classList.contains('is-accumulating')).toBe(false);
+    expect(raw.gqaFormulaEq.textContent).toBe(gqaBase.activeFormula!.equation);
+    expect(raw.gqaFormulaSub.textContent).toBe(gqaBase.activeFormula!.subEquation);
+    expect(raw.gqaFormulaValue.textContent).toBe(`= ${gqaBase.activeFormula!.valueText}`);
+    expect(raw.gqaFormulaHead.textContent).toBe(gqaBase.activeFormula!.headBadge);
+
+    // 2. Mamba-2 Step 3 (h_curr, term 1/2 running)
+    const mambaSim = exec.getMambaTrace(1);
+    const mambaCell = {
+      tensor: 'h_curr' as const,
+      row: 1,
+      col: 2,
+      headIndex: 0,
+      tokenIndex: 7,
+    };
+    const mambaAccum = computeMambaFocusedAccumulation(mambaSim, mambaCell, 3, 0.2);
+    expect(mambaAccum).not.toBeNull();
+    const mambaBase = buildMambaCutaway({
+      bayId: 1,
+      tokens: 8,
+      precision: 'bf16',
+      viewAngle: 'three_quarter',
+      selectedPart: null,
+      hoveredPart: null,
+      simOverride: mambaSim,
+      activeCell: mambaCell,
+      stepperActive: true,
+      stepperStep: 3,
+      stepperSubProgress: 0.4,
+    });
+    state.mode = 'cutaway_mamba';
+    state.mambaBayId = 1;
+    state.mambaSelectedCell = mambaCell;
+    controls.sync(state, { ...mambaBase, focusedAccumulation: mambaAccum }, false, exec, null);
+
+    expect(raw.gqaFormulaEq.textContent).toBe(mambaAccum!.partialEquation);
+    expect(raw.gqaFormulaSub.textContent).toBe(mambaAccum!.partialSubEquation);
+    expect(raw.gqaFormulaValue.textContent).toBe(mambaAccum!.valueBadgeText);
+    expect(raw.gqaFormulaValue.classList.contains('is-accumulating')).toBe(true);
+    expect(raw.gqaFormulaHead.textContent).toBe('Term 1/2 · Running');
+
+    // 3. MoE Step 2 (topk_weights, term 2/6 running)
+    const moeSim = exec.getMoeTrace(2);
+    const moeCell = { tensor: 'topk_weights' as const, row: 0, col: 0, rankSlot: 0, tokenIndex: 7 };
+    const moeAccum = computeMoeFocusedAccumulation(moeSim, moeCell, 2, 0.25, 7, moeSim.topk_indices[7 * moeSim.topK]);
+    expect(moeAccum).not.toBeNull();
+    const moeBase = buildMoECutaway({
+      bayId: 2,
+      tokens: 8,
+      precision: 'bf16',
+      viewAngle: 'three_quarter',
+      selectedPart: null,
+      hoveredPart: null,
+      simOverride: moeSim,
+      activeCell: moeCell,
+      stepperActive: true,
+      stepperStep: 2,
+      stepperSubProgress: 0.5,
+    });
+    state.mode = 'cutaway_moe';
+    state.moeBayId = 2;
+    state.moeSelectedCell = moeCell;
+    controls.sync(state, { ...moeBase, focusedAccumulation: moeAccum }, false, exec, null);
+
+    expect(raw.gqaFormulaEq.textContent).toBe(moeAccum!.partialEquation);
+    expect(raw.gqaFormulaSub.textContent).toBe(moeAccum!.partialSubEquation);
+    expect(raw.gqaFormulaValue.textContent).toBe(moeAccum!.valueBadgeText);
+    expect(raw.gqaFormulaValue.classList.contains('is-accumulating')).toBe(true);
+    expect(raw.gqaFormulaHead.textContent).toBe('Term 2/6 · Running');
+
+    // Idle cutaway removes .is-accumulating cleanly
+    state.moeSelectedCell = null;
+    controls.sync(state, { ...moeBase, activeFormula: null, focusedAccumulation: null }, false, exec, null);
+    expect(raw.gqaFormulaValue.classList.contains('is-accumulating')).toBe(false);
+    expect(raw.gqaFormulaValue.hidden).toBe(true);
+
+    controls.dispose();
+  });
+
+  it('RC2: syncs Act III walkthrough badge, paragraphs, and takeaways dynamically across stepping and branch-1 forks', () => {
+    installMockDocument();
+    const { els, raw } = createMockControlsElements();
+    const controls = new MacroControls(NEMOTRON_SPEC, els, createSpyCallbacks());
+
+    const model = createDefaultHybridModel();
+    let session = createDecodeSession(model, { promptTokenIds: [...TOUR_PREFILL_TOKEN_IDS] });
+    session = stepDecodeSessionGreedy(session); // branch-0, step 1, t8 (8P+1S = 9)
+
+    const step1 = getActiveDecodeStep(session);
+    const t8Label = step1.sequenceTokenLabels[8];
+
+    const state = createInitialState(defaultPose, false);
+    state.tourActive = true;
+    state.executionMode = 'ar_decode';
+    state.precision = 'fp8_selective';
+    state.tokens = step1.totalTokens;
+
+    // Beat 7.2 on branch-0 at t8 (8P+1S = 9)
+    state.tourBeat = 19;
+    state.mode = 'tower';
+    controls.sync(state, null, false, null, session);
+
+    const badge72 = raw.editorialPanel.findOne((el) => el.classList.contains('ed-badge'))!;
+    expect(badge72.textContent).toContain('branch-0');
+    expect(badge72.textContent).toContain(`t8 "${t8Label}"`);
+    expect(badge72.textContent).toContain('8P+1S');
+    expect(raw.editorialPanel.textContent).toContain('8 reused prefix + 1 new');
+    expect(raw.editorialPanel.textContent).toContain(step1.greedyNextToken.label);
+
+    // Beat 7.3 on branch-0 -> [1 × 9]
+    state.tourBeat = 20;
+    state.mode = 'cutaway_gqa';
+    state.gqaBayId = 43;
+    controls.sync(state, null, false, null, session);
+
+    const badge73 = raw.editorialPanel.findOne((el) => el.classList.contains('ed-badge'))!;
+    expect(badge73.textContent).toBe('Bay 43 · branch-0 · [1 × 9]');
+    expect(raw.editorialPanel.textContent).toContain('rectangular [1 × 9] query row');
+
+    // Step forward once more on branch-0 -> t9 (9P+1S = 10, [1 × 10])
+    session = stepDecodeSessionGreedy(session);
+    const step2 = getActiveDecodeStep(session);
+    state.tokens = step2.totalTokens;
+    controls.sync(state, null, false, null, session);
+
+    const badge73Step2 = raw.editorialPanel.findOne((el) => el.classList.contains('ed-badge'))!;
+    expect(badge73Step2.textContent).toBe('Bay 43 · branch-0 · [1 × 10]');
+    expect(raw.editorialPanel.textContent).toContain('9 reused prefix + 1 new');
+    expect(raw.editorialPanel.textContent).toContain(`t9 "${step2.sequenceTokenLabels[9]}"`);
+
+    // Navigate back to prefill (step 0) and fork branch-1 with #2 candidate while exploring!
+    const atPrefill = navigateDecodeSession(session, 0);
+    const altCand = getActiveDecodeStep(atPrefill).predictedNextTokens[1];
+    const branched = stepDecodeSession(atPrefill, altCand.tokenId);
+    const branchedStep = getActiveDecodeStep(branched);
+    const branchedBranch = getActiveDecodeBranch(branched);
+    expect(branchedBranch.branchId).toBe('branch-1');
+
+    state.tourBeat = 21; // Beat 7.4
+    state.tourExploring = true;
+    state.mode = 'tower';
+    state.tokens = branchedStep.totalTokens;
+    controls.sync(state, null, false, null, branched);
+
+    const badge74 = raw.editorialPanel.findOne((el) => el.classList.contains('ed-badge'))!;
+    expect(badge74.textContent).toContain('branch-1');
+    expect(badge74.textContent).toContain(`t8 "${altCand.label}"`);
+    expect(raw.editorialPanel.textContent).toContain('branch-1');
+    expect(raw.editorialPanel.textContent).toContain(`t8 "${altCand.label}"`);
+    expect(raw.editorialPanel.textContent).toContain(branchedStep.greedyNextToken.label);
+
+    controls.dispose();
+  });
+
+  it('RC3: renders Fast/Slow replay controls and updates live in-canvas .spine-wave-hud with disclaimer, pause/close, and reduced-motion summary', () => {
+    installMockDocument();
+    const { els, raw } = createMockControlsElements();
+    const onReplaySpineWaveMode = vi.fn();
+    const onToggleSpineWavePause = vi.fn();
+    const onDismissSpineWaveHud = vi.fn();
+    const controls = new MacroControls(
+      NEMOTRON_SPEC,
+      els,
+      createSpyCallbacks({
+        onReplaySpineWaveMode,
+        onToggleSpineWavePause,
+        onDismissSpineWaveHud,
+      }),
+    );
+
+    const model = createDefaultHybridModel();
+    const exec = runHybridExecution(model, { tokenIds: defaultTokenIdsForLength(8) });
+    let session = createDecodeSession(model, { promptTokenIds: [...TOUR_PREFILL_TOKEN_IDS] });
+    session = stepDecodeSessionGreedy(session);
+
+    const state = createInitialState(defaultPose, false);
+    state.tourActive = false;
+    state.mode = 'tower';
+    state.executionMode = 'ar_decode';
+    state.precision = 'fp8_selective';
+    state.tokens = 9;
+    state.spineWaveMode = 'fast';
+    state.spineWaveProgress = null;
+
+    controls.sync(state, null, false, exec, session);
+
+    // 1. AR Wave controls bar in Tower mode
+    const waveBar = raw.editorialPanel.findOne((el) => el.dataset.testid === 'ar-wave-controls');
+    expect(waveBar).not.toBeNull();
+    const fastBtn = waveBar!.findOne((el) => el.dataset.testid === 'ar-replay-wave')!;
+    const slowBtn = waveBar!.findOne((el) => el.dataset.testid === 'ar-replay-wave-slow')!;
+    expect(fastBtn.textContent).toContain('Fast Wave (0.9s)');
+    expect(slowBtn.textContent).toContain('Slow Replay (5.5s)');
+    expect(fastBtn.classList.contains('is-active')).toBe(true);
+    expect(slowBtn.classList.contains('is-active')).toBe(false);
+    expect(waveBar!.textContent).toContain('Educational replay (not measured runtime)');
+
+    fastBtn.click();
+    slowBtn.click();
+    expect(onReplaySpineWaveMode).toHaveBeenNthCalledWith(1, 'fast');
+    expect(onReplaySpineWaveMode).toHaveBeenNthCalledWith(2, 'instructional');
+
+    // HUD stays hidden while spineWaveProgress is null
+    expect(raw.spineWaveHud.hidden).toBe(true);
+
+    // 2. Active instructional wave renders HUD with stage dot, title, detail, RMS, progress, disclaimer, Pause & Close
+    state.spineWaveMode = 'instructional';
+    state.spineWaveProgress = 0.14; // Bay 06 GQA in 0.05..0.91 span
+    state.spineWavePaused = false;
+    controls.sync(state, null, false, exec, session);
+
+    // Slow button now highlighted in sidebar
+    const slowBtnActive = raw.editorialPanel.findOne(
+      (el) => el.dataset.testid === 'ar-replay-wave-slow',
+    )!;
+    expect(slowBtnActive.classList.contains('is-active')).toBe(true);
+
+    const activeStep = getActiveDecodeStep(session);
+    const expectedStage = describeSpineWaveStage(
+      0.14,
+      NEMOTRON_SPEC,
+      'fp8_selective',
+      activeStep.baySummaries,
+      0,
+    );
+    expect(raw.spineWaveHud.hidden).toBe(false);
+    expect(raw.spineWaveHud.dataset.stageKind).toBe(expectedStage.stageKind);
+    const dotEl = raw.spineWaveHud.findOne((el) => el.dataset.testid === 'spine-wave-hud-dot')!;
+    expect(dotEl.classList.contains(`is-${expectedStage.stageKind}`)).toBe(true);
+    expect(
+      raw.spineWaveHud.findOne((el) => el.dataset.testid === 'spine-wave-hud-title')?.textContent,
+    ).toBe(expectedStage.title);
+    expect(
+      raw.spineWaveHud.findOne((el) => el.dataset.testid === 'spine-wave-hud-detail')?.textContent,
+    ).toBe(expectedStage.actionDetail);
+    expect(
+      raw.spineWaveHud.findOne((el) => el.dataset.testid === 'spine-wave-hud-rms')?.textContent,
+    ).toBe(expectedStage.rmsText);
+    expect(
+      raw.spineWaveHud.findOne((el) => el.dataset.testid === 'spine-wave-hud-fill')?.style.width,
+    ).toBe(`${expectedStage.progressPct}%`);
+    expect(
+      raw.spineWaveHud.findOne((el) => el.dataset.testid === 'spine-wave-hud-disclaimer')
+        ?.textContent,
+    ).toBe(SPINE_REPLAY_DISCLAIMER);
+
+    const pauseBtn = raw.spineWaveHud.findOne((el) => el.dataset.testid === 'spine-wave-hud-pause')!;
+    const closeBtn = raw.spineWaveHud.findOne((el) => el.dataset.testid === 'spine-wave-hud-close')!;
+    expect(pauseBtn.hidden).toBe(false);
+    expect(pauseBtn.textContent).toContain('Pause');
+    pauseBtn.click();
+    closeBtn.click();
+    expect(onToggleSpineWavePause).toHaveBeenCalledTimes(1);
+    expect(onDismissSpineWaveHud).toHaveBeenCalledTimes(1);
+
+    // 3. Direct RAF update via public syncSpineWaveHud updates HUD smoothly without rebuilding editorial DOM
+    const editorialSnapshot = raw.editorialPanel.children[0];
+    state.spineWavePaused = true;
+    state.spineWaveProgress = 0.98; // Output stage (no RMS pill)
+    controls.syncSpineWaveHud(state, exec, session);
+    expect(raw.editorialPanel.children[0]).toBe(editorialSnapshot);
+    expect(raw.spineWaveHud.dataset.stageKind).toBe('output');
+    expect(dotEl.classList.contains('is-output')).toBe(true);
+    expect(raw.spineWaveHud.findOne((el) => el.dataset.testid === 'spine-wave-hud-rms')?.hidden).toBe(
+      true,
+    );
+    expect(pauseBtn.textContent).toContain('Resume');
+
+    // 4. Fast mode hides Pause button; Reduced motion hides Pause and adds explicit static summary note
+    state.spineWaveMode = 'fast';
+    state.spineWavePaused = false;
+    state.spineWaveProgress = 0.02; // Embedding stage
+    controls.syncSpineWaveHud(state, exec, session);
+    expect(pauseBtn.hidden).toBe(true);
+    expect(raw.spineWaveHud.dataset.stageKind).toBe('embedding');
+
+    state.spineWaveMode = 'instructional';
+    state.reducedMotion = true;
+    state.spineWaveProgress = 0.93; // Final RMSNorm stage
+    controls.syncSpineWaveHud(state, exec, session);
+    expect(pauseBtn.hidden).toBe(true);
+    expect(dotEl.classList.contains('is-final_norm')).toBe(true);
+    const reducedDisclaimer = raw.spineWaveHud.findOne(
+      (el) => el.dataset.testid === 'spine-wave-hud-disclaimer',
+    )!.textContent;
+    expect(reducedDisclaimer).toContain(SPINE_REPLAY_DISCLAIMER);
+    expect(reducedDisclaimer).toContain('Static replay summary (reduced motion)');
+
+    // 5. Leaving Tower hides HUD
+    state.mode = 'cutaway_gqa';
+    controls.syncSpineWaveHud(state, exec, session);
+    expect(raw.spineWaveHud.hidden).toBe(true);
 
     controls.dispose();
   });

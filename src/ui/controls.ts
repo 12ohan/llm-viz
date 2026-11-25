@@ -21,6 +21,7 @@ import {
   type ExecutionMode,
   type GqaViewAngle,
   type SceneState,
+  type SpineWaveMode,
   type TocSectionId,
   type ViewMode,
 } from '../model/state';
@@ -44,12 +45,15 @@ import {
   type CutawayPartInfo,
   type CutawaySceneGeometry,
 } from '../scene/cutaways';
+import { describeSpineWaveStage } from '../scene/spine';
 import {
   beatsForChapter,
   getWalkthroughBeat,
   getWalkthroughChapter,
+  resolveBeatDisplayCopy,
   WALKTHROUGH_BEAT_COUNT,
   WALKTHROUGH_BEATS,
+  type LiveDecodeBeatSummary,
 } from '../story/walkthrough';
 
 export type CrossBayNodeKind = 'embedding' | 'output' | BayKind;
@@ -233,6 +237,10 @@ export interface ControlsCallbacks {
   onSelectOutputToken?: (tokenIdx: number) => void;
   onNavigateAdjacentBay?: (neighbor: CrossBayNeighbor) => void;
   onReplaySpineWave?: () => void;
+  // RC3 Optional Spine Replay Mode / HUD Callbacks (backward-compatible)
+  readonly onReplaySpineWaveMode?: (mode: SpineWaveMode) => void;
+  readonly onToggleSpineWavePause?: () => void;
+  readonly onDismissSpineWaveHud?: () => void;
 }
 
 export type UiCallbacks = ControlsCallbacks;
@@ -404,6 +412,7 @@ export interface ControlsElements {
   shortcutsBtn: HTMLButtonElement;
   shortcutsPopover: HTMLDivElement;
   shortcutsCloseBtn: HTMLButtonElement;
+  spineWaveHud?: HTMLDivElement | null;
 }
 
 export function queryControlsElements(): ControlsElements {
@@ -473,6 +482,7 @@ export function queryControlsElements(): ControlsElements {
     shortcutsBtn: get<HTMLButtonElement>('shortcuts-btn'),
     shortcutsPopover: get<HTMLDivElement>('shortcuts-popover'),
     shortcutsCloseBtn: get<HTMLButtonElement>('shortcuts-close'),
+    spineWaveHud: document.getElementById('spine-wave-hud') as HTMLDivElement | null,
   };
 }
 
@@ -501,7 +511,11 @@ export function computeEditorialCacheKey(
   const effGqaG1 = activeCutaway?.gqaStats?.activeGroup1Head ?? state.gqaActiveGroup1Head;
   const execKey = activeExecution ? activeExecution.executionId : 'standalone';
   const decodeKey = decodeSession
-    ? `${decodeSession.activeBranchId}:${decodeSession.activeStepIndex}:${decodeSession.branches.size}:${getActiveDecodeStep(decodeSession).stepExecutionId}:cand${selectedCandidateTokenId ?? 'g'}`
+    ? (() => {
+        const activeBranch = getActiveDecodeBranch(decodeSession);
+        const activeStep = getActiveDecodeStep(decodeSession);
+        return `${decodeSession.activeBranchId}:${decodeSession.activeStepIndex}/${activeBranch.steps.length}:${decodeSession.branches.size}:${activeStep.stepExecutionId}:${activeStep.provenance.nextStateDigest}:cand${selectedCandidateTokenId ?? 'g'}`;
+      })()
     : 'full';
   const boundTok =
     isTower || state.mode === 'cutaway_embedding' || state.mode === 'cutaway_output'
@@ -510,7 +524,7 @@ export function computeEditorialCacheKey(
   const tourKey = state.tourActive
     ? `tour:${state.tourChapter}:b${state.tourBeat}:${state.tourExploring ? 'exp' : 'guided'}`
     : 'free';
-  const waveKey = state.spineWaveProgress !== null ? 'wave' : 'idle';
+  const waveKey = `${state.spineWaveMode}:${state.spineWaveProgress !== null ? 'wave' : 'idle'}`;
   const stepPlayKey =
     state.mode === 'cutaway_mamba'
       ? (state.mambaStepperPlaying ? 'sp1' : 'sp0')
@@ -521,6 +535,28 @@ export function computeEditorialCacheKey(
           : 'sp0';
   return `${state.executionMode}:${decodeKey}:${tourKey}:${waveKey}:${stepPlayKey}:${execKey}:${boundTok}:${state.mode}:et${state.embeddingFocusToken}:ot${state.outputFocusToken}:${state.mambaBayId}:${effMambaHead}:${effMambaTok}:${state.mambaStateToken ?? 'last'}:${state.mambaTemporalPlaying ? 'tplay' : 'tpause'}:${state.moeBayId}:${effMoeTok}:${effMoeExp}:${state.moeTokenCycling ? 'mplay' : 'mpause'}:${state.gqaBayId}:${effGqaG0}:${effGqaG1}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
 }
+
+interface SpineWaveHudNodes {
+  readonly dot: HTMLSpanElement;
+  readonly title: HTMLSpanElement;
+  readonly rms: HTMLSpanElement;
+  readonly pauseBtn: HTMLButtonElement;
+  readonly closeBtn: HTMLButtonElement;
+  readonly detail: HTMLDivElement;
+  readonly fill: HTMLDivElement;
+  readonly disclaimer: HTMLSpanElement;
+  readonly pct: HTMLSpanElement;
+}
+
+const SPINE_WAVE_STAGE_CLASSES: readonly string[] = [
+  'is-embedding',
+  'is-mamba',
+  'is-moe',
+  'is-gqa',
+  'is-final_norm',
+  'is-final-norm',
+  'is-output',
+];
 
 export class MacroControls {
   private readonly spec: NemotronSpec;
@@ -539,6 +575,7 @@ export class MacroControls {
   private lastSyncedCutaway: CutawaySceneGeometry | null = null;
   private lastSyncedExecution: HybridExecutionResult | null = null;
   private lastSyncedDecodeSession: HybridDecodeSession | null = null;
+  private spineWaveHudNodes: SpineWaveHudNodes | null = null;
 
   constructor(spec: NemotronSpec, els: ControlsElements, cb: ControlsCallbacks) {
     this.spec = spec;
@@ -986,11 +1023,15 @@ export class MacroControls {
           state.tokens,
           activeExecution,
           decodeSession,
+          state.spineWaveMode,
         );
       } else {
         this.renderCutawayEditorial(state, activePart, activeCutaway, activeExecution, decodeSession);
       }
     }
+
+    // Keep live in-canvas Tower spine replay HUD synced smoothly (also callable directly during RAF)
+    this.syncSpineWaveHud(state, activeExecution, decodeSession);
 
     // Keep inline beat playback progress bar smooth without rebuilding the editorial DOM
     if (state.tourActive && typeof this.els.editorialPanel.querySelector === 'function') {
@@ -1000,6 +1041,172 @@ export class MacroControls {
         beatFill.style.width = `${Math.round(Math.max(0, Math.min(1, sub)) * 100)}%`;
       }
     }
+  }
+
+  private ensureSpineWaveHudNodes(hud: HTMLDivElement): SpineWaveHudNodes {
+    if (this.spineWaveHudNodes) return this.spineWaveHudNodes;
+    hud.innerHTML = '';
+
+    const head = document.createElement('div');
+    head.className = 'spine-wave-hud-head';
+
+    const dot = document.createElement('span');
+    dot.className = 'spine-wave-hud-dot';
+    dot.dataset.testid = 'spine-wave-hud-dot';
+    dot.setAttribute('aria-hidden', 'true');
+
+    const title = document.createElement('span');
+    title.className = 'spine-wave-hud-title';
+    title.dataset.testid = 'spine-wave-hud-title';
+
+    const rms = document.createElement('span');
+    rms.className = 'spine-wave-hud-rms';
+    rms.dataset.testid = 'spine-wave-hud-rms';
+    rms.hidden = true;
+
+    const actions = document.createElement('div');
+    actions.className = 'spine-wave-hud-actions';
+
+    const pauseBtn = document.createElement('button');
+    pauseBtn.type = 'button';
+    pauseBtn.className = 'spine-wave-hud-btn';
+    pauseBtn.dataset.testid = 'spine-wave-hud-pause';
+    pauseBtn.hidden = true;
+    this.on(pauseBtn, 'click', () => this.cb.onToggleSpineWavePause?.());
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'spine-wave-hud-btn';
+    closeBtn.dataset.testid = 'spine-wave-hud-close';
+    closeBtn.setAttribute('aria-label', 'Close spine replay HUD');
+    closeBtn.title = 'Dismiss replay HUD and settle propagation wave';
+    closeBtn.textContent = '×';
+    this.on(closeBtn, 'click', () => this.cb.onDismissSpineWaveHud?.());
+
+    actions.append(pauseBtn, closeBtn);
+    head.append(dot, title, rms, actions);
+
+    const detail = document.createElement('div');
+    detail.className = 'spine-wave-hud-detail';
+    detail.dataset.testid = 'spine-wave-hud-detail';
+
+    const track = document.createElement('div');
+    track.className = 'spine-wave-hud-track';
+    const fill = document.createElement('div');
+    fill.className = 'spine-wave-hud-fill';
+    fill.dataset.testid = 'spine-wave-hud-fill';
+    track.appendChild(fill);
+
+    const foot = document.createElement('div');
+    foot.className = 'spine-wave-hud-foot';
+
+    const disclaimer = document.createElement('span');
+    disclaimer.className = 'spine-wave-hud-disclaimer';
+    disclaimer.dataset.testid = 'spine-wave-hud-disclaimer';
+
+    const pct = document.createElement('span');
+    pct.className = 'spine-wave-hud-pct';
+    pct.dataset.testid = 'spine-wave-hud-pct';
+
+    foot.append(disclaimer, pct);
+    hud.append(head, detail, track, foot);
+
+    this.spineWaveHudNodes = {
+      dot,
+      title,
+      rms,
+      pauseBtn,
+      closeBtn,
+      detail,
+      fill,
+      disclaimer,
+      pct,
+    };
+    return this.spineWaveHudNodes;
+  }
+
+  /**
+   * Update the floating in-canvas `.spine-wave-hud` directly (also callable from `main.ts`
+   * during RAF animation frames without rebuilding the sidebar editorial DOM).
+   */
+  syncSpineWaveHud(
+    state: SceneState,
+    activeExecution: HybridExecutionResult | null = this.lastSyncedExecution,
+    decodeSession: HybridDecodeSession | null = this.lastSyncedDecodeSession,
+  ): void {
+    const hud = this.els.spineWaveHud;
+    if (!hud) return;
+
+    const waveProgress = state.spineWaveProgress;
+    if (state.mode !== 'tower' || waveProgress === null || !Number.isFinite(waveProgress)) {
+      hud.hidden = true;
+      return;
+    }
+
+    const activeStep = decodeSession ? getActiveDecodeStep(decodeSession) : null;
+    const baySummaries = activeStep?.baySummaries ?? activeExecution?.baySummaries ?? null;
+    const activeTokIdx = activeStep
+      ? Math.max(0, activeStep.tokens - 1)
+      : activeExecution
+        ? Math.max(0, activeExecution.tokens - 1)
+        : Math.max(0, state.tokens - 1);
+
+    const stage = describeSpineWaveStage(
+      waveProgress,
+      this.spec,
+      state.precision,
+      baySummaries,
+      activeTokIdx,
+    );
+    const nodes = this.ensureSpineWaveHudNodes(hud);
+
+    const stageClass = `is-${stage.stageKind}`;
+    for (const cls of SPINE_WAVE_STAGE_CLASSES) {
+      hud.classList.remove(cls);
+      nodes.dot.classList.remove(cls);
+    }
+    hud.classList.add(stageClass);
+    nodes.dot.classList.add(stageClass);
+    if (stage.stageKind === 'final_norm') {
+      hud.classList.add('is-final-norm');
+      nodes.dot.classList.add('is-final-norm');
+    }
+    hud.dataset.stageKind = stage.stageKind;
+    hud.classList.toggle('is-paused', state.spineWavePaused);
+    hud.classList.toggle('is-reduced-motion', state.reducedMotion);
+
+    nodes.title.textContent = stage.title;
+    nodes.detail.textContent = stage.actionDetail;
+    if (stage.rmsText) {
+      nodes.rms.textContent = stage.rmsText;
+      nodes.rms.hidden = false;
+    } else {
+      nodes.rms.textContent = '';
+      nodes.rms.hidden = true;
+    }
+
+    nodes.fill.style.width = `${stage.progressPct}%`;
+    nodes.pct.textContent = `${stage.progressPct}%`;
+    nodes.disclaimer.textContent = state.reducedMotion
+      ? `${stage.disclaimer} · Static replay summary (reduced motion)`
+      : stage.disclaimer;
+
+    const showPause = state.spineWaveMode === 'instructional' && !state.reducedMotion;
+    nodes.pauseBtn.hidden = !showPause;
+    if (showPause) {
+      nodes.pauseBtn.textContent = state.spineWavePaused ? '▶ Resume' : '❚❚ Pause';
+      nodes.pauseBtn.classList.toggle('is-active', state.spineWavePaused);
+      nodes.pauseBtn.setAttribute('aria-pressed', String(state.spineWavePaused));
+      nodes.pauseBtn.title = state.spineWavePaused
+        ? 'Resume slow instructional replay'
+        : 'Pause slow instructional replay';
+    } else {
+      nodes.pauseBtn.textContent = '';
+      nodes.pauseBtn.classList.remove('is-active');
+      nodes.pauseBtn.setAttribute('aria-pressed', 'false');
+    }
+
+    hud.hidden = false;
   }
 
   private activeCutawayStepperPlaying(state: SceneState): boolean {
@@ -1094,30 +1301,49 @@ export class MacroControls {
     this.els.gqaFormulaNote.textContent = noteText;
     this.els.gqaFormulaNoteBtn.title = noteText;
 
+    const accum = cutaway?.focusedAccumulation;
+
     if (formula) {
       this.els.gqaFormulaTensor.textContent = formula.tensorLabel;
       this.els.gqaFormulaCoord.textContent = formula.coordLabel;
-      if (formula.headBadge) {
-        this.els.gqaFormulaHead.textContent = formula.headBadge;
+      if (accum?.active) {
+        this.els.gqaFormulaHead.textContent = accum.badgeText;
         this.els.gqaFormulaHead.hidden = false;
+        this.els.gqaFormulaHead.classList.add('is-accumulating');
+        this.els.gqaFormulaValue.textContent = accum.valueBadgeText;
+        this.els.gqaFormulaValue.classList.remove('is-masked');
+        this.els.gqaFormulaValue.classList.add('is-accumulating');
+        this.els.gqaFormulaValue.hidden = false;
+        this.els.gqaCellClear.hidden = !isPinnedCell;
+        this.els.gqaFormulaEq.textContent = accum.partialEquation;
+        this.els.gqaFormulaSub.textContent = accum.partialSubEquation;
       } else {
-        this.els.gqaFormulaHead.textContent = '';
-        this.els.gqaFormulaHead.hidden = true;
+        this.els.gqaFormulaHead.classList.remove('is-accumulating');
+        if (formula.headBadge) {
+          this.els.gqaFormulaHead.textContent = formula.headBadge;
+          this.els.gqaFormulaHead.hidden = false;
+        } else {
+          this.els.gqaFormulaHead.textContent = '';
+          this.els.gqaFormulaHead.hidden = true;
+        }
+        this.els.gqaFormulaValue.textContent = formula.isMasked
+          ? formula.valueText
+          : `= ${formula.valueText}`;
+        this.els.gqaFormulaValue.classList.toggle('is-masked', formula.isMasked);
+        this.els.gqaFormulaValue.classList.remove('is-accumulating');
+        this.els.gqaFormulaValue.hidden = false;
+        this.els.gqaCellClear.hidden = !isPinnedCell;
+        this.els.gqaFormulaEq.textContent = formula.equation;
+        this.els.gqaFormulaSub.textContent = formula.subEquation;
       }
-      this.els.gqaFormulaValue.textContent = formula.isMasked
-        ? formula.valueText
-        : `= ${formula.valueText}`;
-      this.els.gqaFormulaValue.classList.toggle('is-masked', formula.isMasked);
-      this.els.gqaFormulaValue.hidden = false;
-      this.els.gqaCellClear.hidden = !isPinnedCell;
-      this.els.gqaFormulaEq.textContent = formula.equation;
-      this.els.gqaFormulaSub.textContent = formula.subEquation;
     } else {
       // Idle state: keep head badge and numeric value badge completely empty & hidden (Part 0 #2)
       this.els.gqaFormulaHead.textContent = '';
+      this.els.gqaFormulaHead.classList.remove('is-accumulating');
       this.els.gqaFormulaHead.hidden = true;
       this.els.gqaFormulaValue.textContent = '';
       this.els.gqaFormulaValue.classList.remove('is-masked');
+      this.els.gqaFormulaValue.classList.remove('is-accumulating');
       this.els.gqaFormulaValue.hidden = true;
       this.els.gqaCellClear.hidden = true;
 
@@ -1441,6 +1667,31 @@ export class MacroControls {
       progressRail.appendChild(pip);
     }
 
+    const liveDecodeSummary: LiveDecodeBeatSummary | null =
+      beat.executionMode === 'ar_decode' && decodeSession
+        ? (() => {
+            const branch = getActiveDecodeBranch(decodeSession);
+            const step = getActiveDecodeStep(decodeSession);
+            const lastPos = Math.max(0, step.totalTokens - 1);
+            const lastLabel =
+              step.sequenceTokenLabels[lastPos] ??
+              step.newTokenLabels[step.newTokenLabels.length - 1] ??
+              `t${lastPos}`;
+            return {
+              stepIndex: decodeSession.activeStepIndex,
+              totalSteps: branch.steps.length,
+              branchId: decodeSession.activeBranchId,
+              prefixTokens: step.prefixTokens,
+              newTokens: step.tokens,
+              totalTokens: step.totalTokens,
+              lastTokenPos: lastPos,
+              lastTokenLabel: lastLabel,
+              greedyNextLabel: step.greedyNextToken.label,
+            };
+          })()
+        : null;
+    const displayCopy = resolveBeatDisplayCopy(beat, liveDecodeSummary);
+
     const scrollBody = document.createElement('div');
     scrollBody.className = 'tour-scroll-body';
 
@@ -1454,7 +1705,7 @@ export class MacroControls {
     const badge = document.createElement('span');
     badge.className = 'ed-badge';
     if (beat.precision === 'fp8_selective') badge.classList.add('ed-badge-gold');
-    badge.textContent = beat.badge;
+    badge.textContent = displayCopy.badge;
 
     header.append(title, badge);
     scrollBody.appendChild(header);
@@ -1528,7 +1779,7 @@ export class MacroControls {
       scrollBody.appendChild(beatBar);
     }
 
-    for (const para of beat.paragraphs) {
+    for (const para of displayCopy.paragraphs) {
       const p = document.createElement('p');
       p.className = 'ed-body';
       p.textContent = para;
@@ -1537,7 +1788,7 @@ export class MacroControls {
 
     const list = document.createElement('ul');
     list.className = 'ed-specs';
-    for (const item of beat.takeaways) {
+    for (const item of displayCopy.takeaways) {
       const li = document.createElement('li');
       li.textContent = item;
       list.appendChild(li);
@@ -1546,7 +1797,12 @@ export class MacroControls {
 
     // 5. Embedded live AR Decode controls inside Act III (Beats 7.2–7.4) without exiting tour
     if (beat.executionMode === 'ar_decode' && decodeSession) {
-      const arCard = this.buildArDecodeSessionCard(decodeSession, state.precision, state.mode);
+      const arCard = this.buildArDecodeSessionCard(
+        decodeSession,
+        state.precision,
+        state.mode,
+        state.spineWaveMode,
+      );
       arCard.style.marginTop = '7px';
       scrollBody.appendChild(arCard);
     }
@@ -1651,6 +1907,7 @@ export class MacroControls {
     session: HybridDecodeSession,
     precision: PrecisionMode,
     mode: ViewMode,
+    spineWaveMode: SpineWaveMode = this.lastSyncedState?.spineWaveMode ?? 'fast',
   ): HTMLDivElement {
     const branch = getActiveDecodeBranch(session);
     const step = getActiveDecodeStep(session);
@@ -1883,8 +2140,54 @@ export class MacroControls {
     actRow.append(insertBtn, greedyBtn);
     card.appendChild(actRow);
 
-    // Quick links into truthful incremental cutaways + Replay Wave trigger when viewing the 52-Layer Tower
+    // Fast vs. Slow Instructional Spine Replay controls + cutaway links when viewing the 52-Layer Tower
     if (mode === 'tower') {
+      const waveControls = document.createElement('div');
+      waveControls.className = 'ar-wave-controls';
+      waveControls.dataset.testid = 'ar-wave-controls';
+
+      const fastBtn = document.createElement('button');
+      fastBtn.type = 'button';
+      fastBtn.className =
+        spineWaveMode === 'fast'
+          ? 'ed-flow-tok-btn ar-wave-speed-btn is-active'
+          : 'ed-flow-tok-btn ar-wave-speed-btn';
+      fastBtn.dataset.testid = 'ar-replay-wave';
+      fastBtn.textContent = '⟳ Fast Wave (0.9s)';
+      fastBtn.setAttribute('aria-pressed', String(spineWaveMode === 'fast'));
+      fastBtn.title =
+        'Replay the 52-layer forward propagation wave at fast macro pace (~0.9s educational replay)';
+      fastBtn.addEventListener('click', () => {
+        if (this.cb.onReplaySpineWaveMode) {
+          this.cb.onReplaySpineWaveMode('fast');
+        } else {
+          this.cb.onReplaySpineWave?.();
+        }
+      });
+
+      const slowBtn = document.createElement('button');
+      slowBtn.type = 'button';
+      slowBtn.className =
+        spineWaveMode === 'instructional'
+          ? 'ed-flow-tok-btn ar-wave-speed-btn is-active'
+          : 'ed-flow-tok-btn ar-wave-speed-btn';
+      slowBtn.dataset.testid = 'ar-replay-wave-slow';
+      slowBtn.textContent = '▶ Slow Replay (5.5s)';
+      slowBtn.setAttribute('aria-pressed', String(spineWaveMode === 'instructional'));
+      slowBtn.title =
+        'Replay the 52-layer forward propagation wave at slow instructional pace (~5.5s educational replay with live stage HUD)';
+      slowBtn.addEventListener('click', () => {
+        this.cb.onReplaySpineWaveMode?.('instructional');
+      });
+
+      const waveNote = document.createElement('span');
+      waveNote.className = 'ar-wave-controls-label';
+      waveNote.dataset.testid = 'ar-wave-disclaimer';
+      waveNote.textContent = 'Educational replay (not measured runtime)';
+
+      waveControls.append(fastBtn, slowBtn, waveNote);
+      card.appendChild(waveControls);
+
       const cutRow = document.createElement('div');
       cutRow.className = 'ar-cutaway-links';
       const mkCutBtn = (label: string, kind: BayKind, bayId: number, testid: string) => {
@@ -1896,18 +2199,7 @@ export class MacroControls {
         b.addEventListener('click', () => this.cb.onInspectInternals(kind, bayId));
         return b;
       };
-      const replayBtn = document.createElement('button');
-      replayBtn.type = 'button';
-      const waveActive =
-        this.lastSyncedState?.spineWaveProgress !== null &&
-        this.lastSyncedState?.spineWaveProgress !== undefined;
-      replayBtn.className = waveActive ? 'ed-flow-tok-btn is-active' : 'ed-flow-tok-btn';
-      replayBtn.dataset.testid = 'ar-replay-wave';
-      replayBtn.textContent = '⟳ Replay Wave';
-      replayBtn.title = 'Replay the 52-layer forward propagation wave along the emerald residual spine';
-      replayBtn.addEventListener('click', () => this.cb.onReplaySpineWave?.());
       cutRow.append(
-        replayBtn,
         mkCutBtn(`GQA Bay 43 [${step.tokens}×${step.totalTokens}]`, '*', 43, 'ar-inspect-gqa'),
         mkCutBtn(`Mamba Bay 01 (Hₜ)`, 'M', 1, 'ar-inspect-mamba'),
         mkCutBtn(`MoE Bay 02 (0 B)`, 'E', 2, 'ar-inspect-moe'),
@@ -2088,13 +2380,16 @@ export class MacroControls {
     tokens: number,
     activeExecution: HybridExecutionResult | null = null,
     decodeSession: HybridDecodeSession | null = null,
+    spineWaveMode: SpineWaveMode = 'fast',
   ): void {
     const panel = this.els.editorialPanel;
     panel.classList.remove('is-tour-mode');
     panel.innerHTML = '';
 
     if (decodeSession) {
-      panel.appendChild(this.buildArDecodeSessionCard(decodeSession, precision, 'tower'));
+      panel.appendChild(
+        this.buildArDecodeSessionCard(decodeSession, precision, 'tower', spineWaveMode),
+      );
     }
 
     if (bayId !== null) {
@@ -2586,7 +2881,9 @@ export class MacroControls {
     }
 
     if (decodeSession) {
-      panel.appendChild(this.buildArDecodeSessionCard(decodeSession, state.precision, state.mode));
+      panel.appendChild(
+        this.buildArDecodeSessionCard(decodeSession, state.precision, state.mode, state.spineWaveMode),
+      );
     }
 
     // 1. If user clicked/hovered a specific tensor slab inside the cutaway, show its details!
@@ -3239,3 +3536,5 @@ export class MacroControls {
     this.cleanupFns.length = 0;
   }
 }
+
+export type ControlsUI = MacroControls;
