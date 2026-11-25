@@ -11,6 +11,55 @@
  *   - Only the 29 stateful bays (`6` GQA `*` + `23` Mamba-2 `M`) transfer state across towers;
  *     all `23` MoE (`E`) bays remain strictly stateless.
  *
+ * ## Ownership & Mutability Contract
+ *
+ * Every typed-array buffer and container across the TwoTower runtime falls into one of five
+ * strictly separated ownership classes:
+ *
+ * 1. **Shared Model Weights (`TwoTowerModelParameters`)**:
+ *    - Owned exclusively by `TwoTowerModelParameters` (`contextModel`, `denoiserModel`,
+ *      `timeConditioning`).
+ *    - Shared read-only by reference across all executions, sessions, branches, and traces —
+ *      NEVER duplicated per snapshot, refinement, or trace record.
+ *    - Callers MUST NOT mutate weight buffers (`W_embed`, `finalNormGamma`, `W_lm_head`, per-bay
+ *      weights, `scaleShiftTables`, etc.) in place.
+ *
+ * 2. **Persistent Context Snapshots (`TwoTowerContextSnapshot`)**:
+ *    - Tagged with `stateOrigin: 'persistent_cache'`.
+ *    - Owns strictly private, internally non-aliased backing `ArrayBuffer`s across `ctxState`
+ *      (`prefixTokenIds`, 23 `mambaStates`, 6 `gqaCaches`), 23 `mambaS2` boundary states,
+ *      `arLogits`, and `arProbs`.
+ *    - Strictly IMMUTABLE BY CONTRACT (copy-on-commit). Any external in-place mutation breaks
+ *      `snapshotDigest` / `ctxState.stateDigest` (rejected by `validateContextSnapshot` and
+ *      Nano's `validateDecodeCacheState`) and is isolated from historical Context trace
+ *      reconstruction via private cloned boundary states.
+ *
+ * 3. **Cross-Tower Conditioning Payloads (`TwoTowerContextConditioningState` & `TwoTowerBlockConditioningBase`)**:
+ *    - Explicitly tagged `ownerRole: 'context_tower'` and `consumerRole: 'denoiser_tower'`.
+ *    - Defensively cloned from a validated `TwoTowerContextSnapshot` with zero `ArrayBuffer`
+ *      aliasing against the source Context snapshot and zero internal aliasing across bays.
+ *    - Within a single diffusion block, `TwoTowerBlockConditioningBase` allocates the ~78 KiB
+ *      conditioning buffers ONCE (`refinementIndex: 0`), and `deriveRefinementConditioningView`
+ *      produces lightweight refinement views (`r = 0..K-1`) sharing those read-only frozen maps
+ *      with recomputed `conditioningDigest` — eliminating redundant 78 KiB copies per refinement
+ *      while preserving full validation and non-aliasing invariants.
+ *
+ * 4. **Exposed Trace Typed Arrays & `LayerModulationParams` (`shift`, `scale`, `gate`)**:
+ *    - Every Context layer trace is tagged `traceOrigin: 'context_computed'` (eagerly computed)
+ *      or `'context_reconstructed'` (lazily rebuilt from private checkpoints); every Denoiser
+ *      layer trace is tagged `traceOrigin: 'denoiser_scratch'`.
+ *    - Exposed residual checkpoints (`residualStreams`), `tEmb`, `timestepProjection`,
+ *      `tokenIds`, and per-bay `LayerModulationParams` (`shift`, `scale`, `gate`) are always
+ *      detached clones. Mutating any returned trace tensor or `trace.modulation` CANNOT corrupt
+ *      `getLayerModulation(bayId)`, sibling bays, or future lazy reconstructions.
+ *
+ * 5. **Private Reconstruction Inputs**:
+ *    - Context segment handles and Denoiser pass closures hold strictly unexposed private clones
+ *      of boundary cache states, residual stream checkpoints, token IDs, and per-layer modulation
+ *      vectors (without duplicating shared model weights).
+ *    - Releasing eager traces (`releaseEagerTraces()`) frees retained simulator intermediates
+ *      while preserving 0-ULP bit-exact deterministic lazy reconstruction across all 52 layers.
+ *
  * Pure headless TypeScript — zero DOM, WebGL, scene, or render imports.
  */
 
@@ -34,6 +83,19 @@ export type { TwoTowerExecutionMode };
 export type TwoTowerConditioningMode = 'mock_ar' | 'mask_diffusion';
 export type TwoTowerAlignedStateRole = 'gqa_kv_prefix' | 'mamba_boundary_seed';
 
+/**
+ * Unified TwoTower trace & state origin taxonomy distinguishing:
+ *   - `'context_computed'`: Context Tower layer trace captured eagerly during prefill or block commit
+ *   - `'context_reconstructed'`: Context Tower layer trace lazily rebuilt from private isolated boundary checkpoints
+ *   - `'persistent_cache'`: Persistent Context Tower committed cache snapshot (`TwoTowerContextSnapshot`)
+ *   - `'denoiser_scratch'`: Ephemeral Denoiser Tower forward-pass trace (discarded between refinements)
+ */
+export type TwoTowerTraceOrigin =
+  | 'context_computed'
+  | 'context_reconstructed'
+  | 'persistent_cache'
+  | 'denoiser_scratch';
+
 export interface TwoTowerAlignedLayerEntry {
   readonly bayId: number;
   readonly layerIndex: number;
@@ -49,6 +111,7 @@ export interface TwoTowerAlignedLayerEntry {
  *     zeroed when `P === 1`), preserving exact `S-2 / KV[:-1]` Mock-AR semantics.
  */
 export interface TwoTowerContextSnapshot {
+  readonly stateOrigin: 'persistent_cache';
   readonly modelId: string;
   readonly parameterFingerprint: string;
   readonly ctxState: HybridDecodeCacheState;
@@ -98,6 +161,27 @@ export interface BuildContextConditioningOptions {
   readonly mode: TwoTowerConditioningMode;
   readonly blockId: number;
   readonly refinementIndex: number;
+}
+
+/**
+ * Deduplicated per-block conditioning base holding ONE immutable `'mask_diffusion'`
+ * `TwoTowerContextConditioningState` (created at `refinementIndex: 0`) so interactive sessions
+ * and multi-step refinement loops share the read-only ~78 KiB conditioning buffers across all
+ * refinements `r = 0..K-1` of the same block without duplicating typed arrays.
+ */
+export interface TwoTowerBlockConditioningBase {
+  readonly ownerRole: 'context_tower';
+  readonly consumerRole: 'denoiser_tower';
+  readonly mode: 'mask_diffusion';
+  readonly blockId: number;
+  readonly sourceStateDigest: string;
+  readonly committedPrefixLen: number;
+  readonly absoluteTokenStart: number;
+  readonly allocatedKvCapacity: number;
+  /** Exact deduplicated typed-array byte count of `baseConditioning` (~78 KiB at default `kvCapacity = 24`). */
+  readonly byteLength: number;
+  /** Immutable `refinementIndex: 0` conditioning snapshot whose read-only maps are shared across refinement views. */
+  readonly baseConditioning: TwoTowerContextConditioningState;
 }
 
 // ============================================================================
@@ -298,6 +382,7 @@ export function createTwoTowerContextSnapshot(
   });
 
   const snapshot: TwoTowerContextSnapshot = Object.freeze({
+    stateOrigin: 'persistent_cache' as const,
     modelId: contextModel.modelId,
     parameterFingerprint: contextModel.parameterFingerprint,
     ctxState: params.ctxState,
@@ -315,6 +400,7 @@ export function createTwoTowerContextSnapshot(
 
 /**
  * Strictly validate a `TwoTowerContextSnapshot` against `contextModel`:
+ *   - Verifies `stateOrigin === 'persistent_cache'`
  *   - Runs Nano's full `validateDecodeCacheState(contextModel, snapshot.ctxState)` unchanged
  *   - Validates `P >= 1`, `lastTokenId`/`lastTokenLabel`, `mambaS2` complete bay coverage (`processedTokens === P - 1`)
  *   - Rejects any buffer aliasing between `ctxState`, `mambaS2`, `arLogits`, and `arProbs`
@@ -324,6 +410,11 @@ export function validateContextSnapshot(
   snapshot: TwoTowerContextSnapshot,
   contextModel: HybridModelParameters,
 ): void {
+  if (snapshot.stateOrigin !== 'persistent_cache') {
+    throw new TypeError(
+      `Context snapshot stateOrigin mismatch: expected "persistent_cache", received "${String(snapshot.stateOrigin)}"`,
+    );
+  }
   if (snapshot.modelId !== contextModel.modelId) {
     throw new TypeError(
       `Context snapshot modelId mismatch: snapshot=${snapshot.modelId} !== contextModel=${contextModel.modelId}`,
@@ -968,4 +1059,213 @@ export function assertNonAliasedWithContextSnapshot(
     check(g.K, `conditioning.gqaPrefixCaches[${bayId}].K`);
     check(g.V, `conditioning.gqaPrefixCaches[${bayId}].V`);
   }
+}
+
+// ============================================================================
+// DEEP CLONE, DEDUPLICATED BLOCK-CONDITIONING REUSE & EXACT BYTE ACCOUNTING
+// ============================================================================
+
+function addUniqueBufferBytes(
+  seen: Set<ArrayBufferLike>,
+  arr: ArrayBufferView | undefined,
+): number {
+  if (!arr || seen.has(arr.buffer)) return 0;
+  seen.add(arr.buffer);
+  return arr.buffer.byteLength;
+}
+
+/**
+ * Create a deeply cloned, strictly non-aliased copy of a `HybridDecodeCacheState` so private
+ * historical trace reconstruction closures remain completely immune to external mutations on
+ * public `TwoTowerContextSnapshot.ctxState` buffers or Map containers.
+ */
+export function cloneDecodeCacheState(
+  state: HybridDecodeCacheState,
+): HybridDecodeCacheState {
+  const mambaStates = new Map<number, MambaLayerBoundaryState>();
+  for (const [bayId, m] of state.mambaStates.entries()) {
+    mambaStates.set(
+      bayId,
+      Object.freeze({
+        bayId: m.bayId,
+        kind: 'M' as const,
+        convDim: m.convDim,
+        convKernel: m.convKernel,
+        convState: new Float32Array(m.convState),
+        nHeads: m.nHeads,
+        dHead: m.dHead,
+        dState: m.dState,
+        ssmState: new Float32Array(m.ssmState),
+        processedTokens: m.processedTokens,
+        storageDtypeMetadata: Object.freeze({ conv1d: 'bf16' as const, ssm: 'fp32' as const }),
+      }),
+    );
+  }
+
+  const gqaCaches = new Map<number, GqaLayerKvCache>();
+  for (const [bayId, g] of state.gqaCaches.entries()) {
+    gqaCaches.set(
+      bayId,
+      Object.freeze({
+        bayId: g.bayId,
+        kind: '*' as const,
+        nKv: g.nKv,
+        dHead: g.dHead,
+        seqLen: g.seqLen,
+        maxTokens: g.maxTokens,
+        K: new Float32Array(g.K),
+        V: new Float32Array(g.V),
+        storageDtypeMetadata: g.storageDtypeMetadata,
+      }),
+    );
+  }
+
+  return Object.freeze({
+    modelId: state.modelId,
+    parameterFingerprint: state.parameterFingerprint,
+    stateDigest: state.stateDigest,
+    precisionMetadata: state.precisionMetadata,
+    processedTokens: state.processedTokens,
+    maxTokens: state.maxTokens,
+    prefixTokenIds: new Int32Array(state.prefixTokenIds),
+    prefixTokenLabels: Object.freeze([...state.prefixTokenLabels]),
+    gqaCaches,
+    mambaStates,
+    moeLayerIds: Object.freeze([...state.moeLayerIds]),
+  });
+}
+
+/**
+ * Measure exact deduplicated typed-array bytes held by a `TwoTowerContextConditioningState`
+ * (`23` Mamba boundary seeds + `6` GQA KV prefix caches; `79,872 B = 78.00 KiB` at default `kvCapacity = 24`).
+ */
+export function measureConditioningTypedArrayBytes(
+  state: TwoTowerContextConditioningState,
+): number {
+  const seen = new Set<ArrayBufferLike>();
+  let bytes = 0;
+  for (const m of state.mambaSeedStates.values()) {
+    bytes += addUniqueBufferBytes(seen, m.convState);
+    bytes += addUniqueBufferBytes(seen, m.ssmState);
+  }
+  for (const g of state.gqaPrefixCaches.values()) {
+    bytes += addUniqueBufferBytes(seen, g.K);
+    bytes += addUniqueBufferBytes(seen, g.V);
+  }
+  return bytes;
+}
+
+/**
+ * Measure exact deduplicated typed-array bytes held by a persistent `TwoTowerContextSnapshot`
+ * (`ctxState` prefix tokens + Mamba/GQA caches + `mambaS2` boundary snapshot + `arLogits` + `arProbs`).
+ */
+export function measureContextSnapshotTypedArrayBytes(
+  snapshot: TwoTowerContextSnapshot,
+): number {
+  const seen = new Set<ArrayBufferLike>();
+  let bytes = addUniqueBufferBytes(seen, snapshot.ctxState.prefixTokenIds);
+  for (const m of snapshot.ctxState.mambaStates.values()) {
+    bytes += addUniqueBufferBytes(seen, m.convState);
+    bytes += addUniqueBufferBytes(seen, m.ssmState);
+  }
+  for (const g of snapshot.ctxState.gqaCaches.values()) {
+    bytes += addUniqueBufferBytes(seen, g.K);
+    bytes += addUniqueBufferBytes(seen, g.V);
+  }
+  for (const m of snapshot.mambaS2.values()) {
+    bytes += addUniqueBufferBytes(seen, m.convState);
+    bytes += addUniqueBufferBytes(seen, m.ssmState);
+  }
+  bytes += addUniqueBufferBytes(seen, snapshot.arLogits);
+  bytes += addUniqueBufferBytes(seen, snapshot.arProbs);
+  return bytes;
+}
+
+/**
+ * Construct a deduplicated `TwoTowerBlockConditioningBase` for one masked diffusion block.
+ * Allocates the read-only non-aliased conditioning buffers ONCE (`refinementIndex: 0`), so
+ * subsequent calls to `deriveRefinementConditioningView(base, r)` reuse the exact frozen
+ * `gqaPrefixCaches` and `mambaSeedStates` maps with zero extra 78 KiB typed-array allocations.
+ */
+export function buildBlockConditioningBase(
+  model: TwoTowerModelParameters,
+  contextSnapshot: TwoTowerContextSnapshot,
+  blockId: number,
+): TwoTowerBlockConditioningBase {
+  const baseConditioning = buildContextConditioningState(model, contextSnapshot, {
+    mode: 'mask_diffusion',
+    blockId,
+    refinementIndex: 0,
+  });
+  const byteLength = measureConditioningTypedArrayBytes(baseConditioning);
+
+  return Object.freeze({
+    ownerRole: 'context_tower' as const,
+    consumerRole: 'denoiser_tower' as const,
+    mode: 'mask_diffusion' as const,
+    blockId: baseConditioning.blockId,
+    sourceStateDigest: baseConditioning.sourceStateDigest,
+    committedPrefixLen: baseConditioning.committedPrefixLen,
+    absoluteTokenStart: baseConditioning.absoluteTokenStart,
+    allocatedKvCapacity: baseConditioning.allocatedKvCapacity,
+    byteLength,
+    baseConditioning,
+  });
+}
+
+/**
+ * Derive a lightweight `TwoTowerContextConditioningState` for `refinementIndex` from an
+ * existing `TwoTowerBlockConditioningBase`.
+ *
+ * Shares the immutable read-only `gqaPrefixCaches` and `mambaSeedStates` maps from `base`
+ * WITHOUT re-cloning the ~78 KiB typed arrays, recomputing only `conditioningDigest` for the
+ * updated `refinementIndex`. Passes `validateContextConditioningState` and
+ * `assertNonAliasedWithContextSnapshot` with zero weakening.
+ */
+export function deriveRefinementConditioningView(
+  base: TwoTowerBlockConditioningBase,
+  refinementIndex: number,
+): TwoTowerContextConditioningState {
+  if (!Number.isInteger(refinementIndex) || refinementIndex < 0) {
+    throw new RangeError(
+      `refinementIndex must be a nonnegative integer, received ${refinementIndex}`,
+    );
+  }
+  const src = base.baseConditioning;
+  if (src.mode !== 'mask_diffusion') {
+    throw new TypeError(
+      `TwoTowerBlockConditioningBase requires mode "mask_diffusion", received "${String(src.mode)}"`,
+    );
+  }
+  if (refinementIndex === src.refinementIndex) {
+    return src;
+  }
+
+  const body: Omit<TwoTowerContextConditioningState, 'conditioningDigest'> = {
+    ownerRole: src.ownerRole,
+    consumerRole: src.consumerRole,
+    mode: src.mode,
+    sourceModelId: src.sourceModelId,
+    sourceParameterFingerprint: src.sourceParameterFingerprint,
+    sourceStateDigest: src.sourceStateDigest,
+    targetModelId: src.targetModelId,
+    targetParameterFingerprint: src.targetParameterFingerprint,
+    layerAlignment: src.layerAlignment,
+    committedPrefixLen: src.committedPrefixLen,
+    sourceFullPrefixLen: src.sourceFullPrefixLen,
+    allocatedKvCapacity: src.allocatedKvCapacity,
+    absoluteTokenStart: src.absoluteTokenStart,
+    blockId: src.blockId,
+    refinementIndex,
+    prefixTokenIds: src.prefixTokenIds,
+    prefixTokenLabels: src.prefixTokenLabels,
+    gqaPrefixCaches: src.gqaPrefixCaches,
+    mambaSeedStates: src.mambaSeedStates,
+  };
+
+  const conditioningDigest = computeConditioningDigest(body);
+  return Object.freeze({
+    ...body,
+    conditioningDigest,
+  });
 }
