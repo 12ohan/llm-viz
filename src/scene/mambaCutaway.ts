@@ -33,6 +33,12 @@ import {
 } from '../model/spec';
 import type { GqaViewAngle } from '../model/state';
 import type { AABB } from '../render/camera';
+import {
+  LINE_INSTANCE_FLOATS,
+  LINE_STYLE_ACTIVE,
+  LINE_STYLE_GUIDE,
+  pushFreeGuideLine,
+} from '../render/linePacking';
 import type { PickBox } from '../render/pick';
 import { FlowRibbonBuilder, type FlowRibbonColor } from '../render/ribbons';
 import {
@@ -95,9 +101,6 @@ import {
   CELL_MOE_AMBER,
   CELL_SSM_CYAN,
   CELL_WEIGHT_BLUE,
-  LINE_INSTANCE_FLOATS,
-  LINE_STYLE_ACTIVE,
-  LINE_STYLE_GUIDE,
   SOLID_INSTANCE_FLOATS,
   type DimensionCaliper,
   type LandmarkAnchor,
@@ -276,16 +279,7 @@ class MambaSheetBuilder {
     style = LINE_STYLE_GUIDE,
     alpha = 0.55,
   ): void {
-    this.lineFloats.push(
-      ax, ay, az,
-      bx, by, bz,
-      0, 1, 0,
-      0, 1, 0,
-      cssWidth,
-      style,
-      alpha,
-      0, 0, 0,
-    );
+    pushFreeGuideLine(this.lineFloats, ax, ay, az, bx, by, bz, cssWidth, style, alpha);
   }
 
   pack() {

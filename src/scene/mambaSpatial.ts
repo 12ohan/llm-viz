@@ -26,6 +26,14 @@ import {
   type AABB,
   type ViewportMetrics,
 } from '../render/camera';
+import {
+  LINE_INSTANCE_FLOATS,
+  LINE_STYLE_ACTIVE,
+  LINE_STYLE_BF16_GOLD,
+  LINE_STYLE_GUIDE,
+  pushBoxFrameXZ,
+  pushFreeGuideLine,
+} from '../render/linePacking';
 import type { PickBox } from '../render/pick';
 import { FlowRibbonBuilder, type FlowRibbonColor } from '../render/ribbons';
 import {
@@ -106,10 +114,6 @@ import {
   CELL_NEUTRAL,
   CELL_SSM_CYAN,
   CELL_WEIGHT_BLUE,
-  LINE_INSTANCE_FLOATS,
-  LINE_STYLE_ACTIVE,
-  LINE_STYLE_BF16_GOLD,
-  LINE_STYLE_GUIDE,
   SOLID_INSTANCE_FLOATS,
   type DimensionCaliper,
   type LandmarkAnchor,
@@ -1293,16 +1297,7 @@ class SpatialMambaBuilder {
     style = LINE_STYLE_GUIDE,
     alpha = 0.55,
   ): void {
-    this.lineFloats.push(
-      ax, ay, az,
-      bx, by, bz,
-      0, 1, 0,
-      0, 1, 0,
-      cssWidth,
-      style,
-      alpha,
-      0, 0, 0,
-    );
+    pushFreeGuideLine(this.lineFloats, ax, ay, az, bx, by, bz, cssWidth, style, alpha);
   }
 
   addBoxFrameXZ(
@@ -1315,10 +1310,7 @@ class SpatialMambaBuilder {
     style = LINE_STYLE_GUIDE,
     alpha = 0.45,
   ): void {
-    this.addGuideLine(x0, y, z0, x1, y, z0, cssWidth, style, alpha);
-    this.addGuideLine(x1, y, z0, x1, y, z1, cssWidth, style, alpha);
-    this.addGuideLine(x1, y, z1, x0, y, z1, cssWidth, style, alpha);
-    this.addGuideLine(x0, y, z1, x0, y, z0, cssWidth, style, alpha);
+    pushBoxFrameXZ(this.lineFloats, x0, z0, x1, z1, y, cssWidth, style, alpha);
   }
 
   pack() {
@@ -1682,8 +1674,8 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
     0.30,
     0.32,
   );
-  b.addGuideLine(xInput, BASE_Y, -ioMaxZ * 0.5, xInput, bridgeY, bridgeZ, 0.8, LINE_STYLE_GUIDE, 0.24);
-  b.addGuideLine(xResOut, BASE_Y, -ioMaxZ * 0.5, xResOut, bridgeY, bridgeZ, 0.8, LINE_STYLE_GUIDE, 0.24);
+  b.addGuideLine(xInput, BASE_Y, -ioMaxZ * 0.5, xInput, bridgeY, bridgeZ, 0.85, LINE_STYLE_GUIDE, 0.45);
+  b.addGuideLine(xResOut, BASE_Y, -ioMaxZ * 0.5, xResOut, bridgeY, bridgeZ, 0.85, LINE_STYLE_GUIDE, 0.45);
 
   // Pre-Layer RMSNorm (eps = 1e-5)
   const rmsHl = stageHighlight('rmsnorm', 'rmsnorm', activePart === 'in-proj', feederPreservedBf16);
@@ -1877,9 +1869,9 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
     convBaseFrameX1,
     convSpanZ * 0.5 + 0.06,
     0.02,
-    isFp8Mode ? 1.35 : 0.95,
+    isFp8Mode ? 1.15 : 0.95,
     convFrameStyle,
-    isFp8Mode ? 0.72 : 0.42,
+    isFp8Mode ? 0.62 : 0.44,
   );
 
   for (let slot = 0; slot < sim.convKernel; slot++) {
@@ -1935,8 +1927,9 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
 
     // Subtle vertical stanchions at ends of first & last Conv1D shelf grounding the fixed prism
     if (slot === 0 || slot === sim.convKernel - 1) {
-      b.addGuideLine(sx, 0.02, -convSpanZ * 0.5, sx, sy - 0.03, -convSpanZ * 0.5, 0.85, convFrameStyle, 0.35);
-      b.addGuideLine(sx, 0.02, convSpanZ * 0.5, sx, sy - 0.03, convSpanZ * 0.5, 0.85, convFrameStyle, 0.35);
+      const convStanchionAlpha = isFp8Mode ? 0.50 : 0.46;
+      b.addGuideLine(sx, 0.02, -convSpanZ * 0.5, sx, sy - 0.03, -convSpanZ * 0.5, 0.85, convFrameStyle, convStanchionAlpha);
+      b.addGuideLine(sx, 0.02, convSpanZ * 0.5, sx, sy - 0.03, convSpanZ * 0.5, 0.85, convFrameStyle, convStanchionAlpha);
     }
   }
 
@@ -2079,9 +2072,9 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
         pos.x,
         cy - ez * 0.5 - 0.03,
         pos.z,
-        anchorActive ? 1.8 : 1.0,
+        anchorActive ? 1.65 : 1.0,
         anchorActive ? LINE_STYLE_ACTIVE : LINE_STYLE_GUIDE,
-        anchorActive ? 0.90 : 0.45,
+        anchorActive ? 0.90 : 0.50,
       );
     }
   }
@@ -2211,15 +2204,15 @@ export function buildMambaSpatialScene(ctx: BuildMambaSpatialContext): CutawaySc
   const pedX1 = xHCurr + hSize * 0.5 + 0.16;
   const pedZ0 = bankCenterZ - 0.56;
   const pedZ1 = hZ + hSize * 0.5 + 0.16;
-  b.addBoxFrameXZ(pedX0, pedZ0, pedX1, pedZ1, 0.02, 1.05, LINE_STYLE_GUIDE, 0.42);
-  b.addBoxFrameXZ(pedX0, pedZ0, pedX1, pedZ1, PEDESTAL_Y - 0.05, 0.95, LINE_STYLE_GUIDE, 0.34);
+  b.addBoxFrameXZ(pedX0, pedZ0, pedX1, pedZ1, 0.02, 1.0, LINE_STYLE_GUIDE, 0.46);
+  b.addBoxFrameXZ(pedX0, pedZ0, pedX1, pedZ1, PEDESTAL_Y - 0.05, 0.9, LINE_STYLE_GUIDE, 0.40);
   for (const [sx, sz] of [
     [pedX0, pedZ0],
     [pedX1, pedZ0],
     [pedX1, pedZ1],
     [pedX0, pedZ1],
   ] as const) {
-    b.addGuideLine(sx, 0.02, sz, sx, PEDESTAL_Y - 0.05, sz, 0.9, LINE_STYLE_GUIDE, 0.32);
+    b.addGuideLine(sx, 0.02, sz, sx, PEDESTAL_Y - 0.05, sz, 0.9, LINE_STYLE_GUIDE, 0.46);
   }
 
   // Prior SSM State H_{t-1} (FIXED 4x4 mini / 64x128 prod FP32)

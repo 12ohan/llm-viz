@@ -38,6 +38,13 @@ import { normalizeMoeWeightCell } from '../model/moePlayback';
 import type { PrecisionMode } from '../model/spec';
 import type { GqaViewAngle } from '../model/state';
 import type { AABB } from '../render/camera';
+import {
+  LINE_INSTANCE_FLOATS,
+  LINE_STYLE_ACTIVE,
+  LINE_STYLE_GUIDE,
+  pushDashedFrameXZ,
+  pushFreeGuideLine,
+} from '../render/linePacking';
 import type { PickBox } from '../render/pick';
 import { FlowRibbonBuilder } from '../render/ribbons';
 import {
@@ -107,9 +114,6 @@ import {
   CELL_NEUTRAL,
   CELL_SSM_CYAN,
   CELL_WEIGHT_BLUE,
-  LINE_INSTANCE_FLOATS,
-  LINE_STYLE_ACTIVE,
-  LINE_STYLE_GUIDE,
   SOLID_INSTANCE_FLOATS,
   type DimensionCaliper,
   type LandmarkAnchor,
@@ -276,16 +280,7 @@ class MoeSheetBuilder {
     style = LINE_STYLE_GUIDE,
     alpha = 0.55,
   ): void {
-    this.lineFloats.push(
-      ax, ay, az,
-      bx, by, bz,
-      0, 1, 0,
-      0, 1, 0,
-      cssWidth,
-      style,
-      alpha,
-      0, 0, 0,
-    );
+    pushFreeGuideLine(this.lineFloats, ax, ay, az, bx, by, bz, cssWidth, style, alpha);
   }
 
   addDashedFrameXZ(
@@ -295,32 +290,11 @@ class MoeSheetBuilder {
     z1: number,
     y: number,
     style = LINE_STYLE_GUIDE,
-    alpha = 0.45,
+    alpha = 0.42,
     dash = 0.22,
     gap = 0.14,
   ): void {
-    const dashedLine = (ax: number, az: number, bx: number, bz: number) => {
-      const dx = bx - ax;
-      const dz = bz - az;
-      const len = Math.hypot(dx, dz);
-      if (len < 1e-4) return;
-      const ux = dx / len;
-      const uz = dz / len;
-      for (let d = 0; d < len; d += dash + gap) {
-        const dEnd = Math.min(len, d + dash);
-        this.addGuideLine(
-          ax + ux * d, y, az + uz * d,
-          ax + ux * dEnd, y, az + uz * dEnd,
-          0.95,
-          style,
-          alpha,
-        );
-      }
-    };
-    dashedLine(x0, z0, x1, z0);
-    dashedLine(x1, z0, x1, z1);
-    dashedLine(x1, z1, x0, z1);
-    dashedLine(x0, z1, x0, z0);
+    pushDashedFrameXZ(this.lineFloats, x0, z0, x1, z1, y, style, alpha, dash, gap, 0.9);
   }
 
   pack() {
@@ -1002,7 +976,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     bankTop + bankD + 0.12,
     0.004,
     LINE_STYLE_GUIDE,
-    0.42,
+    0.40,
   );
 
   for (let e = 0; e < sim.nRoutedExperts; e++) {
@@ -1266,7 +1240,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     zDetail + wDownD * 0.5 + 0.20,
     0.004,
     focusedEval.isActive ? LINE_STYLE_ACTIVE : LINE_STYLE_GUIDE,
-    focusedEval.isActive ? 0.44 : 0.36,
+    focusedEval.isActive ? 0.40 : 0.36,
   );
 
   b.addSheet({
@@ -1486,7 +1460,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     zBranchOut + seqDepth * 0.5 + 0.20,
     0.004,
     LINE_STYLE_GUIDE,
-    0.48,
+    0.42,
   );
 
   const sharedUpHl = sheetHighlight({ tensor: 'shared_w_up', isAggregate: true }, ['shared-expert'], [4]);

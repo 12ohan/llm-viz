@@ -22,6 +22,15 @@ import {
   type AABB,
   type ViewportMetrics,
 } from '../render/camera';
+import {
+  LINE_INSTANCE_FLOATS,
+  LINE_STYLE_ACTIVE,
+  LINE_STYLE_BF16_GOLD,
+  LINE_STYLE_GUIDE,
+  pushBoxFrameXZ,
+  pushDashedFrameXZ,
+  pushFreeGuideLine,
+} from '../render/linePacking';
 import type { PickBox } from '../render/pick';
 import { FlowRibbonBuilder, type FlowRibbonColor } from '../render/ribbons';
 import {
@@ -95,10 +104,6 @@ import {
   CELL_NEUTRAL,
   CELL_SSM_CYAN,
   CELL_WEIGHT_BLUE,
-  LINE_INSTANCE_FLOATS,
-  LINE_STYLE_ACTIVE,
-  LINE_STYLE_BF16_GOLD,
-  LINE_STYLE_GUIDE,
   SOLID_INSTANCE_FLOATS,
   type DimensionCaliper,
   type LandmarkAnchor,
@@ -1230,16 +1235,7 @@ class SpatialMoeBuilder {
     style = LINE_STYLE_GUIDE,
     alpha = 0.55,
   ): void {
-    this.lineFloats.push(
-      ax, ay, az,
-      bx, by, bz,
-      0, 1, 0,
-      0, 1, 0,
-      cssWidth,
-      style,
-      alpha,
-      0, 0, 0,
-    );
+    pushFreeGuideLine(this.lineFloats, ax, ay, az, bx, by, bz, cssWidth, style, alpha);
   }
 
   addBoxFrameXZ(
@@ -1252,10 +1248,7 @@ class SpatialMoeBuilder {
     style = LINE_STYLE_GUIDE,
     alpha = 0.45,
   ): void {
-    this.addGuideLine(x0, y, z0, x1, y, z0, cssWidth, style, alpha);
-    this.addGuideLine(x1, y, z0, x1, y, z1, cssWidth, style, alpha);
-    this.addGuideLine(x1, y, z1, x0, y, z1, cssWidth, style, alpha);
-    this.addGuideLine(x0, y, z1, x0, y, z0, cssWidth, style, alpha);
+    pushBoxFrameXZ(this.lineFloats, x0, z0, x1, z1, y, cssWidth, style, alpha);
   }
 
   addDashedFrameXZ(
@@ -1265,32 +1258,11 @@ class SpatialMoeBuilder {
     z1: number,
     y: number,
     style = LINE_STYLE_GUIDE,
-    alpha = 0.45,
+    alpha = 0.42,
     dash = 0.22,
     gap = 0.14,
   ): void {
-    const dashedLine = (ax: number, az: number, bx: number, bz: number) => {
-      const dx = bx - ax;
-      const dz = bz - az;
-      const len = Math.hypot(dx, dz);
-      if (len < 1e-4) return;
-      const ux = dx / len;
-      const uz = dz / len;
-      for (let d = 0; d < len; d += dash + gap) {
-        const dEnd = Math.min(len, d + dash);
-        this.addGuideLine(
-          ax + ux * d, y, az + uz * d,
-          ax + ux * dEnd, y, az + uz * dEnd,
-          0.95,
-          style,
-          alpha,
-        );
-      }
-    };
-    dashedLine(x0, z0, x1, z0);
-    dashedLine(x1, z0, x1, z1);
-    dashedLine(x1, z1, x0, z1);
-    dashedLine(x0, z1, x0, z0);
+    pushDashedFrameXZ(this.lineFloats, x0, z0, x1, z1, y, style, alpha, dash, gap, 0.9);
   }
 
   pack() {
@@ -1649,8 +1621,8 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     0.30,
     0.32,
   );
-  b.addGuideLine(xInput, BASE_Y, -ioMaxZ * 0.5, xInput, bridgeY, bridgeZ, 0.8, LINE_STYLE_GUIDE, 0.24);
-  b.addGuideLine(xResOut, BASE_Y, -ioMaxZ * 0.5, xResOut, bridgeY, bridgeZ, 0.8, LINE_STYLE_GUIDE, 0.24);
+  b.addGuideLine(xInput, BASE_Y, -ioMaxZ * 0.5, xInput, bridgeY, bridgeZ, 0.85, LINE_STYLE_GUIDE, 0.45);
+  b.addGuideLine(xResOut, BASE_Y, -ioMaxZ * 0.5, xResOut, bridgeY, bridgeZ, 0.85, LINE_STYLE_GUIDE, 0.45);
 
   // Pre-MoE RMSNorm (U)
   const rmsHl = sheetHighlight({ tensor: 'rmsnorm', isAggregate: true }, ['rmsnorm'], [0]);
@@ -1765,7 +1737,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     bankTop + bankD + 0.10,
     0.015,
     LINE_STYLE_GUIDE,
-    0.44,
+    0.40,
   );
 
   const bankEnvelope: SheetGeomRecord = {
@@ -1831,9 +1803,9 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
         cx,
         towerY - 0.035,
         cz,
-        pinActive ? 1.6 : 0.95,
+        pinActive ? 1.45 : 0.95,
         pinActive ? LINE_STYLE_ACTIVE : LINE_STYLE_GUIDE,
-        pinActive ? 0.85 : 0.42,
+        pinActive ? 0.82 : 0.48,
       );
 
       // Paired 2-matrix micro-plates (W_up + W_down, non-gated ReLU²) -> 12 'routed-bank' pickBoxes!
@@ -1966,20 +1938,21 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
 
   // Grounding stanchions & architectural frame for the FP32 Top-6 Bridge
   const bridgeFrameStyle = isFp8Mode ? LINE_STYLE_BF16_GOLD : LINE_STYLE_GUIDE;
+  const bridgeStanchionAlpha = isFp8Mode ? 0.50 : 0.46;
   b.addBoxFrameXZ(
     xUnbiased - 0.20,
     zRouted - topkSpanZ * 0.5 - 0.06,
     xTopk + 0.22,
     zRouted + topkSpanZ * 0.5 + 0.06,
     0.018,
-    isFp8Mode ? 1.25 : 0.9,
+    isFp8Mode ? 1.15 : 0.9,
     bridgeFrameStyle,
-    isFp8Mode ? 0.68 : 0.40,
+    isFp8Mode ? 0.60 : 0.42,
   );
-  b.addGuideLine(xUnbiased, 0.02, zRouted - topkSpanZ * 0.5, xUnbiased, bridgeDeckY - 0.03, zRouted - topkSpanZ * 0.5, 0.85, bridgeFrameStyle, 0.35);
-  b.addGuideLine(xUnbiased, 0.02, zRouted + topkSpanZ * 0.5, xUnbiased, bridgeDeckY - 0.03, zRouted + topkSpanZ * 0.5, 0.85, bridgeFrameStyle, 0.35);
-  b.addGuideLine(xTopk, 0.02, zRouted - topkSpanZ * 0.5, xTopk, bridgeDeckY - 0.03, zRouted - topkSpanZ * 0.5, 0.85, bridgeFrameStyle, 0.35);
-  b.addGuideLine(xTopk, 0.02, zRouted + topkSpanZ * 0.5, xTopk, bridgeDeckY - 0.03, zRouted + topkSpanZ * 0.5, 0.85, bridgeFrameStyle, 0.35);
+  b.addGuideLine(xUnbiased, 0.02, zRouted - topkSpanZ * 0.5, xUnbiased, bridgeDeckY - 0.03, zRouted - topkSpanZ * 0.5, 0.85, bridgeFrameStyle, bridgeStanchionAlpha);
+  b.addGuideLine(xUnbiased, 0.02, zRouted + topkSpanZ * 0.5, xUnbiased, bridgeDeckY - 0.03, zRouted + topkSpanZ * 0.5, 0.85, bridgeFrameStyle, bridgeStanchionAlpha);
+  b.addGuideLine(xTopk, 0.02, zRouted - topkSpanZ * 0.5, xTopk, bridgeDeckY - 0.03, zRouted - topkSpanZ * 0.5, 0.85, bridgeFrameStyle, bridgeStanchionAlpha);
+  b.addGuideLine(xTopk, 0.02, zRouted + topkSpanZ * 0.5, xTopk, bridgeDeckY - 0.03, zRouted + topkSpanZ * 0.5, 0.85, bridgeFrameStyle, bridgeStanchionAlpha);
 
   // Tier 1: Unbiased Sigmoid Scores [1 x 6] (e_score_correction_bias stripped before normalization!)
   const isInspectingTopk = activeFormula?.cell.tensor === 'topk_weights';
@@ -2122,7 +2095,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     wbZ1,
     0.018,
     focusedEval.isActive ? LINE_STYLE_ACTIVE : LINE_STYLE_GUIDE,
-    focusedEval.isActive ? 0.52 : 0.34,
+    focusedEval.isActive ? 0.40 : 0.35,
   );
 
   // Upright Routed W_up Wall [d_exp=4, d=8] (1.0x hidden x 1.0x intermediate)
@@ -2490,7 +2463,7 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     zShared + SHARED_INTER_SPAN * 0.5 + 0.16,
     0.018,
     LINE_STYLE_GUIDE,
-    0.46,
+    0.40,
   );
 
   // Upright Shared W_up Wall [d_shared=8, d=8] -> EXACT 1.0x hidden (1.10) x 2.0x intermediate (1.24)!

@@ -15,6 +15,12 @@ import {
 } from '../model/spec';
 import type { GqaViewAngle } from '../model/state';
 import type { AABB } from '../render/camera';
+import {
+  LINE_INSTANCE_FLOATS,
+  LINE_STYLE_ACTIVE,
+  LINE_STYLE_GUIDE,
+  pushFreeGuideLine,
+} from '../render/linePacking';
 import type { PickBox } from '../render/pick';
 import {
   FlowRibbonBuilder,
@@ -81,9 +87,6 @@ import {
   CELL_NEUTRAL,
   CELL_SSM_CYAN,
   CELL_WEIGHT_BLUE,
-  LINE_INSTANCE_FLOATS,
-  LINE_STYLE_ACTIVE,
-  LINE_STYLE_GUIDE,
   SOLID_INSTANCE_FLOATS,
   type DimensionCaliper,
   type KvDepthTickAnchor,
@@ -267,16 +270,7 @@ class GqaSheetBuilder {
     style = LINE_STYLE_GUIDE,
     alpha = 0.55,
   ): void {
-    this.lineFloats.push(
-      ax, ay, az,
-      bx, by, bz,
-      0, 1, 0,
-      0, 1, 0,
-      cssWidth,
-      style,
-      alpha,
-      0, 0, 0,
-    );
+    pushFreeGuideLine(this.lineFloats, ax, ay, az, bx, by, bz, cssWidth, style, alpha);
   }
 
   pack(): {
@@ -1103,7 +1097,7 @@ export function buildGqaCutaway(opts: GqaCutawayOptions): CutawaySceneGeometry {
       tickScaleX + 0.09, 0.02, tz,
       tk === keyCount ? 1.4 : 0.85,
       tk === keyCount ? LINE_STYLE_ACTIVE : LINE_STYLE_GUIDE,
-      0.8,
+      tk === keyCount ? 0.85 : 0.55,
     );
     b.kvDepthTicks.push({
       token: tk,

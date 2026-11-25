@@ -13,6 +13,11 @@ import {
   type AABB,
   type ViewportMetrics,
 } from '../render/camera';
+import {
+  LINE_INSTANCE_FLOATS,
+  LINE_STYLE_GUIDE,
+  pushFreeGuideLine,
+} from '../render/linePacking';
 import type { PickBox, PickHit } from '../render/pick';
 import { FlowRibbonBuilder } from '../render/ribbons';
 import {
@@ -79,8 +84,6 @@ import {
   CELL_EMBED_SLATE,
   CELL_NEUTRAL,
   CELL_WEIGHT_BLUE,
-  LINE_INSTANCE_FLOATS,
-  LINE_STYLE_GUIDE,
   SOLID_INSTANCE_FLOATS,
   type DimensionCaliper,
   type LandmarkAnchor,
@@ -605,16 +608,7 @@ class EmbeddingSceneBuilder {
     style = LINE_STYLE_GUIDE,
     alpha = 0.5,
   ): void {
-    this.lineFloats.push(
-      ax, ay, az,
-      bx, by, bz,
-      0, 1, 0,
-      0, 1, 0,
-      cssWidth,
-      style,
-      alpha,
-      0, 0, 0,
-    );
+    pushFreeGuideLine(this.lineFloats, ax, ay, az, bx, by, bz, cssWidth, style, alpha);
   }
 
   pack() {
@@ -863,8 +857,8 @@ export function buildEmbeddingCutaway(
   });
 
   // Subtle floor stanchions grounding upright W_embed
-  b.addGuideLine(xWEmbed, 0.0, -wEmbedSpanZ * 0.5, xWEmbed, wEmbedY - wEmbedHeightY * 0.5, -wEmbedSpanZ * 0.5, 0.85, LINE_STYLE_GUIDE, 0.35);
-  b.addGuideLine(xWEmbed, 0.0, wEmbedSpanZ * 0.5, xWEmbed, wEmbedY - wEmbedHeightY * 0.5, wEmbedSpanZ * 0.5, 0.85, LINE_STYLE_GUIDE, 0.35);
+  b.addGuideLine(xWEmbed, 0.0, -wEmbedSpanZ * 0.5, xWEmbed, wEmbedY - wEmbedHeightY * 0.5, -wEmbedSpanZ * 0.5, 0.9, LINE_STYLE_GUIDE, 0.48);
+  b.addGuideLine(xWEmbed, 0.0, wEmbedSpanZ * 0.5, xWEmbed, wEmbedY - wEmbedHeightY * 0.5, wEmbedSpanZ * 0.5, 0.9, LINE_STYLE_GUIDE, 0.48);
 
   // -------------------------------------------------------------------------
   // 3. Explicit NoPE Contrast Slot (Ghost Rail beside the copy bridge)
@@ -901,17 +895,17 @@ export function buildEmbeddingCutaway(
     cellFamily: CELL_NEUTRAL,
   });
 
-  // Delicate diagonal X cross-lines over the NoPE Ghost Rail emphasizing "NO Positional Embedding"
+  // Crisp diagonal X cross-lines over the NoPE Ghost Rail emphasizing "NO Positional Embedding"
   const nopeY = BASE_Y + 0.056;
   b.addGuideLine(
     xNopeSlot - nopeW * 0.44, nopeY, nopeZ - nopeD * 0.40,
     xNopeSlot + nopeW * 0.44, nopeY, nopeZ + nopeD * 0.40,
-    1.1, LINE_STYLE_GUIDE, hasCellTrace ? 0.20 : 0.55,
+    1.2, LINE_STYLE_GUIDE, hasCellTrace ? 0.22 : 0.65,
   );
   b.addGuideLine(
     xNopeSlot - nopeW * 0.44, nopeY, nopeZ + nopeD * 0.40,
     xNopeSlot + nopeW * 0.44, nopeY, nopeZ - nopeD * 0.40,
-    1.1, LINE_STYLE_GUIDE, hasCellTrace ? 0.20 : 0.55,
+    1.2, LINE_STYLE_GUIDE, hasCellTrace ? 0.22 : 0.65,
   );
 
   // -------------------------------------------------------------------------

@@ -19,6 +19,11 @@ import {
   type AABB,
   type ViewportMetrics,
 } from '../render/camera';
+import {
+  LINE_INSTANCE_FLOATS,
+  LINE_STYLE_GUIDE,
+  pushFreeGuideLine,
+} from '../render/linePacking';
 import type { PickBox, PickHit } from '../render/pick';
 import { FlowRibbonBuilder, type FlowRibbonColor } from '../render/ribbons';
 import {
@@ -86,8 +91,6 @@ import {
   CELL_ACTIVATION_GREEN,
   CELL_MOE_AMBER,
   CELL_WEIGHT_BLUE,
-  LINE_INSTANCE_FLOATS,
-  LINE_STYLE_GUIDE,
   SOLID_INSTANCE_FLOATS,
   type DimensionCaliper,
   type LandmarkAnchor,
@@ -758,16 +761,7 @@ class OutputSceneBuilder {
     style = LINE_STYLE_GUIDE,
     alpha = 0.5,
   ): void {
-    this.lineFloats.push(
-      ax, ay, az,
-      bx, by, bz,
-      0, 1, 0,
-      0, 1, 0,
-      cssWidth,
-      style,
-      alpha,
-      0, 0, 0,
-    );
+    pushFreeGuideLine(this.lineFloats, ax, ay, az, bx, by, bz, cssWidth, style, alpha);
   }
 
   pack() {
@@ -1221,8 +1215,8 @@ export function buildOutputCutaway(
   });
 
   // Grounding stanchions under W_lm_head
-  b.addGuideLine(xWLm, 0.0, -wLmSpanZ * 0.5, xWLm, WALL_Y - WALL_H * 0.5, -wLmSpanZ * 0.5, 0.85, LINE_STYLE_GUIDE, 0.35);
-  b.addGuideLine(xWLm, 0.0, wLmSpanZ * 0.5, xWLm, WALL_Y - WALL_H * 0.5, wLmSpanZ * 0.5, 0.85, LINE_STYLE_GUIDE, 0.35);
+  b.addGuideLine(xWLm, 0.0, -wLmSpanZ * 0.5, xWLm, WALL_Y - WALL_H * 0.5, -wLmSpanZ * 0.5, 0.9, LINE_STYLE_GUIDE, 0.48);
+  b.addGuideLine(xWLm, 0.0, wLmSpanZ * 0.5, xWLm, WALL_Y - WALL_H * 0.5, wLmSpanZ * 0.5, 0.9, LINE_STYLE_GUIDE, 0.48);
 
   // Final Norm [focusTok] -> Upright W_lm_head
   const normFocusPt = localToWorldOnFrame(

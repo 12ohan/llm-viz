@@ -21,6 +21,12 @@ import {
   type AABB,
   type ViewportMetrics,
 } from '../render/camera';
+import {
+  LINE_INSTANCE_FLOATS,
+  LINE_STYLE_ACTIVE,
+  LINE_STYLE_GUIDE,
+  pushFreeGuideLine,
+} from '../render/linePacking';
 import type { PickBox } from '../render/pick';
 import { FlowRibbonBuilder, type FlowRibbonColor } from '../render/ribbons';
 import {
@@ -100,9 +106,6 @@ import {
   CELL_MOE_AMBER,
   CELL_NEUTRAL,
   CELL_WEIGHT_BLUE,
-  LINE_INSTANCE_FLOATS,
-  LINE_STYLE_ACTIVE,
-  LINE_STYLE_GUIDE,
   SOLID_INSTANCE_FLOATS,
   type DimensionCaliper,
   type KvDepthTickAnchor,
@@ -568,16 +571,7 @@ class SpatialGqaBuilder {
     style = LINE_STYLE_GUIDE,
     alpha = 0.6,
   ): void {
-    this.lineFloats.push(
-      ax, ay, az,
-      bx, by, bz,
-      0, 1, 0,
-      0, 1, 0,
-      cssWidth,
-      style,
-      alpha,
-      0, 0, 0,
-    );
+    pushFreeGuideLine(this.lineFloats, ax, ay, az, bx, by, bz, cssWidth, style, alpha);
   }
 
   pack() {
@@ -1629,8 +1623,8 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
   );
 
   // Subtle architectural stanchion lines grounding the residual bridge endpoints
-  b.addGuideLine(xInput, BASE_Y, -ioD * 0.5, xInput, bridgeY, bridgeZ, 0.8, LINE_STYLE_GUIDE, 0.25);
-  b.addGuideLine(xResOut, BASE_Y, -ioD * 0.5, xResOut, bridgeY, bridgeZ, 0.8, LINE_STYLE_GUIDE, 0.25);
+  b.addGuideLine(xInput, BASE_Y, -ioD * 0.5, xInput, bridgeY, bridgeZ, 0.85, LINE_STYLE_GUIDE, 0.45);
+  b.addGuideLine(xResOut, BASE_Y, -ioD * 0.5, xResOut, bridgeY, bridgeZ, 0.85, LINE_STYLE_GUIDE, 0.45);
 
   const rmsHl = stageHighlight(
     'rmsnorm',
@@ -1875,9 +1869,9 @@ export function buildGqaSpatialScene(ctx: BuildGqaSpatialContext): CutawaySceneG
       b.addGuideLine(
         pos.x, 0.04, pos.z,
         pos.x, cy - ez * 0.5 - 0.03, pos.z,
-        isActiveSelected ? 1.8 : 1.0,
+        isActiveSelected ? 1.65 : 1.0,
         isActiveSelected ? LINE_STYLE_ACTIVE : LINE_STYLE_GUIDE,
-        isActiveSelected ? 0.92 : 0.45,
+        isActiveSelected ? 0.90 : 0.50,
       );
     }
   }

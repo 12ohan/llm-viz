@@ -1,6 +1,18 @@
 import type { Vec3 } from '../model/spec';
-import { LINE_INSTANCE_BYTES } from '../scene/spine';
 import { linkProgram, PALETTE } from './device';
+import {
+  LINE_INSTANCE_ATTRIBS,
+  LINE_INSTANCE_BYTES,
+  LINE_INSTANCE_FLOATS,
+  LINE_OFFSETS,
+} from './linePacking';
+
+export {
+  LINE_INSTANCE_ATTRIBS,
+  LINE_INSTANCE_BYTES,
+  LINE_INSTANCE_FLOATS,
+  LINE_OFFSETS,
+};
 
 /**
  * Pass 2: Crisp depth-tested screen-space hairlines for perspective camera (no gl_FragDepth).
@@ -246,16 +258,9 @@ export class LinesPass {
       gl.vertexAttribPointer(loc, size, gl.FLOAT, false, LINE_INSTANCE_BYTES, offset);
       gl.vertexAttribDivisor(loc, 1);
     };
-    bindInst(2, 3, 0);
-    bindInst(3, 3, 12);
-    bindInst(4, 1, 24);
-    bindInst(5, 1, 28);
-    bindInst(6, 1, 32);
-    bindInst(7, 1, 36);
-    bindInst(8, 1, 40);
-    bindInst(9, 1, 44);
-    bindInst(10, 3, 48);
-    bindInst(11, 3, 60);
+    for (const attr of LINE_INSTANCE_ATTRIBS) {
+      bindInst(attr.location, attr.size, attr.byteOffset);
+    }
 
     gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
