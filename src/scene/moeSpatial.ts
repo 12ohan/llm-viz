@@ -899,6 +899,10 @@ export function buildMoeActiveCellGrids(params: {
       isAccumulating && activeTensor === 'topk_weights'
         ? focusedAccumulation!.partialSum
         : undefined;
+    const topkTextOverride =
+      isAccumulating && activeTensor === 'topk_weights' && !focusedAccumulation!.isFinal
+        ? `Σ${focusedAccumulation!.partialSum.toFixed(2)}`
+        : undefined;
     grids.push({
       key: 'topk_weights',
       grid: {
@@ -911,6 +915,7 @@ export function buildMoeActiveCellGrids(params: {
         activeRow: activeCol !== undefined ? 0 : undefined,
         ...directRevealFields('topk_weights'),
         ...(topkOverride !== undefined ? { activeValueOverride: topkOverride } : {}),
+        ...(topkTextOverride !== undefined ? { activeValueTextOverride: topkTextOverride } : {}),
         colLabels: expertLabels,
         rowLabels: [`t${absFocusToken}`],
         colDimLabel: 'Top-6 (×2.5)',
@@ -2737,52 +2742,59 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
       popoverTargetWorld = targetSpan.frontPoint;
       drawCellHighlight3D(b.flow, targetSpan, CELL_TARGET_FILL, CELL_TARGET_FRAME, 0.024, true);
 
-      // Refinement 2: Special high-clarity visualization for Top-6 Normalization (biased selection vs unbiased σ & 6-term denom!)
+      // Refinement 2 + RB-2: High-clarity visualization for Top-6 Normalization (biased selection vs unbiased σ & running/full 6-term denom)
       if (c.tensor === 'topk_weights') {
         const slot = Math.max(0, Math.min(sim.topK - 1, c.rankSlot ?? c.col));
         const winnerId = sim.topk_indices[focusToken * sim.topK + slot];
         const unbiasedRec = b.sheetRegistry.get('topk_unbiased');
+        const isPartialDenomAccum = Boolean(
+          focusedAccumulation?.active && !focusedAccumulation.isFinal,
+        );
+        const denomEndSlot = isPartialDenomAccum
+          ? Math.max(0, Math.min(sim.topK - 1, focusedAccumulation!.currentTermIndex))
+          : sim.topK - 1;
 
         if (unbiasedRec) {
-          // 1. Teal denominator highlight spanning ALL 6 unbiased sigmoid scores [0..5] (explicitly including slot j itself!)
-          const fullDenomSpan = spanFromSheetGrid(unbiasedRec, 0, 0, 0, sim.topK - 1);
-          drawCellHighlight3D(b.flow, fullDenomSpan, CELL_OP_B_FILL, CELL_OP_B_FRAME, 0.020, true);
+          // 1. Teal denominator highlight spanning accumulated slots [0..denomEndSlot] (all 6 slots [0..5] on 6/6 or unrestricted)
+          const denomSpan = spanFromSheetGrid(unbiasedRec, 0, 0, 0, denomEndSlot);
+          drawCellHighlight3D(b.flow, denomSpan, CELL_OP_B_FILL, CELL_OP_B_FRAME, 0.020, true);
 
-          // 2. Indigo numerator cell highlight on slot j itself (stacked clearly inside the 6-slot denominator!)
-          const numSlotSpan = spanFromSheetGrid(unbiasedRec, 0, 0, slot, slot);
-          drawCellHighlight3D(b.flow, numSlotSpan, CELL_OP_A_FILL, CELL_OP_A_FRAME, 0.025, true);
+          // 2. Indigo highlight: active accumulated denominator term during 1/6..5/6, or numerator slot j on 6/6 & unrestricted
+          const primarySlot = isPartialDenomAccum ? denomEndSlot : slot;
+          const primarySlotSpan = spanFromSheetGrid(unbiasedRec, 0, 0, primarySlot, primarySlot);
+          drawCellHighlight3D(b.flow, primarySlotSpan, CELL_OP_A_FILL, CELL_OP_A_FRAME, 0.025, true);
           popoverSources.push(
-            { world: numSlotSpan.frontPoint, role: 'indigo' },
-            { world: fullDenomSpan.frontPoint, role: 'teal' },
+            { world: primarySlotSpan.frontPoint, role: 'indigo' },
+            { world: denomSpan.frontPoint, role: 'teal' },
           );
 
-          // 3. Bank tiles -> Unbiased σ strip (indigo for numerator expert, teal for other 5 denominator contributors)
-          for (let m = 0; m < sim.topK; m++) {
+          // 3. Bank tiles -> Unbiased σ strip (only accumulated slots 0..denomEndSlot while !isFinal; all 6 on 6/6 & unrestricted)
+          for (let m = 0; m <= denomEndSlot; m++) {
             const eid = activeExpertIds[m];
             const tile = bankTileGeom.get(eid);
             if (!tile) continue;
             const tileSpan = spanFromSheetGrid(tile, 0, 0, 0, 0);
             const mSlotSpan = spanFromSheetGrid(unbiasedRec, 0, 0, m, m);
-            const isNumerator = eid === winnerId;
+            const isPrimary = isPartialDenomAccum ? m === denomEndSlot : eid === winnerId;
             drawCellHighlight3D(
               b.flow,
               tileSpan,
-              isNumerator ? CELL_OP_A_FILL : CELL_OP_B_FILL,
-              isNumerator ? CELL_OP_A_FRAME : CELL_OP_B_FRAME,
-              isNumerator ? 0.024 : 0.018,
+              isPrimary ? CELL_OP_A_FILL : CELL_OP_B_FILL,
+              isPrimary ? CELL_OP_A_FRAME : CELL_OP_B_FRAME,
+              isPrimary ? 0.024 : 0.018,
               true,
             );
-            drawOperandDependency3D(b.flow, tileSpan, mSlotSpan, isNumerator);
+            drawOperandDependency3D(b.flow, tileSpan, mSlotSpan, isPrimary);
           }
 
-          // 4. Primary indigo numerator thread (σ_j -> w_j) + converging teal denominator arc (Σ_{m=0..5} σ_m -> w_j)
-          drawOperandDependency3D(b.flow, numSlotSpan, targetSpan, true);
+          // 4. Primary indigo thread (active term or numerator σ_j -> w_j) + converging teal denominator arc (Σ_{m=0..denomEndSlot} σ_m -> w_j)
+          drawOperandDependency3D(b.flow, primarySlotSpan, targetSpan, true);
           b.flow.addCubic3D(
-            fullDenomSpan.frontPoint,
+            denomSpan.frontPoint,
             [
-              (fullDenomSpan.frontPoint[0] + targetSpan.frontPoint[0]) * 0.5,
+              (denomSpan.frontPoint[0] + targetSpan.frontPoint[0]) * 0.5,
               bridgeDeckY + 0.34,
-              (fullDenomSpan.frontPoint[2] + targetSpan.frontPoint[2]) * 0.5,
+              (denomSpan.frontPoint[2] + targetSpan.frontPoint[2]) * 0.5,
             ],
             [targetSpan.frontPoint[0] - 0.14, bridgeDeckY + 0.22, targetSpan.frontPoint[2]],
             targetSpan.frontPoint,
@@ -3068,7 +3080,9 @@ export function buildMoeSpatialScene(ctx: BuildMoeSpatialContext): CutawaySceneG
     {
       id: 'moe-detail-status',
       label: focusedEval.isActive
-        ? `Magnified #${(focusedRank ?? 0) + 1}/6: ${focusExpTag} (w=${focusedEval.appliedWeight.toFixed(2)})`
+        ? revealEnabled && (stepperStep ?? 0) <= 2
+          ? `Magnified #${(focusedRank ?? 0) + 1}/6: ${focusExpTag}`
+          : `Magnified #${(focusedRank ?? 0) + 1}/6: ${focusExpTag} (w=${focusedEval.appliedWeight.toFixed(2)})`
         : `${focusExpTag} IDLE PREVIEW (Rank #${focusedEval.choiceRank + 1}/128 · 0 contrib)`,
       world: [(xRoutedWUp + xRoutedWDown) * 0.5, 0.04, wbZ1 + 0.42],
       partId: 'routed-w-up',

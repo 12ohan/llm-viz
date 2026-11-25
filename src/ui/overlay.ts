@@ -57,6 +57,8 @@ export interface ActiveSheetCellGrid {
   readonly revealRowFrontier?: number;
   /** Running partial-sum override for the actively accumulating frontier cell (`col === activeCol && row === activeRow`). */
   readonly activeValueOverride?: number | null;
+  /** Optional formatted string override for the actively accumulating frontier cell (e.g. `Σ1.84`). Takes precedence over numeric formatting when non-null. */
+  readonly activeValueTextOverride?: string | null;
   readonly colLabels?: readonly string[];
   readonly rowLabels?: readonly string[];
   readonly colDimLabel?: string; // e.g. "K = 6"
@@ -1920,14 +1922,22 @@ export class MacroOverlay {
 
       const isActive = col === grid.activeCol && row === grid.activeRow;
       const isMasked = Boolean(grid.masked && idx < grid.masked.length && grid.masked[idx] !== 0);
-      const isAccumulating =
+      const hasTextOverride =
+        isActive &&
+        !isMasked &&
+        grid.activeValueTextOverride !== undefined &&
+        grid.activeValueTextOverride !== null;
+      const hasNumericOverride =
         isActive &&
         !isMasked &&
         grid.activeValueOverride !== undefined &&
         grid.activeValueOverride !== null &&
         Number.isFinite(grid.activeValueOverride);
-      const rawValue = isAccumulating ? grid.activeValueOverride! : grid.values[idx];
-      const text = formatCellOverlayValue(rawValue, grid.format ?? 'signed', isMasked);
+      const isAccumulating = hasTextOverride || hasNumericOverride;
+      const rawValue = hasNumericOverride ? grid.activeValueOverride! : grid.values[idx];
+      const text = hasTextOverride
+        ? grid.activeValueTextOverride!
+        : formatCellOverlayValue(rawValue, grid.format ?? 'signed', isMasked);
       const w = this.measureText(text, cellNumFont) + 6;
       const h = 13;
       const lx = pt.x - w * 0.5;

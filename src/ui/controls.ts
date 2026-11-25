@@ -33,7 +33,19 @@ import {
   type HybridDecodeSession,
 } from '../math/incrementalDecode';
 import { MAMBA_STEPPER_STEPS } from '../math/mambaSim';
-import { formatExpertId, MOE_STEPPER_STEPS } from '../math/moeSim';
+import {
+  formatExpertId,
+  MOE_SIM_CONFIG,
+  MOE_STEPPER_STEPS,
+  type MoeCellRef,
+} from '../math/moeSim';
+import {
+  computeSubCellFraction,
+  moeAccumTermBucket,
+  resolveMoeAccumTermProgress,
+  resolveMoeStepperCellForAccum,
+} from '../model/rcPlayback';
+import { computeMoeFocusedAccumulation } from '../scene/accumulation';
 import {
   EMBEDDING_STEPPER_STEPS,
   formatMambaHeadId,
@@ -45,6 +57,7 @@ import {
   type CutawayPartInfo,
   type CutawaySceneGeometry,
 } from '../scene/cutaways';
+import { computeMoeSheetReveal } from '../scene/moeSpatial';
 import { describeSpineWaveStage } from '../scene/spine';
 import {
   beatsForChapter,
@@ -491,6 +504,110 @@ export function queryControlsElements(): ControlsElements {
  * from `activeCutaway` so hovering or clicking across different tokens/heads within the same tensor
  * or part always refreshes the sidebar Recurrence controls, head grid, and `partCatalog` specs.
  */
+interface MoeSidebarWeightReveal {
+  readonly masked: boolean;
+  readonly activeSlot: number;
+  readonly isActiveSlotFinal: boolean;
+  readonly termBucket: number;
+}
+
+function resolveMoeSidebarWeightReveal(
+  state: SceneState,
+  cutaway: CutawaySceneGeometry | null,
+): MoeSidebarWeightReveal {
+  const sim = cutaway?.moeSim ?? null;
+  const topK = sim?.topK ?? MOE_SIM_CONFIG.topK;
+  const revealMaskActive =
+    state.moeStepperActive && !state.reducedMotion && state.moeStepperStep <= 2;
+
+  if (!revealMaskActive) {
+    return { masked: false, activeSlot: topK, isActiveSlotFinal: true, termBucket: -1 };
+  }
+
+  if (state.moeStepperStep < 2) {
+    return { masked: true, activeSlot: -1, isActiveSlotFinal: false, termBucket: -1 };
+  }
+
+  const hasDirectCellOverride =
+    state.moeHoveredCell !== null || state.moeSelectedCell !== null;
+
+  if (!sim) {
+    const clampedP = Math.max(0, Math.min(0.9999, state.moeStepperSubProgress));
+    const activeSlot = Math.min(topK - 1, Math.floor(clampedP * topK));
+    const settled =
+      hasDirectCellOverride ||
+      !Number.isFinite(state.moeStepperSubProgress) ||
+      state.moeStepperSubProgress >= 0.999;
+    const termP = settled ? 1 : computeSubCellFraction(clampedP, topK);
+    const termBucket =
+      termP >= 0.999 ? -1 : Math.min(topK - 1, Math.floor(Math.max(0, termP) * topK));
+    const isActiveSlotFinal = termBucket < 0 || termBucket === topK - 1;
+    return { masked: true, activeSlot, isActiveSlotFinal, termBucket };
+  }
+
+  const focusTok = Math.min(
+    sim.tokens - 1,
+    cutaway?.moeStats?.focusToken ?? Math.max(0, sim.tokens - 1),
+  );
+  const focusExp =
+    cutaway?.moeStats?.focusExpert ??
+    cutaway?.moeStats?.activeExpertIds[0] ??
+    sim.topk_indices[focusTok * sim.topK];
+
+  const activeRankMap = new Map<number, number>();
+  for (let j = 0; j < sim.topK; j++) {
+    activeRankMap.set(sim.topk_indices[focusTok * sim.topK + j], j);
+  }
+
+  const cutawayFormulaCell: MoeCellRef | null =
+    cutaway?.kind === 'cutaway_moe' &&
+    cutaway.activeFormula &&
+    'cell' in cutaway.activeFormula
+      ? ((cutaway.activeFormula as { readonly cell?: MoeCellRef }).cell ?? null)
+      : null;
+  const activeCell: MoeCellRef =
+    cutawayFormulaCell ??
+    resolveMoeStepperCellForAccum(sim, 2, state.moeStepperSubProgress, focusTok, focusExp);
+
+  const [, colFrontier] = computeMoeSheetReveal(
+    {
+      enabled: true,
+      step: 2,
+      activeCell,
+      focusToken: focusTok,
+      focusExpert: focusExp,
+      activeRankMap,
+      sim,
+      pulsePhase: 0,
+    },
+    'topk_weights',
+  );
+  const activeSlot = Math.max(0, Math.min(sim.topK - 1, Math.round(colFrontier)));
+
+  let accum = cutaway?.focusedAccumulation ?? null;
+  const cutawayHasSettledTopkReveal =
+    cutaway?.kind === 'cutaway_moe' &&
+    cutaway.sheetRevealData !== undefined &&
+    cutawayFormulaCell?.tensor === 'topk_weights' &&
+    cutaway.focusedAccumulation === null;
+
+  if (!accum && !cutawayHasSettledTopkReveal) {
+    const termP = resolveMoeAccumTermProgress(
+      sim,
+      2,
+      state.moeStepperSubProgress,
+      true,
+      false,
+      hasDirectCellOverride,
+    );
+    accum = computeMoeFocusedAccumulation(sim, activeCell, 2, termP, focusTok, focusExp);
+  }
+
+  const isActiveSlotFinal = accum ? accum.isFinal : true;
+  const termBucket = accum ? accum.currentTermIndex : -1;
+  return { masked: true, activeSlot, isActiveSlotFinal, termBucket };
+}
+
 export function computeEditorialCacheKey(
   state: SceneState,
   activeCutaway: CutawaySceneGeometry | null,
@@ -533,7 +650,42 @@ export function computeEditorialCacheKey(
         : state.mode === 'cutaway_gqa'
           ? (state.gqaStepperPlaying ? 'sp1' : 'sp0')
           : 'sp0';
-  return `${state.executionMode}:${decodeKey}:${tourKey}:${waveKey}:${stepPlayKey}:${execKey}:${boundTok}:${state.mode}:et${state.embeddingFocusToken}:ot${state.outputFocusToken}:${state.mambaBayId}:${effMambaHead}:${effMambaTok}:${state.mambaStateToken ?? 'last'}:${state.mambaTemporalPlaying ? 'tplay' : 'tpause'}:${state.moeBayId}:${effMoeTok}:${effMoeExp}:${state.moeTokenCycling ? 'mplay' : 'mpause'}:${state.gqaBayId}:${effGqaG0}:${effGqaG1}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
+  const moeRevealKey =
+    state.mode === 'cutaway_moe'
+      ? (() => {
+          const rev = resolveMoeSidebarWeightReveal(state, activeCutaway);
+          if (!rev.masked) {
+            return `mr0:a${state.moeStepperActive ? 1 : 0}:s${state.moeStepperStep}:rm${state.reducedMotion ? 1 : 0}`;
+          }
+          if (state.moeStepperStep < 2) {
+            return `mr1:s${state.moeStepperStep}:rm0`;
+          }
+          const topK = activeCutaway?.moeSim?.topK ?? MOE_SIM_CONFIG.topK;
+          const clampedP = Math.max(0, Math.min(0.9999, state.moeStepperSubProgress));
+          const stateSlot = Math.min(topK - 1, Math.floor(clampedP * topK));
+          const stateBucket = activeCutaway?.moeSim
+            ? moeAccumTermBucket(
+                activeCutaway.moeSim,
+                2,
+                resolveMoeAccumTermProgress(
+                  activeCutaway.moeSim,
+                  2,
+                  state.moeStepperSubProgress,
+                  true,
+                  false,
+                  state.moeHoveredCell !== null || state.moeSelectedCell !== null,
+                ),
+              )
+            : state.moeStepperSubProgress >= 0.999
+              ? -1
+              : Math.min(
+                  topK - 1,
+                  Math.floor(Math.max(0, computeSubCellFraction(clampedP, topK)) * topK),
+                );
+          return `mr1:s2:sl${rev.activeSlot}:f${rev.isActiveSlotFinal ? 1 : 0}:b${rev.termBucket}:ps${stateSlot}:pb${stateBucket}`;
+        })()
+      : 'mrna';
+  return `${state.executionMode}:${decodeKey}:${tourKey}:${waveKey}:${stepPlayKey}:${moeRevealKey}:${execKey}:${boundTok}:${state.mode}:et${state.embeddingFocusToken}:ot${state.outputFocusToken}:${state.mambaBayId}:${effMambaHead}:${effMambaTok}:${state.mambaStateToken ?? 'last'}:${state.mambaTemporalPlaying ? 'tplay' : 'tpause'}:${state.moeBayId}:${effMoeTok}:${effMoeExp}:${state.moeTokenCycling ? 'mplay' : 'mpause'}:${state.gqaBayId}:${effGqaG0}:${effGqaG1}:${state.section}:${activeBayId ?? 'none'}:${state.selectedBay ?? 'none'}:${activePart ?? 'none'}:${state.selectedPart ?? 'none'}:${state.precision}:${state.tokens}`;
 }
 
 interface SpineWaveHudNodes {
@@ -3250,11 +3402,22 @@ export class MacroControls {
       expTop.textContent = `Top-6 Active Experts for t${absFocusTok} (×2.5 scaled, click to inspect):`;
       wrap.appendChild(expTop);
 
+      const weightReveal = resolveMoeSidebarWeightReveal(state, cutaway);
       const expGrid = document.createElement('div');
       expGrid.className = 'moe-topk-grid';
       for (let j = 0; j < sim.topK; j++) {
         const eid = sim.topk_indices[focusTok * sim.topK + j];
         const w = sim.topk_weights[focusTok * sim.topK + j];
+        let weightText: string;
+        if (!weightReveal.masked) {
+          weightText = w.toFixed(2);
+        } else if (state.moeStepperStep < 2 || j > weightReveal.activeSlot) {
+          weightText = '—';
+        } else if (j < weightReveal.activeSlot) {
+          weightText = w.toFixed(2);
+        } else {
+          weightText = weightReveal.isActiveSlotFinal ? w.toFixed(2) : '…';
+        }
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'moe-exp-btn';
@@ -3262,7 +3425,7 @@ export class MacroControls {
         const isSel = eid === focusExp;
         btn.classList.toggle('is-selected', isSel);
         btn.setAttribute('aria-pressed', String(isSel));
-        btn.innerHTML = `<span>${formatExpertId(eid)}</span><span class="moe-exp-w">${w.toFixed(2)}</span>`;
+        btn.innerHTML = `<span>${formatExpertId(eid)}</span><span class="moe-exp-w">${weightText}</span>`;
         btn.addEventListener('click', () => this.cb.onSelectMoeExpert(eid));
         expGrid.appendChild(btn);
       }

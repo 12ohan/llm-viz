@@ -384,6 +384,7 @@ function buildMoePartCatalog(params: {
   readonly focusExpTag: string;
   readonly activeExpertIds: readonly number[];
   readonly focusedEval: ReturnType<typeof evaluateSingleRoutedExpert>;
+  readonly hideFocusedWeight?: boolean;
 }): Record<string, CutawayPartInfo> {
   const {
     bayId,
@@ -394,6 +395,7 @@ function buildMoePartCatalog(params: {
     focusExpTag,
     activeExpertIds,
     focusedEval,
+    hideFocusedWeight = false,
   } = params;
   const partCatalog: Record<string, CutawayPartInfo> = {
     'residual-in': {
@@ -492,7 +494,9 @@ function buildMoePartCatalog(params: {
         'First of only 2 matrices in NemotronHMLP (no SwiGLU gate_proj, no linear bias). Projects normalized token U into intermediate hidden width 1,856 (miniature d_exp = 4).',
       specs: [
         focusedEval.isActive
-          ? `${focusExpTag} is ACTIVE (#${(focusedEval.activeRank ?? 0) + 1} · w = ${focusedEval.appliedWeight.toFixed(3)}) for t${focusToken}.`
+          ? hideFocusedWeight
+            ? `${focusExpTag} is ACTIVE (#${(focusedEval.activeRank ?? 0) + 1} · w = pending (Step 3)) for t${focusToken}.`
+            : `${focusExpTag} is ACTIVE (#${(focusedEval.activeRank ?? 0) + 1} · w = ${focusedEval.appliedWeight.toFixed(3)}) for t${focusToken}.`
           : `${focusExpTag} is IDLE (Rank #${focusedEval.choiceRank + 1}/128 · 0 contribution) for t${focusToken}.`,
         'Production precision metadata: FP8 in FP8 Selective mode (live simulator stays Float32).',
       ],
@@ -592,7 +596,9 @@ function buildMoePartCatalog(params: {
       ? `Routed Expert ${focusExpTag} · Active Top-6 #${(focusedEval.activeRank ?? 0) + 1}`
       : `Routed Expert ${focusExpTag} · Idle (Rank #${focusedEval.choiceRank + 1}/128)`,
     badge: focusedEval.isActive
-      ? `w = ${focusedEval.appliedWeight.toFixed(3)} · ReLU²`
+      ? hideFocusedWeight
+        ? 'ReLU²'
+        : `w = ${focusedEval.appliedWeight.toFixed(3)} · ReLU²`
       : 'Skipped · 0 Contribution',
     summary: focusedEval.isActive
       ? `Selected in Top-6 for token t${focusToken} "${focusTokLabel}" via choice score ${focusedEval.choiceScore.toFixed(3)} (unbiased σ = ${focusedEval.unbiasedScore.toFixed(3)}, e_bias = ${focusedEval.bias >= 0 ? '+' : '−'}${Math.abs(focusedEval.bias).toFixed(3)}).`
@@ -654,6 +660,14 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     : null;
   const focusSet = buildMoeFocusSet(activeFormula, sim, focusToken);
 
+  const stepperActive = opts.stepperActive ?? false;
+  const reducedMotion = opts.reducedMotion ?? false;
+  const stepperStep = opts.stepperStep ?? null;
+  const termProgress = opts.termProgress;
+  const revealEnabled =
+    stepperActive && !reducedMotion && stepperStep !== null && stepperStep !== undefined;
+  const hideFocusedWeight = revealEnabled && (stepperStep ?? 0) <= 2;
+
   const partCatalog = buildMoePartCatalog({
     bayId,
     isFp8Mode,
@@ -663,6 +677,7 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     focusExpTag,
     activeExpertIds,
     focusedEval,
+    hideFocusedWeight,
   });
 
   const moeStats: MoECutawayStats = {
@@ -683,11 +698,6 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     usesSmoothRibbons: true,
     voxelArrowCount: 0,
   };
-
-  const stepperActive = opts.stepperActive ?? false;
-  const reducedMotion = opts.reducedMotion ?? false;
-  const stepperStep = opts.stepperStep ?? null;
-  const termProgress = opts.termProgress;
 
   if (opts.viewAngle === 'three_quarter') {
     return buildMoeSpatialScene({
@@ -715,8 +725,6 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     });
   }
 
-  const revealEnabled =
-    stepperActive && !reducedMotion && stepperStep !== null && stepperStep !== undefined;
   const focusedAccumulation: FocusedAccumulationResult | null =
     stepperActive &&
     !reducedMotion &&
@@ -1787,12 +1795,19 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
         });
         drawOperandDependencyXZ(b.flow, upRect, targetRect, idx === 0);
       });
-      // Refinement 2: In Near-Plan too, show all 5 other Top-6 unbiased denominator contributors on topk_weights!
+      // Refinement 2 + RB-2: In Near-Plan too, highlight only accumulated denominator contributors during 1/6..5/6 (all Top-6 on 6/6 & unrestricted)
       if (c.tensor === 'topk_weights') {
         const slot = Math.max(0, Math.min(sim.topK - 1, c.rankSlot ?? c.col));
         const winnerId = sim.topk_indices[focusToken * sim.topK + slot];
+        const isPartialDenomAccum = Boolean(
+          focusedAccumulation?.active && !focusedAccumulation.isFinal,
+        );
+        const denomEndSlot = isPartialDenomAccum
+          ? Math.max(0, Math.min(sim.topK - 1, focusedAccumulation!.currentTermIndex))
+          : sim.topK - 1;
         let addedDenomSource = false;
-        for (const eid of activeExpertIds) {
+        for (let m = 0; m <= denomEndSlot; m++) {
+          const eid = activeExpertIds[m];
           if (eid === winnerId) continue;
           const denomRect = resolveSpanRect({
             tensor: 'router_bank',
@@ -1956,7 +1971,9 @@ export function buildMoECutaway(opts: BuildMoECutawayOptions): CutawaySceneGeome
     {
       id: 'moe-detail-status',
       label: focusedEval.isActive
-        ? `${focusExpTag} ACTIVE (#${(focusedEval.activeRank ?? 0) + 1} · w=${focusedEval.appliedWeight.toFixed(2)})`
+        ? hideFocusedWeight
+          ? `${focusExpTag} ACTIVE (#${(focusedEval.activeRank ?? 0) + 1})`
+          : `${focusExpTag} ACTIVE (#${(focusedEval.activeRank ?? 0) + 1} · w=${focusedEval.appliedWeight.toFixed(2)})`
         : `${focusExpTag} IDLE (Rank #${focusedEval.choiceRank + 1}/128 · 0 contrib)`,
       world: [(wUpX + wDownX) * 0.5, 0.08, zDetail + wDownD * 0.5 + 0.30],
       partId: 'routed-w-up',

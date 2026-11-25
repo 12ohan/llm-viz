@@ -33,6 +33,8 @@ import { fmtSigned } from './sheetInspector';
 export interface FocusedAccumulationResult {
   /** True ONLY when `termProgress < 1 && totalTerms > 1`. */
   readonly active: boolean;
+  /** True ONLY on the final reduction term (`currentTermIndex === totalTerms - 1`). */
+  readonly isFinal: boolean;
   /** Zero-based active term index (`0 .. totalTerms - 1`). */
   readonly currentTermIndex: number;
   /** Total number of terms in the focused cell's reduction. */
@@ -193,6 +195,7 @@ export function computeGqaFocusedAccumulation(
 
     return {
       active: true,
+      isFinal,
       currentTermIndex,
       totalTerms,
       partialSum,
@@ -273,6 +276,7 @@ export function computeGqaFocusedAccumulation(
 
     return {
       active: true,
+      isFinal,
       currentTermIndex,
       totalTerms,
       partialSum,
@@ -429,6 +433,7 @@ export function computeMambaFocusedAccumulation(
 
     return {
       active: true,
+      isFinal,
       currentTermIndex,
       totalTerms,
       partialSum,
@@ -477,6 +482,7 @@ export function computeMambaFocusedAccumulation(
 
       return {
         active: true,
+        isFinal: false,
         currentTermIndex: 0,
         totalTerms,
         partialSum,
@@ -500,6 +506,7 @@ export function computeMambaFocusedAccumulation(
 
     return {
       active: true,
+      isFinal: true,
       currentTermIndex: 1,
       totalTerms,
       partialSum,
@@ -561,6 +568,7 @@ export function computeMambaFocusedAccumulation(
 
       return {
         active: true,
+        isFinal: false,
         currentTermIndex,
         totalTerms,
         partialSum,
@@ -588,6 +596,7 @@ export function computeMambaFocusedAccumulation(
 
     return {
       active: true,
+      isFinal: true,
       currentTermIndex,
       totalTerms,
       partialSum,
@@ -612,8 +621,8 @@ export function computeMambaFocusedAccumulation(
 /**
  * Trace-derived partial-sum evaluator for MoE focused cells during Stepper playback:
  * - Step 2 (`3. Top-6 (×2.5)`, `topk_weights`):
- *   accumulates the 6-term unbiased sigmoid denominator `Σ_{m=0..k} σ_m` (`1/6..6/6`)
- *   and produces the running normalized `×2.5` weight estimate without spoiling the final weight.
+ *   accumulates the 6-term unbiased sigmoid denominator `Σ_{m=0..k} σ_m` (`1/6..5/6`)
+ *   and reveals the completed normalized `×2.5` expert weight ONLY at `6/6`.
  * - Step 3 / Step 5 (`4. Routed ReLU²` / `6. Merge + Res` on `routed_sum` or `moe_out`):
  *   accumulates the 6 weighted routed expert branches `w_0·y_0 + … + w_k·y_k` (`1/6..6/6`),
  *   merging `+ y_shared` on the final stage for `moe_out`.
@@ -662,33 +671,38 @@ export function computeMoeFocusedAccumulation(
       }
     }
 
-    const runningDenom = rawDenom + MOE_SIM_CONFIG.probDenomEps;
-    const partialSum = Math.fround((targetRawSigma / runningDenom) * routedScalingFactor);
     const stepNum = currentTermIndex + 1;
     const pending = totalTerms - stepNum;
     const isFinal = pending === 0;
     const curExpTag = formatExpertId(curExpId);
 
+    const runningDenomSum = Math.fround(rawDenom);
+    const finalValue = Math.fround(
+      (targetRawSigma / (rawDenom + MOE_SIM_CONFIG.probDenomEps)) * routedScalingFactor,
+    );
+    const partialSum = isFinal ? finalValue : runningDenomSum;
+
     const currentTermExpr = `+ σ(#${stepNum} ${curExpTag}) = ${curSigma.toFixed(3)} → Σσ = ${rawDenom.toFixed(3)}`;
 
     const partialEquation = isFinal
-      ? `w[${winnerTag}] = (${targetRawSigma.toFixed(3)} / (${shownSigmas.join(' + ')})) × ${routedScalingFactor} = (${targetRawSigma.toFixed(3)} / ${rawDenom.toFixed(3)}) × ${routedScalingFactor} = ${partialSum.toFixed(3)} (${stepNum}/${totalTerms})`
-      : `w[${winnerTag}] ≈ (${targetRawSigma.toFixed(3)} / (${shownSigmas.join(' + ')} + …)) × ${routedScalingFactor} = (${targetRawSigma.toFixed(3)} / ${rawDenom.toFixed(3)}) × ${routedScalingFactor} ≈ ${partialSum.toFixed(3)} (running ${stepNum}/${totalTerms})`;
+      ? `w[${winnerTag}] = (${targetRawSigma.toFixed(3)} / (${shownSigmas.join(' + ')})) × ${routedScalingFactor} = (${targetRawSigma.toFixed(3)} / ${rawDenom.toFixed(3)}) × ${routedScalingFactor} = ${finalValue.toFixed(3)} (${stepNum}/${totalTerms})`
+      : `Σσ = ${shownSigmas.join(' + ')} + … = ${rawDenom.toFixed(3)} (${stepNum}/${totalTerms}) · w[${winnerTag}] = (${targetRawSigma.toFixed(3)} / Σ₆σ) × ${routedScalingFactor}`;
 
     const partialSubEquation = isFinal
       ? `Accumulated all ${totalTerms}/${totalTerms} unbiased σ denominator terms (Σσ = ${rawDenom.toFixed(3)}) · exact ×${routedScalingFactor} weight`
-      : `Accumulating term ${stepNum}/${totalTerms} (rank #${stepNum} ${curExpTag} unbiased σ) · running Σσ = ${rawDenom.toFixed(3)} (${pending} ${pending === 1 ? 'term' : 'terms'} pending)`;
+      : `Accumulating denominator term ${stepNum}/${totalTerms} (rank #${stepNum} ${curExpTag} unbiased σ) · running Σσ = ${rawDenom.toFixed(3)} (${pending} ${pending === 1 ? 'term' : 'terms'} pending)`;
 
     const popoverEquation = isFinal
-      ? `#${stepNum} ${curExpTag}: +σ(${curSigma.toFixed(2)}) → Σσ=${rawDenom.toFixed(2)} · w=${partialSum.toFixed(3)}`
-      : `#${stepNum} ${curExpTag}: +σ(${curSigma.toFixed(2)}) → Σσ=${rawDenom.toFixed(2)} · w≈${partialSum.toFixed(3)}`;
+      ? `#${stepNum} ${curExpTag}: +σ(${curSigma.toFixed(2)}) → Σσ=${rawDenom.toFixed(2)} · w=${finalValue.toFixed(3)}`
+      : `#${stepNum} ${curExpTag}: +σ(${curSigma.toFixed(2)}) → Σσ = ${rawDenom.toFixed(3)} (${stepNum}/${totalTerms})`;
 
     const valueBadgeText = isFinal
-      ? `= ${partialSum.toFixed(3)} (${stepNum}/${totalTerms})`
-      : `≈ ${partialSum.toFixed(3)} (${stepNum}/${totalTerms})`;
+      ? `w = ${finalValue.toFixed(3)} (${stepNum}/${totalTerms})`
+      : `Σσ = ${rawDenom.toFixed(3)} (${stepNum}/${totalTerms})`;
 
     return {
       active: true,
+      isFinal,
       currentTermIndex,
       totalTerms,
       partialSum,
@@ -775,6 +789,7 @@ export function computeMoeFocusedAccumulation(
 
     return {
       active: true,
+      isFinal,
       currentTermIndex,
       totalTerms,
       partialSum,
