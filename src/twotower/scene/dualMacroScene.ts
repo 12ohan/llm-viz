@@ -109,6 +109,7 @@ import {
   type TwoTowerExecutionMode,
 } from '../spec';
 import {
+  TWOTOWER_MINI_MODEL_INVENTORY,
   buildTwoTowerSelectionIdentity,
   getTwoTowerBayKind,
   resolveTwoTowerSessionViewState,
@@ -119,6 +120,7 @@ import {
   type TwoTowerSelectionIdentity,
   type TwoTowerSessionViewState,
   type TwoTowerSpatialScene,
+  type TwoTowerTimestepStatus,
   type TwoTowerTowerRole,
 } from './provenance';
 
@@ -219,10 +221,20 @@ export interface TwoTowerMacroDiagnostics extends Readonly<Record<string, unknow
   readonly timestepRailActive: boolean;
   readonly timestepValue: number | null;
   readonly timestepStatusLabel: string;
+  readonly timestepStatus: TwoTowerTimestepStatus;
   readonly refinementLoopState: TwoTowerMacroRefinementLoopState;
   readonly blockCommitPathwayState: TwoTowerMacroCommitPathwayState;
   readonly contextTraceStatus: 'available' | 'pruned_unavailable';
   readonly denoiserLookupStatus: 'active_on_record' | 'historical_prior_record' | 'none_yet';
+  readonly isHistoricalDenoiserInspection: boolean;
+  readonly denoiserSourceRecordIndex: number | null;
+  readonly denoiserSourceBlockId: number | null;
+  readonly denoiserSourceRefinementIndex: number | null;
+  readonly denoiserSourceContextPrefixLen: number | null;
+  readonly denoiserSourceContextCacheDigest: string | null;
+  readonly denoiserMatchesCurrentContextBoundary: boolean;
+  readonly historicalProvenanceWarning: string | null;
+  readonly modelDimensionalInventory: typeof TWOTOWER_MINI_MODEL_INVENTORY;
   readonly snapshotIntegrityValid: boolean;
   readonly snapshotIntegrityError: string | null;
   readonly instructionalReplayPhase: number | null;
@@ -1118,43 +1130,36 @@ export function buildTwoTowerMacroScene(
   const refinementLoopState = resolveRefinementLoopState(view);
   const blockCommitPathwayState = resolveCommitPathwayState(view);
 
+  // Canonical stage-separated timestep status (`t = nMasked / B`, NEVER `r / K`) and
+  // explicit historical Denoiser provenance (`sourceContextPrefixLen` & `sourceContextCacheDigest`).
+  const ts = view.timestepStatus;
+  const dl = view.denoiserLookup;
+  const isHistoricalDenoiser = dl.isHistoricalInspection;
+
   // Active block / denoiser metrics strictly from historical record
   const activeBlockSize =
     activeBlock?.blockConfig.blockSize ??
-    view.denoiserLookup.pass?.blockSize ??
+    (view.record.kind === 'diffusion_block_commit' ? view.record.blockConfig.blockSize : null) ??
+    dl.pass?.blockSize ??
     (isMockArMode ? 1 : historicalConfig.blockSize);
-  const activeBlockMaskedCount = activeBlock
-    ? activeBlock.nMasked
-    : view.record.kind === 'diffusion_refinement'
-      ? Math.round(view.record.tModel * activeBlockSize)
-      : 0;
-  const timestepValue: number | null = isDiffusionMode
-    ? view.record.kind === 'diffusion_refinement'
-      ? view.record.tModel
-      : view.record.kind === 'diffusion_confidence_commit'
-        ? view.record.denoiserPass.tModel
-        : activeBlock
-          ? activeBlock.nMasked / Math.max(1, activeBlock.blockConfig.blockSize)
-          : view.denoiserLookup.pass?.mode === 'mask_diffusion'
-            ? view.denoiserLookup.pass.tModel
-            : null
-    : null;
+  const activeBlockMaskedCount = ts.currentBlockMask?.currentUnresolvedCount ?? 0;
+  // Strictly derived from executed pass input mask fraction — NEVER pairs executed t with another stage's nMasked
+  const timestepValue: number | null = ts.executedPass?.tModel ?? null;
+  const timestepStatusLabel = ts.summaryLabel;
 
-  const timestepStatusLabel = !timestepRailActive
-    ? 'BYPASSED (t = null)'
-    : timestepValue !== null
-      ? `ACTIVE · t = ${timestepValue.toFixed(2)} (${activeBlockMaskedCount}/${activeBlockSize} masked)`
-      : 'ACTIVE · adaLN-single ready';
-
-  // Conditioning KV length exposed by Context Tower to Denoiser Tower
+  // Conditioning KV length exposed by current Context boundary to Denoiser Tower
   const contextKvConditioningLen = isMockArMode
     ? Math.max(0, committedPrefixLen - 1)
     : isDiffusionMode
       ? committedPrefixLen
       : 0;
+  const historicalDenoiserLabel =
+    isHistoricalDenoiser && dl.pass !== null
+      ? `Historical Rec #${dl.sourceRecordIndex} (b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'}, ${dl.pass.passExecutionId}, P_cond=${dl.sourceContextPrefixLen ?? 'n/a'})`
+      : null;
 
   const denoiserAbsStart =
-    view.denoiserLookup.pass?.absoluteTokenStart ??
+    dl.pass?.absoluteTokenStart ??
     activeBlock?.absoluteTokenStart ??
     (isMockArMode ? Math.max(0, committedPrefixLen - 1) : committedPrefixLen);
 
@@ -1170,6 +1175,9 @@ export function buildTwoTowerMacroScene(
   }
   if (view.latestContextTrace.status === 'pruned_unavailable') {
     warnings.push(view.latestContextTrace.reason);
+  }
+  if (dl.historicalProvenanceWarning !== null) {
+    warnings.push(dl.historicalProvenanceWarning);
   }
   const warningBanner = warnings.length > 0 ? warnings.join(' ') : null;
 
@@ -1424,12 +1432,19 @@ export function buildTwoTowerMacroScene(
   partCatalog['den-embed'] = {
     id: 'den-embed',
     title: 'Denoiser Tower · W_embed_den (Untied)',
-    badge: isArMode ? 'Idle in AR' : 'Denoiser Tower',
+    badge: isArMode
+      ? 'Idle in AR'
+      : isHistoricalDenoiser
+        ? 'Historical Prior Pass'
+        : 'Denoiser Tower',
     summary: `Independent Denoiser embedding table (${view.model.denoiserModel.modelId}); embeds noisy [MASK]^B block or Mock-AR token.`,
     specs: [
       `Production shape: 131,072 × 2,688 BF16 (NoPE)`,
       `Active query length: S = ${activeBlockSize} at absPos ${denoiserAbsStart}`,
       `Mode at step: ${modeAtRecord}`,
+      ...(historicalDenoiserLabel
+        ? [`Last Denoiser pass: ${historicalDenoiserLabel} (current Context P=${committedPrefixLen})`]
+        : []),
       `Fingerprint: ${view.model.denoiserModel.parameterFingerprint}`,
     ],
   };
@@ -1892,20 +1907,50 @@ export function buildTwoTowerMacroScene(
     max: [0.45, railTopY, 0.0],
   });
 
+  const timestepHubTitle =
+    ts.conditioningMode === 'bypassed_ar'
+      ? 'Shared Timestep Hub · BYPASSED in AR (t = null)'
+      : ts.conditioningMode === 'bypassed_mock_ar'
+        ? 'Shared Timestep Hub · BYPASSED in Mock-AR (t = null)'
+        : ts.conditioningMode === 'inactive_no_pass_yet'
+          ? 'Shared Timestep Hub · INACTIVE (No Diffusion Pass Yet)'
+          : ts.conditioningMode === 'historical_prior_pass'
+            ? 'Shared Timestep Hub · HISTORICAL Prior Pass'
+            : 'Shared Timestep Hub · adaLN-single (ACTIVE)';
+
+  const timestepHubSpecs: string[] = [
+    `Status: ${timestepStatusLabel}`,
+    `Conditioning mode: ${ts.conditioningMode} · Block state: ${ts.blockCompletionState}`,
+    `Block lifecycle: ${ts.blockCompletionNote}`,
+  ];
+  if (ts.executedPass !== null) {
+    timestepHubSpecs.push(
+      ts.executedPass.isDiagnosticOverride
+        ? `Executed pass: t_override = ${ts.executedPass.overrideValue!.toFixed(4)} vs empirical ${ts.executedPass.nMaskedInput}/${ts.executedPass.blockSize} = ${ts.executedPass.empiricalMaskFraction.toFixed(4)} (Rec #${ts.executedPass.sourceRecordIndex}, b${ts.executedPass.sourceBlockId ?? '-'}, r${ts.executedPass.sourceRefinementIndex ?? '-'}, ${ts.executedPass.passExecutionId})`
+        : `Executed pass: t = nMasked/B = ${ts.executedPass.nMaskedInput}/${ts.executedPass.blockSize} = ${ts.executedPass.tModel.toFixed(4)} (Rec #${ts.executedPass.sourceRecordIndex}, b${ts.executedPass.sourceBlockId ?? '-'}, r${ts.executedPass.sourceRefinementIndex ?? '-'}, ${ts.executedPass.passExecutionId})`,
+    );
+  }
+  if (ts.nextEligibleStep !== null) {
+    timestepHubSpecs.push(
+      `Next eligible step: t = ${ts.nextEligibleStep.nextNMasked}/${ts.nextEligibleStep.blockSize} = ${ts.nextEligibleStep.nextTModel.toFixed(4)} (${ts.nextEligibleStep.remainingSteps} steps left)`,
+    );
+  }
+  timestepHubSpecs.push(
+    `Checkpoint params: 30,022,272 (30.02M) across 58 tensors (paper claimed ~1.5M)`,
+    `Split ordering: 29 pre-norm (M/* modulate→RMSNorm) · 23 post-norm (E RMSNorm→modulate)`,
+  );
+
   partCatalog['timestep-hub'] = {
     id: 'timestep-hub',
-    title: timestepRailActive
-      ? 'Shared Timestep Hub · adaLN-single (ACTIVE)'
-      : 'Shared Timestep Hub · BYPASSED (t = null)',
+    title: timestepHubTitle,
     badge: timestepStatusLabel,
-    summary: timestepRailActive
-      ? 'Computes t = nMasked / B → sinusoidal φ(t) → MLP → 3d global modulation tEmb, broadcast down x = 0 to all 52 Denoiser scale_shift_tables[l].'
-      : `Timestep conditioning is explicitly BYPASSED (t = null, tEmb = null) in ${modeAtRecord} mode; zero modulation applied.`,
-    specs: [
-      `Status: ${timestepStatusLabel}`,
-      `Checkpoint params: 30,022,272 (30.02M) across 58 tensors (paper claimed ~1.5M)`,
-      `Split ordering: 29 pre-norm (M/* modulate→RMSNorm) · 23 post-norm (E RMSNorm→modulate)`,
-    ],
+    summary:
+      ts.conditioningMode === 'bypassed_ar' || ts.conditioningMode === 'bypassed_mock_ar'
+        ? `Timestep conditioning is explicitly BYPASSED (t = null, tEmb = null) in ${modeAtRecord} mode; zero modulation applied.`
+        : ts.conditioningMode === 'inactive_no_pass_yet'
+          ? `Mask-diffusion conditioning is INACTIVE (no Denoiser pass has executed yet on this record). Canonical timestep t = nMasked / B (never r / K) activates on the first refinement pass.`
+          : 'Computes canonical t = nMasked / B (never r / K) → sinusoidal φ(t) → MLP → 3d global modulation tEmb, broadcast down x = 0 to all 52 Denoiser scale_shift_tables[l].',
+    specs: timestepHubSpecs,
   };
   partCatalog['timestep-rail'] = partCatalog['timestep-hub'];
 
@@ -2414,61 +2459,99 @@ export function buildTwoTowerMacroScene(
 
       // Part catalog metadata
       const seedLabel = isMockArMode ? `mambaS2 (P-1 = ${Math.max(0, committedPrefixLen - 1)})` : `S-1 boundary (P = ${committedPrefixLen})`;
+      const denMambaCondLabel =
+        isHistoricalDenoiser && dl.sourceContextPrefixLen !== null
+          ? `Historical pass read H_${Math.max(0, dl.sourceContextPrefixLen - 1)} (P_cond=${dl.sourceContextPrefixLen}, Rec #${dl.sourceRecordIndex}, b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'}) ≠ current Context P=${committedPrefixLen}`
+          : `Conditioned on current Context ${seedLabel}`;
+      const miniMambaInv = TWOTOWER_MINI_MODEL_INVENTORY.mamba;
       partCatalog[`ctx-mamba-body-${padId}`] = {
         id: `ctx-mamba-body-${padId}`,
         title: `Context Bay ${padId} · Mamba-2 (Persistent Boundary Owner)`,
         badge: 'Context Tower · Mamba-2',
         summary: `Context Tower Mamba-2 layer ${id - 1} maintaining fixed-size Conv1D 4-tap + FP32 SSM H boundary slabs (0 B/tok growth).`,
-        specs: [`Model: ${view.model.contextModel.modelId}`, `Seeded boundary: ${seedLabel}`, `Origin: ${ctxOrigin}`],
+        specs: [
+          `Model: ${view.model.contextModel.modelId}`,
+          `Miniature Mamba-2 inventory: ${miniMambaInv.heads} heads, ${miniMambaInv.groups} groups, ${miniMambaInv.dHead}×${miniMambaInv.dState} SSM state (prod 64 heads / 8 groups / 64×128 SSM)`,
+          `Seeded boundary: ${seedLabel}`,
+          `Origin: ${ctxOrigin}`,
+        ],
       };
       partCatalog[`den-mamba-body-${padId}`] = {
         id: `den-mamba-body-${padId}`,
         title: `Denoiser Bay ${padId} · Mamba-2 (Ephemeral Scratch)`,
-        badge: isArMode ? 'Idle in AR' : 'Denoiser · Pre-Norm adaLN',
+        badge: isArMode
+          ? 'Idle in AR'
+          : isHistoricalDenoiser
+            ? 'Historical Prior Pass'
+            : 'Denoiser · Pre-Norm adaLN',
         summary: `Denoiser Tower Mamba-2 layer ${id - 1} using pre-norm adaLN ordering (modulate → RMSNorm) over ephemeral scratch state.`,
-        specs: [`Model: ${view.model.denoiserModel.modelId}`, `adaLN ordering: modulate → RMSNorm (pre-norm)`, `Origin: denoiser_scratch`],
+        specs: [
+          `Model: ${view.model.denoiserModel.modelId}`,
+          `Miniature Mamba-2 inventory: ${miniMambaInv.heads} heads, ${miniMambaInv.groups} groups, ${miniMambaInv.dHead}×${miniMambaInv.dState} SSM state`,
+          denMambaCondLabel,
+          `adaLN ordering: modulate → RMSNorm (pre-norm)`,
+          `Origin: denoiser_scratch`,
+        ],
       };
       partCatalog[`ctx-conv-bay-${padId}`] = {
         id: `ctx-conv-bay-${padId}`,
         title: `Context Bay ${padId} · Persistent Conv1D 4-Tap History`,
         badge: 'Persistent Cache · BF16',
         summary: 'Fixed-size depthwise Conv1D 4-tap boundary buffer owned exclusively by Context Tower (0 B/tok growth).',
-        specs: ['Shape: 6,144 × 4 BF16 (48 KiB/bay)', `Seeded boundary: ${seedLabel}`, 'Origin: persistent_cache'],
+        specs: [
+          `Production: 6,144 × 4 BF16 (48 KiB/bay) · Mini: ${miniMambaInv.convDim} × ${miniMambaInv.convKernel} FP32`,
+          `Seeded boundary: ${seedLabel}`,
+          'Origin: persistent_cache',
+        ],
       };
       partCatalog[`ctx-ssm-bay-${padId}`] = {
         id: `ctx-ssm-bay-${padId}`,
         title: `Context Bay ${padId} · Persistent FP32 SSM H State`,
         badge: 'Persistent Cache · FP32',
         summary: 'Fixed-size recurrent FP32 SSM H matrix owned exclusively by Context Tower (0 B/tok growth).',
-        specs: ['Shape: 64 × 64 × 128 FP32 (2.0 MiB/bay)', `Seeded boundary: ${seedLabel}`, 'Origin: persistent_cache'],
+        specs: [
+          `Production: 64 × [64×128] FP32 (2.0 MiB/bay) · Mini: ${miniMambaInv.heads} heads × [${miniMambaInv.dHead}×${miniMambaInv.dState}] across ${miniMambaInv.groups} groups`,
+          `Seeded boundary: ${seedLabel}`,
+          'Origin: persistent_cache',
+        ],
       };
       partCatalog[`den-scratch-conv-bay-${padId}`] = {
         id: `den-scratch-conv-bay-${padId}`,
         title: `Denoiser Bay ${padId} · Ephemeral Conv1D Scratchpad`,
-        badge: 'Ephemeral Scratch · Discarded',
+        badge: isHistoricalDenoiser ? 'Historical Scratch · Prior Pass' : 'Ephemeral Scratch · Discarded',
         summary: 'Transient Denoiser Conv1D buffer freshly seeded from Context before each refinement and discarded immediately after.',
-        specs: ['Origin: denoiser_scratch', 'NEVER overwrites Context persistent boundary during refinements'],
+        specs: [denMambaCondLabel, 'Origin: denoiser_scratch', 'NEVER overwrites Context persistent boundary during refinements'],
       };
       partCatalog[`den-scratch-ssm-bay-${padId}`] = {
         id: `den-scratch-ssm-bay-${padId}`,
         title: `Denoiser Bay ${padId} · Ephemeral SSM Scratchpad`,
-        badge: 'Ephemeral Scratch · Discarded',
+        badge: isHistoricalDenoiser ? 'Historical Scratch · Prior Pass' : 'Ephemeral Scratch · Discarded',
         summary: 'Transient Denoiser FP32 SSM scratch state freshly seeded from Context and discarded after each refinement pass.',
-        specs: ['Origin: denoiser_scratch', 'Discarded between refinements; Context updates once on block commit'],
+        specs: [denMambaCondLabel, 'Origin: denoiser_scratch', 'Discarded between refinements; Context updates once on block commit'],
       };
       partCatalog[`linker-mamba-conv-bay-${padId}`] = {
         id: `linker-mamba-conv-bay-${padId}`,
         title: `Cross-Tower Linker · Bay ${padId} Mamba Conv1D (4-tap)`,
         badge: isMockArMode ? 'Mock-AR mambaS2' : isDiffusionMode ? 'Diffusion S-1 Seed' : 'Dormant in AR',
         summary: `Read-only Context→Denoiser handoff of raw 4-tap Conv1D history at Bay ${padId} (layer ${id - 1}).`,
-        specs: [`Upper sub-lane (+0.18 Y)`, `Source: ${seedLabel}`, 'ownerRole: context_tower → consumerRole: denoiser_tower'],
+        specs: [
+          `Upper sub-lane (+0.18 Y)`,
+          `Current Context boundary: ${seedLabel}`,
+          ...(isHistoricalDenoiser ? [denMambaCondLabel] : []),
+          'ownerRole: context_tower → consumerRole: denoiser_tower',
+        ],
       };
       partCatalog[`linker-mamba-ssm-bay-${padId}`] = {
         id: `linker-mamba-ssm-bay-${padId}`,
         title: `Cross-Tower Linker · Bay ${padId} Mamba FP32 SSM H`,
         badge: isMockArMode ? 'Mock-AR mambaS2' : isDiffusionMode ? 'Diffusion S-1 Seed' : 'Dormant in AR',
         summary: `Read-only Context→Denoiser handoff of persistent FP32 SSM H state at Bay ${padId} (layer ${id - 1}).`,
-        specs: [`Lower sub-lane (-0.18 Y)`, `Source: ${seedLabel}`, 'ownerRole: context_tower → consumerRole: denoiser_tower'],
+        specs: [
+          `Lower sub-lane (-0.18 Y)`,
+          `Current Context boundary: ${seedLabel}`,
+          ...(isHistoricalDenoiser ? [denMambaCondLabel] : []),
+          'ownerRole: context_tower → consumerRole: denoiser_tower',
+        ],
       };
     } else if (kind === '*') {
       // 1. CONTEXT GQA BODY + SOLID PERSISTENT KV PREFIX CACHE (0..P-1) + 24-SLOT GHOST CAPACITY RAIL
@@ -2791,13 +2874,19 @@ export function buildTwoTowerMacroScene(
       const kvRangeLabel = isMockArMode
         ? `KV[0..${Math.max(0, committedPrefixLen - 2)}] (P-1 = ${contextKvConditioningLen} tokens; excludes last token)`
         : `KV[0..${Math.max(0, committedPrefixLen - 1)}] (P = ${committedPrefixLen} tokens)`;
+      const denKvCondLabel =
+        isHistoricalDenoiser && dl.sourceContextPrefixLen !== null
+          ? `Historical pass read KV[0..${Math.max(0, dl.sourceContextPrefixLen - 1)}] (P_cond=${dl.sourceContextPrefixLen}, Rec #${dl.sourceRecordIndex}, b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'}) — does NOT match current Context P=${committedPrefixLen}`
+          : `Conditioned prefix: ${kvRangeLabel}`;
+      const miniGqaInv = TWOTOWER_MINI_MODEL_INVENTORY.gqa;
 
       partCatalog[`ctx-gqa-body-${padId}`] = {
         id: `ctx-gqa-body-${padId}`,
-        title: `Context Bay ${padId} · GQA Attention (32Q / 2KV)`,
+        title: `Context Bay ${padId} · GQA Attention (${miniGqaInv.queryHeads}Q / ${miniGqaInv.kvHeads}KV)`,
         badge: 'Persistent KV Owner',
         summary: `Context Tower GQA layer ${id - 1} owning persistent prefix KV slices 0..${committedPrefixLen - 1} within ${kvCapacity}-slot capacity.`,
         specs: [
+          `Miniature GQA inventory: ${miniGqaInv.queryHeads} query heads / ${miniGqaInv.kvHeads} KV heads, head width dHead = ${miniGqaInv.headDim} (prod 32Q / 2KV, dHead = 128)`,
           `Populated slots: ${committedPrefixLen} / ${kvCapacity} (${formatKiB((prodMem.kvBytesPerToken / 6) * committedPrefixLen)} at bay)`,
           `Attention: causal over Context prefix`,
         ],
@@ -2805,12 +2894,19 @@ export function buildTwoTowerMacroScene(
       partCatalog[`den-gqa-body-${padId}`] = {
         id: `den-gqa-body-${padId}`,
         title: `Denoiser Bay ${padId} · GQA Attention (${isDiffusionMode ? 'Bidirectional Block' : isMockArMode ? 'Causal S=1' : 'Idle'})`,
-        badge: isDiffusionMode ? `Ephemeral B=${activeBlockSize} KV` : isMockArMode ? 'Mock-AR S=1' : 'Idle in AR',
+        badge: isHistoricalDenoiser
+          ? 'Historical Prior Pass'
+          : isDiffusionMode
+            ? `Ephemeral B=${activeBlockSize} KV`
+            : isMockArMode
+              ? 'Mock-AR S=1'
+              : 'Idle in AR',
         summary: isDiffusionMode
-          ? `Attends bidirectionally over concatenated [Context KV[0..P-1] | Ephemeral Block KV[0..B-1]]; discards block KV after pass.`
+          ? `Attends bidirectionally over concatenated [Context KV[0..P_cond-1] | Ephemeral Block KV[0..B-1]]; discards block KV after pass.`
           : `Denoiser GQA layer ${id - 1} (${modeAtRecord} mode).`,
         specs: [
-          `Conditioned prefix: ${kvRangeLabel}`,
+          `Miniature GQA inventory: ${miniGqaInv.queryHeads} query heads / ${miniGqaInv.kvHeads} KV heads, head width dHead = ${miniGqaInv.headDim}`,
+          denKvCondLabel,
           `Ephemeral block KV: ${ephemeralKvCount} slot${ephemeralKvCount === 1 ? '' : 's'} (discarded after step)`,
           `adaLN ordering: modulate → RMSNorm (pre-norm)`,
         ],
@@ -2821,7 +2917,8 @@ export function buildTwoTowerMacroScene(
         badge: 'Logical Read-Only Access',
         summary: `Logical read-only prefix KV access (${kvRangeLabel}) from Context Tower into Denoiser Bay ${padId} — NOT a mandatory physical inter-device copy (shared-memory zero-copy on single GPU).`,
         specs: [
-          `Prefix exposed: ${kvRangeLabel}`,
+          `Current Context prefix: ${kvRangeLabel}`,
+          ...(isHistoricalDenoiser ? [denKvCondLabel] : []),
           `ownerRole: context_tower → consumerRole: denoiser_tower`,
           `Logical read-only prefix access (never mutates Context KV)`,
         ],
@@ -3264,12 +3361,14 @@ export function buildTwoTowerMacroScene(
     },
     {
       id: 'header-timestep',
-      label: timestepRailActive ? `Timestep Rail · ${timestepStatusLabel}` : 'Timestep Rail · BYPASSED (t = null)',
-      sublabel: 't = nMasked/B → φ(t) → MLP → 3d tEmb',
+      label: `Timestep Rail · ${timestepStatusLabel}`,
+      sublabel: ts.executedPass?.isDiagnosticOverride
+        ? 'Canonical t = nMasked / B (diagnostic override active) → φ(t) → MLP → 3d tEmb'
+        : 'Canonical t = nMasked / B (never r / K) → φ(t) → MLP → 3d tEmb',
       world: [TIMESTEP_RAIL_X, TIMESTEP_HUB_Y + 1.8, railZ],
       bayId: -1,
       partId: 'timestep-hub',
-      tone: timestepRailActive ? 'gold' : 'muted',
+      tone: ts.conditioningMode === 'active_diffusion' ? 'gold' : 'muted',
       align: 'center',
       tier: 'primary',
     },
@@ -3279,12 +3378,20 @@ export function buildTwoTowerMacroScene(
         ? 'Denoiser Tower · Idle (AR Mode)'
         : isMockArMode
           ? 'Denoiser Tower · Mock-AR Causal (S = 1)'
-          : `Denoiser Tower · Ephemeral Block (B = ${activeBlockSize})`,
-      sublabel: isArMode ? 'Context-only execution' : 'Scratchpad discarded every step',
+          : isHistoricalDenoiser
+            ? `Denoiser Tower · Historical Prior Pass (Rec #${dl.sourceRecordIndex}, P_cond=${dl.sourceContextPrefixLen ?? 'n/a'})`
+            : `Denoiser Tower · Ephemeral Block (B = ${activeBlockSize})`,
+      sublabel: isArMode
+        ? isHistoricalDenoiser
+          ? `Context-only · Last prior pass Rec #${dl.sourceRecordIndex} (P_cond=${dl.sourceContextPrefixLen ?? 'n/a'}) ≠ P=${committedPrefixLen}`
+          : 'Context-only execution'
+        : isHistoricalDenoiser
+          ? `Prior pass (b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'}) ≠ current Context P=${committedPrefixLen}`
+          : 'Scratchpad discarded every step',
       world: [DENOISER_TOWER_X + 4.2, EMBED_Y + 2.0, 0],
       bayId: 0,
       partId: 'den-embed',
-      tone: isArMode ? 'muted' : 'default',
+      tone: isArMode || isHistoricalDenoiser ? 'muted' : 'default',
       align: 'right',
       tier: 'primary',
     },
@@ -3549,8 +3656,13 @@ export function buildTwoTowerMacroScene(
       origin: 'persistent_cache',
     },
     {
-      label: timestepRailActive ? `Timestep: ${timestepStatusLabel}` : 'Timestep: BYPASSED (t = null)',
-      tone: timestepRailActive ? 'gold' : 'muted',
+      label: `Timestep: ${timestepStatusLabel}`,
+      tone:
+        ts.conditioningMode === 'active_diffusion'
+          ? 'gold'
+          : ts.conditioningMode === 'historical_prior_pass'
+            ? 'warn'
+            : 'muted',
       origin: 'denoiser_scratch',
     },
     {
@@ -3558,15 +3670,27 @@ export function buildTwoTowerMacroScene(
       tone: 'shared',
     },
   ];
+  if (isHistoricalDenoiser) {
+    provenanceBadges.push({
+      label: `Historical Denoiser Pass · Rec #${dl.sourceRecordIndex} (b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'}, P_cond=${dl.sourceContextPrefixLen ?? 'n/a'} vs P=${committedPrefixLen})`,
+      tone: 'warn',
+      origin: 'denoiser_scratch',
+    });
+  }
   if (replayPhase !== null) {
     provenanceBadges.push({
       label: SPINE_REPLAY_DISCLAIMER,
       tone: 'muted',
     });
   }
-  if (warningBanner !== null) {
+  if (!view.snapshotIntegrity.valid) {
     provenanceBadges.push({
-      label: !view.snapshotIntegrity.valid ? 'Snapshot Integrity Alert' : 'Context Trace Pruned',
+      label: 'Snapshot Integrity Alert',
+      tone: 'warn',
+    });
+  } else if (view.latestContextTrace.status === 'pruned_unavailable') {
+    provenanceBadges.push({
+      label: 'Context Trace Pruned',
       tone: 'warn',
     });
   }
@@ -3584,10 +3708,20 @@ export function buildTwoTowerMacroScene(
     timestepRailActive,
     timestepValue,
     timestepStatusLabel,
+    timestepStatus: ts,
     refinementLoopState,
     blockCommitPathwayState,
     contextTraceStatus: view.latestContextTrace.status,
-    denoiserLookupStatus: view.denoiserLookup.status,
+    denoiserLookupStatus: dl.status,
+    isHistoricalDenoiserInspection: dl.isHistoricalInspection,
+    denoiserSourceRecordIndex: dl.sourceRecordIndex,
+    denoiserSourceBlockId: dl.sourceBlockId,
+    denoiserSourceRefinementIndex: dl.sourceRefinementIndex,
+    denoiserSourceContextPrefixLen: dl.sourceContextPrefixLen,
+    denoiserSourceContextCacheDigest: dl.sourceContextCacheDigest,
+    denoiserMatchesCurrentContextBoundary: dl.matchesCurrentContextBoundary,
+    historicalProvenanceWarning: dl.historicalProvenanceWarning,
+    modelDimensionalInventory: TWOTOWER_MINI_MODEL_INVENTORY,
     snapshotIntegrityValid: view.snapshotIntegrity.valid,
     snapshotIntegrityError: view.snapshotIntegrity.error,
     instructionalReplayPhase: replayPhase,
@@ -3624,10 +3758,10 @@ export function buildTwoTowerMacroScene(
   const resolvedLayerIndex = resolvedBayId >= 1 && resolvedBayId <= 52 ? resolvedBayId - 1 : null;
 
   const modeSubtitle = isArMode
-    ? `AR mode · Context Tower active (P=${committedPrefixLen}/${kvCapacity}) · Denoiser idle · Timestep BYPASSED`
+    ? `AR mode · Context Tower active (P=${committedPrefixLen}/${kvCapacity}) · Denoiser idle · ${timestepStatusLabel}`
     : isMockArMode
-      ? `Mock-AR mode · Context KV[:-1] + mambaS2 (${contextKvConditioningLen}) → Denoiser causal S=1 · Timestep BYPASSED`
-      : `Mask-Diffusion · Context P=${committedPrefixLen} (immutable) → Denoiser B=${activeBlockSize} · ${timestepStatusLabel} · ${view.lifecyclePhase}`;
+      ? `Mock-AR mode · Context KV[:-1] + mambaS2 (${contextKvConditioningLen}) → Denoiser causal S=1 · ${timestepStatusLabel}`
+      : `Mask-Diffusion · Context P=${committedPrefixLen} (${ts.blockCompletionState === 'committed_to_context' ? 'committed' : 'immutable'}) → Denoiser B=${activeBlockSize} · ${timestepStatusLabel} · ${view.lifecyclePhase}`;
 
   return {
     viewMode: 'macro',
@@ -3653,7 +3787,8 @@ export function buildTwoTowerMacroScene(
     partCatalog,
     activeSelection,
     provenanceBadges,
-    epistemicNote: TWOTOWER_SPEC.productionDefaults.epistemicNote,
+    epistemicNote:
+      `${TWOTOWER_SPEC.productionDefaults.epistemicNote} Miniature model inventory: 32 GQA query heads / 2 KV heads (head width 4), 16 Mamba heads / 8 groups (4×4 per-head FP32 SSM state).`,
     warningBanner,
     diagnostics,
   };

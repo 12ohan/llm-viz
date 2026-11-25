@@ -122,8 +122,11 @@ import {
   buildTwoTowerSelectionIdentity,
   getTwoTowerBayKind,
   resolveTwoTowerSessionViewState,
+  type TwoTowerDenoiserPassLookup,
   type TwoTowerProvenanceBadge,
   type TwoTowerSpatialScene,
+  type TwoTowerTimestepConditioningMode,
+  type TwoTowerTimestepStatus,
 } from './provenance';
 
 export type TimestepTensorKey =
@@ -172,11 +175,25 @@ export interface TimestepCameraFitOptions {
 
 export interface TimestepCutawayDiagnostics {
   readonly bypassed: boolean;
+  readonly inactiveNoPassYet: boolean;
+  readonly conditioningMode: TwoTowerTimestepConditioningMode;
+  readonly timestepStatus: TwoTowerTimestepStatus;
   readonly bypassReason: string | null;
   readonly statusLabel: string;
   readonly tModel: number | null;
   readonly nMasked: number | null;
   readonly blockSize: number | null;
+  readonly empiricalMaskFraction: number | null;
+  readonly isDiagnosticOverride: boolean;
+  readonly overrideValue: number | null;
+  readonly isHistoricalDenoiserInspection: boolean;
+  readonly matchesCurrentContextBoundary: boolean;
+  readonly sourceRecordIndex: number | null;
+  readonly sourceBlockId: number | null;
+  readonly sourceRefinementIndex: number | null;
+  readonly sourceContextPrefixLen: number | null;
+  readonly sourceContextCacheDigest: string | null;
+  readonly historicalProvenanceWarning: string | null;
   readonly bayId: number;
   readonly layerIndex: number;
   readonly mixerKind: Kind;
@@ -743,9 +760,11 @@ function describeTimestepCellFormula(params: {
   readonly mixerKind: Kind;
   readonly modulationOrder: ModulationOrder;
   readonly bypassed: boolean;
+  readonly sheetsDimmed: boolean;
+  readonly timestepStatus: TwoTowerTimestepStatus;
+  readonly denoiserLookup: TwoTowerDenoiserPassLookup;
+  readonly currentContextPrefixLen: number;
   readonly tModel: number | null;
-  readonly nMasked: number | null;
-  readonly blockSize: number | null;
   readonly phi: Float32Array;
   readonly mlpH: Float32Array;
   readonly tRepr: Float32Array;
@@ -762,9 +781,11 @@ function describeTimestepCellFormula(params: {
     mixerKind,
     modulationOrder,
     bypassed,
+    sheetsDimmed,
+    timestepStatus,
+    denoiserLookup,
+    currentContextPrefixLen,
     tModel,
-    nMasked,
-    blockSize,
     phi,
     mlpH,
     tRepr,
@@ -777,34 +798,71 @@ function describeTimestepCellFormula(params: {
   const half = freqDim / 2;
   const table = weights.scaleShiftTables[layerIndex];
   const bayTag = `Bay ${String(bayId).padStart(2, '0')} (L${layerIndex} · ${bayKindDisplayName(mixerKind)})`;
+  const condMode = timestepStatus.conditioningMode;
+  const inactiveNoPassYet = condMode === 'inactive_no_pass_yet';
+  const isHistoricalPass = condMode === 'historical_prior_pass';
+  const inactiveBadge =
+    condMode === 'bypassed_ar'
+      ? 'BYPASSED in Context AR (t = null)'
+      : condMode === 'bypassed_mock_ar'
+        ? 'BYPASSED in Mock-AR (t = null)'
+        : 'INACTIVE · No diffusion pass yet';
+  const inactiveValueText = bypassed ? 'bypassed' : 'inactive (no pass yet)';
+  const inactiveEqSuffix =
+    condMode === 'bypassed_ar'
+      ? 'BYPASSED in Context AR (t = null)'
+      : condMode === 'bypassed_mock_ar'
+        ? 'BYPASSED in Mock-AR (t = null)'
+        : 'INACTIVE (no mask_diffusion pass executed yet)';
 
   switch (cell.tensor) {
     case 't_scalar': {
-      if (bypassed || tModel === null) {
+      if (sheetsDimmed || tModel === null || timestepStatus.executedPass === null) {
+        const nextNote = timestepStatus.nextEligibleStep
+          ? ` Next eligible pass will use canonical t = nMasked / B = ${timestepStatus.nextEligibleStep.nextNMasked} / ${timestepStatus.nextEligibleStep.blockSize} = ${timestepStatus.nextEligibleStep.nextTModel.toFixed(4)} (never r / K).`
+          : ` ${timestepStatus.blockCompletionNote}`;
         return {
           cell: { tensor: 't_scalar', row: 0, col: 0 },
           tensorLabel: 'Masked Fraction t',
           coordLabel: 't = null',
-          headBadge: 'BYPASSED in Context AR / Mock-AR',
+          headBadge: inactiveBadge,
           value: 0,
           isMasked: true,
-          valueText: 'null (BYPASSED)',
-          equation: 'BYPASSED in Context AR / Mock-AR (t = null) — all AdaLN shift/scale/gate disabled',
-          subEquation: 'Timestep conditioning runs ONLY during Denoiser mask_diffusion refinements.',
+          valueText: bypassed ? 'null (BYPASSED)' : 'null (no pass yet)',
+          equation: bypassed
+            ? `${inactiveBadge} — all AdaLN shift/scale/gate disabled`
+            : `INACTIVE · No diffusion pass executed yet (t = null; NOT an AR/Mock-AR bypass)`,
+          subEquation: bypassed
+            ? 'Timestep conditioning runs ONLY during Denoiser mask_diffusion refinements (canonical t = nMasked / B, never r / K).'
+            : `Mask-diffusion mode ready.${nextNote}`,
           targetSpan: { tensor: 't_scalar', rowStart: 0, rowEnd: 0, colStart: 0, colEnd: 0, role: 'target' },
           upstreamSpans: [],
         };
       }
+      const ep = timestepStatus.executedPass;
+      const histPrefix = isHistoricalPass
+        ? `HISTORICAL Rec #${ep.sourceRecordIndex} (b${ep.sourceBlockId ?? '-'} r${ep.sourceRefinementIndex ?? '-'}, ${ep.passExecutionId}, P_cond=${denoiserLookup.sourceContextPrefixLen ?? 'n/a'} vs P=${currentContextPrefixLen})`
+        : `Denoiser Diffusion Active (Rec #${ep.sourceRecordIndex}, b${ep.sourceBlockId ?? '-'} r${ep.sourceRefinementIndex ?? '-'})`;
+      const eq = ep.isDiagnosticOverride
+        ? `Diagnostic override t_override = ${ep.overrideValue!.toFixed(4)} (empirical input nMasked / B = ${ep.nMaskedInput} / ${ep.blockSize} = ${ep.empiricalMaskFraction.toFixed(4)}) → t_scaled = ${(tModel * 1000).toFixed(1)}`
+        : `t = nMasked / B = ${ep.nMaskedInput} / ${ep.blockSize} = ${tModel.toFixed(4)} → t_scaled = ${(tModel * 1000).toFixed(1)}`;
+      const stageNote =
+        timestepStatus.currentBlockMask &&
+        timestepStatus.currentBlockMask.currentUnresolvedCount !== ep.nMaskedInput
+          ? ` Post-step block state: ${timestepStatus.currentBlockMask.currentUnresolvedCount}/${timestepStatus.currentBlockMask.blockSize} masked (${timestepStatus.blockCompletionNote})`
+          : '';
       return {
         cell: { tensor: 't_scalar', row: 0, col: 0 },
         tensorLabel: 'Masked Fraction t',
-        coordLabel: `t = ${nMasked ?? 0}/${blockSize ?? 1}`,
-        headBadge: 'Denoiser Diffusion Active',
+        coordLabel: ep.isDiagnosticOverride
+          ? `t_override = ${ep.overrideValue!.toFixed(4)} (empirical ${ep.nMaskedInput}/${ep.blockSize})`
+          : `t = ${ep.nMaskedInput}/${ep.blockSize}`,
+        headBadge: histPrefix,
         value: tModel,
         isMasked: false,
         valueText: tModel.toFixed(4),
-        equation: `t = nMasked / B = ${nMasked ?? 0} / ${blockSize ?? 1} = ${tModel.toFixed(4)} → t_scaled = ${(tModel * 1000).toFixed(1)}`,
-        subEquation: 'Outer scaling t_scaled = t × 1000 (maxPeriodScale = 1000) feeds FP32 sinusoidal frequencies.',
+        equation: eq,
+        subEquation: `Canonical t = nMasked / B (never r / K); outer scaling t_scaled = t × 1000 feeds FP32 sinusoidal frequencies.${stageNote}`,
         targetSpan: { tensor: 't_scalar', rowStart: 0, rowEnd: 0, colStart: 0, colEnd: 0, role: 'target' },
         upstreamSpans: [],
       };
@@ -821,12 +879,12 @@ function describeTimestepCellFormula(params: {
         cell: { tensor: 'phi', row, col: k },
         tensorLabel: 'Sinusoidal Embedding φ(t)',
         coordLabel: `φ[${flatIdx}] = ${fnName}(k=${k})`,
-        headBadge: bypassed ? 'BYPASSED (t = null)' : 'FP32 · COS-FIRST [cos; sin]',
+        headBadge: sheetsDimmed ? inactiveBadge : 'FP32 · COS-FIRST [cos; sin]',
         value: val,
-        isMasked: bypassed,
-        valueText: bypassed ? 'bypassed' : fmtSigned(val, 4),
-        equation: bypassed
-          ? `φ[${flatIdx}] BYPASSED in Context AR / Mock-AR (t = null)`
+        isMasked: sheetsDimmed,
+        valueText: sheetsDimmed ? inactiveValueText : fmtSigned(val, 4),
+        equation: sheetsDimmed
+          ? `φ[${flatIdx}] ${inactiveEqSuffix}`
           : `φ[${flatIdx}] = ${fnName}(t·1000 · ω_${k}) = ${fnName}(${arg.toFixed(3)}) = ${fmtSigned(val, 4)}`,
         subEquation: `ω_${k} = exp(-ln(10000)·${k}/${half}) = ${omega.toFixed(5)} · COS occupies [0..7], SIN occupies [8..15].`,
         targetSpan: { tensor: 'phi', rowStart: row, rowEnd: row, colStart: k, colEnd: k, role: 'target' },
@@ -844,7 +902,7 @@ function describeTimestepCellFormula(params: {
         coordLabel: `W₀[ch=${r}, f=${c}]`,
         headBadge: 't_embedder.mlp.0.weight',
         value: val,
-        isMasked: bypassed,
+        isMasked: sheetsDimmed,
         valueText: fmtSigned(val, 4),
         equation: `W₀[${r}, ${c}] = ${fmtSigned(val, 4)} (b₀[${r}] = ${fmtSigned(weights.mlp0Bias[r], 4)})`,
         subEquation: 'Denoiser-only global MLP layer 0 weight (mini [8×16], prod [2688×256]).',
@@ -860,12 +918,12 @@ function describeTimestepCellFormula(params: {
         cell: { tensor: 'mlp_h', row: 0, col: r },
         tensorLabel: 'Timestep MLP SiLU(h₀)',
         coordLabel: `h₀_act[ch=${r}]`,
-        headBadge: bypassed ? 'BYPASSED' : 'SiLU(W₀·φ + b₀)',
+        headBadge: sheetsDimmed ? inactiveBadge : 'SiLU(W₀·φ + b₀)',
         value: val,
-        isMasked: bypassed,
-        valueText: bypassed ? 'bypassed' : fmtSigned(val, 4),
-        equation: bypassed
-          ? `SiLU(h₀[${r}]) BYPASSED (t = null)`
+        isMasked: sheetsDimmed,
+        valueText: sheetsDimmed ? inactiveValueText : fmtSigned(val, 4),
+        equation: sheetsDimmed
+          ? `SiLU(h₀[${r}]) ${inactiveEqSuffix}`
           : `h₀_act[${r}] = SiLU(Σ W₀[${r},:]·φ + b₀[${r}]) = ${fmtSigned(val, 4)}`,
         subEquation: 'Intermediate SiLU activation feeding W₂ [8×8] inside t_embedder.mlp.',
         targetSpan: { tensor: 'mlp_h', rowStart: 0, rowEnd: 0, colStart: r, colEnd: r, role: 'target' },
@@ -886,7 +944,7 @@ function describeTimestepCellFormula(params: {
         coordLabel: `W₂[ch=${r}, in=${c}]`,
         headBadge: 't_embedder.mlp.2.weight',
         value: val,
-        isMasked: bypassed,
+        isMasked: sheetsDimmed,
         valueText: fmtSigned(val, 4),
         equation: `W₂[${r}, ${c}] = ${fmtSigned(val, 4)} (b₂[${r}] = ${fmtSigned(weights.mlp2Bias[r], 4)})`,
         subEquation: 'Denoiser-only global MLP layer 2 weight (mini [8×8], prod [2688×2688]).',
@@ -902,12 +960,12 @@ function describeTimestepCellFormula(params: {
         cell: { tensor: 't_repr', row: 0, col: r },
         tensorLabel: 'Timestep Representation tRepr',
         coordLabel: `tRepr[ch=${r}]`,
-        headBadge: bypassed ? 'BYPASSED' : 'Global MLP Output [8]',
+        headBadge: sheetsDimmed ? inactiveBadge : 'Global MLP Output [8]',
         value: val,
-        isMasked: bypassed,
-        valueText: bypassed ? 'bypassed' : fmtSigned(val, 4),
-        equation: bypassed
-          ? `tRepr[${r}] BYPASSED (t = null)`
+        isMasked: sheetsDimmed,
+        valueText: sheetsDimmed ? inactiveValueText : fmtSigned(val, 4),
+        equation: sheetsDimmed
+          ? `tRepr[${r}] ${inactiveEqSuffix}`
           : `tRepr[${r}] = W₂[${r},:] · h₀_act + b₂[${r}] = ${fmtSigned(val, 4)}`,
         subEquation: 'Shared timestep vector evaluated once per denoising step; feeds SiLU → W_time_block [24×8].',
         targetSpan: { tensor: 't_repr', rowStart: 0, rowEnd: 0, colStart: r, colEnd: r, role: 'target' },
@@ -930,7 +988,7 @@ function describeTimestepCellFormula(params: {
         coordLabel: `${BAND_NAMES[band]}_g[ch=${ch}] × in${c}`,
         headBadge: 't_block.1.weight (3d × d)',
         value: val,
-        isMasked: bypassed,
+        isMasked: sheetsDimmed,
         valueText: fmtSigned(val, 4),
         equation: `W_time_block[${r} (${BAND_NAMES[band]}[${ch}]), ${c}] = ${fmtSigned(val, 4)}`,
         subEquation: 'Shared PixArt-alpha adaLN-single projection mapping SiLU(tRepr) into [shift_g(8), scale_g(8), gate_g(8)].',
@@ -948,12 +1006,12 @@ function describeTimestepCellFormula(params: {
         cell: { tensor: 't_emb', row: band, col: ch },
         tensorLabel: 'Global Modulation tEmb [3×8]',
         coordLabel: `${BAND_NAMES[band]}_g[ch=${ch}]`,
-        headBadge: bypassed ? 'BYPASSED' : 'Shared Across All 52 Layers',
+        headBadge: sheetsDimmed ? inactiveBadge : 'Shared Across All 52 Layers',
         value: val,
-        isMasked: bypassed,
-        valueText: bypassed ? 'bypassed' : fmtSigned(val, 4),
-        equation: bypassed
-          ? `tEmb[${BAND_NAMES[band]}_g, ch${ch}] BYPASSED (t = null)`
+        isMasked: sheetsDimmed,
+        valueText: sheetsDimmed ? inactiveValueText : fmtSigned(val, 4),
+        equation: sheetsDimmed
+          ? `tEmb[${BAND_NAMES[band]}_g, ch${ch}] ${inactiveEqSuffix}`
           : `${BAND_NAMES[band]}_g[${ch}] = W_time_block[${r},:] · SiLU(tRepr) + b_blk[${r}] = ${fmtSigned(val, 4)}`,
         subEquation: 'Broadcast to all 52 layers and added elementwise to each layer’s learned scale_shift_tables[l].',
         targetSpan: { tensor: 't_emb', rowStart: band, rowEnd: band, colStart: ch, colEnd: ch, role: 'target' },
@@ -974,7 +1032,7 @@ function describeTimestepCellFormula(params: {
         coordLabel: `table[L${layerIndex}][${BAND_NAMES[band]}, ch=${ch}]`,
         headBadge: `${bayTag} · Learned [3×8]`,
         value: val,
-        isMasked: bypassed,
+        isMasked: sheetsDimmed,
         valueText: fmtSigned(val, 4),
         equation: `scale_shift_tables[${layerIndex}][${BAND_NAMES[band]}, ${ch}] = ${fmtSigned(val, 4)}`,
         subEquation: 'Per-layer learned AdaLN offset (~randn/√d init) added to global tEmb.',
@@ -998,14 +1056,14 @@ function describeTimestepCellFormula(params: {
         cell: { tensor: 'layer_mod', row: band, col: ch },
         tensorLabel: `${bayTag} · Layer ${BAND_NAMES[band]}`,
         coordLabel: `${BAND_NAMES[band]}[ch=${ch}]`,
-        headBadge: bypassed ? 'BYPASSED (t = null)' : `tEmb + scale_shift_tables[${layerIndex}]`,
+        headBadge: sheetsDimmed ? inactiveBadge : `tEmb + scale_shift_tables[${layerIndex}]`,
         value: val,
-        isMasked: bypassed,
-        valueText: bypassed ? 'bypassed' : fmtSigned(val, 4),
-        equation: bypassed
-          ? `${BAND_NAMES[band]}[${ch}] BYPASSED in Context AR / Mock-AR (t = null)`
+        isMasked: sheetsDimmed,
+        valueText: sheetsDimmed ? inactiveValueText : fmtSigned(val, 4),
+        equation: sheetsDimmed
+          ? `${BAND_NAMES[band]}[${ch}] ${inactiveEqSuffix}`
           : `${BAND_NAMES[band]}[${ch}] = table(${fmtSigned(tVal, 3)}) + ${BAND_NAMES[band]}_g(${fmtSigned(gVal, 3)}) = ${fmtSigned(val, 4)}`,
-        subEquation: `Active order for ${bayTag}: ${modulationOrder}${gateExtra}`,
+        subEquation: `Active order for ${bayTag}: ${modulationOrder}${gateExtra}${inactiveNoPassYet ? ' · No pass executed yet.' : ''}`,
         targetSpan: { tensor: 'layer_mod', rowStart: band, rowEnd: band, colStart: ch, colEnd: ch, role: 'target' },
         upstreamSpans: [
           { tensor: 't_emb', rowStart: band, rowEnd: band, colStart: ch, colEnd: ch, role: 'operand_a' },
@@ -1040,8 +1098,8 @@ function describeTimestepCellFormula(params: {
       const sc = layerModFlat[d + ch];
       const eq =
         modulationOrder === 'modulate_then_norm'
-          ? bypassed
-            ? `X[${ch}] = ${fmtSigned(val, 4)} (Pre-RMSNorm modulation BYPASSED)`
+          ? sheetsDimmed
+            ? `X[${ch}] = ${fmtSigned(val, 4)} (Pre-RMSNorm modulation ${bypassed ? 'BYPASSED' : 'INACTIVE — no pass yet'})`
             : `X_mod[${ch}] = X(${fmtSigned(xv, 3)})·(1 + ${fmtSigned(sc, 3)}) + ${fmtSigned(sh, 3)} = ${fmtSigned(val, 4)}`
           : `U[${ch}] = RMSNorm(X)[${ch}] = ${fmtSigned(val, 4)} (MoE normalizes BEFORE AdaLN modulation)`;
       return {
@@ -1059,7 +1117,7 @@ function describeTimestepCellFormula(params: {
             : `${bayTag} uses norm_then_modulate (RMSNorm(X) feeds AdaLN modulation).`,
         targetSpan: { tensor: 'stage1', rowStart: 0, rowEnd: 0, colStart: ch, colEnd: ch, role: 'target' },
         upstreamSpans:
-          modulationOrder === 'modulate_then_norm' && !bypassed
+          modulationOrder === 'modulate_then_norm' && !sheetsDimmed
             ? [
                 { tensor: 'residual_x', rowStart: 0, rowEnd: 0, colStart: ch, colEnd: ch, role: 'operand_a' },
                 { tensor: 'layer_mod', rowStart: 0, rowEnd: 1, colStart: ch, colEnd: ch, role: 'operand_b' },
@@ -1076,9 +1134,9 @@ function describeTimestepCellFormula(params: {
       const sc = layerModFlat[d + ch];
       const eq =
         modulationOrder === 'modulate_then_norm'
-          ? `U[${ch}] = RMSNorm(${bypassed ? 'X' : 'X_mod'})[${ch}] = ${fmtSigned(val, 4)}`
-          : bypassed
-            ? `U[${ch}] = ${fmtSigned(val, 4)} (Post-RMSNorm modulation BYPASSED)`
+          ? `U[${ch}] = RMSNorm(${sheetsDimmed ? 'X' : 'X_mod'})[${ch}] = ${fmtSigned(val, 4)}`
+          : sheetsDimmed
+            ? `U[${ch}] = ${fmtSigned(val, 4)} (Post-RMSNorm modulation ${bypassed ? 'BYPASSED' : 'INACTIVE — no pass yet'})`
             : `U_mod[${ch}] = U(${fmtSigned(s1, 3)})·(1 + ${fmtSigned(sc, 3)}) + ${fmtSigned(sh, 3)} = ${fmtSigned(val, 4)}`;
       return {
         cell: { tensor: 'stage2', row: 0, col: ch },
@@ -1092,7 +1150,7 @@ function describeTimestepCellFormula(params: {
         subEquation: `Feeds ${bayKindDisplayName(mixerKind)} mixer directly.`,
         targetSpan: { tensor: 'stage2', rowStart: 0, rowEnd: 0, colStart: ch, colEnd: ch, role: 'target' },
         upstreamSpans:
-          modulationOrder === 'norm_then_modulate' && !bypassed
+          modulationOrder === 'norm_then_modulate' && !sheetsDimmed
             ? [
                 { tensor: 'stage1', rowStart: 0, rowEnd: 0, colStart: ch, colEnd: ch, role: 'operand_a' },
                 { tensor: 'layer_mod', rowStart: 0, rowEnd: 1, colStart: ch, colEnd: ch, role: 'operand_b' },
@@ -1131,16 +1189,20 @@ function describeTimestepCellFormula(params: {
         cell: { tensor: 'gated_delta', row: 0, col: ch },
         tensorLabel: 'Outer AdaLN Residual Gate (d = 8)',
         coordLabel: `gate[${ch}] ⊙ ${appVecs.mixerOutLabel}[${ch}]`,
-        headBadge: bypassed ? 'Gate BYPASSED (1×)' : 'Outer Residual Gate (d=8 ≠ Mamba d_inner=64)',
+        headBadge: sheetsDimmed
+          ? bypassed
+            ? 'Gate BYPASSED (1×)'
+            : 'Gate INACTIVE (no pass yet)'
+          : 'Outer Residual Gate (d=8 ≠ Mamba d_inner=64)',
         value: val,
         isMasked: false,
         valueText: fmtSigned(val, 4),
-        equation: bypassed
-          ? `Δ[${ch}] = ${appVecs.mixerOutLabel}(${fmtSigned(mVal, 3)}) (outer AdaLN gate BYPASSED)`
+        equation: sheetsDimmed
+          ? `Δ[${ch}] = ${appVecs.mixerOutLabel}(${fmtSigned(mVal, 3)}) (outer AdaLN gate ${bypassed ? 'BYPASSED' : 'INACTIVE'})`
           : `Δ[${ch}] = gate[${ch}](${fmtSigned(gVal, 3)}) · ${appVecs.mixerOutLabel}(${fmtSigned(mVal, 3)}) = ${fmtSigned(val, 4)}`,
         subEquation: 'Channel-wise outer AdaLN residual gate (d=8), strictly separate from Mamba’s internal d_inner=64 SiLU(z) gate.',
         targetSpan: { tensor: 'gated_delta', rowStart: 0, rowEnd: 0, colStart: ch, colEnd: ch, role: 'target' },
-        upstreamSpans: bypassed
+        upstreamSpans: sheetsDimmed
           ? [{ tensor: 'mixer_out', rowStart: 0, rowEnd: 0, colStart: ch, colEnd: ch, role: 'operand_a' }]
           : [
               { tensor: 'mixer_out', rowStart: 0, rowEnd: 0, colStart: ch, colEnd: ch, role: 'operand_a' },
@@ -1159,12 +1221,12 @@ function describeTimestepCellFormula(params: {
         cell: { tensor: 'residual_y', row: 0, col: ch },
         tensorLabel: 'Residual Output Y',
         coordLabel: `Y[ch=${ch}, ${tokTag}]`,
-        headBadge: bypassed ? 'Y = X + Mixer_out' : 'Y = X + gate ⊙ Mixer_out',
+        headBadge: sheetsDimmed ? 'Y = X + Mixer_out' : 'Y = X + gate ⊙ Mixer_out',
         value: val,
         isMasked: false,
         valueText: fmtSigned(val, 4),
         equation: `Y[${ch}, ${tokTag}] = X_untouched(${fmtSigned(xv, 3)}) + Δ(${fmtSigned(dv, 3)}) = ${fmtSigned(val, 4)}`,
-        subEquation: `Untouched residual X merges with ${bypassed ? 'unmodulated' : 'outer-gated'} ${appVecs.mixerOutLabel}. Final norm_f remains strictly unmodulated.`,
+        subEquation: `Untouched residual X merges with ${sheetsDimmed ? 'unmodulated' : 'outer-gated'} ${appVecs.mixerOutLabel}. Final norm_f remains strictly unmodulated.`,
         targetSpan: { tensor: 'residual_y', rowStart: 0, rowEnd: 0, colStart: ch, colEnd: ch, role: 'target' },
         upstreamSpans: [
           { tensor: 'residual_x', rowStart: 0, rowEnd: 0, colStart: ch, colEnd: ch, role: 'operand_a' },
@@ -1422,58 +1484,71 @@ export function buildTwoTowerTimestepScene(
   const { d, freqDim } = weights.config;
   const half = freqDim / 2;
 
-  const denoiserPass = view.denoiserLookup.pass;
-  const isDiffusionPassActive =
-    view.modeAtRecord === 'mask_diffusion' &&
-    denoiserPass !== null &&
-    denoiserPass.mode === 'mask_diffusion' &&
-    denoiserPass.tModel !== null &&
-    denoiserPass.timestepProjection !== null;
-
-  const tModel: number | null = isDiffusionPassActive ? denoiserPass!.tModel : null;
+  const ts = view.timestepStatus;
+  const dl = view.denoiserLookup;
+  const denoiserPass = dl.pass;
+  const conditioningMode = ts.conditioningMode;
   const bypassed =
-    view.modeAtRecord === 'ar' || view.modeAtRecord === 'mock_ar' || tModel === null;
+    conditioningMode === 'bypassed_ar' || conditioningMode === 'bypassed_mock_ar';
+  const inactiveNoPassYet = conditioningMode === 'inactive_no_pass_yet';
+  const isHistoricalPass = conditioningMode === 'historical_prior_pass';
 
-  const bypassReason: string | null = !bypassed
-    ? null
-    : view.modeAtRecord === 'ar'
-      ? 'BYPASSED in Context AR / Mock-AR (t = null) — Context Tower never applies timestep conditioning.'
-      : view.modeAtRecord === 'mock_ar'
-        ? 'BYPASSED in Context AR / Mock-AR (t = null) — Mock-AR runs Denoiser causally without AdaLN modulation.'
-        : 'BYPASSED in Context AR / Mock-AR (t = null) — No active mask_diffusion Denoiser pass has executed yet on this record.';
+  const hasExecutedDiffusionPass =
+    (conditioningMode === 'active_diffusion' || conditioningMode === 'historical_prior_pass') &&
+    ts.executedPass !== null &&
+    denoiserPass !== null &&
+    denoiserPass.timestepProjection !== null;
+  const sheetsDimmed = !hasExecutedDiffusionPass;
 
-  const statusLabel = bypassed
-    ? 'BYPASSED in Context AR / Mock-AR (t = null)'
-    : `ACTIVE Diffusion Conditioning (t = ${tModel!.toFixed(3)})`;
+  const tModel: number | null = hasExecutedDiffusionPass ? ts.executedPass!.tModel : null;
+  const nMasked: number | null = hasExecutedDiffusionPass ? ts.executedPass!.nMaskedInput : null;
+  const blockSize: number | null = hasExecutedDiffusionPass ? ts.executedPass!.blockSize : null;
+  const empiricalMaskFraction: number | null = hasExecutedDiffusionPass
+    ? ts.executedPass!.empiricalMaskFraction
+    : null;
+  const isDiagnosticOverride = hasExecutedDiffusionPass && ts.executedPass!.isDiagnosticOverride;
+  const overrideValue: number | null = hasExecutedDiffusionPass
+    ? ts.executedPass!.overrideValue
+    : null;
 
-  // Count masked slots in the active diffusion pass when active
-  let nMasked: number | null = null;
-  let blockSize: number | null = null;
-  if (isDiffusionPassActive && denoiserPass) {
-    blockSize = denoiserPass.blockSize;
-    let cnt = 0;
-    for (let i = 0; i < denoiserPass.tokenIds.length; i++) {
-      if (denoiserPass.tokenIds[i] === view.model.maskTokenId) cnt++;
-    }
-    nMasked = cnt;
-  }
+  const bypassReason: string | null =
+    conditioningMode === 'bypassed_ar'
+      ? 'BYPASSED in Context AR (t = null) — Context Tower never applies timestep conditioning.'
+      : conditioningMode === 'bypassed_mock_ar'
+        ? 'BYPASSED in Mock-AR (t = null) — Mock-AR runs Denoiser causally without AdaLN modulation.'
+        : null;
+
+  const statusLabel =
+    conditioningMode === 'bypassed_ar'
+      ? 'BYPASSED in Context AR (t = null)'
+      : conditioningMode === 'bypassed_mock_ar'
+        ? 'BYPASSED in Mock-AR (t = null)'
+        : conditioningMode === 'inactive_no_pass_yet'
+          ? ts.summaryLabel
+          : isHistoricalPass && ts.executedPass !== null
+            ? isDiagnosticOverride
+              ? `HISTORICAL Diffusion Pass (Rec #${ts.executedPass.sourceRecordIndex}, b${ts.executedPass.sourceBlockId ?? '-'} r${ts.executedPass.sourceRefinementIndex ?? '-'}, t_override = ${tModel!.toFixed(3)}; empirical ${nMasked}/${blockSize} = ${empiricalMaskFraction!.toFixed(3)})`
+              : `HISTORICAL Diffusion Pass (Rec #${ts.executedPass.sourceRecordIndex}, b${ts.executedPass.sourceBlockId ?? '-'} r${ts.executedPass.sourceRefinementIndex ?? '-'}, t = ${tModel!.toFixed(3)}, input ${nMasked}/${blockSize})`
+            : isDiagnosticOverride
+              ? `ACTIVE Diffusion Conditioning (t_override = ${tModel!.toFixed(3)}; empirical ${nMasked}/${blockSize} = ${empiricalMaskFraction!.toFixed(3)})`
+              : `ACTIVE Diffusion Conditioning (t = ${tModel!.toFixed(3)}, input ${nMasked}/${blockSize} masked)`;
 
   // Extract REAL timestep conditioning tensors (detached copies, never mutating session buffers)
   const phi =
-    isDiffusionPassActive && denoiserPass?.timestepProjection
+    hasExecutedDiffusionPass && denoiserPass?.timestepProjection
       ? new Float32Array(denoiserPass.timestepProjection.phi)
       : new Float32Array(freqDim);
-  const mlpH = isDiffusionPassActive ? computeMlpHiddenAct(phi, weights) : new Float32Array(d);
+  const mlpH = hasExecutedDiffusionPass ? computeMlpHiddenAct(phi, weights) : new Float32Array(d);
   const tRepr =
-    isDiffusionPassActive && denoiserPass?.timestepProjection
+    hasExecutedDiffusionPass && denoiserPass?.timestepProjection
       ? new Float32Array(denoiserPass.timestepProjection.tRepr)
       : new Float32Array(d);
   const tEmb =
-    isDiffusionPassActive && denoiserPass?.timestepProjection
+    hasExecutedDiffusionPass && denoiserPass?.timestepProjection
       ? new Float32Array(denoiserPass.timestepProjection.tEmb)
       : new Float32Array(3 * d);
 
-  const layerMod = isDiffusionPassActive ? denoiserPass!.getLayerModulation(bayId) : null;
+  const layerMod = hasExecutedDiffusionPass ? denoiserPass!.getLayerModulation(bayId) : null;
   const layerModFlat = new Float32Array(3 * d);
   if (layerMod) {
     layerModFlat.set(layerMod.shift, 0);
@@ -1485,7 +1560,7 @@ export function buildTwoTowerTimestepScene(
   const scaleL2 = layerMod ? l2Norm(layerMod.scale) : 0;
   const gateL2 = layerMod ? l2Norm(layerMod.gate) : 0;
 
-  // Pull REAL selected layer trace (Denoiser trace when available, else latest Context bay trace for bypassed view)
+  // Pull REAL selected layer trace (Denoiser trace when available, else latest Context bay trace for bypassed/inactive view)
   const denoiserTrace = denoiserPass ? view.resolveDenoiserBayTrace(bayId) : null;
   let fallbackTraceSim: {
     readonly X: Float32Array;
@@ -1539,7 +1614,7 @@ export function buildTwoTowerTimestepScene(
     d,
     mixerKind,
     modulationOrder,
-    bypassed,
+    bypassed: sheetsDimmed,
     trace: denoiserTrace,
     fallbackTraceSim,
     localTok: localTokenIndex,
@@ -1549,7 +1624,7 @@ export function buildTwoTowerTimestepScene(
   const atlas = buildTimestepValueAtlas({
     weights,
     layerIndex,
-    bypassed,
+    bypassed: sheetsDimmed,
     tModel,
     phi,
     mlpH,
@@ -1575,9 +1650,11 @@ export function buildTwoTowerTimestepScene(
         mixerKind,
         modulationOrder,
         bypassed,
+        sheetsDimmed,
+        timestepStatus: ts,
+        denoiserLookup: dl,
+        currentContextPrefixLen: view.committedPrefixLen,
         tModel,
-        nMasked,
-        blockSize,
         phi,
         mlpH,
         tRepr,
@@ -1627,9 +1704,9 @@ export function buildTwoTowerTimestepScene(
   const SHEET_THICK = 0.058;
   const WALL_Y = 1.46;
 
-  // Helper resolving highlight state: dims modulation sheets visibly whenever bypassed!
+  // Helper resolving highlight state: dims modulation sheets visibly whenever bypassed or inactive (no pass yet)!
   const modSheetHl = (tensor: TimestepTensorKey, partId: string, stepIdx: number, isGold = false): number => {
-    if (bypassed) {
+    if (sheetsDimmed) {
       if (activePart === partId || activeFormula?.cell.tensor === tensor) {
         return SHEET_HL_PATHWAY;
       }
@@ -1917,7 +1994,7 @@ export function buildTwoTowerTimestepScene(
     gridCols: d, gridRows: 1,
     sheetKind: SHEET_KIND_STANDARD,
     role: SHEET_ROLE_NORM,
-    highlight: appSheetHl('gated_delta', 'gated-delta', !bypassed),
+    highlight: appSheetHl('gated_delta', 'gated-delta', !sheetsDimmed),
     seed: 15.1,
     partId: 'gated-delta',
     tensorKey: 'gated_delta',
@@ -1973,7 +2050,7 @@ export function buildTwoTowerTimestepScene(
   });
 
   // Architectural dashed frame around selected layer application box
-  b.addDashedFrameXZ(4.65, -2.75, 10.50, 1.55, 0.02, bypassed ? LINE_STYLE_GUIDE : LINE_STYLE_ACTIVE, 0.45);
+  b.addDashedFrameXZ(4.65, -2.75, 10.50, 1.55, 0.02, sheetsDimmed ? LINE_STYLE_GUIDE : LINE_STYLE_ACTIVE, 0.45);
   // Stanchions grounding upright weight walls
   for (const wx of [xW0, xW2, xTBlockW]) {
     b.addGuideLine(wx, 0.0, -0.75, wx, 0.45, -0.75, 0.9, LINE_STYLE_GUIDE, 0.45);
@@ -1983,8 +2060,8 @@ export function buildTwoTowerTimestepScene(
   // =========================================================================
   // SMOOTH 3D FLOW RIBBONS (Modulation Chain + Emerald Untouched Residual Highway)
   // =========================================================================
-  const chainCol = bypassed ? RIBBON_DIMMED : hasCellTrace ? RIBBON_DIMMED : RIBBON_TIME_GOLD;
-  const gateCol = bypassed ? RIBBON_DIMMED : hasCellTrace ? RIBBON_DIMMED : RIBBON_GATE_CORAL;
+  const chainCol = sheetsDimmed ? RIBBON_DIMMED : hasCellTrace ? RIBBON_DIMMED : RIBBON_TIME_GOLD;
+  const gateCol = sheetsDimmed ? RIBBON_DIMMED : hasCellTrace ? RIBBON_DIMMED : RIBBON_GATE_CORAL;
   const resCol = hasCellTrace ? RIBBON_RESIDUAL : RIBBON_RESIDUAL_ACTIVE;
 
   const connectHorizontal = (xA: number, xB: number, z: number, col: FlowRibbonColor, w = 0.085) => {
@@ -2250,18 +2327,36 @@ export function buildTwoTowerTimestepScene(
       ? 'X → X_mod = X·(1+scale)+shift → RMSNorm(X_mod) → Mixer → gate ⊙ Mixer_out → + X'
       : 'X → RMSNorm(X) → U → U_mod = U·(1+scale)+shift → MoE → gate ⊙ MoE_out → + X';
 
+  const tScalarLandmarkLabel =
+    conditioningMode === 'bypassed_ar'
+      ? 'BYPASSED in Context AR (t = null)'
+      : conditioningMode === 'bypassed_mock_ar'
+        ? 'BYPASSED in Mock-AR (t = null)'
+        : inactiveNoPassYet
+          ? ts.nextEligibleStep
+            ? `INACTIVE · No pass yet (Next t = ${ts.nextEligibleStep.nextNMasked}/${ts.nextEligibleStep.blockSize} = ${ts.nextEligibleStep.nextTModel.toFixed(3)})`
+            : 'INACTIVE · No diffusion pass yet (t = null)'
+          : isDiagnosticOverride
+            ? `${isHistoricalPass ? `HISTORICAL Rec #${ts.executedPass!.sourceRecordIndex} · ` : ''}t_override = ${overrideValue!.toFixed(3)} (empirical ${nMasked}/${blockSize} = ${empiricalMaskFraction!.toFixed(3)})`
+            : `${isHistoricalPass ? `HISTORICAL Rec #${ts.executedPass!.sourceRecordIndex} · ` : ''}t = nMasked / B = ${nMasked}/${blockSize} (${tModel!.toFixed(3)})`;
+  const tScalarLandmarkSublabel = bypassed
+    ? 'All AdaLN modulation sheets dimmed (AR / Mock-AR bypass)'
+    : inactiveNoPassYet
+      ? 'Mask-diffusion ready · Canonical t = nMasked / B activates on pass 0'
+      : isHistoricalPass
+        ? `Prior pass (b${ts.executedPass!.sourceBlockId ?? '-'} r${ts.executedPass!.sourceRefinementIndex ?? '-'}, P_cond=${dl.sourceContextPrefixLen ?? 'n/a'} ≠ P=${view.committedPrefixLen}) · t_scaled = ${(tModel! * 1000).toFixed(1)}`
+        : `t_scaled = ${(tModel! * 1000).toFixed(1)} · ${ts.blockCompletionNote}`;
+
   b.landmarks.push(
     {
       id: 'time-t-scalar',
-      label: bypassed
-        ? 'BYPASSED in Context AR / Mock-AR (t = null)'
-        : `t = nMasked / B = ${nMasked ?? 0}/${blockSize ?? 1} (${tModel!.toFixed(3)})`,
-      sublabel: bypassed ? 'All AdaLN modulation sheets dimmed' : 't_scaled = t × 1000',
+      label: tScalarLandmarkLabel,
+      sublabel: tScalarLandmarkSublabel,
       world: [xScalar, 0.24, 0.74],
       partId: 't-scalar',
       align: 'bottom',
       tier: 'primary',
-      tone: bypassed ? 'muted' : 'gold',
+      tone: sheetsDimmed ? 'muted' : 'gold',
     },
     {
       id: 'time-phi',
@@ -2271,7 +2366,7 @@ export function buildTwoTowerTimestepScene(
       partId: 'phi-sinusoid',
       align: 'top',
       tier: 'primary',
-      tone: bypassed ? 'muted' : 'cyan',
+      tone: sheetsDimmed ? 'muted' : 'cyan',
     },
     {
       id: 'time-mlp',
@@ -2281,7 +2376,7 @@ export function buildTwoTowerTimestepScene(
       partId: 't-repr',
       align: 'top',
       tier: 'primary',
-      tone: bypassed ? 'muted' : 'default',
+      tone: sheetsDimmed ? 'muted' : 'default',
     },
     {
       id: 'time-tblock',
@@ -2291,7 +2386,7 @@ export function buildTwoTowerTimestepScene(
       partId: 't-emb',
       align: 'top',
       tier: 'primary',
-      tone: bypassed ? 'muted' : 'gold',
+      tone: sheetsDimmed ? 'muted' : 'gold',
     },
     {
       id: 'time-layer-table',
@@ -2301,19 +2396,23 @@ export function buildTwoTowerTimestepScene(
       partId: 'scale-shift-table',
       align: 'top',
       tier: 'primary',
-      tone: bypassed ? 'muted' : 'default',
+      tone: sheetsDimmed ? 'muted' : 'default',
     },
     {
       id: 'time-layer-mod',
       label: `${bayStr} · (shift, scale, gate) [3×8]`,
       sublabel: bypassed
-        ? 'BYPASSED (t = null)'
-        : `‖sh‖=${shiftL2.toFixed(2)} · ‖sc‖=${scaleL2.toFixed(2)} · ‖gt‖=${gateL2.toFixed(2)}`,
+        ? conditioningMode === 'bypassed_ar'
+          ? 'BYPASSED in Context AR (t = null)'
+          : 'BYPASSED in Mock-AR (t = null)'
+        : inactiveNoPassYet
+          ? 'INACTIVE (no diffusion pass yet)'
+          : `‖sh‖=${shiftL2.toFixed(2)} · ‖sc‖=${scaleL2.toFixed(2)} · ‖gt‖=${gateL2.toFixed(2)}`,
       world: [xLayerMod, 0.24, 0.92],
       partId: 'layer-mod',
       align: 'bottom',
       tier: 'primary',
-      tone: bypassed ? 'muted' : 'gold',
+      tone: sheetsDimmed ? 'muted' : 'gold',
     },
     {
       id: 'time-residual-highway',
@@ -2371,21 +2470,47 @@ export function buildTwoTowerTimestepScene(
     't-scalar': {
       id: 't-scalar',
       title: 'Masked Fraction Scalar t = nMasked / B',
-      badge: bypassed ? 'BYPASSED (t = null)' : `t = ${tModel!.toFixed(4)}`,
+      badge: bypassed
+        ? conditioningMode === 'bypassed_ar'
+          ? 'BYPASSED · AR (t = null)'
+          : 'BYPASSED · Mock-AR (t = null)'
+        : inactiveNoPassYet
+          ? 'INACTIVE · No Pass Yet'
+          : isDiagnosticOverride
+            ? `t_override = ${overrideValue!.toFixed(4)} (emp ${empiricalMaskFraction!.toFixed(4)})`
+            : `t = ${tModel!.toFixed(4)}`,
       summary: bypassed
-        ? 'BYPASSED in Context AR / Mock-AR (t = null). Timestep conditioning is completely inactive outside Denoiser mask_diffusion refinements.'
-        : 'Fraction of masked slots entering the Denoiser block refinement step. Scaled by maxPeriodScale = 1000 before sinusoidal frequency encoding.',
+        ? `${bypassReason}`
+        : inactiveNoPassYet
+          ? `Mask-diffusion conditioning is INACTIVE because no Denoiser pass has executed yet (NOT an AR/Mock-AR bypass). ${ts.blockCompletionNote}`
+          : 'Canonical fraction of masked slots entering the executed Denoiser pass (`t = nMasked / B`, NEVER `r / K`). Scaled by maxPeriodScale = 1000 before sinusoidal frequency encoding.',
       specs: [
-        bypassed
-          ? 'Status: BYPASSED in Context AR / Mock-AR (t = null)'
-          : `nMasked = ${nMasked ?? 0}, B = ${blockSize ?? 1} → t = ${tModel!.toFixed(4)}`,
+        `Conditioning mode: ${conditioningMode} · Block state: ${ts.blockCompletionState}`,
+        ...(hasExecutedDiffusionPass && ts.executedPass
+          ? [
+              isDiagnosticOverride
+                ? `Diagnostic override t_override = ${overrideValue!.toFixed(4)} (empirical input ${nMasked}/${blockSize} = ${empiricalMaskFraction!.toFixed(4)})`
+                : `Executed input masks: nMasked = ${nMasked}, B = ${blockSize} → t = ${tModel!.toFixed(4)}`,
+              `Source pass: Rec #${ts.executedPass.sourceRecordIndex} (b${ts.executedPass.sourceBlockId ?? '-'}, r${ts.executedPass.sourceRefinementIndex ?? '-'}, ${ts.executedPass.passExecutionId}, P_cond=${dl.sourceContextPrefixLen ?? 'n/a'})`,
+            ]
+          : [`Status: ${statusLabel}`]),
+        ...(ts.currentBlockMask
+          ? [
+              `Current block state: ${ts.currentBlockMask.currentUnresolvedCount}/${ts.currentBlockMask.blockSize} masked (${ts.blockCompletionState})`,
+            ]
+          : []),
+        ...(ts.nextEligibleStep
+          ? [
+              `Next eligible pass: t = ${ts.nextEligibleStep.nextNMasked}/${ts.nextEligibleStep.blockSize} = ${ts.nextEligibleStep.nextTModel.toFixed(4)} (${ts.nextEligibleStep.remainingSteps} steps left)`,
+            ]
+          : []),
         'Outer scale: 1000 · Max period: 10000 (IEEE-754 Float32)',
       ],
     },
     'phi-sinusoid': {
       id: 'phi-sinusoid',
       title: 'Sinusoidal Timestep Embedding φ(t)',
-      badge: bypassed ? 'BYPASSED' : 'FP32 · [16] mini ([256] prod)',
+      badge: bypassed ? 'BYPASSED' : inactiveNoPassYet ? 'INACTIVE' : 'FP32 · [16] mini ([256] prod)',
       summary:
         'Log-spaced sinusoidal frequency embedding in strict COS-FIRST ordering: φ[0..7] = cos(t·1000·ω_k), φ[8..15] = sin(t·1000·ω_k).',
       specs: [
@@ -2445,7 +2570,7 @@ export function buildTwoTowerTimestepScene(
     'layer-mod': {
       id: 'layer-mod',
       title: `${bayStr} · Effective (shift, scale, gate)`,
-      badge: bypassed ? 'BYPASSED' : `${modulationOrder}`,
+      badge: bypassed ? 'BYPASSED' : inactiveNoPassYet ? 'INACTIVE' : `${modulationOrder}`,
       summary:
         'Elementwise sum tEmb + scale_shift_tables[l], sliced into shift[8], scale[8], and outer residual gate[8].',
       specs: [
@@ -2545,8 +2670,13 @@ export function buildTwoTowerTimestepScene(
 
   const provenanceBadges: TwoTowerProvenanceBadge[] = [
     {
-      label: bypassed ? 'Timestep Conditioning: BYPASSED (t = null)' : `Timestep Conditioning: ACTIVE (t = ${tModel!.toFixed(3)})`,
-      tone: bypassed ? 'muted' : 'gold',
+      label: `Timestep Conditioning: ${statusLabel}`,
+      tone:
+        conditioningMode === 'active_diffusion'
+          ? 'gold'
+          : isHistoricalPass
+            ? 'warn'
+            : 'muted',
       origin: traceOrigin,
     },
     {
@@ -2562,6 +2692,13 @@ export function buildTwoTowerTimestepScene(
       tone: 'shared',
     },
   ];
+  if (dl.isHistoricalInspection) {
+    provenanceBadges.push({
+      label: `Historical Pass · Rec #${dl.sourceRecordIndex} (b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'}, P_cond=${dl.sourceContextPrefixLen ?? 'n/a'} vs P=${view.committedPrefixLen})`,
+      tone: 'warn',
+      origin: 'denoiser_scratch',
+    });
+  }
 
   const activeSelection = buildTwoTowerSelectionIdentity(view, {
     towerRole: denoiserPass ? 'denoiser' : 'shared',
@@ -2576,11 +2713,25 @@ export function buildTwoTowerTimestepScene(
 
   const diagnostics: TimestepCutawayDiagnostics = Object.freeze({
     bypassed,
+    inactiveNoPassYet,
+    conditioningMode,
+    timestepStatus: ts,
     bypassReason,
     statusLabel,
     tModel,
     nMasked,
     blockSize,
+    empiricalMaskFraction,
+    isDiagnosticOverride,
+    overrideValue,
+    isHistoricalDenoiserInspection: dl.isHistoricalInspection,
+    matchesCurrentContextBoundary: dl.matchesCurrentContextBoundary,
+    sourceRecordIndex: dl.sourceRecordIndex,
+    sourceBlockId: dl.sourceBlockId,
+    sourceRefinementIndex: dl.sourceRefinementIndex,
+    sourceContextPrefixLen: dl.sourceContextPrefixLen,
+    sourceContextCacheDigest: dl.sourceContextCacheDigest,
+    historicalProvenanceWarning: dl.historicalProvenanceWarning,
     bayId,
     layerIndex,
     mixerKind,
@@ -2601,25 +2752,31 @@ export function buildTwoTowerTimestepScene(
     tokenLabel,
     hasLiveDenoiserTrace: appVecs.hasLiveTrace,
     timeConditioningFingerprint: weights.fingerprint,
-    phi: bypassed ? null : Object.freeze(Array.from(phi)),
-    tRepr: bypassed ? null : Object.freeze(Array.from(tRepr)),
-    tEmb: bypassed ? null : Object.freeze(Array.from(tEmb)),
+    phi: sheetsDimmed ? null : Object.freeze(Array.from(phi)),
+    tRepr: sheetsDimmed ? null : Object.freeze(Array.from(tRepr)),
+    tEmb: sheetsDimmed ? null : Object.freeze(Array.from(tEmb)),
     shift: layerMod ? Object.freeze(Array.from(layerMod.shift)) : null,
     scale: layerMod ? Object.freeze(Array.from(layerMod.scale)) : null,
     gate: layerMod ? Object.freeze(Array.from(layerMod.gate)) : null,
     scaleShiftTable: Object.freeze(Array.from(weights.scaleShiftTables[layerIndex])),
   });
 
-  const warningBanner = !view.snapshotIntegrity.valid
-    ? `Context snapshot integrity error: ${view.snapshotIntegrity.error}`
-    : bypassed
-      ? bypassReason
-      : null;
+  const warningParts: string[] = [];
+  if (!view.snapshotIntegrity.valid) {
+    warningParts.push(`Context snapshot integrity error: ${view.snapshotIntegrity.error}`);
+  }
+  if (dl.historicalProvenanceWarning !== null) {
+    warningParts.push(dl.historicalProvenanceWarning);
+  }
+  if (bypassReason !== null) {
+    warningParts.push(bypassReason);
+  }
+  const warningBanner = warningParts.length > 0 ? warningParts.join(' ') : null;
 
   const packed = b.pack();
   const atlasKey =
-    `tt-time|${view.model.twoTowerFingerprint}|${executionId}|b${bayId}|tok${localTokenIndex}|` +
-    `${bypassed ? 'bypassed' : tModel!.toFixed(6)}`;
+    `tt-time|${view.model.twoTowerFingerprint}|${executionId}|${conditioningMode}|src${dl.sourceRecordIndex ?? 'none'}|b${bayId}|tok${localTokenIndex}|` +
+    `${sheetsDimmed ? conditioningMode : tModel!.toFixed(6)}`;
 
   return {
     viewMode: 'timestep',

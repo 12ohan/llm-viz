@@ -242,8 +242,9 @@ describe('Stage TT3 Wave 3 · Dedicated Timestep Conditioning Cutaway', () => {
     expect(arDiag.scaleL2).toBe(0);
     expect(arDiag.gateL2).toBe(0);
     expect(arDiag.finalNormModulated).toBe(false);
-    expect(arDiag.statusLabel).toContain('BYPASSED in Context AR / Mock-AR (t = null)');
-    expect(arScene.warningBanner).toContain('BYPASSED in Context AR / Mock-AR (t = null)');
+    expect(arDiag.conditioningMode).toBe('bypassed_ar');
+    expect(arDiag.statusLabel).toContain('BYPASSED in Context AR (t = null)');
+    expect(arScene.warningBanner).toContain('BYPASSED in Context AR (t = null)');
 
     // Modulation sheets are explicitly dimmed when bypassed
     const scalarIdx = arScene.solidPickBoxes.findIndex((b) => b.partId === 't-scalar');
@@ -266,8 +267,9 @@ describe('Stage TT3 Wave 3 · Dedicated Timestep Conditioning Cutaway', () => {
     expect(mockDiag.tModel).toBeNull();
     expect(mockDiag.modulationOrder).toBe('norm_then_modulate');
     expect(mockDiag.finalNormModulated).toBe(false);
-    expect(mockDiag.statusLabel).toContain('BYPASSED in Context AR / Mock-AR (t = null)');
-    expect(mockScene.warningBanner).toContain('BYPASSED in Context AR / Mock-AR (t = null)');
+    expect(mockDiag.conditioningMode).toBe('bypassed_mock_ar');
+    expect(mockDiag.statusLabel).toContain('BYPASSED in Mock-AR (t = null)');
+    expect(mockScene.warningBanner).toContain('BYPASSED in Mock-AR (t = null)');
   });
 });
 

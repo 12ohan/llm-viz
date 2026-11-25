@@ -123,6 +123,7 @@ import type { ActiveSheetCellGrid, CellPopoverSpec } from '../../ui/overlay';
 import type { TwoTowerTraceOrigin } from '../contracts';
 import type { TwoTowerSession } from '../session';
 import {
+  TWOTOWER_MINI_MODEL_INVENTORY,
   buildTwoTowerSelectionIdentity,
   resolveNearestBayOfKind,
   resolveTwoTowerSessionViewState,
@@ -205,6 +206,15 @@ export interface PairedGqaDiagnostics {
   readonly contextTraceStatus: 'available' | 'pruned_unavailable';
   readonly contextTraceOrigin: 'context_computed' | 'context_reconstructed' | 'persistent_cache';
   readonly denoiserPassStatus: 'active_on_record' | 'historical_prior_record' | 'none_yet';
+  readonly currentContextPrefixLen: number;
+  readonly denoiserConditioningPrefixLen: number | null;
+  readonly denoiserSourceContextCacheDigest: string | null;
+  readonly denoiserSourceRecordIndex: number | null;
+  readonly denoiserSourceBlockId: number | null;
+  readonly denoiserSourceRefinementIndex: number | null;
+  readonly isHistoricalDenoiserInspection: boolean;
+  readonly matchesCurrentContextBoundary: boolean;
+  readonly historicalProvenanceWarning: string | null;
   readonly hasDenoiserPreNormMod: boolean;
   readonly hasDenoiserResidualGate: boolean;
   readonly conditioningOwnerRole: 'context_tower';
@@ -215,6 +225,14 @@ export interface PairedGqaDiagnostics {
   readonly denoiserParameterFingerprint: string;
   readonly prefixKvReveals: readonly PairedGqaKvRevealRecord[];
   readonly blockKvReveals: readonly PairedGqaKvRevealRecord[];
+  readonly modelGqaInventory: {
+    readonly queryHeads: number;
+    readonly kvHeads: number;
+    readonly queriesPerKvGroup: number;
+    readonly headDim: number;
+    readonly displayedScoreHeads: readonly [number, number];
+    readonly displayedScoreHeadCount: 2;
+  };
   readonly atlasDimensions: readonly [number, number];
   readonly atlasPrimaryMaskedCells: number;
   readonly atlasSecondaryMaskedCells: number;
@@ -536,18 +554,20 @@ function augmentGqaFormulaWithProvenance(
   base: GqaCellFormula,
   tower: 'context' | 'denoiser',
   bayId: number,
+  historicalPrefixNote?: string | null,
 ): GqaCellFormula {
   const towerLabel = tower === 'denoiser' ? 'Denoiser Tower' : 'Context Tower';
   const P = sim.prefixTokens;
   let provenanceTag = '';
+  const histQualifier = historicalPrefixNote ? ` [${historicalPrefixNote}]` : '';
 
   if (base.cell.tensor === 'kv_k' || base.cell.tensor === 'kv_v') {
     const k = base.cell.tokenIndex ?? 0;
     provenanceTag =
       tower === 'denoiser'
         ? k < P
-          ? `Inherited Context Prefix KV (pos ${k})`
-          : `Denoiser Scratch Block KV (pos ${k})`
+          ? `Inherited Context Prefix KV (pos ${k}${histQualifier})`
+          : `Denoiser Scratch Block KV (pos ${k}${histQualifier})`
         : k < P
           ? `Inherited Context Prefix KV (pos ${k})`
           : `Context Segment KV (pos ${k})`;
@@ -556,8 +576,8 @@ function augmentGqaFormulaWithProvenance(
     const keyOrigin =
       tower === 'denoiser'
         ? k < P
-          ? `Inherited Context Prefix KV (pos ${k})`
-          : `Denoiser Scratch Block KV (pos ${k})`
+          ? `Inherited Context Prefix KV (pos ${k}${histQualifier})`
+          : `Denoiser Scratch Block KV (pos ${k}${histQualifier})`
         : k < P
           ? `Inherited Context Prefix KV (pos ${k})`
           : `Context Segment KV (pos ${k})`;
@@ -567,9 +587,11 @@ function augmentGqaFormulaWithProvenance(
         : 'Causal mask (k <= P + q)';
     provenanceTag = `${keyOrigin} · ${maskDesc}`;
   } else if (base.cell.tensor === 'rmsnorm' && sim.X_mod) {
-    provenanceTag = 'Pre-RMSNorm AdaLN modulated (X → X_mod → RMSNorm)';
+    provenanceTag = `Pre-RMSNorm AdaLN modulated (X → X_mod → RMSNorm)${histQualifier}`;
   } else if (base.cell.tensor === 'residual' && sim.residualGateApplied) {
-    provenanceTag = 'Outer AdaLN residual gate active (unmodulated X preserved)';
+    provenanceTag = `Outer AdaLN residual gate active (unmodulated X preserved)${histQualifier}`;
+  } else if (historicalPrefixNote && tower === 'denoiser') {
+    provenanceTag = historicalPrefixNote;
   }
 
   return {
@@ -649,11 +671,13 @@ function buildPairedGqaCellPopover(
     readonly role: 'indigo' | 'teal';
   }[],
   focusedAccumulation?: FocusedAccumulationResult | null,
+  historicalPrefixTag?: string | null,
 ): CellPopoverSpec {
   const cell = clampCellToSim(sim, formula.cell);
   const P = sim.prefixTokens;
   const K = sim.keyTokens;
   const { dHead } = sim;
+  const histSuffix = historicalPrefixTag && tower === 'denoiser' ? ` · ${historicalPrefixTag}` : '';
 
   let coordLabel = formula.coordLabel;
   let equation = formula.equation;
@@ -670,8 +694,8 @@ function buildPairedGqaCellPopover(
     const keySourceTag =
       tower === 'denoiser'
         ? k < P
-          ? `Inherited Context Prefix KV (pos ${k})`
-          : `Denoiser Scratch Block KV (pos ${k})`
+          ? `Inherited Context Prefix KV (pos ${k}${histSuffix})`
+          : `Denoiser Scratch Block KV (pos ${k}${histSuffix})`
         : `Context KV (pos ${k})`;
     coordLabel = `[q=t${qAbs}, k=t${k} · ${keySourceTag}]`;
     if (!visible) {
@@ -702,9 +726,9 @@ function buildPairedGqaCellPopover(
     const name = cell.tensor === 'kv_k' ? `K${g}` : `V${g}`;
     const srcLabel =
       k < P
-        ? `Inherited Context Prefix KV (pos ${k})`
+        ? `Inherited Context Prefix KV (pos ${k}${histSuffix})`
         : tower === 'denoiser'
-          ? `Denoiser Scratch Block KV (pos ${k})`
+          ? `Denoiser Scratch Block KV (pos ${k}${histSuffix})`
           : `Context Segment KV (pos ${k})`;
     coordLabel = `[${name} t${k}, d=${r}]`;
     equation = k < P ? `${srcLabel} (read-only · 0 compute)` : `${srcLabel} = W_${cell.tensor === 'kv_k' ? 'K' : 'V'}·U`;
@@ -1061,7 +1085,14 @@ export function buildTwoTowerPairedGqaScene(
     };
   }
 
-  // Explicit 4-length distinction
+  const dl = view.denoiserLookup;
+  const isHistoricalDenoiser = dl.isHistoricalInspection;
+  const matchesCurrentBoundary = dl.matchesCurrentContextBoundary;
+  const historicalBoundaryMismatch = isHistoricalDenoiser && !matchesCurrentBoundary;
+  const currentContextPrefixLen = view.committedPrefixLen;
+  const denoiserConditioningPrefixLen = dl.sourceContextPrefixLen;
+
+  // Explicit 4-length distinction (NEVER relabeling a prior Denoiser pass's P_cond as current Context P!)
   const allocatedKvCapacity = view.kvCapacity;
   const queryLen =
     denoiserSim !== null
@@ -1072,15 +1103,19 @@ export function buildTwoTowerPairedGqaScene(
   const contextPrefixKvLen =
     denoiserSim !== null
       ? denoiserSim.prefixTokens
-      : view.committedPrefixLen;
+      : currentContextPrefixLen;
   const blockKvLen = denoiserSim !== null ? denoiserSim.tokens : 0;
   const totalAttendedKvLen =
     denoiserSim !== null
       ? denoiserSim.keyTokens
       : contextSim !== null
         ? contextSim.keyTokens
-        : view.committedPrefixLen;
+        : currentContextPrefixLen;
   const unusedKvCapacity = Math.max(0, allocatedKvCapacity - totalAttendedKvLen);
+  const historicalTag =
+    isHistoricalDenoiser && dl.pass !== null
+      ? `Historical Rec #${dl.sourceRecordIndex} (b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'}, ${dl.pass.passExecutionId}, P_cond=${denoiserConditioningPrefixLen ?? contextPrefixKvLen})`
+      : null;
 
   // Resolve active inspection target & stepper state
   const stepperStep =
@@ -1148,7 +1183,15 @@ export function buildTwoTowerPairedGqaScene(
     activeSim !== null && activeCell !== null ? describeCellFormula(activeSim, activeCell) : null;
   const activeFormula =
     rawFormula !== null && activeSim !== null
-      ? augmentGqaFormulaWithProvenance(activeSim, rawFormula, activeTower, bayId)
+      ? augmentGqaFormulaWithProvenance(
+          activeSim,
+          rawFormula,
+          activeTower,
+          bayId,
+          historicalBoundaryMismatch && activeTower === 'denoiser'
+            ? `Historical P_cond=${contextPrefixKvLen} ≠ current Context P=${currentContextPrefixLen}, Rec #${dl.sourceRecordIndex}`
+            : null,
+        )
       : null;
 
   const focusedAccumulation: FocusedAccumulationResult | null =
@@ -1243,15 +1286,17 @@ export function buildTwoTowerPairedGqaScene(
     b.addBoxFrameXZ(ctxXMin, -3.65, ctxXMax, 3.65, BASE_Y - 0.03, 1.0, LINE_STYLE_GUIDE, 0.42);
     b.landmarks.push({
       id: 'ctx-wing-header',
-      label: 'Context Tower Provenance (Causal)',
+      label: historicalBoundaryMismatch
+        ? `Context Tower Provenance · Current P=${currentContextPrefixLen} (≠ Prior Denoiser P_cond=${contextPrefixKvLen})`
+        : 'Context Tower Provenance (Causal)',
       sublabel:
         ctxLookup.status === 'available'
-          ? `origin=${ctxLookup.traceOrigin} · KV[0..${Math.max(0, view.committedPrefixLen - 1)}] (${view.committedPrefixLen}/${allocatedKvCapacity} slots)`
-          : `Trace pruned · Persistent KV cache [0..${Math.max(0, view.committedPrefixLen - 1)}] authoritative`,
+          ? `origin=${ctxLookup.traceOrigin} · KV[0..${Math.max(0, currentContextPrefixLen - 1)}] (${currentContextPrefixLen}/${allocatedKvCapacity} slots) · Model: 32Q/2KV dHead=4 (2 score slices: ${fmtHead(effG0)}, ${fmtHead(effG1)})`
+          : `Trace pruned · Persistent KV cache [0..${Math.max(0, currentContextPrefixLen - 1)}] authoritative`,
       world: [ctxX(0.5), 2.85, -3.65],
       bayId,
       partId: 'ctx-kv-cache',
-      tone: ctxLookup.status === 'available' ? 'cyan' : 'gold',
+      tone: historicalBoundaryMismatch ? 'gold' : ctxLookup.status === 'available' ? 'cyan' : 'gold',
       align: 'center',
       tier: 'primary',
     });
@@ -2078,19 +2123,27 @@ export function buildTwoTowerPairedGqaScene(
       b.landmarks.push(
         {
           id: 'den-wing-header',
-          label: `Denoiser Tower (${isBidirectional ? 'Bidirectional Block' : 'Mock-AR Causal'})`,
-          sublabel: `Q=${queryLen} · Prefix KV=${contextPrefixKvLen} · Block KV=${blockKvLen} · Capacity=${allocatedKvCapacity}`,
+          label: historicalBoundaryMismatch
+            ? `HISTORICAL Denoiser Tower (Rec #${dl.sourceRecordIndex}, P_cond=${contextPrefixKvLen} ≠ P=${currentContextPrefixLen})`
+            : `Denoiser Tower (${isBidirectional ? 'Bidirectional Block' : 'Mock-AR Causal'})`,
+          sublabel:
+            (historicalBoundaryMismatch ? `${historicalTag} · ` : '') +
+            `Q=${queryLen} · Prefix KV=${contextPrefixKvLen} · Block KV=${blockKvLen} · Capacity=${allocatedKvCapacity} · Model 32Q/2KV (2 score slices: ${fmtHead(effG0)}, ${fmtHead(effG1)})`,
           world: [denX(0.5), 2.95, -3.75],
           bayId,
           partId: 'den-scores-g0',
-          tone: 'default',
+          tone: historicalBoundaryMismatch ? 'gold' : 'default',
           align: 'center',
           tier: 'primary',
         },
         {
           id: 'den-kv-bank-landmark',
-          label: `Concatenated KV (${contextPrefixKvLen} Prefix + ${blockKvLen} Block / ${allocatedKvCapacity} Cap)`,
-          sublabel: `Prefix [0..${Math.max(0, P - 1)}] inherited read-only · Block [${P}..${K - 1}] denoiser_scratch · [${K}..${allocatedKvCapacity - 1}] unused`,
+          label: historicalBoundaryMismatch
+            ? `Historical Concatenated KV (Prior Prefix KV[0..${Math.max(0, P - 1)}] P_cond=${contextPrefixKvLen} ≠ P=${currentContextPrefixLen} + ${blockKvLen} Block / ${allocatedKvCapacity} Cap)`
+            : `Concatenated KV (${contextPrefixKvLen} Prefix + ${blockKvLen} Block / ${allocatedKvCapacity} Cap)`,
+          sublabel: historicalBoundaryMismatch
+            ? `Prior pass prefix [0..${Math.max(0, P - 1)}] from Rec #${dl.sourceRecordIndex} (NOT current Context P=${currentContextPrefixLen}) · Block [${P}..${K - 1}] denoiser_scratch`
+            : `Prefix [0..${Math.max(0, P - 1)}] inherited read-only · Block [${P}..${K - 1}] denoiser_scratch · [${K}..${allocatedKvCapacity - 1}] unused`,
           world: [xKTrack, 1.35, -3.35],
           bayId,
           partId: 'den-prefix-kv',
@@ -2166,12 +2219,12 @@ export function buildTwoTowerPairedGqaScene(
   // 3. CENTER LOGICAL CONDITIONING BRIDGE (`x ∈ [-3.5, -1.8]` in paired mode)
   // ==========================================================================
   const prefixSliceDesc =
-    view.modeAtRecord === 'mock_ar'
+    dl.pass?.mode === 'mock_ar' || (dl.pass === null && view.modeAtRecord === 'mock_ar')
       ? `KV[0..${Math.max(0, contextPrefixKvLen - 1)}] (KV[:-1] Mock-AR)`
       : `KV[0..${Math.max(0, contextPrefixKvLen - 1)}]`;
-  const bridgeNote =
-    `Logical read-only prefix conditioning (${prefixSliceDesc}, ownerRole: 'context_tower', ` +
-    `consumerRole: 'denoiser_tower') — NOT requiring a physical inter-device copy.`;
+  const bridgeNote = historicalBoundaryMismatch
+    ? `Historical logical read-only prefix conditioning (${prefixSliceDesc}, P_cond=${contextPrefixKvLen} from ${historicalTag}, ownerRole: 'context_tower', consumerRole: 'denoiser_tower') — does NOT match current Context boundary P=${currentContextPrefixLen}; NOT requiring a physical inter-device copy.`
+    : `Logical read-only prefix conditioning (${prefixSliceDesc}, ownerRole: 'context_tower', consumerRole: 'denoiser_tower') — NOT requiring a physical inter-device copy.`;
 
   if (towerFocus === 'paired') {
     // Divider lines & bridge plaque in x ∈ [-3.5, -1.8]
@@ -2233,8 +2286,12 @@ export function buildTwoTowerPairedGqaScene(
 
     b.landmarks.push({
       id: 'conditioning-bridge-landmark',
-      label: `Logical Read-Only Prefix Bridge (${prefixSliceDesc})`,
-      sublabel: "ownerRole: 'context_tower' · Zero physical inter-device copy required",
+      label: historicalBoundaryMismatch
+        ? `Historical Read-Only Prefix Bridge (${prefixSliceDesc} · P_cond=${contextPrefixKvLen} ≠ P=${currentContextPrefixLen})`
+        : `Logical Read-Only Prefix Bridge (${prefixSliceDesc})`,
+      sublabel: historicalBoundaryMismatch
+        ? `${historicalTag} · Prior conditioning does NOT belong to current Context P=${currentContextPrefixLen}`
+        : "ownerRole: 'context_tower' · Zero physical inter-device copy required",
       world: [-2.65, 1.35, 0],
       bayId,
       partId: 'conditioning-bridge',
@@ -2276,6 +2333,9 @@ export function buildTwoTowerPairedGqaScene(
         targetSpan3D.frontPoint,
         sourceWorlds,
         focusedAccumulation,
+        historicalBoundaryMismatch
+          ? `Historical P_cond=${contextPrefixKvLen} ≠ P=${currentContextPrefixLen}, Rec #${dl.sourceRecordIndex}`
+          : null,
       );
     }
   }
@@ -2297,14 +2357,17 @@ export function buildTwoTowerPairedGqaScene(
   // ==========================================================================
   // 5. PART CATALOG, SELECTION IDENTITY, BADGES, WARNINGS & DIAGNOSTICS
   // ==========================================================================
+  const miniGqa = TWOTOWER_MINI_MODEL_INVENTORY.gqa;
   const partCatalog: Record<string, CutawayPartInfo> = {
     'ctx-kv-cache': {
       id: 'ctx-kv-cache',
       title: 'Context Persistent KV Cache',
       badge: 'ownerRole: context_tower',
-      summary: `Persistent causal KV cache owned exclusively by Context Tower (${view.committedPrefixLen}/${allocatedKvCapacity} populated slots).`,
+      summary: `Persistent causal KV cache owned exclusively by Context Tower (${currentContextPrefixLen}/${allocatedKvCapacity} populated slots).`,
       specs: [
-        `contextPrefixKvLen = ${contextPrefixKvLen}`,
+        `Current Context prefix: KV[0..${Math.max(0, currentContextPrefixLen - 1)}] (P = ${currentContextPrefixLen})`,
+        `Denoiser pass conditioning prefix: contextPrefixKvLen = ${contextPrefixKvLen}${historicalBoundaryMismatch ? ` (historical Rec #${dl.sourceRecordIndex} ≠ current P=${currentContextPrefixLen})` : ''}`,
+        `Complete miniature GQA inventory: ${miniGqa.queryHeads} query heads / ${miniGqa.kvHeads} KV heads, head width dHead = ${miniGqa.headDim} (16:1 grouping)`,
         `allocatedKvCapacity = ${allocatedKvCapacity}`,
         `Context fingerprint: ${view.model.contextModel.parameterFingerprint}`,
       ],
@@ -2312,44 +2375,52 @@ export function buildTwoTowerPairedGqaScene(
     'conditioning-bridge': {
       id: 'conditioning-bridge',
       title: 'Logical Read-Only Conditioning Bridge',
-      badge: 'Zero Physical Copy',
+      badge: historicalBoundaryMismatch ? 'Historical Conditioning · Mismatch' : 'Zero Physical Copy',
       summary: bridgeNote,
       specs: [
-        `Exposed prefix slice: ${prefixSliceDesc}`,
+        `Exposed prefix slice: ${prefixSliceDesc} (P_cond=${contextPrefixKvLen}, current Context P=${currentContextPrefixLen})`,
+        ...(historicalTag ? [`Historical pass: ${historicalTag}`] : []),
         "ownerRole: 'context_tower' → consumerRole: 'denoiser_tower'",
         'Logical read-only view — no inter-device physical KV duplication required',
       ],
     },
     'den-prefix-kv': {
       id: 'den-prefix-kv',
-      title: 'Inherited Context Prefix KV [0..P−1]',
-      badge: 'persistent_cache · Read-Only',
-      summary: 'Read-only Context prefix KV slices referenced by Denoiser attention; NEVER recomputed or ghosted during projection reveal.',
+      title: historicalBoundaryMismatch
+        ? `Historical Inherited Prefix KV [0..${Math.max(0, contextPrefixKvLen - 1)}] (P_cond=${contextPrefixKvLen} ≠ P=${currentContextPrefixLen})`
+        : `Inherited Context Prefix KV [0..${Math.max(0, contextPrefixKvLen - 1)}]`,
+      badge: historicalBoundaryMismatch ? 'Historical Prefix · Prior Boundary' : 'persistent_cache · Read-Only',
+      summary: historicalBoundaryMismatch
+        ? `Read-only Context prefix KV[0..${Math.max(0, contextPrefixKvLen - 1)}] read by ${historicalTag}; does NOT belong to current Context boundary P=${currentContextPrefixLen}.`
+        : 'Read-only Context prefix KV slices referenced by Denoiser attention; NEVER recomputed or ghosted during projection reveal.',
       specs: [
-        `contextPrefixKvLen = ${contextPrefixKvLen}`,
+        `contextPrefixKvLen = ${contextPrefixKvLen} (current Context P = ${currentContextPrefixLen})`,
+        ...(dl.sourceContextCacheDigest ? [`Source Context cache digest: ${dl.sourceContextCacheDigest}`] : []),
         'Reveal policy: SHEET_REVEAL_NONE across all steps 0..5',
       ],
     },
     'den-block-kv': {
       id: 'den-block-kv',
-      title: 'Denoiser Scratch Block KV [P..P+B−1]',
-      badge: 'denoiser_scratch · Ephemeral',
+      title: `Denoiser Scratch Block KV [${contextPrefixKvLen}..${Math.max(contextPrefixKvLen, totalAttendedKvLen - 1)}]`,
+      badge: historicalBoundaryMismatch ? 'Historical Scratch · Prior Pass' : 'denoiser_scratch · Ephemeral',
       summary: 'Newly projected Denoiser K/V slices computed with independent Denoiser W_K/W_V weights and discarded between refinements.',
       specs: [
         `queryLen = ${queryLen}`,
         `blockKvLen = ${blockKvLen}`,
+        ...(historicalTag ? [`Source pass: ${historicalTag}`] : []),
         `Denoiser fingerprint: ${view.model.denoiserModel.parameterFingerprint}`,
       ],
     },
     'den-scores-g0': {
       id: 'den-scores-g0',
-      title: `Denoiser Attention Scores (${fmtHead(effG0)})`,
+      title: `Denoiser Attention Scores (${fmtHead(effG0)} — Selected Slice 1 of 2 Displayed / 32 Model Q Heads)`,
       badge: denoiserSim?.attentionMaskMode === 'bidirectional_block' ? 'Bidirectional Block' : 'Causal',
       summary:
         denoiserSim?.attentionMaskMode === 'bidirectional_block'
           ? `Full bidirectional block attention over [0..${totalAttendedKvLen - 1}] (0 masked cells).`
           : `Causal attention over [0..${totalAttendedKvLen - 1}] (k > P + q masked to −∞).`,
       specs: [
+        `Model inventory: ${miniGqa.queryHeads} miniature Q heads / ${miniGqa.kvHeads} KV heads, head width ${miniGqa.headDim}; 128×128 atlas shows 2 selected Scores/Softmax head slices (${fmtHead(effG0)}, ${fmtHead(effG1)})`,
         `Shape: [Q=${queryLen} × K=${totalAttendedKvLen}] (Prefix ${contextPrefixKvLen} + Block ${blockKvLen})`,
         `Allocated KV capacity: ${allocatedKvCapacity} (${unusedKvCapacity} unused)`,
       ],
@@ -2376,7 +2447,11 @@ export function buildTwoTowerPairedGqaScene(
         : null,
     headIndex: activeFocusHead,
     kvHeadIndex: activeFocusGrp,
-    provenanceNote: `Paired GQA Bay ${String(bayId).padStart(2, '0')} (layer ${layerIndex}) · ${activeTower.toUpperCase()} · Q=${queryLen}, Prefix=${contextPrefixKvLen}, Block=${blockKvLen}, Cap=${allocatedKvCapacity}`,
+    provenanceNote:
+      `Paired GQA Bay ${String(bayId).padStart(2, '0')} (layer ${layerIndex}) · ${activeTower.toUpperCase()} · ` +
+      `Model 32Q/2KV (dHead=4; score slices ${fmtHead(effG0)}, ${fmtHead(effG1)}) · ` +
+      `Q=${queryLen}, Prefix=${contextPrefixKvLen}, Block=${blockKvLen}, Cap=${allocatedKvCapacity}` +
+      (historicalTag ? ` · ${historicalTag}` : ''),
   });
 
   const warnings: string[] = [];
@@ -2386,12 +2461,18 @@ export function buildTwoTowerPairedGqaScene(
   if (ctxLookup.status === 'pruned_unavailable') {
     warnings.push(ctxLookup.reason);
   }
+  if (dl.historicalProvenanceWarning !== null) {
+    warnings.push(dl.historicalProvenanceWarning);
+  }
   const warningBanner = warnings.length > 0 ? warnings.join(' | ') : null;
 
   const provenanceBadges: TwoTowerProvenanceBadge[] = [
-    { label: `Bay ${String(bayId).padStart(2, '0')} (Layer ${layerIndex}) · GQA 32Q/2KV`, tone: 'shared' },
     {
-      label: `Context: ${ctxLookup.traceOrigin}`,
+      label: `Bay ${String(bayId).padStart(2, '0')} (Layer ${layerIndex}) · GQA 32Q/2KV dHead=4 (Score slices: ${fmtHead(effG0)}, ${fmtHead(effG1)})`,
+      tone: 'shared',
+    },
+    {
+      label: `Context: ${ctxLookup.traceOrigin} (P=${currentContextPrefixLen})`,
       tone: ctxLookup.status === 'available' ? 'context' : 'warn',
       origin: ctxLookup.traceOrigin,
     },
@@ -2402,9 +2483,16 @@ export function buildTwoTowerPairedGqaScene(
     },
     {
       label: `Q=${queryLen} · Prefix=${contextPrefixKvLen} · Block=${blockKvLen} · Cap=${allocatedKvCapacity}`,
-      tone: 'gold',
+      tone: historicalBoundaryMismatch ? 'warn' : 'gold',
     },
   ];
+  if (isHistoricalDenoiser) {
+    provenanceBadges.push({
+      label: `Historical Denoiser Pass · Rec #${dl.sourceRecordIndex} (b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'}, P_cond=${contextPrefixKvLen} vs P=${currentContextPrefixLen})`,
+      tone: 'warn',
+      origin: 'denoiser_scratch',
+    });
+  }
 
   const fitBounds: AABB =
     towerFocus === 'context_solo'
@@ -2435,7 +2523,16 @@ export function buildTwoTowerPairedGqaScene(
     lengths,
     contextTraceStatus: ctxLookup.status,
     contextTraceOrigin: ctxLookup.traceOrigin,
-    denoiserPassStatus: view.denoiserLookup.status,
+    denoiserPassStatus: dl.status,
+    currentContextPrefixLen,
+    denoiserConditioningPrefixLen,
+    denoiserSourceContextCacheDigest: dl.sourceContextCacheDigest,
+    denoiserSourceRecordIndex: dl.sourceRecordIndex,
+    denoiserSourceBlockId: dl.sourceBlockId,
+    denoiserSourceRefinementIndex: dl.sourceRefinementIndex,
+    isHistoricalDenoiserInspection: isHistoricalDenoiser,
+    matchesCurrentContextBoundary: matchesCurrentBoundary,
+    historicalProvenanceWarning: dl.historicalProvenanceWarning,
     hasDenoiserPreNormMod: Boolean(denoiserSim?.X_mod),
     hasDenoiserResidualGate: Boolean(denoiserSim?.residualGateApplied),
     conditioningOwnerRole: 'context_tower',
@@ -2446,6 +2543,14 @@ export function buildTwoTowerPairedGqaScene(
     denoiserParameterFingerprint: view.model.denoiserModel.parameterFingerprint,
     prefixKvReveals: Object.freeze(b.prefixKvReveals),
     blockKvReveals: Object.freeze(b.blockKvReveals),
+    modelGqaInventory: Object.freeze({
+      queryHeads: miniGqa.queryHeads,
+      kvHeads: miniGqa.kvHeads,
+      queriesPerKvGroup: miniGqa.queriesPerKvGroup,
+      headDim: miniGqa.headDim,
+      displayedScoreHeads: Object.freeze([effG0, effG1] as const),
+      displayedScoreHeadCount: 2 as const,
+    }),
     atlasDimensions: [TWOTOWER_GQA_ATLAS_WIDTH, TWOTOWER_GQA_ATLAS_HEIGHT] as const,
     atlasPrimaryMaskedCells: gqaAtlas?.primary.maskedScoreCellCount ?? 0,
     atlasSecondaryMaskedCells: gqaAtlas?.secondary?.maskedScoreCellCount ?? 0,
@@ -2453,7 +2558,7 @@ export function buildTwoTowerPairedGqaScene(
 
   const packed = b.pack();
   const valueAtlas: Rg32fValueAtlas | undefined = gqaAtlas ?? fallbackCacheAtlas ?? undefined;
-  const atlasKey = `tt-gqa:${view.identity.recordId}:b${bayId}:f${towerFocus}:g0-${effG0}:g1-${effG1}`;
+  const atlasKey = `tt-gqa:${view.identity.recordId}:${ctxExecId}:${denExecId}:b${bayId}:f${towerFocus}:g0-${effG0}:g1-${effG1}`;
 
   const displayFormula =
     activeFormula && focusedAccumulation?.active
@@ -2476,8 +2581,9 @@ export function buildTwoTowerPairedGqaScene(
     viewMode: 'paired_gqa',
     title: `Paired GQA Cutaway · Bay ${String(bayId).padStart(2, '0')} (Layer ${layerIndex})`,
     subtitle:
-      `35/65 Context Provenance → Logical Read-Only Prefix Bridge → Active Denoiser ` +
-      `(Q=${queryLen}, Prefix=${contextPrefixKvLen}, Block=${blockKvLen}, Cap=${allocatedKvCapacity})`,
+      (historicalBoundaryMismatch ? `HISTORICAL Denoiser (${historicalTag} ≠ P=${currentContextPrefixLen}) · ` : '') +
+      `35/65 Context Provenance → Logical Read-Only Prefix Bridge → Denoiser ` +
+      `(Q=${queryLen}, Prefix=${contextPrefixKvLen}, Block=${blockKvLen}, Cap=${allocatedKvCapacity} · 32Q/2KV, slices ${fmtHead(effG0)}/${fmtHead(effG1)})`,
     bayId,
     layerIndex,
     activeTowerFocus: towerFocus,
@@ -2499,7 +2605,8 @@ export function buildTwoTowerPairedGqaScene(
     stepperSteps: GQA_STEPPER_STEPS,
     provenanceBadges,
     epistemicNote:
-      'Synthetic miniature Float32 TwoTower simulation (d=8, 32Q/2KV, kvCapacity=24; not 63.2B checkpoint weights). ' +
+      'Synthetic miniature Float32 TwoTower simulation (d=8, 32 miniature GQA query heads / 2 KV heads, head width 4, kvCapacity=24; not 63.19B checkpoint weights). ' +
+      'The 128×128 atlas packs all 32 Q heads and both KV heads while displaying 2 selected Q-head slices (1 per KV group) on Scores/Softmax plates. ' +
       'Prefix KV conditioning is a logical read-only view of Context Tower memory (no physical copy required).',
     warningBanner,
     diagnostics: diagnostics as unknown as Readonly<Record<string, unknown>>,

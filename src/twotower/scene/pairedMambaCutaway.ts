@@ -133,6 +133,7 @@ import {
   type MambaPositionDecomposition,
 } from './mambaDecomposition';
 import {
+  TWOTOWER_MINI_MODEL_INVENTORY,
   buildTwoTowerSelectionIdentity,
   resolveNearestBayOfKind,
   resolveTwoTowerSessionViewState,
@@ -611,6 +612,15 @@ export interface PairedMambaDiagnostics {
   readonly refinementIndex: number | null;
   readonly sourceBoundaryDigest: string;
   readonly contextSnapshotDigest: string;
+  readonly currentContextPrefixLen: number;
+  readonly currentContextStateDigest: string;
+  readonly denoiserConditioningPrefixLen: number | null;
+  readonly denoiserSourceRecordIndex: number | null;
+  readonly denoiserSourceBlockId: number | null;
+  readonly denoiserSourceRefinementIndex: number | null;
+  readonly isHistoricalDenoiserInspection: boolean;
+  readonly matchesCurrentContextBoundary: boolean;
+  readonly historicalProvenanceWarning: string | null;
   readonly conditioningDigest: string | null;
   readonly refinementSeedInvariantNote: string;
   readonly convChannel: PairedMambaSeedChannelDiagnostics;
@@ -624,6 +634,17 @@ export interface PairedMambaDiagnostics {
   readonly causalAfterGqaNote: string;
   readonly decaySemanticsDisclaimer: string;
   readonly decomposition: MambaPositionDecomposition | null;
+  readonly modelMambaInventory: {
+    readonly heads: number;
+    readonly groups: number;
+    readonly headsPerGroup: number;
+    readonly dHead: number;
+    readonly dState: number;
+    readonly stateMatrixShape: readonly [number, number];
+    readonly displayedHeadIndex: number;
+    readonly displayedGroupIndex: number;
+    readonly atlasSelectedDecompHeadCount: 1;
+  };
   readonly atlasDimensions: readonly [number, number];
 }
 
@@ -945,15 +966,35 @@ export function buildTwoTowerPairedMambaScene(
   const denoiserSim: MambaSimResult | null =
     denoiserTrace?.kind === 'M' ? denoiserTrace.sim : null;
 
-  // Authoritative Context boundary state (conditioning seed when Denoiser ran, else persistent ctxState)
-  const conditioning = view.denoiserLookup.conditioning;
+  // Authoritative Context boundary state: strictly distinguish the conditioning seed read by
+  // the inspected Denoiser pass (`denoiserSeedBoundaryState`, e.g. H_7 at P_cond=8) from the
+  // current record's persistent Context boundary (`currentContextBoundaryState`, e.g. H_11 at P=12).
+  const dl = view.denoiserLookup;
+  const isHistoricalDenoiser = dl.isHistoricalInspection;
+  const matchesCurrentBoundary = dl.matchesCurrentContextBoundary;
+  const conditioning = dl.conditioning;
+  const currentContextBoundaryState: MambaLayerBoundaryState | null =
+    view.contextSnapshot.ctxState.mambaStates.get(bayId) ?? null;
+  const denoiserSeedBoundaryState: MambaLayerBoundaryState | null =
+    conditioning?.mambaSeedStates.get(bayId) ?? null;
   const contextBoundaryState: MambaLayerBoundaryState | null =
-    conditioning?.mambaSeedStates.get(bayId) ??
-    view.contextSnapshot.ctxState.mambaStates.get(bayId) ??
-    null;
+    denoiserSeedBoundaryState ?? currentContextBoundaryState;
 
+  const currentContextPrefixLen = view.committedPrefixLen;
+  const currentContextStateDigest = view.contextSnapshot.ctxState.stateDigest;
+  const denoiserConditioningPrefixLen = dl.sourceContextPrefixLen;
+  const seedPrefixLen =
+    denoiserSeedBoundaryState?.processedTokens ??
+    denoiserConditioningPrefixLen ??
+    currentContextPrefixLen;
+  const seedLastPos = Math.max(0, seedPrefixLen - 1);
+  const historicalBoundaryMismatch = isHistoricalDenoiser && !matchesCurrentBoundary;
   const sourceBoundaryDigest =
-    conditioning?.sourceStateDigest ?? view.contextSnapshot.ctxState.stateDigest;
+    dl.sourceContextCacheDigest ?? currentContextStateDigest;
+  const historicalTag =
+    isHistoricalDenoiser && dl.pass !== null
+      ? `Historical Rec #${dl.sourceRecordIndex} (b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'}, ${dl.pass.passExecutionId}, P_cond=${seedPrefixLen})`
+      : null;
 
   const requestedCell = options?.hoveredCell ?? options?.selectedCell ?? null;
   let activeTower: 'context' | 'denoiser' =
@@ -1128,15 +1169,19 @@ export function buildTwoTowerPairedMambaScene(
 
     b.landmarks.push({
       id: 'ctx-mamba-header',
-      label: 'Context Tower Provenance (2 Persistent Channels)',
+      label: historicalBoundaryMismatch
+        ? `Context Wing · Current P=${currentContextPrefixLen} vs Historical Seed P_cond=${seedPrefixLen}`
+        : 'Context Tower Provenance (2 Persistent Channels)',
       sublabel:
-        ctxLookup.status === 'available'
-          ? `origin=${ctxLookup.traceOrigin} · Channel 1: 4-col Conv1D + Channel 2: 16×[4×4] FP32 SSM`
-          : 'Historical trace pruned · Persistent Conv1D & FP32 SSM boundary snapshots remain authoritative',
+        historicalBoundaryMismatch
+          ? `Right wing shows ${historicalTag}; boundary H_${seedLastPos} below is that prior seed (NOT current Context H_${Math.max(0, currentContextPrefixLen - 1)})`
+          : ctxLookup.status === 'available'
+            ? `origin=${ctxLookup.traceOrigin} · Channel 1: 4-col Conv1D + Channel 2: 16 heads × [4×4] FP32 SSM (8 groups)`
+            : 'Historical trace pruned · Persistent Conv1D & FP32 SSM boundary snapshots remain authoritative',
       world: [ctxX(0.5), 2.85, -3.65],
       bayId,
       partId: 'ctx-ssm-state',
-      tone: ctxLookup.status === 'available' ? 'cyan' : 'gold',
+      tone: historicalBoundaryMismatch ? 'gold' : ctxLookup.status === 'available' ? 'cyan' : 'gold',
       align: 'center',
       tier: 'primary',
     });
@@ -1220,8 +1265,12 @@ export function buildTwoTowerPairedMambaScene(
     b.landmarks.push(
       {
         id: 'ctx-conv-channel-landmark',
-        label: 'Channel 1 · Conv1D 4-Col History',
-        sublabel: 'persistent_cache · BF16 (prod) · slots [0..3] (lags 3,2,1 enter pos 0)',
+        label: historicalBoundaryMismatch
+          ? `Channel 1 · Historical Conv1D Seed (P_cond=${seedPrefixLen} ≠ P=${currentContextPrefixLen})`
+          : 'Channel 1 · Conv1D 4-Col History',
+        sublabel: historicalBoundaryMismatch
+          ? `${historicalTag} · NOT current Context P=${currentContextPrefixLen} cache · slots [0..3]`
+          : 'persistent_cache · BF16 (prod) · slots [0..3] (lags 3,2,1 enter pos 0)',
         world: [xConvCtx, 1.05, zConvCtx + 0.95],
         bayId,
         partId: 'ctx-conv-state',
@@ -1231,12 +1280,16 @@ export function buildTwoTowerPairedMambaScene(
       },
       {
         id: 'ctx-ssm-channel-landmark',
-        label: `Channel 2 · FP32 SSM H_{P−1} (${formatMambaHeadId(activeHead)} + 16h Bank)`,
-        sublabel: 'persistent_cache · FP32 (prod) · 16 × [4×4] miniature / 64 × [64×128] prod',
+        label: historicalBoundaryMismatch
+          ? `Channel 2 · Historical FP32 SSM H_${seedLastPos} (P_cond=${seedPrefixLen} ≠ P=${currentContextPrefixLen}, ${formatMambaHeadId(activeHead)} of 16h)`
+          : `Channel 2 · FP32 SSM H_${seedLastPos} (${formatMambaHeadId(activeHead)} slice of 16h / 8g Bank)`,
+        sublabel: historicalBoundaryMismatch
+          ? `${historicalTag} · Model: 16 heads / 8 groups / 4×4 SSM (1 selected head slice; NOT current H_${Math.max(0, currentContextPrefixLen - 1)})`
+          : 'persistent_cache · FP32 (prod) · Model: 16 Mamba heads / 8 groups / 4×4 SSM (64 × [64×128] prod)',
         world: [xSsmCtx, PEDESTAL_Y + 1.05, zSsmCtx - 0.95],
         bayId,
         partId: 'ctx-ssm-state',
-        tone: 'cyan',
+        tone: historicalBoundaryMismatch ? 'gold' : 'cyan',
         align: 'center',
         tier: 'primary',
       },
@@ -1922,15 +1975,19 @@ export function buildTwoTowerPairedMambaScene(
       b.landmarks.push(
         {
           id: 'den-mamba-header',
-          label: `Denoiser Mamba-2 · Bay ${String(bayId).padStart(2, '0')} (${formatMambaHeadId(activeHead)}, localPos=${localPos}/${T - 1})`,
+          label: historicalBoundaryMismatch
+            ? `HISTORICAL Denoiser Mamba-2 · Bay ${String(bayId).padStart(2, '0')} (Rec #${dl.sourceRecordIndex}, P_cond=${seedPrefixLen} ≠ P=${currentContextPrefixLen})`
+            : `Denoiser Mamba-2 · Bay ${String(bayId).padStart(2, '0')} (${formatMambaHeadId(activeHead)} of 16h, localPos=${localPos}/${T - 1})`,
           sublabel:
+            (historicalBoundaryMismatch ? `${historicalTag} · ` : '') +
+            `Model: 16 heads / 8 groups / 4×4 SSM (1 selected slice) · ` +
             `Conv1D: ${decomposition.convWindow.inheritedHistoryColumnCount} ctx + ${decomposition.convWindow.blockColumnCount} blk cols · ` +
             `dA=${decomposition.decayFactor.toFixed(3)} · Π dA=${decomposition.cumulativeDecay.toFixed(3)} · ` +
             (isAfterFirstBidirectionalGqa ? 'Post-Bay-06 GQA (inputs may mix later block pos)' : 'Pre-Bay-06 GQA (strictly causal)'),
           world: [denX(0.5), 2.95, -3.75],
           bayId,
           partId: 'den-h-curr',
-          tone: 'default',
+          tone: historicalBoundaryMismatch ? 'gold' : 'default',
           align: 'center',
           tier: 'primary',
         },
@@ -2052,8 +2109,12 @@ export function buildTwoTowerPairedMambaScene(
 
     b.landmarks.push({
       id: 'mamba-dual-bridge-landmark',
-      label: 'Dual-Channel Boundary Bridge (Conv1D + FP32 SSM)',
-      sublabel: refinementSeedInvariantNote,
+      label: historicalBoundaryMismatch
+        ? `Historical Boundary Bridge (H_${seedLastPos} @ P_cond=${seedPrefixLen} ≠ P=${currentContextPrefixLen})`
+        : `Dual-Channel Boundary Bridge (Conv1D + FP32 SSM H_${seedLastPos})`,
+      sublabel: historicalBoundaryMismatch
+        ? `${historicalTag} · Prior seed does NOT belong to current Context boundary P=${currentContextPrefixLen}`
+        : refinementSeedInvariantNote,
       world: [-2.65, 1.92, 0.10],
       bayId,
       partId: 'bridge-mamba-ssm',
@@ -2118,8 +2179,16 @@ export function buildTwoTowerPairedMambaScene(
     const gPrev = gridFromSheet4x4(
       b.sheetRegistry.get('den:h_prev'),
       decomposition.H_prev,
-      localPos === 0 ? `H_init ${hTag} (Context)` : `H_prev ${hTag}`,
-      localPos === 0 ? `boundary t${Math.max(0, decomposition.absoluteTokenPosition - 1)}` : `pos ${localPos - 1}`,
+      localPos === 0
+        ? historicalBoundaryMismatch
+          ? `H_init ${hTag} (Historical P_cond=${seedPrefixLen})`
+          : `H_init ${hTag} (Context H_${seedLastPos})`
+        : `H_prev ${hTag}`,
+      localPos === 0
+        ? historicalBoundaryMismatch
+          ? `prior H_${seedLastPos} ≠ P=${currentContextPrefixLen}`
+          : `boundary t${seedLastPos}`
+        : `pos ${localPos - 1}`,
     );
     const gRet = gridFromSheet4x4(
       b.sheetRegistry.get('den:inherited_retention'),
@@ -2144,7 +2213,9 @@ export function buildTwoTowerPairedMambaScene(
   // ==========================================================================
   const convChannelDiag: PairedMambaSeedChannelDiagnostics = Object.freeze({
     channelId: 'mamba_conv_channel',
-    label: 'Conv1D 4-Column Raw History Cache',
+    label: historicalBoundaryMismatch
+      ? `Historical Conv1D 4-Column Seed (P_cond=${seedPrefixLen} ≠ P=${currentContextPrefixLen})`
+      : 'Conv1D 4-Column Raw History Cache',
     ownerRole: 'context_tower',
     consumerRole: 'denoiser_tower',
     traceOrigin: 'persistent_cache',
@@ -2155,55 +2226,71 @@ export function buildTwoTowerPairedMambaScene(
 
   const ssmChannelDiag: PairedMambaSeedChannelDiagnostics = Object.freeze({
     channelId: 'mamba_ssm_channel',
-    label: 'FP32 SSM Boundary Seed H_{P-1}',
+    label: historicalBoundaryMismatch
+      ? `Historical FP32 SSM Seed H_${seedLastPos} (P_cond=${seedPrefixLen} ≠ P=${currentContextPrefixLen})`
+      : `FP32 SSM Boundary Seed H_${seedLastPos}`,
     ownerRole: 'context_tower',
     consumerRole: 'denoiser_tower',
     traceOrigin: 'persistent_cache',
     storageDtypeMetadata: 'fp32',
-    shapeSummary: '16 × [4×4] miniature FP32 state (64 × [64×128] production)',
+    shapeSummary: 'Model inventory: 16 Mamba heads, 8 groups, 4×4 per-head FP32 SSM state (64 × [64×128] prod); 1 selected head displayed in 4×4 decomposition',
     sourceBoundaryDigest,
   });
 
   const partCatalog: Record<string, CutawayPartInfo> = {
     'ctx-conv-state': {
       id: 'ctx-conv-state',
-      title: 'Context Persistent Conv1D Raw History (Channel 1)',
-      badge: 'persistent_cache · BF16 (prod)',
-      summary: 'Dedicated 4-column Conv1D rolling cache owned by Context Tower; distinct from FP32 SSM state.',
+      title: historicalBoundaryMismatch
+        ? `Historical Context Conv1D Seed (P_cond=${seedPrefixLen}, Channel 1)`
+        : 'Context Persistent Conv1D Raw History (Channel 1)',
+      badge: historicalBoundaryMismatch
+        ? `Historical Seed · P_cond=${seedPrefixLen} ≠ P=${currentContextPrefixLen}`
+        : 'persistent_cache · BF16 (prod)',
+      summary: historicalBoundaryMismatch
+        ? `Historical 4-column Conv1D seed read by ${historicalTag} (P_cond=${seedPrefixLen}); does NOT represent current Context boundary P=${currentContextPrefixLen}.`
+        : 'Dedicated 4-column Conv1D rolling cache owned by Context Tower; distinct from FP32 SSM state.',
       specs: [
         '4 allocated columns (slots [0..3], slot 3 = newest prior token)',
         'At localPos=0, 3 preceding raw history columns (lags 3, 2, 1) enter alongside xBC_pre[0]',
+        `Seed boundary prefix: P_cond=${seedPrefixLen} (current Context P=${currentContextPrefixLen})`,
         `Boundary digest: ${sourceBoundaryDigest}`,
       ],
     },
     'ctx-ssm-state': {
       id: 'ctx-ssm-state',
-      title: 'Context Persistent FP32 SSM State H_{P-1} (Channel 2)',
-      badge: 'persistent_cache · FP32 (prod)',
-      summary: 'Dedicated 16×[4×4] FP32 SSM boundary seed owned by Context Tower; independent from Conv1D history.',
+      title: historicalBoundaryMismatch
+        ? `Historical Context FP32 SSM Seed H_${seedLastPos} (P_cond=${seedPrefixLen}, Channel 2)`
+        : `Context Persistent FP32 SSM State H_${seedLastPos} (Channel 2)`,
+      badge: historicalBoundaryMismatch
+        ? `Historical Seed · P_cond=${seedPrefixLen} ≠ P=${currentContextPrefixLen}`
+        : 'persistent_cache · FP32 (prod)',
+      summary: historicalBoundaryMismatch
+        ? `Historical 16×[4×4] FP32 SSM boundary seed H_${seedLastPos} read by ${historicalTag}; does NOT belong to current Context boundary P=${currentContextPrefixLen} (H_${Math.max(0, currentContextPrefixLen - 1)}).`
+        : 'Dedicated 16-head / 8-group [4×4] FP32 SSM boundary seed owned by Context Tower; independent from Conv1D history.',
       specs: [
-        `Active head: ${formatMambaHeadId(activeHead)} (Group G${activeGroup})`,
+        `Complete miniature inventory: 16 Mamba heads, 8 groups, 4×4 per-head SSM state (atlas slice displays 1 selected head: ${formatMambaHeadId(activeHead)} / Group G${activeGroup})`,
+        `Seed boundary prefix: P_cond=${seedPrefixLen} (current Context P=${currentContextPrefixLen})`,
         `Boundary digest: ${sourceBoundaryDigest}`,
       ],
     },
     'bridge-mamba-conv': {
       id: 'bridge-mamba-conv',
       title: 'Cross-Tower Conv1D History Bridge',
-      badge: 'Channel 1 · Read-Only',
+      badge: historicalBoundaryMismatch ? 'Historical Seed · Mismatch' : 'Channel 1 · Read-Only',
       summary: `${refinementSeedInvariantNote} Transfers the 4-column Conv1D raw history cache into Denoiser's Conv1D window.`,
       specs: [
-        `sourceBoundaryDigest: ${sourceBoundaryDigest}`,
-        `Refinement index: ${view.denoiserLookup.sourceRefinementIndex ?? 'n/a'}`,
+        `sourceBoundaryDigest: ${sourceBoundaryDigest} (P_cond=${seedPrefixLen}, current P=${currentContextPrefixLen})`,
+        `Source record/refinement: Rec #${dl.sourceRecordIndex ?? 'n/a'} b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'}`,
       ],
     },
     'bridge-mamba-ssm': {
       id: 'bridge-mamba-ssm',
       title: 'Cross-Tower FP32 SSM Boundary Bridge',
-      badge: 'Channel 2 · Read-Only',
-      summary: `${refinementSeedInvariantNote} Seeds Denoiser H_prev at localPos=0 strictly from committed Context H_{P-1}.`,
+      badge: historicalBoundaryMismatch ? 'Historical Seed · Mismatch' : 'Channel 2 · Read-Only',
+      summary: `${refinementSeedInvariantNote} Seeds Denoiser H_prev at localPos=0 strictly from committed Context H_${seedLastPos}.`,
       specs: [
-        `sourceBoundaryDigest: ${sourceBoundaryDigest}`,
-        `Refinement index: ${view.denoiserLookup.sourceRefinementIndex ?? 'n/a'}`,
+        `sourceBoundaryDigest: ${sourceBoundaryDigest} (P_cond=${seedPrefixLen}, current P=${currentContextPrefixLen})`,
+        `Source record/refinement: Rec #${dl.sourceRecordIndex ?? 'n/a'} b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'}`,
       ],
     },
     'den-conv1d-window': {
@@ -2224,6 +2311,7 @@ export function buildTwoTowerPairedMambaScene(
       badge: decomposition ? `Π dA = ${decomposition.cumulativeDecay.toFixed(4)}` : 'Analytical',
       summary: decomposition?.decaySemanticsDisclaimer ?? 'Closed-form inherited retention component.',
       specs: [
+        `Selected 4×4 decomposition slice: ${formatMambaHeadId(activeHead)} (Group G${activeGroup}) of 16 Mamba heads / 8 groups`,
         decomposition ? `Rounding residual max |sum − H_curr| = ${decomposition.roundingResidualMaxAbs.toExponential(2)}` : '',
         decomposition?.causalAfterGqaNote ?? '',
       ].filter(Boolean),
@@ -2246,8 +2334,9 @@ export function buildTwoTowerPairedMambaScene(
     headIndex: activeHead,
     groupIndex: activeGroup,
     provenanceNote:
-      `Paired Mamba Bay ${String(bayId).padStart(2, '0')} (layer ${layerIndex}) · ${formatMambaHeadId(activeHead)} · ` +
-      `localPos=${localPos} · boundary=${sourceBoundaryDigest}`,
+      `Paired Mamba Bay ${String(bayId).padStart(2, '0')} (layer ${layerIndex}) · ${formatMambaHeadId(activeHead)} (1 of 16 heads, 8 groups) · ` +
+      `localPos=${localPos} · boundary=${sourceBoundaryDigest} (P_cond=${seedPrefixLen}, current P=${currentContextPrefixLen})` +
+      (historicalTag ? ` · ${historicalTag}` : ''),
   });
 
   const warnings: string[] = [];
@@ -2257,12 +2346,18 @@ export function buildTwoTowerPairedMambaScene(
   if (ctxLookup.status === 'pruned_unavailable') {
     warnings.push(ctxLookup.reason);
   }
+  if (dl.historicalProvenanceWarning !== null) {
+    warnings.push(dl.historicalProvenanceWarning);
+  }
   const warningBanner = warnings.length > 0 ? warnings.join(' | ') : null;
 
   const provenanceBadges: TwoTowerProvenanceBadge[] = [
-    { label: `Bay ${String(bayId).padStart(2, '0')} (Layer ${layerIndex}) · Mamba-2`, tone: 'shared' },
     {
-      label: `Context: ${ctxLookup.traceOrigin}`,
+      label: `Bay ${String(bayId).padStart(2, '0')} (Layer ${layerIndex}) · Mamba-2 (16h / 8g / 4×4 SSM · Slice: ${formatMambaHeadId(activeHead)})`,
+      tone: 'shared',
+    },
+    {
+      label: `Context: ${ctxLookup.traceOrigin} (P=${currentContextPrefixLen})`,
       tone: ctxLookup.status === 'available' ? 'context' : 'warn',
       origin: ctxLookup.traceOrigin,
     },
@@ -2273,11 +2368,18 @@ export function buildTwoTowerPairedMambaScene(
       tone: isAfterFirstBidirectionalGqa ? 'gold' : 'denoiser',
     },
     {
-      label: `Boundary ${sourceBoundaryDigest.slice(0, 8)} · r=${view.denoiserLookup.sourceRefinementIndex ?? 'ctx'}`,
-      tone: 'muted',
+      label: `Seed H_${seedLastPos} (${sourceBoundaryDigest.slice(0, 8)}, P_cond=${seedPrefixLen}) · r=${dl.sourceRefinementIndex ?? 'ctx'}`,
+      tone: historicalBoundaryMismatch ? 'warn' : 'muted',
       origin: 'persistent_cache',
     },
   ];
+  if (isHistoricalDenoiser) {
+    provenanceBadges.push({
+      label: `Historical Denoiser Pass · Rec #${dl.sourceRecordIndex} (b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'}, P_cond=${seedPrefixLen} vs P=${currentContextPrefixLen})`,
+      tone: 'warn',
+      origin: 'denoiser_scratch',
+    });
+  }
 
   const fitBounds: AABB =
     towerFocus === 'context_solo'
@@ -2296,6 +2398,7 @@ export function buildTwoTowerPairedMambaScene(
     decomposition?.decaySemanticsDisclaimer ??
     'Epistemic note: Per-head decay factors dA and SSM state norms are algebraic magnitudes and do NOT measure retained semantic information.';
 
+  const miniMamba = TWOTOWER_MINI_MODEL_INVENTORY.mamba;
   const diagnostics: PairedMambaDiagnostics = Object.freeze({
     bayId,
     layerIndex,
@@ -2306,35 +2409,56 @@ export function buildTwoTowerPairedMambaScene(
     localTokenIndex: localPos,
     blockLength: primaryTokens,
     absoluteTokenPosition: decomposition?.absoluteTokenPosition ?? view.committedPrefixLen,
-    refinementIndex: view.denoiserLookup.sourceRefinementIndex,
+    refinementIndex: dl.sourceRefinementIndex,
     sourceBoundaryDigest,
     contextSnapshotDigest: view.contextSnapshot.snapshotDigest,
+    currentContextPrefixLen,
+    currentContextStateDigest,
+    denoiserConditioningPrefixLen,
+    denoiserSourceRecordIndex: dl.sourceRecordIndex,
+    denoiserSourceBlockId: dl.sourceBlockId,
+    denoiserSourceRefinementIndex: dl.sourceRefinementIndex,
+    isHistoricalDenoiserInspection: isHistoricalDenoiser,
+    matchesCurrentContextBoundary: matchesCurrentBoundary,
+    historicalProvenanceWarning: dl.historicalProvenanceWarning,
     conditioningDigest: conditioning?.conditioningDigest ?? null,
     refinementSeedInvariantNote,
     convChannel: convChannelDiag,
     ssmChannel: ssmChannelDiag,
     contextTraceStatus: ctxLookup.status,
     contextTraceOrigin: ctxLookup.traceOrigin,
-    denoiserPassStatus: view.denoiserLookup.status,
+    denoiserPassStatus: dl.status,
     hasDenoiserPreNormMod: Boolean(denoiserSim?.X_mod),
     hasDenoiserResidualGate: Boolean(denoiserSim?.residualGateApplied),
     isAfterFirstBidirectionalGqa,
     causalAfterGqaNote,
     decaySemanticsDisclaimer,
     decomposition,
+    modelMambaInventory: Object.freeze({
+      heads: miniMamba.heads,
+      groups: miniMamba.groups,
+      headsPerGroup: miniMamba.headsPerGroup,
+      dHead: miniMamba.dHead,
+      dState: miniMamba.dState,
+      stateMatrixShape: miniMamba.ssmStateMatrixShape,
+      displayedHeadIndex: activeHead,
+      displayedGroupIndex: activeGroup,
+      atlasSelectedDecompHeadCount: 1 as const,
+    }),
     atlasDimensions: [TWOTOWER_MAMBA_ATLAS_WIDTH, TWOTOWER_MAMBA_ATLAS_HEIGHT] as const,
   });
 
   const packed = b.pack();
   const valueAtlas: Rg32fValueAtlas | undefined = mambaAtlas ?? fallbackBoundaryAtlas ?? undefined;
-  const atlasKey = `tt-mamba:${view.identity.recordId}:b${bayId}:f${towerFocus}:h${activeHead}:p${localPos}`;
+  const atlasKey = `tt-mamba:${view.identity.recordId}:${ctxExecId}:${denExecId}:b${bayId}:f${towerFocus}:h${activeHead}:p${localPos}`;
 
   return {
     viewMode: 'paired_mamba',
     title: `Paired Mamba-2 Cutaway · Bay ${String(bayId).padStart(2, '0')} (Layer ${layerIndex})`,
     subtitle:
-      `35/65 Context Dual-Channel Boundary (Conv1D + FP32 SSM) → Active Denoiser Analytical Decomposition ` +
-      `(${formatMambaHeadId(activeHead)}, localPos=${localPos}/${Math.max(0, primaryTokens - 1)})`,
+      (historicalBoundaryMismatch ? `HISTORICAL Denoiser (${historicalTag} ≠ P=${currentContextPrefixLen}) · ` : '') +
+      `35/65 Context Dual-Channel Boundary (Conv1D + FP32 SSM H_${seedLastPos}) → Denoiser Analytical Decomposition ` +
+      `(${formatMambaHeadId(activeHead)} of 16 heads / 8 groups, localPos=${localPos}/${Math.max(0, primaryTokens - 1)})`,
     bayId,
     layerIndex,
     activeTowerFocus: towerFocus,
@@ -2355,7 +2479,9 @@ export function buildTwoTowerPairedMambaScene(
     activeSelection,
     stepperSteps: MAMBA_STEPPER_STEPS,
     provenanceBadges,
-    epistemicNote: `${decaySemanticsDisclaimer} ${causalAfterGqaNote}`,
+    epistemicNote:
+      `${decaySemanticsDisclaimer} ${causalAfterGqaNote} ` +
+      `Miniature Mamba-2 inventory: 16 heads, 8 groups, 4×4 per-head FP32 SSM state (256×128 atlas packs all 16 heads/8 groups and shows 1 selected head's 4×4 analytical decomposition slice).`,
     warningBanner,
     diagnostics: diagnostics as unknown as Readonly<Record<string, unknown>>,
   };

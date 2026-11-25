@@ -125,6 +125,14 @@ export interface TwoTowerEmbeddingDiagnostics {
   readonly hasMaskTokens: boolean;
   readonly hasEosTokens: boolean;
   readonly contextTraceStatus: 'available' | 'pruned_unavailable' | 'not_applicable';
+  readonly isHistoricalDenoiserInspection: boolean;
+  readonly matchesCurrentContextBoundary: boolean;
+  readonly denoiserSourceRecordIndex: number | null;
+  readonly denoiserSourceBlockId: number | null;
+  readonly denoiserSourceRefinementIndex: number | null;
+  readonly denoiserSourceContextPrefixLen: number | null;
+  readonly denoiserSourceContextCacheDigest: string | null;
+  readonly historicalProvenanceWarning: string | null;
   readonly syntheticMiniatureDisclosure: string;
 }
 
@@ -163,6 +171,14 @@ export interface TwoTowerOutputDiagnostics {
   readonly focusToken: number;
   readonly absoluteFocusPosition: number;
   readonly contextTraceStatus: 'available' | 'pruned_unavailable' | 'not_applicable';
+  readonly isHistoricalDenoiserInspection: boolean;
+  readonly matchesCurrentContextBoundary: boolean;
+  readonly denoiserSourceRecordIndex: number | null;
+  readonly denoiserSourceBlockId: number | null;
+  readonly denoiserSourceRefinementIndex: number | null;
+  readonly denoiserSourceContextPrefixLen: number | null;
+  readonly denoiserSourceContextCacheDigest: string | null;
+  readonly historicalProvenanceWarning: string | null;
   readonly samplerPresentationSource: 'recorded_commit' | 'live_refinement_preview' | 'none';
   readonly samplerPresentation: SamplerStepPresentation | null;
   readonly top5AtFocus: readonly HybridPrediction[];
@@ -422,12 +438,20 @@ export function buildTwoTowerEmbeddingScene(
   let executionId: string;
   let traceOrigin: TwoTowerTraceOrigin;
   let contextTraceStatus: 'available' | 'pruned_unavailable' | 'not_applicable' = 'not_applicable';
-  let warningBanner: string | null = !view.snapshotIntegrity.valid
-    ? `Context snapshot integrity error: ${view.snapshotIntegrity.error}`
-    : null;
+  const dl = view.denoiserLookup;
+  const isHistoricalDenoiser = towerRole === 'denoiser' && dl.pass !== null && dl.isHistoricalInspection;
+  const historicalTag =
+    isHistoricalDenoiser && dl.pass !== null
+      ? `Historical Rec #${dl.sourceRecordIndex} (b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'}, ${dl.pass.passExecutionId}, P_cond=${dl.sourceContextPrefixLen ?? 'n/a'} vs P=${view.committedPrefixLen})`
+      : null;
+
+  const warningParts: string[] = [];
+  if (!view.snapshotIntegrity.valid) {
+    warningParts.push(`Context snapshot integrity error: ${view.snapshotIntegrity.error}`);
+  }
 
   if (towerRole === 'denoiser') {
-    const denPass = view.denoiserLookup.pass;
+    const denPass = dl.pass;
     if (denPass !== null) {
       tokenIds = new Int32Array(denPass.tokenIds);
       tokenLabels = [...denPass.tokenLabels];
@@ -435,6 +459,9 @@ export function buildTwoTowerEmbeddingScene(
       startTokenOffset = denPass.absoluteTokenStart;
       executionId = denPass.passExecutionId;
       traceOrigin = 'denoiser_scratch';
+      if (isHistoricalDenoiser && dl.historicalProvenanceWarning !== null) {
+        warningParts.push(dl.historicalProvenanceWarning);
+      }
     } else if (view.activeBlock !== null) {
       tokenIds = Int32Array.from(view.activeBlock.currentTokens);
       tokenLabels = [...view.activeBlock.currentTokenLabels];
@@ -442,9 +469,9 @@ export function buildTwoTowerEmbeddingScene(
       startTokenOffset = view.activeBlock.absoluteTokenStart;
       executionId = view.identity.recordId;
       traceOrigin = 'denoiser_scratch';
-      warningBanner =
-        warningBanner ??
-        'Denoiser forward pass has not executed yet for this initialized block; previewing deterministic W_embed_den lookup on current block tokens.';
+      warningParts.push(
+        'Denoiser forward pass has not executed yet for this initialized block; previewing deterministic W_embed_den lookup on current block tokens.',
+      );
     } else {
       // Fallback: display the latest committed token ID deterministically with clear disclosure
       const lastId = view.contextSnapshot.lastTokenId;
@@ -455,9 +482,9 @@ export function buildTwoTowerEmbeddingScene(
       startTokenOffset = Math.max(0, view.committedPrefixLen - 1);
       executionId = view.identity.recordId;
       traceOrigin = 'denoiser_scratch';
-      warningBanner =
-        warningBanner ??
-        'No Denoiser forward pass has executed yet on this branch; previewing deterministic W_embed_den lookup on latest token.';
+      warningParts.push(
+        'No Denoiser forward pass has executed yet on this branch; previewing deterministic W_embed_den lookup on latest token.',
+      );
     }
   } else {
     if (view.latestContextTrace.status === 'available' && view.latestContextTrace.execution) {
@@ -512,11 +539,12 @@ export function buildTwoTowerEmbeddingScene(
       startTokenOffset = sliceStart;
       executionId = view.identity.sourceCacheDigest;
       traceOrigin = 'persistent_cache';
-      warningBanner =
-        warningBanner ??
-        'Historical Context execution trace is unavailable after history pruning; displaying deterministic W_embed_ctx lookup from authoritative persistent Context prefix tokens.';
+      warningParts.push(
+        'Historical Context execution trace is unavailable after history pruning; displaying deterministic W_embed_ctx lookup from authoritative persistent Context prefix tokens.',
+      );
     }
   }
+  const warningBanner: string | null = warningParts.length > 0 ? warningParts.join(' | ') : null;
 
   const T = tokenIds.length;
   const focusToken = Math.max(0, Math.min(T - 1, Math.trunc(options?.focusToken ?? T - 1)));
@@ -608,6 +636,7 @@ export function buildTwoTowerEmbeddingScene(
       specs: [
         ...nanoScene.partCatalog['token-strip'].specs,
         `Absolute token positions: [${absRange[0]}..${absRange[1]}] (startTokenOffset = ${startTokenOffset})`,
+        ...(historicalTag ? [`Historical Denoiser provenance: ${historicalTag}`] : []),
         maskTokenAbsolutePositions.length > 0
           ? `[MASK] (#${maskTokenId}) active at absolute positions: ${maskTokenAbsolutePositions.map((p) => `t${p}`).join(', ')}`
           : `No [MASK] (#${maskTokenId}) tokens in this slice`,
@@ -664,6 +693,15 @@ export function buildTwoTowerEmbeddingScene(
     ...(eosTokenLocalIndices.length > 0
       ? [{ label: `${eosTokenLocalIndices.length}× <eos> (#${eosTokenId})`, tone: 'warn' as const }]
       : []),
+    ...(isHistoricalDenoiser
+      ? [
+          {
+            label: `Historical Denoiser Pass · Rec #${dl.sourceRecordIndex} (b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'}, P_cond=${dl.sourceContextPrefixLen ?? 'n/a'} vs P=${view.committedPrefixLen})`,
+            tone: 'warn' as const,
+            origin: 'denoiser_scratch' as const,
+          },
+        ]
+      : []),
   ];
 
   const activeSelection = buildTwoTowerSelectionIdentity(view, {
@@ -675,7 +713,9 @@ export function buildTwoTowerEmbeddingScene(
     executionId,
     absoluteTokenPosition: startTokenOffset + focusToken,
     absoluteTokenRange: absRange,
-    provenanceNote: `${towerLabel} ${weightTableName} (fp=${towerModel.parameterFingerprint}) · pos [${absRange[0]}..${absRange[1]}]`,
+    provenanceNote:
+      `${towerLabel} ${weightTableName} (fp=${towerModel.parameterFingerprint}) · pos [${absRange[0]}..${absRange[1]}]` +
+      (historicalTag ? ` · ${historicalTag}` : ''),
   });
 
   const diagnostics: TwoTowerEmbeddingDiagnostics = Object.freeze({
@@ -702,6 +742,14 @@ export function buildTwoTowerEmbeddingScene(
     hasMaskTokens: maskTokenLocalIndices.length > 0,
     hasEosTokens: eosTokenLocalIndices.length > 0,
     contextTraceStatus,
+    isHistoricalDenoiserInspection: isHistoricalDenoiser,
+    matchesCurrentContextBoundary: towerRole === 'denoiser' ? dl.matchesCurrentContextBoundary : true,
+    denoiserSourceRecordIndex: towerRole === 'denoiser' ? dl.sourceRecordIndex : null,
+    denoiserSourceBlockId: towerRole === 'denoiser' ? dl.sourceBlockId : null,
+    denoiserSourceRefinementIndex: towerRole === 'denoiser' ? dl.sourceRefinementIndex : null,
+    denoiserSourceContextPrefixLen: towerRole === 'denoiser' ? dl.sourceContextPrefixLen : null,
+    denoiserSourceContextCacheDigest: towerRole === 'denoiser' ? dl.sourceContextCacheDigest : null,
+    historicalProvenanceWarning: isHistoricalDenoiser ? dl.historicalProvenanceWarning : null,
     syntheticMiniatureDisclosure: TWOTOWER_SYNTHETIC_MINIATURE_DISCLOSURE,
   });
 
@@ -712,7 +760,9 @@ export function buildTwoTowerEmbeddingScene(
   return {
     viewMode: 'embedding',
     title: `TwoTower Embedding (NoPE) · ${towerLabel} (${weightTableName})`,
-    subtitle: `V=${vocabSize} (incl. [MASK] #${maskTokenId}, <eos> #${eosTokenId}) · pos [${absRange[0]}..${absRange[1]}] · Independent Weights`,
+    subtitle:
+      (historicalTag ? `${historicalTag} · ` : '') +
+      `V=${vocabSize} (incl. [MASK] #${maskTokenId}, <eos> #${eosTokenId}) · pos [${absRange[0]}..${absRange[1]}] · Independent Weights`,
     bayId: 0,
     layerIndex: null,
     activeTowerFocus: towerRole === 'denoiser' ? 'denoiser_solo' : 'context_solo',
@@ -883,6 +933,14 @@ function buildUnavailableOutputScene(params: {
     focusToken: 0,
     absoluteFocusPosition: absPos,
     contextTraceStatus,
+    isHistoricalDenoiserInspection: false,
+    matchesCurrentContextBoundary: false,
+    denoiserSourceRecordIndex: null,
+    denoiserSourceBlockId: null,
+    denoiserSourceRefinementIndex: null,
+    denoiserSourceContextPrefixLen: null,
+    denoiserSourceContextCacheDigest: null,
+    historicalProvenanceWarning: null,
     samplerPresentationSource: 'none' as const,
     samplerPresentation: null,
     top5AtFocus,
@@ -1119,6 +1177,13 @@ export function buildTwoTowerOutputScene(
     absoluteTokenOffset: startTokenOffset,
   }));
 
+  const dlOut = view.denoiserLookup;
+  const isHistoricalDenoiserOut = towerRole === 'denoiser' && dlOut.isHistoricalInspection;
+  const historicalTagOut =
+    isHistoricalDenoiserOut && dlOut.pass !== null
+      ? `Historical Rec #${dlOut.sourceRecordIndex} (b${dlOut.sourceBlockId ?? '-'} r${dlOut.sourceRefinementIndex ?? '-'}, ${dlOut.pass.passExecutionId}, P_cond=${dlOut.sourceContextPrefixLen ?? 'n/a'} vs P=${view.committedPrefixLen})`
+      : null;
+
   const towerLabel = towerRole === 'denoiser' ? 'Denoiser Tower' : 'Context Tower';
   const absRange: readonly [number, number] = Object.freeze([
     startTokenOffset,
@@ -1164,6 +1229,7 @@ export function buildTwoTowerOutputScene(
       specs: [
         ...nanoScene.partCatalog.logits.specs,
         predictionSemanticsLabel,
+        ...(historicalTagOut ? [`Historical Denoiser provenance: ${historicalTagOut}`] : []),
         TWOTOWER_SYNTHETIC_MINIATURE_DISCLOSURE,
       ],
     },
@@ -1228,6 +1294,15 @@ export function buildTwoTowerOutputScene(
     ...(samplerPresentation !== null
       ? [{ label: 'MDLM Sampler: [MASK]=0.0000 · Zero Infinity', tone: 'gold' as const }]
       : []),
+    ...(isHistoricalDenoiserOut
+      ? [
+          {
+            label: `Historical Denoiser Pass · Rec #${dlOut.sourceRecordIndex} (b${dlOut.sourceBlockId ?? '-'} r${dlOut.sourceRefinementIndex ?? '-'}, P_cond=${dlOut.sourceContextPrefixLen ?? 'n/a'} vs P=${view.committedPrefixLen})`,
+            tone: 'warn' as const,
+            origin: 'denoiser_scratch' as const,
+          },
+        ]
+      : []),
   ];
 
   const activeSelection = buildTwoTowerSelectionIdentity(view, {
@@ -1239,7 +1314,9 @@ export function buildTwoTowerOutputScene(
     executionId,
     absoluteTokenPosition: absoluteFocusPosition,
     absoluteTokenRange: absRange,
-    provenanceNote: `${towerLabel} ${weightTableName} (fp=${towerModel.parameterFingerprint}) · ${predictionSemanticsLabel}`,
+    provenanceNote:
+      `${towerLabel} ${weightTableName} (fp=${towerModel.parameterFingerprint}) · ${predictionSemanticsLabel}` +
+      (historicalTagOut ? ` · ${historicalTagOut}` : ''),
   });
 
   const top5AtFocus = lmHead.topKByToken[focusToken] ?? Object.freeze([]);
@@ -1264,15 +1341,28 @@ export function buildTwoTowerOutputScene(
     focusToken,
     absoluteFocusPosition,
     contextTraceStatus,
+    isHistoricalDenoiserInspection: isHistoricalDenoiserOut,
+    matchesCurrentContextBoundary: towerRole === 'denoiser' ? dlOut.matchesCurrentContextBoundary : true,
+    denoiserSourceRecordIndex: towerRole === 'denoiser' ? dlOut.sourceRecordIndex : null,
+    denoiserSourceBlockId: towerRole === 'denoiser' ? dlOut.sourceBlockId : null,
+    denoiserSourceRefinementIndex: towerRole === 'denoiser' ? dlOut.sourceRefinementIndex : null,
+    denoiserSourceContextPrefixLen: towerRole === 'denoiser' ? dlOut.sourceContextPrefixLen : null,
+    denoiserSourceContextCacheDigest: towerRole === 'denoiser' ? dlOut.sourceContextCacheDigest : null,
+    historicalProvenanceWarning: isHistoricalDenoiserOut ? dlOut.historicalProvenanceWarning : null,
     samplerPresentationSource,
     samplerPresentation,
     top5AtFocus,
     syntheticMiniatureDisclosure: TWOTOWER_SYNTHETIC_MINIATURE_DISCLOSURE,
   });
 
-  const warningBanner = !view.snapshotIntegrity.valid
-    ? `Context snapshot integrity error: ${view.snapshotIntegrity.error}`
-    : null;
+  const warningPartsOut: string[] = [];
+  if (!view.snapshotIntegrity.valid) {
+    warningPartsOut.push(`Context snapshot integrity error: ${view.snapshotIntegrity.error}`);
+  }
+  if (isHistoricalDenoiserOut && dlOut.historicalProvenanceWarning !== null) {
+    warningPartsOut.push(dlOut.historicalProvenanceWarning);
+  }
+  const warningBanner = warningPartsOut.length > 0 ? warningPartsOut.join(' | ') : null;
 
   const atlasKey =
     `tt-out|${towerModel.parameterFingerprint}|${towerRole}|${executionId}|` +
@@ -1281,7 +1371,9 @@ export function buildTwoTowerOutputScene(
   return {
     viewMode: 'output',
     title: `TwoTower Output & Untied LM Head · ${towerLabel} (${weightTableName})`,
-    subtitle: `${predictionSemanticsLabel} · Final RMSNorm Strictly Unmodulated`,
+    subtitle:
+      (historicalTagOut ? `${historicalTagOut} · ` : '') +
+      `${predictionSemanticsLabel} · Final RMSNorm Strictly Unmodulated`,
     bayId: 53,
     layerIndex: null,
     activeTowerFocus: towerRole === 'denoiser' ? 'denoiser_solo' : 'context_solo',

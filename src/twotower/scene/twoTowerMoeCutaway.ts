@@ -99,6 +99,14 @@ export interface TwoTowerMoeDiagnostics {
   readonly layerIndex: number;
   readonly towerRole: 'context' | 'denoiser';
   readonly contextTraceStatus: 'available' | 'pruned_unavailable' | 'not_applicable';
+  readonly isHistoricalDenoiserInspection: boolean;
+  readonly matchesCurrentContextBoundary: boolean;
+  readonly denoiserSourceRecordIndex: number | null;
+  readonly denoiserSourceBlockId: number | null;
+  readonly denoiserSourceRefinementIndex: number | null;
+  readonly denoiserSourceContextPrefixLen: number | null;
+  readonly denoiserSourceContextCacheDigest: string | null;
+  readonly historicalProvenanceWarning: string | null;
   readonly routerPrecisionPolicy: RouterPrecisionPolicy;
   readonly selectionMargin: MoeSelectionMarginInfo | null;
   readonly modulationOrder: 'norm_then_modulate';
@@ -245,6 +253,14 @@ function buildUnavailableMoeScene(params: {
     layerIndex,
     towerRole,
     contextTraceStatus,
+    isHistoricalDenoiserInspection: false,
+    matchesCurrentContextBoundary: false,
+    denoiserSourceRecordIndex: null,
+    denoiserSourceBlockId: null,
+    denoiserSourceRefinementIndex: null,
+    denoiserSourceContextPrefixLen: null,
+    denoiserSourceContextCacheDigest: null,
+    historicalProvenanceWarning: null,
     routerPrecisionPolicy: view.model.config.routerPrecisionPolicy,
     selectionMargin: null,
     modulationOrder: 'norm_then_modulate' as const,
@@ -565,7 +581,14 @@ export function buildTwoTowerMoeScene(
     absoluteTokenOffset: sim.startTokenOffset,
   }));
 
-  // Augment partCatalog with TwoTower FP64 margin, post-norm AdaLN, and 0 B stateless metadata
+  // Augment partCatalog with TwoTower FP64 margin, post-norm AdaLN, historical provenance, and 0 B stateless metadata
+  const dl = view.denoiserLookup;
+  const isHistoricalDenoiser = towerRole === 'denoiser' && dl.isHistoricalInspection;
+  const historicalTag =
+    isHistoricalDenoiser && dl.pass !== null
+      ? `Historical Rec #${dl.sourceRecordIndex} (b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'}, ${dl.pass.passExecutionId}, P_cond=${dl.sourceContextPrefixLen ?? 'n/a'} vs P=${view.committedPrefixLen})`
+      : null;
+
   const bayStr = `Bay ${String(bayId).padStart(2, '0')} (L${layerIndex})`;
   const towerLabel = towerRole === 'denoiser' ? 'Denoiser Tower' : 'Context Tower';
   const marginText =
@@ -585,18 +608,23 @@ export function buildTwoTowerMoeScene(
         ...nanoScene.partCatalog['w-router'].specs,
         `Router precision policy: ${sim.routerPrecisionPolicy}`,
         `Selection margin (6th vs 7th): ${marginText}`,
+        ...(historicalTag ? [`Historical Denoiser provenance: ${historicalTag}`] : []),
       ],
     },
     rmsnorm: {
       ...nanoScene.partCatalog.rmsnorm,
       badge: modulationActive
         ? 'Post-Norm AdaLN ACTIVE (norm_then_modulate)'
-        : 'AdaLN BYPASSED (Context / Mock-AR)',
+        : towerRole === 'context'
+          ? 'Unmodulated Context Tower'
+          : 'AdaLN BYPASSED (Mock-AR)',
       specs: [
         ...nanoScene.partCatalog.rmsnorm.specs,
         modulationActive
           ? 'TwoTower MoE ordering: RMSNorm(X) → U → U_mod = U·(1+scale)+shift (norm_then_modulate)'
-          : 'Timestep modulation bypassed in Context AR / Mock-AR; U feeds router and experts unmodulated.',
+          : towerRole === 'context'
+            ? 'Context Tower never applies timestep modulation; U feeds router and experts unmodulated.'
+            : 'Timestep modulation bypassed in Mock-AR; U feeds router and experts unmodulated.',
       ],
     },
     'residual-out': {
@@ -608,7 +636,7 @@ export function buildTwoTowerMoeScene(
         `${towerLabel} ${bayStr} · 0 B stateless (NO cross-tower cache transfer)`,
         sim.residualGateApplied
           ? 'Channel-wise outer AdaLN residual gate (d=8) scales y_moe before merging with untouched X.'
-          : 'Unmodulated residual merge (Context AR / Mock-AR).',
+          : 'Unmodulated residual merge (Context Tower or Mock-AR).',
       ],
     },
   };
@@ -619,12 +647,14 @@ export function buildTwoTowerMoeScene(
     {
       id: 'twotower-moe-margin',
       label: `FP64 Top-6 Cutoff: ${marginText}${selectionMargin.isTightMargin ? ' (TIGHT)' : ''}`,
-      sublabel: `${towerLabel} ${bayStr} · ${modulationActive ? 'Post-Norm AdaLN + Outer Gate ACTIVE' : 'AdaLN BYPASSED'} · 0 B Stateless`,
+      sublabel:
+        `${towerLabel} ${bayStr} · ${modulationActive ? 'Post-Norm AdaLN + Outer Gate ACTIVE' : 'AdaLN BYPASSED'} · 0 B Stateless` +
+        (historicalTag ? ` · ${historicalTag}` : ''),
       world: [0.0, 3.08, -2.55],
       partId: 'w-router',
       align: 'top',
       tier: 'primary',
-      tone: selectionMargin.isTightMargin ? 'gold' : 'cyan',
+      tone: isHistoricalDenoiser ? 'gold' : selectionMargin.isTightMargin ? 'gold' : 'cyan',
     },
   ];
 
@@ -651,6 +681,13 @@ export function buildTwoTowerMoeScene(
       tone: 'shared',
     },
   ];
+  if (isHistoricalDenoiser) {
+    provenanceBadges.push({
+      label: `Historical Denoiser Pass · Rec #${dl.sourceRecordIndex} (b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'}, P_cond=${dl.sourceContextPrefixLen ?? 'n/a'} vs P=${view.committedPrefixLen})`,
+      tone: 'warn',
+      origin: 'denoiser_scratch',
+    });
+  }
 
   const activeSelection = buildTwoTowerSelectionIdentity(view, {
     towerRole,
@@ -662,7 +699,9 @@ export function buildTwoTowerMoeScene(
     absoluteTokenPosition: sim.startTokenOffset + resolvedFocusToken,
     absoluteTokenRange: [sim.startTokenOffset, sim.startTokenOffset + sim.tokens - 1],
     expertId: resolvedFocusExpert,
-    provenanceNote: `${towerLabel} ${bayStr} · ${marginText} · 0 B stateless`,
+    provenanceNote:
+      `${towerLabel} ${bayStr} · ${marginText} · 0 B stateless` +
+      (historicalTag ? ` · ${historicalTag}` : ''),
   });
 
   const diagnostics: TwoTowerMoeDiagnostics = Object.freeze({
@@ -670,6 +709,14 @@ export function buildTwoTowerMoeScene(
     layerIndex,
     towerRole,
     contextTraceStatus,
+    isHistoricalDenoiserInspection: isHistoricalDenoiser,
+    matchesCurrentContextBoundary: towerRole === 'denoiser' ? dl.matchesCurrentContextBoundary : true,
+    denoiserSourceRecordIndex: towerRole === 'denoiser' ? dl.sourceRecordIndex : null,
+    denoiserSourceBlockId: towerRole === 'denoiser' ? dl.sourceBlockId : null,
+    denoiserSourceRefinementIndex: towerRole === 'denoiser' ? dl.sourceRefinementIndex : null,
+    denoiserSourceContextPrefixLen: towerRole === 'denoiser' ? dl.sourceContextPrefixLen : null,
+    denoiserSourceContextCacheDigest: towerRole === 'denoiser' ? dl.sourceContextCacheDigest : null,
+    historicalProvenanceWarning: isHistoricalDenoiser ? dl.historicalProvenanceWarning : null,
     routerPrecisionPolicy: sim.routerPrecisionPolicy,
     selectionMargin,
     modulationOrder: 'norm_then_modulate' as const,
@@ -688,9 +735,14 @@ export function buildTwoTowerMoeScene(
     sidebarWeightTexts: Object.freeze(sidebarWeightTexts),
   });
 
-  const warningBanner = !view.snapshotIntegrity.valid
-    ? `Context snapshot integrity error: ${view.snapshotIntegrity.error}`
-    : null;
+  const warningParts: string[] = [];
+  if (!view.snapshotIntegrity.valid) {
+    warningParts.push(`Context snapshot integrity error: ${view.snapshotIntegrity.error}`);
+  }
+  if (isHistoricalDenoiser && dl.historicalProvenanceWarning !== null) {
+    warningParts.push(dl.historicalProvenanceWarning);
+  }
+  const warningBanner = warningParts.length > 0 ? warningParts.join(' | ') : null;
 
   const atlasKey =
     `tt-moe|${view.model.twoTowerFingerprint}|${towerRole}|${executionId}|b${bayId}|` +
@@ -700,6 +752,7 @@ export function buildTwoTowerMoeScene(
     viewMode: 'moe',
     title: `TwoTower Granular MoE (128+1) · ${towerLabel} ${bayStr}`,
     subtitle:
+      (historicalTag ? `${historicalTag} · ` : '') +
       `${sim.routerPrecisionPolicy === 'float64_reference' ? 'FP64 Router' : 'FP32 Router'} · ` +
       `6th-vs-7th Δ=${selectionMargin.choiceScoreMargin.toFixed(4)} · ` +
       `${modulationActive ? 'Post-Norm AdaLN ACTIVE' : 'AdaLN BYPASSED'} · 0 B Stateless`,

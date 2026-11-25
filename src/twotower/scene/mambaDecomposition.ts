@@ -79,6 +79,11 @@ export interface MambaHeadDecayProfileEntry {
 }
 
 export interface MambaPositionDecomposition {
+  /** Complete miniature Mamba-2 logical inventory (16 heads, 8 groups, 4×4 per-head SSM state). */
+  readonly modelHeadCount: number;
+  readonly modelGroupCount: number;
+  readonly ssmStateMatrixShape: readonly [number, number];
+  /** Selected head slice index (`0..15`) and owning group (`0..7`) shown in the 4×4 decomposition plates. */
   readonly headIndex: number;
   readonly headLabel: string;
   readonly groupIndex: number;
@@ -455,6 +460,9 @@ export function extractMambaFullBlockPositionState(
         `incorporate information from later block positions.`;
 
   return Object.freeze({
+    modelHeadCount: sim.nHeads,
+    modelGroupCount: sim.nGroups,
+    ssmStateMatrixShape: Object.freeze([dHead, dState] as const),
     headIndex,
     headLabel: formatMambaHeadId(headIndex),
     groupIndex: g,

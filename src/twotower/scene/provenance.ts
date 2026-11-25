@@ -16,6 +16,8 @@
  *     existing `SolidsPass`, `LinesPass`, `RibbonsPass`, `FlatFlowRibbonsPass`, and `SheetsPass`.
  */
 
+import { GQA_SIM_CONFIG } from '../../math/gqaSim';
+import { MAMBA_SIM_CONFIG } from '../../math/mambaSim';
 import type { Kind } from '../../model/spec';
 import type { AABB } from '../../render/camera';
 import type { PickBox, PickHit } from '../../render/pick';
@@ -53,7 +55,39 @@ import {
   type TwoTowerSessionRecord,
   type TwoTowerSessionTermination,
 } from '../session';
-import { TWOTOWER_SPEC, type TwoTowerExecutionMode } from '../spec';
+import { TWOTOWER_MINI_CONFIG, TWOTOWER_SPEC, type TwoTowerExecutionMode } from '../spec';
+
+/**
+ * Authoritative miniature TwoTower model dimensional inventory (derived strictly from
+ * `GQA_SIM_CONFIG`, `MAMBA_SIM_CONFIG`, and `TWOTOWER_MINI_CONFIG`) — clearly separated from
+ * selected per-view RG32F atlas slices so slice counts are never mislabeled as model head counts.
+ */
+export const TWOTOWER_MINI_MODEL_INVENTORY = Object.freeze({
+  d: TWOTOWER_MINI_CONFIG.d,
+  vocabSize: TWOTOWER_MINI_CONFIG.vocabSize,
+  gqa: Object.freeze({
+    queryHeads: GQA_SIM_CONFIG.nQ, // 32 miniature GQA query heads
+    kvHeads: GQA_SIM_CONFIG.nKv, // 2 KV heads
+    queriesPerKvGroup: (GQA_SIM_CONFIG.nQ / GQA_SIM_CONFIG.nKv) as 16,
+    headDim: GQA_SIM_CONFIG.dHead, // head width 4
+    qConcatDim: GQA_SIM_CONFIG.qConcatDim, // 128
+    kvConcatDim: GQA_SIM_CONFIG.kvConcatDim, // 8
+    atlasSelectedScoreHeadCount: 2 as const, // 1 selected Q head per KV group on Scores/Softmax plates
+  }),
+  mamba: Object.freeze({
+    heads: MAMBA_SIM_CONFIG.nHeads, // 16 miniature Mamba heads
+    groups: MAMBA_SIM_CONFIG.nGroups, // 8 Mamba groups
+    headsPerGroup: MAMBA_SIM_CONFIG.headsPerGroup, // 2
+    dHead: MAMBA_SIM_CONFIG.dHead, // 4
+    dInner: MAMBA_SIM_CONFIG.dInner, // 64
+    dState: MAMBA_SIM_CONFIG.dState, // 4
+    ssmStateMatrixShape: Object.freeze([MAMBA_SIM_CONFIG.dHead, MAMBA_SIM_CONFIG.dState] as const), // 4×4
+    convKernel: MAMBA_SIM_CONFIG.convKernel, // 4
+    convDim: MAMBA_SIM_CONFIG.convDim, // 128
+    inProjDim: MAMBA_SIM_CONFIG.inProjDim, // 208
+    atlasSelectedDecompHeadCount: 1 as const, // 1 selected head for native 4×4 analytical decomposition plates
+  }),
+});
 
 export type TwoTowerTowerRole = 'context' | 'denoiser' | 'shared';
 
@@ -131,8 +165,96 @@ export interface TwoTowerDenoiserPassLookup {
   readonly sourceRecordIndex: number | null;
   readonly sourceBlockId: number | null;
   readonly sourceRefinementIndex: number | null;
+  /** True strictly when showing a prior Denoiser pass (`status === 'historical_prior_record'`). */
+  readonly isHistoricalInspection: boolean;
+  /** Actual Context prefix length (`conditioning.committedPrefixLen` / `pass.committedPrefixLen`) that the Denoiser pass read. */
+  readonly sourceContextPrefixLen: number | null;
+  /** Authoritative Context cache digest (`conditioning.sourceStateDigest` / `pass.sourceStateDigest`) that the Denoiser pass read. */
+  readonly sourceContextCacheDigest: string | null;
+  /** Authoritative frozen historical `configAtStep` of the record where the Denoiser pass executed. */
+  readonly sourceRecordConfig: TwoTowerSessionConfig | null;
+  /**
+   * True ONLY when the Denoiser pass executed on the current record AND its conditioning cache
+   * digest and prefix length match the current record's `contextSnapshot` in the same active
+   * block/mode. Strictly `false` after block commit (`P -> P+B`), mode switch, or new block init.
+   */
+  readonly matchesCurrentContextBoundary: boolean;
+  /**
+   * Explicit non-null warning whenever `isHistoricalInspection` is true (especially when
+   * `!matchesCurrentContextBoundary`) so prior KV/Mamba conditioning is never relabeled as
+   * belonging to the current Context boundary.
+   */
+  readonly historicalProvenanceWarning: string | null;
   readonly traceOrigin: 'denoiser_scratch';
   readonly note: string;
+}
+
+export type TwoTowerBlockCompletionState =
+  | 'no_active_block'
+  | 'refining'
+  | 'completed_uncommitted'
+  | 'committed_to_context';
+
+export type TwoTowerTimestepConditioningMode =
+  | 'active_diffusion'
+  | 'inactive_no_pass_yet'
+  | 'historical_prior_pass'
+  | 'bypassed_ar'
+  | 'bypassed_mock_ar';
+
+export interface TwoTowerExecutedPassTimestep {
+  /** Model timestep scalar actually fed into sinusoidal embedding φ(t). */
+  readonly tModel: number;
+  /** Actual masked token count entering the executed Denoiser pass (`pass.tokenIds`). */
+  readonly nMaskedInput: number;
+  /** Block size B of the executed Denoiser pass (`pass.blockSize`). */
+  readonly blockSize: number;
+  /** Canonical empirical mask fraction `nMaskedInput / blockSize` (never `r / K`). */
+  readonly empiricalMaskFraction: number;
+  /** True when `tModel` differs from `empiricalMaskFraction` via a diagnostic `tOverride`. */
+  readonly isDiagnosticOverride: boolean;
+  /** Explicit diagnostic override scalar when `isDiagnosticOverride` is true, else `null`. */
+  readonly overrideValue: number | null;
+  readonly passExecutionId: string;
+  readonly sourceRecordIndex: number;
+  readonly sourceBlockId: number | null;
+  readonly sourceRefinementIndex: number | null;
+}
+
+export interface TwoTowerCurrentBlockMaskStatus {
+  /** Unresolved `[MASK]` token count on the current record (post-commit on `diffusion_confidence_commit`). */
+  readonly currentUnresolvedCount: number;
+  readonly blockSize: number;
+  /** Current unresolved mask fraction `currentUnresolvedCount / blockSize`. */
+  readonly currentMaskFraction: number;
+  readonly isBlockComplete: boolean;
+  readonly isCommittedToContext: boolean;
+}
+
+export interface TwoTowerNextEligibleStepTimestep {
+  /** Canonical timestep `nextNMasked / blockSize` for the next eligible refinement pass. */
+  readonly nextTModel: number;
+  readonly nextNMasked: number;
+  readonly blockSize: number;
+  readonly remainingSteps: number;
+}
+
+/**
+ * Frozen canonical timestep status (`t = nMasked / B`, NEVER `r / K`) strictly separating:
+ *   1. `executedPass`: the executed Denoiser pass's actual input mask fraction (plus any diagnostic override).
+ *   2. `currentBlockMask`: the current record's block mask state (post-commit if on a commit record).
+ *   3. `nextEligibleStep`: populated ONLY when an incomplete active block can run another refinement (`nMasked > 0 && remainingSteps > 0`).
+ *   4. `blockCompletionState`: explicit lifecycle completion state (confirming no further denoiser pass is needed when complete).
+ *   5. `conditioningMode`: cleanly distinguishes active diffusion, inactive/no-pass-yet, historical prior pass, AR bypass, and Mock-AR bypass.
+ */
+export interface TwoTowerTimestepStatus {
+  readonly executedPass: TwoTowerExecutedPassTimestep | null;
+  readonly currentBlockMask: TwoTowerCurrentBlockMaskStatus | null;
+  readonly nextEligibleStep: TwoTowerNextEligibleStepTimestep | null;
+  readonly blockCompletionState: TwoTowerBlockCompletionState;
+  readonly blockCompletionNote: string;
+  readonly conditioningMode: TwoTowerTimestepConditioningMode;
+  readonly summaryLabel: string;
 }
 
 export interface TwoTowerSnapshotIntegrity {
@@ -166,6 +288,8 @@ export interface TwoTowerSessionViewState {
   readonly termination: TwoTowerSessionTermination | null;
   readonly latestContextTrace: TwoTowerContextTraceResolution;
   readonly denoiserLookup: TwoTowerDenoiserPassLookup;
+  /** Canonical stage-separated timestep status (`t = nMasked / B`, never `r / K`). */
+  readonly timestepStatus: TwoTowerTimestepStatus;
   readonly latestSamplerPresentation: SamplerStepPresentation | null;
   /** Resolve an actual Context bay trace (`1..52`) from the latest non-pruned Context execution. */
   resolveContextBayTrace(bayId: number, preferredAbsPos?: number): TwoTowerContextBayTraceLookup;
@@ -264,12 +388,200 @@ export function resolveNearestBayOfKind(requestedBayId: number, kind: Kind): num
   return best;
 }
 
+function countMaskedTokenIds(tokenIds: ArrayLike<number>, maskTokenId: number): number {
+  let count = 0;
+  for (let i = 0; i < tokenIds.length; i++) {
+    if (tokenIds[i] === maskTokenId) count++;
+  }
+  return count;
+}
+
+/**
+ * Resolve the canonical, stage-separated `TwoTowerTimestepStatus` (`t = nMasked / B`, NEVER `r / K`)
+ * for the active or historical cursor record without mutating any session buffers.
+ */
+export function resolveTwoTowerTimestepStatus(params: {
+  readonly record: TwoTowerSessionRecord;
+  readonly denoiserLookup: TwoTowerDenoiserPassLookup;
+  readonly maskTokenId: number;
+}): TwoTowerTimestepStatus {
+  const { record, denoiserLookup, maskTokenId } = params;
+  const modeAtRecord = record.configAtStep.mode;
+  const activeBlock = record.activeBlock;
+
+  // 1. Current record's block mask state & completion state
+  let currentBlockMask: TwoTowerCurrentBlockMaskStatus | null = null;
+  let blockCompletionState: TwoTowerBlockCompletionState = 'no_active_block';
+  let blockCompletionNote = 'No active diffusion block on this record.';
+  let nextEligibleStep: TwoTowerNextEligibleStepTimestep | null = null;
+
+  if (activeBlock !== null) {
+    const B = activeBlock.blockConfig.blockSize;
+    const unresolved = activeBlock.nMasked;
+    const isComplete =
+      unresolved === 0 || activeBlock.status === 'completed_uncommitted';
+    currentBlockMask = Object.freeze({
+      currentUnresolvedCount: unresolved,
+      blockSize: B,
+      currentMaskFraction: B > 0 ? unresolved / B : 0,
+      isBlockComplete: isComplete,
+      isCommittedToContext: false,
+    });
+
+    if (isComplete) {
+      blockCompletionState = 'completed_uncommitted';
+      blockCompletionNote =
+        `Block b${activeBlock.blockId} is fully unmasked (0/${B} [MASK] remaining) — no further denoiser evaluation is required; ready to commit block to Context Tower.`;
+    } else {
+      blockCompletionState = 'refining';
+      const remainingSteps = Math.max(
+        0,
+        activeBlock.blockConfig.stepsPerBlock - activeBlock.completedRefinements,
+      );
+      if (
+        record.termination === null &&
+        (activeBlock.status === 'initialized' || activeBlock.status === 'refining') &&
+        unresolved > 0 &&
+        remainingSteps > 0
+      ) {
+        nextEligibleStep = Object.freeze({
+          nextTModel: unresolved / B,
+          nextNMasked: unresolved,
+          blockSize: B,
+          remainingSteps,
+        });
+        blockCompletionNote =
+          `Block b${activeBlock.blockId} has ${unresolved}/${B} unresolved [MASK] slot${unresolved === 1 ? '' : 's'}; next eligible pass uses t = ${unresolved}/${B} = ${(unresolved / B).toFixed(3)} (${remainingSteps} step${remainingSteps === 1 ? '' : 's'} remaining).`;
+      } else if (activeBlock.status === 'awaiting_confidence_commit') {
+        blockCompletionNote =
+          `Block b${activeBlock.blockId} refinement r=${activeBlock.pendingRefinementIndex ?? 0} denoised (${unresolved}/${B} pre-commit masks); commit confidence to reveal post-commit mask state.`;
+      } else {
+        blockCompletionNote =
+          `Block b${activeBlock.blockId} has ${unresolved}/${B} masked slots remaining with 0 refinement steps left in budget.`;
+      }
+    }
+  } else if (record.kind === 'diffusion_block_commit') {
+    const B = record.blockConfig.blockSize;
+    currentBlockMask = Object.freeze({
+      currentUnresolvedCount: 0,
+      blockSize: B,
+      currentMaskFraction: 0,
+      isBlockComplete: true,
+      isCommittedToContext: true,
+    });
+    blockCompletionState = 'committed_to_context';
+    blockCompletionNote =
+      `Block b${record.blockConfig.blockId} (${B}/${B} tokens) committed to Context Tower (P=${record.committedPrefixLen}) — no further denoiser evaluation is required.`;
+  }
+
+  // 2. Conditioning mode & executed pass timestep (strictly derived from executed pass input tokens!)
+  let conditioningMode: TwoTowerTimestepConditioningMode;
+  let executedPass: TwoTowerExecutedPassTimestep | null = null;
+
+  if (modeAtRecord === 'ar') {
+    conditioningMode = 'bypassed_ar';
+  } else if (modeAtRecord === 'mock_ar') {
+    conditioningMode = 'bypassed_mock_ar';
+  } else {
+    const pass = denoiserLookup.pass;
+    if (
+      pass !== null &&
+      pass.mode === 'mask_diffusion' &&
+      pass.tModel !== null &&
+      denoiserLookup.sourceRecordIndex !== null
+    ) {
+      const nMaskedInput = countMaskedTokenIds(pass.tokenIds, maskTokenId);
+      const blockSize = pass.blockSize;
+      const empiricalMaskFraction = blockSize > 0 ? nMaskedInput / blockSize : 0;
+      const isDiagnosticOverride = Math.abs(pass.tModel - empiricalMaskFraction) > 1e-6;
+      executedPass = Object.freeze({
+        tModel: pass.tModel,
+        nMaskedInput,
+        blockSize,
+        empiricalMaskFraction,
+        isDiagnosticOverride,
+        overrideValue: isDiagnosticOverride ? pass.tModel : null,
+        passExecutionId: pass.passExecutionId,
+        sourceRecordIndex: denoiserLookup.sourceRecordIndex,
+        sourceBlockId: denoiserLookup.sourceBlockId,
+        sourceRefinementIndex: denoiserLookup.sourceRefinementIndex,
+      });
+      conditioningMode =
+        denoiserLookup.status === 'active_on_record'
+          ? 'active_diffusion'
+          : 'historical_prior_pass';
+    } else {
+      conditioningMode = 'inactive_no_pass_yet';
+    }
+  }
+
+  // 3. Stage-consistent summary label (NEVER pairs an executed pass's tModel with a different stage's nMasked)
+  let summaryLabel: string;
+  if (conditioningMode === 'bypassed_ar') {
+    summaryLabel = 'BYPASSED (t = null) · AR mode';
+  } else if (conditioningMode === 'bypassed_mock_ar') {
+    summaryLabel = 'BYPASSED (t = null) · Mock-AR mode';
+  } else if (conditioningMode === 'inactive_no_pass_yet') {
+    if (nextEligibleStep !== null) {
+      summaryLabel =
+        `INACTIVE (no pass yet) · Next t = ${nextEligibleStep.nextTModel.toFixed(2)} ` +
+        `(${nextEligibleStep.nextNMasked}/${nextEligibleStep.blockSize} masked)`;
+    } else if (blockCompletionState === 'completed_uncommitted') {
+      summaryLabel = 'INACTIVE (no pass yet) · Block already complete (0 masked, no pass needed)';
+    } else if (blockCompletionState === 'committed_to_context') {
+      summaryLabel = 'INACTIVE (no pass yet) · Block committed to Context (no further pass needed)';
+    } else {
+      summaryLabel = 'INACTIVE · No diffusion pass yet (ready)';
+    }
+  } else if (conditioningMode === 'historical_prior_pass' && executedPass !== null) {
+    const passDesc = executedPass.isDiagnosticOverride
+      ? `t_override = ${executedPass.overrideValue!.toFixed(2)} (empirical ${executedPass.nMaskedInput}/${executedPass.blockSize} = ${executedPass.empiricalMaskFraction.toFixed(2)})`
+      : `t = ${executedPass.tModel.toFixed(2)} (${executedPass.nMaskedInput}/${executedPass.blockSize} input masked)`;
+    const locTag = `Rec #${executedPass.sourceRecordIndex} b${executedPass.sourceBlockId ?? '-'} r${executedPass.sourceRefinementIndex ?? '-'}`;
+    if (nextEligibleStep !== null) {
+      summaryLabel =
+        `HISTORICAL (${locTag}: ${passDesc}) · Next block t = ${nextEligibleStep.nextTModel.toFixed(2)} ` +
+        `(${nextEligibleStep.nextNMasked}/${nextEligibleStep.blockSize} masked)`;
+    } else {
+      summaryLabel = `HISTORICAL (${locTag}: ${passDesc}) · Block committed (no further pass needed)`;
+    }
+  } else if (executedPass !== null) {
+    // active_diffusion
+    const passDesc = executedPass.isDiagnosticOverride
+      ? `t_override = ${executedPass.overrideValue!.toFixed(2)} (empirical ${executedPass.nMaskedInput}/${executedPass.blockSize} = ${executedPass.empiricalMaskFraction.toFixed(2)})`
+      : `t = ${executedPass.tModel.toFixed(2)} (${executedPass.nMaskedInput}/${executedPass.blockSize} input masked)`;
+    if (blockCompletionState === 'completed_uncommitted') {
+      summaryLabel = `ACTIVE · Pass ${passDesc} · Block complete (0/${executedPass.blockSize} left, no further pass needed)`;
+    } else if (nextEligibleStep !== null) {
+      summaryLabel =
+        `ACTIVE · Pass ${passDesc} · Block now ${nextEligibleStep.nextNMasked}/${nextEligibleStep.blockSize} masked ` +
+        `(Next t = ${nextEligibleStep.nextTModel.toFixed(2)})`;
+    } else {
+      summaryLabel = `ACTIVE · ${passDesc}`;
+    }
+  } else {
+    summaryLabel = 'INACTIVE · No diffusion pass yet';
+  }
+
+  return Object.freeze({
+    executedPass,
+    currentBlockMask,
+    nextEligibleStep,
+    blockCompletionState,
+    blockCompletionNote,
+    conditioningMode,
+    summaryLabel,
+  });
+}
+
 /**
  * Safely inspect a `TwoTowerSession` at its current historical or live cursor, enforcing:
  *   1. Historical `record.configAtStep` is authoritative (never `session.pendingConfig`).
  *   2. Fail-safe validation of `record.contextSnapshot` against `session.model.contextModel`.
  *   3. Explicit handling of missing historical Context execution after pruning (never invents traces).
- *   4. Clear distinction between active-record Denoiser passes and prior-record Denoiser passes.
+ *   4. Clear distinction between active-record Denoiser passes and prior-record Denoiser passes,
+ *      including explicit Context cache boundary provenance & mismatch warnings.
+ *   5. Stage-separated canonical timestep semantics (`t = nMasked / B`, NEVER `r / K`).
  */
 export function resolveTwoTowerSessionViewState(session: TwoTowerSession): TwoTowerSessionViewState {
   const branch = getActiveBranch(session);
@@ -310,19 +622,41 @@ export function resolveTwoTowerSessionViewState(session: TwoTowerSession): TwoTo
           'Historical Context execution trace is unavailable after history pruning; persistent Context cache snapshot remains authoritative (no synthetic trace substituted).',
       });
 
-  // Resolve Denoiser pass: active on current record vs latest prior record at or before cursor
+  // Resolve Denoiser pass: active on current record vs latest prior record at or before cursor,
+  // preserving explicit Context cache boundary provenance (`sourceContextPrefixLen`, `sourceContextCacheDigest`,
+  // `sourceRecordConfig`, `matchesCurrentContextBoundary`, `historicalProvenanceWarning`).
+  const currentCtxDigest = record.contextSnapshot.ctxState.stateDigest;
+  const currentCtxPrefixLen = record.contextSnapshot.ctxState.processedTokens;
+
   let denoiserLookup: TwoTowerDenoiserPassLookup;
   if (record.denoiserPass !== null) {
+    const pass = record.denoiserPass;
+    const cond = record.conditioning;
+    const sourceContextPrefixLen = cond?.committedPrefixLen ?? pass.committedPrefixLen;
+    const sourceContextCacheDigest =
+      cond?.sourceStateDigest ?? pass.sourceStateDigest ?? record.identity.sourceCacheDigest;
+    const matchesCurrentContextBoundary =
+      sourceContextCacheDigest === currentCtxDigest &&
+      sourceContextPrefixLen === currentCtxPrefixLen &&
+      pass.mode === record.configAtStep.mode &&
+      (record.activeBlock === null || record.activeBlock.blockId === pass.blockId);
+
     denoiserLookup = Object.freeze({
       status: 'active_on_record' as const,
-      pass: record.denoiserPass,
-      conditioning: record.conditioning,
+      pass,
+      conditioning: cond,
       sourceRecordId: record.identity.recordId,
       sourceRecordIndex: branch.cursorIndex,
       sourceBlockId: record.identity.blockId,
       sourceRefinementIndex: record.identity.refinementIndex,
+      isHistoricalInspection: false,
+      sourceContextPrefixLen,
+      sourceContextCacheDigest,
+      sourceRecordConfig: record.configAtStep,
+      matchesCurrentContextBoundary,
+      historicalProvenanceWarning: null,
       traceOrigin: 'denoiser_scratch' as const,
-      note: `Active Denoiser scratch pass (${record.denoiserPass.mode}, ${record.denoiserPass.passExecutionId}).`,
+      note: `Active Denoiser scratch pass (${pass.mode}, ${pass.passExecutionId}, conditioned on Context P=${sourceContextPrefixLen}, cache ${sourceContextCacheDigest.slice(0, 8)}).`,
     });
   } else {
     let priorPass: TwoTowerDenoiserPassResult | null = null;
@@ -331,6 +665,8 @@ export function resolveTwoTowerSessionViewState(session: TwoTowerSession): TwoTo
     let priorRecordIndex: number | null = null;
     let priorBlockId: number | null = null;
     let priorRefinementIndex: number | null = null;
+    let priorRecordConfig: TwoTowerSessionConfig | null = null;
+    let priorRecordSourceDigest: string | null = null;
 
     for (let idx = branch.cursorIndex - 1; idx >= 0; idx--) {
       const candidate = branch.records[idx];
@@ -341,11 +677,46 @@ export function resolveTwoTowerSessionViewState(session: TwoTowerSession): TwoTo
         priorRecordIndex = idx;
         priorBlockId = candidate.identity.blockId;
         priorRefinementIndex = candidate.identity.refinementIndex;
+        priorRecordConfig = candidate.configAtStep;
+        priorRecordSourceDigest = candidate.identity.sourceCacheDigest;
         break;
       }
     }
 
     if (priorPass !== null) {
+      const sourceContextPrefixLen = priorCond?.committedPrefixLen ?? priorPass.committedPrefixLen;
+      const sourceContextCacheDigest =
+        priorCond?.sourceStateDigest ?? priorPass.sourceStateDigest ?? priorRecordSourceDigest;
+      // Strictly FALSE for historical prior passes after block commitment, mode switch, or new block init
+      const currentActiveBlock: TwoTowerActiveDiffusionBlock | null = record.activeBlock;
+      const matchesCurrentContextBoundary =
+        sourceContextCacheDigest !== null &&
+        sourceContextCacheDigest === currentCtxDigest &&
+        sourceContextPrefixLen === currentCtxPrefixLen &&
+        priorPass.mode === record.configAtStep.mode &&
+        record.kind !== 'diffusion_block_commit' &&
+        record.kind !== 'diffusion_block_init' &&
+        currentActiveBlock !== null &&
+        currentActiveBlock.blockId === priorPass.blockId;
+
+      const locTag =
+        priorBlockId !== null
+          ? `Block b${priorBlockId}, r=${priorRefinementIndex ?? 0}`
+          : `mode=${priorPass.mode}`;
+      const shortSrcDigest = sourceContextCacheDigest ? sourceContextCacheDigest.slice(0, 8) : 'n/a';
+      const shortCurDigest = currentCtxDigest.slice(0, 8);
+      const blockSwitchNote =
+        record.activeBlock !== null && record.activeBlock.blockId !== priorBlockId
+          ? ` (active Block b${record.activeBlock.blockId} has not been denoised yet)`
+          : '';
+      const boundaryMismatchDetail = !matchesCurrentContextBoundary
+        ? ` Current record #${branch.cursorIndex} (${record.kind}, mode=${record.configAtStep.mode}) is at Context P=${currentCtxPrefixLen} (cache ${shortCurDigest})${blockSwitchNote} — prior Denoiser KV/Mamba conditioning (P=${sourceContextPrefixLen}) does NOT belong to the current Context boundary.`
+        : '';
+      const historicalProvenanceWarning =
+        `Historical Denoiser pass inspection: showing prior ${priorPass.mode} pass from Record #${priorRecordIndex} ` +
+        `(${locTag}, ${priorPass.passExecutionId}) conditioned on Context P=${sourceContextPrefixLen} ` +
+        `(cache ${shortSrcDigest}).${boundaryMismatchDetail}`;
+
       denoiserLookup = Object.freeze({
         status: 'historical_prior_record' as const,
         pass: priorPass,
@@ -354,8 +725,14 @@ export function resolveTwoTowerSessionViewState(session: TwoTowerSession): TwoTo
         sourceRecordIndex: priorRecordIndex,
         sourceBlockId: priorBlockId,
         sourceRefinementIndex: priorRefinementIndex,
+        isHistoricalInspection: true,
+        sourceContextPrefixLen,
+        sourceContextCacheDigest,
+        sourceRecordConfig: priorRecordConfig,
+        matchesCurrentContextBoundary,
+        historicalProvenanceWarning,
         traceOrigin: 'denoiser_scratch' as const,
-        note: `No Denoiser pass executed on record #${branch.cursorIndex} (${record.kind}); showing most recent prior Denoiser pass from record #${priorRecordIndex} (${priorPass.passExecutionId}).`,
+        note: `No Denoiser pass executed on record #${branch.cursorIndex} (${record.kind}); showing prior Denoiser pass from record #${priorRecordIndex} (${locTag}, ${priorPass.passExecutionId}, conditioned on Context P=${sourceContextPrefixLen}, cache ${shortSrcDigest}).`,
       });
     } else {
       denoiserLookup = Object.freeze({
@@ -366,11 +743,24 @@ export function resolveTwoTowerSessionViewState(session: TwoTowerSession): TwoTo
         sourceRecordIndex: null,
         sourceBlockId: null,
         sourceRefinementIndex: null,
+        isHistoricalInspection: false,
+        sourceContextPrefixLen: null,
+        sourceContextCacheDigest: null,
+        sourceRecordConfig: null,
+        matchesCurrentContextBoundary: false,
+        historicalProvenanceWarning: null,
         traceOrigin: 'denoiser_scratch' as const,
         note: 'No Denoiser forward pass has executed yet on this branch (Context-only state).',
       });
     }
   }
+
+  // Canonical stage-separated timestep status (`t = nMasked / B`, NEVER `r / K`)
+  const timestepStatus = resolveTwoTowerTimestepStatus({
+    record,
+    denoiserLookup,
+    maskTokenId: session.model.maskTokenId,
+  });
 
   // Latest sampler presentation
   const latestSamplerPresentation: SamplerStepPresentation | null =
@@ -448,6 +838,7 @@ export function resolveTwoTowerSessionViewState(session: TwoTowerSession): TwoTo
     termination: record.termination,
     latestContextTrace,
     denoiserLookup,
+    timestepStatus,
     latestSamplerPresentation,
     resolveContextBayTrace,
     resolveDenoiserBayTrace,

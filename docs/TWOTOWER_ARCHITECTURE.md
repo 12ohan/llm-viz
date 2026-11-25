@@ -71,14 +71,22 @@ flowchart LR
   DHead -- "Single commit after block completes" --> Ctx
 ```
 
-### Split PixArt-α `adaLN-single` Conditioning Ordering
+### Split PixArt-α `adaLN-single` Conditioning Ordering & Canonical Timestep Semantics
 
 Denoiser-only timestep conditioning (`30,022,272` parameters across `58` BF16 tensors) computes:
 
-1. **Sinusoidal frequency embedding**: `t_scaled = t * 1000`, `ω_k = exp(-ln(10000) · k / (freqDim / 2))`, ordered **`[cos(0..half-1), sin(0..half-1)]`** (`freqDim = 256` production, `16` miniature).
-2. **Global projection**: `t_repr = t_embedder.mlp(φ)` (`freqDim → d → d`, SiLU) and `t_emb = t_block(SiLU(t_repr))` (`[3 · d]`).
-3. **Per-layer modulation**: `(shift_l, scale_l, gate_l) = scale_shift_tables[l] + t_emb` for each layer `l ∈ [0..51]`, with `modulate(x, shift, scale) = x * (1 + scale) + shift`.
-4. **Exact split normalization ordering** (critical to match `modeling_nemotron_twotower.py` and verified by order-inversion sensitivity parity tests):
+1. **Canonical Masked-Fraction Timestep (`t = nMasked / B`, NEVER `r / K`):**
+   - For any active `mask_diffusion` refinement pass, the canonical scalar is strictly **`t = nMasked / B`** (the empirical masked token fraction entering the executed Denoiser pass — never a step-ratio `r / K`).
+   - Spatial view provenance (`TwoTowerTimestepStatus` in `src/twotower/scene/provenance.ts`) strictly separates five concerns:
+     - `executedPass`: the executed Denoiser pass's actual input masked fraction (`nMaskedInput / blockSize`), storing any diagnostic `tOverride` separately (`overrideValue` vs `empiricalMaskFraction`) so labels never conflate an override with empirical input counts.
+     - `currentBlockMask`: the current record's unresolved `[MASK]` count (post-commit on `diffusion_confidence_commit`).
+     - `nextEligibleStep`: populated **only** when an incomplete active block can run another refinement (`nMasked > 0 && remainingSteps > 0`).
+     - `blockCompletionState`: `'no_active_block' | 'refining' | 'completed_uncommitted' | 'committed_to_context'` — explicitly noting that no further denoiser evaluation is required once a block is complete.
+     - `conditioningMode`: `'active_diffusion' | 'inactive_no_pass_yet' | 'historical_prior_pass' | 'bypassed_ar' | 'bypassed_mock_ar'` — explicitly distinguishing inactive/no-pass-yet records (`context_prefill`, `diffusion_block_init` before pass 0, or ready states) from genuine `AR` / `Mock-AR` bypass (`tModel = null`).
+2. **Sinusoidal frequency embedding**: `t_scaled = t * 1000`, `ω_k = exp(-ln(10000) · k / (freqDim / 2))`, ordered **`[cos(0..half-1), sin(0..half-1)]`** (`freqDim = 256` production, `16` miniature).
+3. **Global projection**: `t_repr = t_embedder.mlp(φ)` (`freqDim → d → d`, SiLU) and `t_emb = t_block(SiLU(t_repr))` (`[3 · d]`).
+4. **Per-layer modulation**: `(shift_l, scale_l, gate_l) = scale_shift_tables[l] + t_emb` for each layer `l ∈ [0..51]`, with `modulate(x, shift, scale) = x * (1 + scale) + shift`.
+5. **Exact split normalization ordering** (critical to match `modeling_nemotron_twotower.py` and verified by order-inversion sensitivity parity tests):
    - **Mamba-2 (`M`, 23 layers) & GQA (`*`, 6 layers):** **`modulate → RMSNorm`** (`RMSNorm(x * (1 + scale) + shift)`).
    - **MoE (`E`, 23 layers):** **`RMSNorm → modulate`** (`RMSNorm(x) * (1 + scale) + shift`).
    - **All 52 layers:** residual gating `x + gate * mixer_out`.
@@ -164,6 +172,16 @@ To run complete 52-layer dual-tower block-diffusion trajectories interactively i
 | Sampling temperature `T` | **`0.0`** default (greedy); deterministic Gumbel-max when `> 0` | `0.0` (code) / `0.1` (card) | Strict zero `Math.random()`; caller supplies explicit uniform variates when `T > 0`. |
 | Canonical weights | **`860` tensors / `600,120` Float32s (`2.29 MiB`)** | `12,544` tensors / `63.19B` | Context (`seed = 0x4e454d33`), independent Denoiser via deterministic in-generation perturbation `{ seed: 20260701, scale: 0.15 }`, plus `58` time-conditioning tensors (`seed = 0x54543031`). |
 
+### Miniature Model Logical Head/State Inventory vs. Selected Spatial Atlas Slices
+
+All Stage TT3/TT4 spatial views distinguish the miniature model's **complete logical inventory** (`TWOTOWER_MINI_MODEL_INVENTORY` in `src/twotower/scene/provenance.ts`, derived directly from `GQA_SIM_CONFIG` and `MAMBA_SIM_CONFIG`) from the **selected subset of head slices** rendered on individual inspection plates:
+
+| Layer Kind | Complete Miniature Logical Inventory | Production 30B-A3B Inventory | Spatial Atlas Packing & Selected Slice Scope |
+| --- | --- | --- | --- |
+| **GQA Attention (`*`, 6 bays)** | **32 miniature GQA query heads**, **2 KV heads** (`16:1` grouping), **head width `dHead = 4`** (`qConcatDim = 128`, `kvConcatDim = 8`) | `32` Q heads, `2` KV heads (`16:1`), `dHead = 128` (`qConcatDim = 4,096`, `kvConcatDim = 512`) | `128×128` RG32F GQA atlas packs all `32` Q heads (`Q00..Q31`) and both KV heads (`K0/V0`, `K1/V1`), while displaying **2 selected Q-head slices** (`group0Head`, `group1Head`, 1 per KV group) on the Scores/Softmax matrices. |
+| **Mamba-2 (`M`, 23 bays)** | **16 miniature Mamba heads (`H00..H15`)**, **8 Mamba groups (`G0..G7`, `2` heads/group)**, `dHead = 4`, `dInner = 64`, `dState = 4`, **`4×4` per-head FP32 SSM state matrices**, 4-tap `convDim = 128` Conv1D | `64` heads, `8` groups (`8` heads/group), `dHead = 64`, `dInner = 4,096`, `dState = 128` (`64 × [64×128]` FP32 SSM), 4-tap `convDim = 6,144` Conv1D | `256×128` RG32F Mamba atlas packs all `16` heads (`xHeads`, `dt`, decay bank, bank summary) and all `8` groups (`B`, `C`, `rms_gate`), while displaying **1 selected head's native `4×4` analytical SSM decomposition slice**. |
+| **Granular MoE (`E`, 23 bays)** | `128` routed experts (`Top-6`, `×2.5`, `FP64` router + `FP32` bias) + `1` double-wide shared expert (`0 B` stateless) | `128` routed (`1,856`) + `1` shared (`3,712`), `0 B` stateless | Full `128+1` bank rendered directly; zero cross-tower cache transfer. |
+
 ---
 
 ## 6. Topology A Multi-Entry MPA, Isolation Contract & Ownership Architecture
@@ -196,4 +214,5 @@ Rather than merging TwoTower into Nano's bundle, `vite.config.ts` compiles two i
 - **Immutable Context Ownership & Conditioning Provenance (`src/twotower/contracts.ts`, `src/twotower/execution.ts`):**
   - `TwoTowerContextSnapshot` owns Context's committed `ctxState` (`HybridDecodeCacheState`) and pre-last-token `mambaS2` boundary snapshot, verified by `snapshotDigest` and Nano's unmodified `validateDecodeCacheState()`.
   - `TwoTowerContextConditioningState` carries explicit `ownerRole: 'context_tower'` and `consumerRole: 'denoiser_tower'`, defensively cloned non-aliased `ArrayBuffer`s across all 29 aligned bays (`6` GQA + `23` Mamba-2), and a cryptographic-style 64-bit `conditioningDigest` — guaranteeing Context-owned caches are never mutated or relabeled as Denoiser-owned.
-  - **Lazy Per-Layer Trace Reconstruction (`traceOrigin`):** Primary cutaway bays (`[1, 2, 6, 42, 43, 52]`) are retained eagerly (`traceOrigin: 'computed_this_step'`), while any other bay `1..52` is reconstructed on demand from detached internal boundary closures (`traceOrigin: 'reconstructed_from_checkpoint'`) inside a bounded LRU trace cache.
+  - **Lazy Per-Layer Trace Reconstruction (`traceOrigin`):** Primary Context cutaway bays (`[1, 2, 6, 42, 43, 52]`) are retained eagerly (`traceOrigin: 'context_computed'`), while any other Context bay `1..52` is reconstructed on demand from detached internal boundary closures (`traceOrigin: 'context_reconstructed'`) inside a bounded LRU trace cache. Persistent committed cache snapshots are tagged `'persistent_cache'`, and ephemeral Denoiser scratchpad traces are tagged `'denoiser_scratch'`.
+  - **Historical Cache Boundary Provenance (`TwoTowerDenoiserPassLookup`):** Whenever the active record has no Denoiser pass of its own (e.g., after `diffusion_block_commit` advancing `P = 8 → 12`, after switching to `ar_step`, or on `diffusion_block_init` of a new block before pass 0), spatial scenes explicitly surface `isHistoricalInspection: true`, `sourceContextPrefixLen`, `sourceContextCacheDigest`, `sourceRecordConfig`, `matchesCurrentContextBoundary: false`, and an explicit `historicalProvenanceWarning` banner/badge. Prior Denoiser conditioning (`KV[0..7]` or `H_7`) is **never** relabeled as belonging to the current Context boundary (`P = 12`), historical `record.configAtStep` is strictly preserved (never `session.pendingConfig`), and pruned Context traces (`pruned_unavailable`) always emit explicit warnings without substituting synthetic traces.

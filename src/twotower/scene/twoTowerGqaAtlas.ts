@@ -1,10 +1,17 @@
 /**
  * Dedicated 128×128 TwoTower GQA RG32F Value Atlas (`src/twotower/scene/twoTowerGqaAtlas.ts`)
  *
- * Packs EVERY live Float32 tensor for the primary tower (Denoiser or solo Context) AND the
+ * Packs live miniature Float32 tensors for the primary tower (Denoiser or solo Context) AND the
  * secondary Context provenance tower (or persistent Context KV cache fallback when historical
  * Context traces were pruned) into ONE non-overlapping 128×128 RG32F texture (16,384 texels
  * = 128 KiB), supporting query lengths T <= 16 and attended KV lengths K <= 24.
+ *
+ * DIMENSIONAL INVENTORY VS. SELECTED ATLAS SLICES:
+ *   - Complete miniature GQA model inventory: 32 query heads (Q00..Q31, 16 per KV group),
+ *     2 KV heads (KV0, KV1), head width dHead = 4 (qConcatDim = 128, kvConcatDim = 8).
+ *   - All 32 query heads (Q[0..31]) and both KV heads (KV0/KV1) are packed in full;
+ *     attention Scores & Softmax regions pack 2 SELECTED head slices (1 per KV group:
+ *     `group0Head ∈ [0..15]` and `group1Head ∈ [16..31]`) out of the model's 32 logical Q heads.
  *
  * CRITICAL VISIBILITY CONSISTENCY:
  *   Uses `isAttentionKeyVisible(sim.attentionMaskMode, sim.prefixTokens, q, k, sim.keyTokens)`
@@ -120,6 +127,11 @@ export interface TwoTowerGqaSecondaryAtlasSlices {
 export interface TwoTowerGqaValueAtlas extends Rg32fValueAtlas {
   readonly width: typeof TWOTOWER_GQA_ATLAS_WIDTH;
   readonly height: typeof TWOTOWER_GQA_ATLAS_HEIGHT;
+  /** Complete miniature GQA model head inventory (32 Q heads, 2 KV heads, dHead = 4). */
+  readonly logicalQueryHeadCount: 32;
+  readonly logicalKvHeadCount: 2;
+  readonly headDim: 4;
+  /** Selected 2-head atlas slice indices (1 per KV group out of 32 logical Q heads). */
   readonly group0Head: number;
   readonly group1Head: number;
   readonly primary: TwoTowerGqaPrimaryAtlasSlices;
@@ -543,6 +555,9 @@ export function buildTwoTowerGqaValueAtlas(
     width: TWOTOWER_GQA_ATLAS_WIDTH,
     height: TWOTOWER_GQA_ATLAS_HEIGHT,
     data,
+    logicalQueryHeadCount: 32,
+    logicalKvHeadCount: 2,
+    headDim: 4,
     group0Head: g0,
     group1Head: g1,
     primary,

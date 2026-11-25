@@ -403,7 +403,8 @@ describe('Stage TT3 Wave 1: Dual-Tower 52×2 Macro Spatial Composition & Provena
       expect(arDiag.committedPrefixLen).toBe(9);
       expect(arDiag.timestepRailActive).toBe(false);
       expect(arDiag.timestepValue).toBeNull();
-      expect(arDiag.timestepStatusLabel).toBe('BYPASSED (t = null)');
+      expect(arDiag.timestepStatusLabel).toContain('BYPASSED (t = null)');
+      expect(arDiag.timestepStatus.conditioningMode).toBe('bypassed_ar');
       expect(arDiag.refinementLoopState).toBe('dormant');
       expect(arDiag.blockCommitPathwayState).toBe('dormant');
       expect(arDiag.channelEmphasis.gqa_kv.elevatedCount).toBe(0);
@@ -423,7 +424,8 @@ describe('Stage TT3 Wave 1: Dual-Tower 52×2 Macro Spatial Composition & Provena
       expect(mockArDiag.contextKvConditioningLen).toBe(8); // P - 1 conditioning (KV[:-1] + mambaS2)!
       expect(mockArDiag.timestepRailActive).toBe(false);
       expect(mockArDiag.timestepValue).toBeNull();
-      expect(mockArDiag.timestepStatusLabel).toBe('BYPASSED (t = null)');
+      expect(mockArDiag.timestepStatusLabel).toContain('BYPASSED (t = null)');
+      expect(mockArDiag.timestepStatus.conditioningMode).toBe('bypassed_mock_ar');
       expect(mockArDiag.refinementLoopState).toBe('dormant');
       expect(mockArDiag.blockCommitPathwayState).toBe('active_single_token');
       // Even when filtering `timestep` in Mock-AR, timestep rail stays bypassed (not elevated!)
@@ -447,7 +449,7 @@ describe('Stage TT3 Wave 1: Dual-Tower 52×2 Macro Spatial Composition & Provena
         afterBlockCommit,
       } = stepDiffusionBlockToCompletedUncommitted(diffBase);
 
-      // 3a. diffusion_block_init
+      // 3a. diffusion_block_init (no pass executed yet: executedPass === null, nextEligibleStep t = 4/4 = 1.0)
       const initDiag = getDiag(buildTwoTowerMacroScene(afterInit));
       expect(initDiag.measuredExecutionMode).toBe('mask_diffusion');
       expect(initDiag.recordKind).toBe('diffusion_block_init');
@@ -456,7 +458,10 @@ describe('Stage TT3 Wave 1: Dual-Tower 52×2 Macro Spatial Composition & Provena
       expect(initDiag.activeBlockSize).toBe(4);
       expect(initDiag.activeBlockMaskedCount).toBe(4);
       expect(initDiag.timestepRailActive).toBe(true);
-      expect(initDiag.timestepValue).toBeCloseTo(1.0, 6);
+      expect(initDiag.timestepValue).toBeNull();
+      expect(initDiag.timestepStatus.conditioningMode).toBe('inactive_no_pass_yet');
+      expect(initDiag.timestepStatus.executedPass).toBeNull();
+      expect(initDiag.timestepStatus.nextEligibleStep?.nextTModel).toBeCloseTo(1.0, 6);
       expect(initDiag.refinementLoopState).toBe('active');
       expect(initDiag.blockCommitPathwayState).toBe('dormant');
 
