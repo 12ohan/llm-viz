@@ -104,7 +104,7 @@ VITE_BASE_PATH=/llm-viz/ npm run build
 - [**Architecture Guide (`docs/ARCHITECTURE.md`)**](docs/ARCHITECTURE.md) — Module boundaries, 5-pass WebGL2 pipeline, context-loss recovery, runtime performance architecture, immutable AR cache contracts, and future TwoTower extension points.
 - [**Verification Runbook (`docs/VERIFICATION.md`)**](docs/VERIFICATION.md) — Vitest & PyTorch `2.15.0` parity tolerances, SHA-256 fixture regeneration workflow, Playwright WebGL2 E2E coverage, CI vs. Pages deploy workflows, and known limitations.
 - [**Third-Party Notices (`THIRD_PARTY_NOTICES.md`)**](THIRD_PARTY_NOTICES.md) — Verified upstream licenses, architectural attributions, non-redistribution statement, and dev-only dependency inventory.
-- [**Changelog (`CHANGELOG.md`)**](CHANGELOG.md) — Unreleased v1.0 Release Candidate summary.
+- [**Changelog (`CHANGELOG.md`)**](CHANGELOG.md) — Nemotron 3 Nano `v1.0.0` release notes.
 - **Historical Milestone 1 Briefs (superseded):** [`docs/archive/DESIGN_BRIEF.md`](docs/archive/DESIGN_BRIEF.md) · [`docs/archive/IMPLEMENTATION_PLAN.md`](docs/archive/IMPLEMENTATION_PLAN.md).
 
 ---

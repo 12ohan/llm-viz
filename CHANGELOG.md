@@ -2,9 +2,9 @@
 
 All notable changes to **Nemotron 3 Nano 30B-A3B — Architecture Visualization** are documented in this file.
 
-> **Release Status:** This changelog tracks the pre-release v1.0 Release Candidate (`[Unreleased]`). No finalized `v1.0.0` git tag has been created yet.
+> **Release Status:** Finalized **Nemotron 3 Nano `v1.0.0`** milestone release ([Live Demo](https://12ohan.github.io/llm-viz/)). Regression baseline: `236 / 236` Vitest tests (`33` files), `9 / 9` Playwright Chromium WebGL2 tests, full/incremental `0`-ULP parity, independent PyTorch `2.15.0` fixtures, and zero browser runtime dependencies.
 
-## [Unreleased] — Nemotron 3 Nano v1.0 Release Candidate
+## [1.0.0] — 2026-11-24
 
 ### Added
 
