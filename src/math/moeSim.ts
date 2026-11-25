@@ -23,7 +23,7 @@ import {
   fmtSigned,
   type LayerFormulaReadout,
   type StepperStepDef,
-} from '../scene/sheetInspector';
+} from './formulaFormat';
 
 export const MOE_SIM_CONFIG = {
   d: 8,
@@ -928,7 +928,7 @@ export function describeMoeCellFormula(
         value: wv,
         isMasked: !ev.isActive,
         valueText: fmtSigned(wv, 3),
-        equation: `W_up[${expTag}, ${hRow}, ${iCol}] = ${fmtSigned(wv, 3)} × U[${iCol}, t${tokIdx}](${fmtSigned(sim.U[iCol * T + tokIdx], 3)})`,
+        equation: `W_up[${expTag}, ${hRow}, ${iCol}] = ${fmtSigned(wv, 3)} × U[${iCol}, t${absTok(tokIdx)}](${fmtSigned(sim.U[iCol * T + tokIdx], 3)})`,
         subEquation: ev.isActive
           ? `Only 2 matrices per expert (W_up + W_down, zero bias). Contributes to h[${hRow}] = ${fmtSigned(ev.h[hRow], 3)}.`
           : `Idle expert (${expTag}, rank #${ev.choiceRank + 1}): previewing weights only; zero compute/contribution in layer sum.`,
@@ -948,12 +948,12 @@ export function describeMoeCellFormula(
       return {
         cell: { tensor: 'routed_pre', row: hRow, col: 0, tokenIndex: tokIdx, expertId: expId },
         tensorLabel: `${expTag} Pre-Act h`,
-        coordLabel: `t${tokIdx} "${tokLabel}" · h${hRow}`,
+        coordLabel: `t${absTok(tokIdx)} "${tokLabel}" · h${hRow}`,
         headBadge: hv > 0 ? `Positive → passes ReLU²` : `≤ 0 → zeroed by ReLU²`,
         value: hv,
         isMasked: !ev.isActive,
         valueText: fmtSigned(hv, 3),
-        equation: `h[${expTag}, ${hRow}] = Σᵢ W_up[${hRow}, i]·U[i, t${tokIdx}] = ${fmtSigned(hv, 3)}  → ReLU² = ${av.toFixed(3)}`,
+        equation: `h[${expTag}, ${hRow}] = Σᵢ W_up[${hRow}, i]·U[i, t${absTok(tokIdx)}] = ${fmtSigned(hv, 3)}  → ReLU² = ${av.toFixed(3)}`,
         subEquation: ev.isActive
           ? `Non-gated pre-activation (no SwiGLU gate branch). Negative entries become exact 0.`
           : `Hypothetical preview for idle expert ${expTag} (rank #${ev.choiceRank + 1}, 0 layer contribution).`,
@@ -974,7 +974,7 @@ export function describeMoeCellFormula(
       return {
         cell: { tensor: 'routed_act', row: hRow, col: 0, tokenIndex: tokIdx, expertId: expId },
         tensorLabel: `${expTag} ReLU²`,
-        coordLabel: `t${tokIdx} "${tokLabel}" · h${hRow}`,
+        coordLabel: `t${absTok(tokIdx)} "${tokLabel}" · h${hRow}`,
         headBadge: hv > 0 ? `Squared (+)` : `Exact Zero (h ≤ 0)`,
         value: av,
         isMasked: !ev.isActive || hv <= 0,
@@ -1024,7 +1024,7 @@ export function describeMoeCellFormula(
       const t = Math.max(0, Math.min(T - 1, rawCell.row));
       const ch = Math.max(0, Math.min(d - 1, rawCell.col));
       const val = sim.y_routed[ch * T + t];
-      const tl = sim.tokenLabels[t] ?? `t${t}`;
+      const tl = sim.tokenLabels[t] ?? `t${absTok(t)}`;
       const { expertId: resolvedExp, activeRank } = resolveRoutedSumExpert(
         sim,
         t,
@@ -1071,7 +1071,7 @@ export function describeMoeCellFormula(
         value: wv,
         isMasked: false,
         valueText: fmtSigned(wv, 3),
-        equation: `W_up_s[${hRow}, ${iCol}] = ${fmtSigned(wv, 3)} × U[${iCol}, t${tokIdx}](${fmtSigned(sim.U[iCol * T + tokIdx], 3)})`,
+        equation: `W_up_s[${hRow}, ${iCol}] = ${fmtSigned(wv, 3)} × U[${iCol}, t${absTok(tokIdx)}](${fmtSigned(sim.U[iCol * T + tokIdx], 3)})`,
         subEquation: `Always-on double-width shared expert (d_shared=8 = 2×d_exp; prod 3,712 = 2×1,856, fused in checkpoint).`,
         upstreamSpans: [
           { tensor: 'rmsnorm', rowStart: tokIdx, rowEnd: tokIdx, colStart: iCol, colEnd: iCol, tokenIndex: tokIdx },
@@ -1088,15 +1088,15 @@ export function describeMoeCellFormula(
       return {
         cell: { tensor: 'shared_act', row: hRow, col: 0, tokenIndex: tokIdx },
         tensorLabel: 'Shared ReLU² (2×)',
-        coordLabel: `t${tokIdx} "${tokLabel}" · s${hRow}`,
+        coordLabel: `t${absTok(tokIdx)} "${tokLabel}" · s${hRow}`,
         headBadge: hv > 0 ? 'Always-On · Positive²' : 'Always-On · Exact 0',
         value: av,
         isMasked: hv <= 0,
         valueText: av.toFixed(3),
         equation:
           hv > 0
-            ? `a_shared[${hRow}, t${tokIdx}] = max(0, ${fmtSigned(hv, 3)})² = ${av.toFixed(3)}`
-            : `a_shared[${hRow}, t${tokIdx}] = max(0, ${fmtSigned(hv, 3)})² = 0.000`,
+            ? `a_shared[${hRow}, t${absTok(tokIdx)}] = max(0, ${fmtSigned(hv, 3)})² = ${av.toFixed(3)}`
+            : `a_shared[${hRow}, t${absTok(tokIdx)}] = max(0, ${fmtSigned(hv, 3)})² = 0.000`,
         subEquation: `Double-width non-gated ReLU² (no SwiGLU gate_proj, no router gating, NO 2.5× scaling).`,
         upstreamSpans: [
           { tensor: 'shared_w_up', rowStart: hRow, rowEnd: hRow, colStart: 0, colEnd: d - 1, tokenIndex: tokIdx },
@@ -1119,7 +1119,7 @@ export function describeMoeCellFormula(
         value: wv,
         isMasked: false,
         valueText: fmtSigned(wv, 3),
-        equation: `W_down_s[${oRow}, ${hCol}] = ${fmtSigned(wv, 3)}  (y_shared[${oRow}, t${tokIdx}] = ${fmtSigned(ys, 3)})`,
+        equation: `W_down_s[${oRow}, ${hCol}] = ${fmtSigned(wv, 3)}  (y_shared[${oRow}, t${absTok(tokIdx)}] = ${fmtSigned(ys, 3)})`,
         subEquation: `Projects 3,712 shared width → 2,688 residual (mini 8→8). Added unscaled (no 2.5× multiplier).`,
         upstreamSpans: [
           { tensor: 'shared_act', rowStart: hCol, rowEnd: hCol, colStart: 0, colEnd: 0, tokenIndex: tokIdx },
@@ -1133,16 +1133,16 @@ export function describeMoeCellFormula(
       const t = Math.max(0, Math.min(T - 1, rawCell.row));
       const ch = Math.max(0, Math.min(d - 1, rawCell.col));
       const val = sim.y_shared[ch * T + t];
-      const tl = sim.tokenLabels[t] ?? `t${t}`;
+      const tl = sim.tokenLabels[t] ?? `t${absTok(t)}`;
       return {
         cell: { tensor: 'shared_out', row: t, col: ch, tokenIndex: t },
         tensorLabel: 'Shared Out (Always-On)',
-        coordLabel: `t${t} "${tl}" · ch ${ch}`,
+        coordLabel: `t${absTok(t)} "${tl}" · ch ${ch}`,
         headBadge: 'Unscaled (1.0×) · 3,712 width',
         value: val,
         isMasked: false,
         valueText: fmtSigned(val, 3),
-        equation: `y_shared[${ch}, t${t}] = Σₛ W_down_s[${ch}, s]·a_shared[s, t${t}] = ${fmtSigned(val, 3)}`,
+        equation: `y_shared[${ch}, t${absTok(t)}] = Σₛ W_down_s[${ch}, s]·a_shared[s, t${absTok(t)}] = ${fmtSigned(val, 3)}`,
         subEquation: `Parallel always-on branch merges directly with Routed Sum (NOT multiplied by routed_scaling_factor = 2.5).`,
         upstreamSpans: [
           { tensor: 'shared_w_down', rowStart: ch, rowEnd: ch, colStart: 0, colEnd: dShared - 1, tokenIndex: t },
@@ -1158,16 +1158,16 @@ export function describeMoeCellFormula(
       const yr = sim.y_routed[ch * T + t];
       const ys = sim.y_shared[ch * T + t];
       const ym = sim.y_moe[ch * T + t];
-      const tl = sim.tokenLabels[t] ?? `t${t}`;
+      const tl = sim.tokenLabels[t] ?? `t${absTok(t)}`;
       return {
         cell: { tensor: 'moe_out', row: t, col: ch, tokenIndex: t },
         tensorLabel: 'MoE Merge Out',
-        coordLabel: `t${t} "${tl}" · ch ${ch}`,
+        coordLabel: `t${absTok(t)} "${tl}" · ch ${ch}`,
         headBadge: 'Routed (×2.5) + Shared (1×)',
         value: ym,
         isMasked: false,
         valueText: fmtSigned(ym, 3),
-        equation: `y_moe[${ch}, t${t}] = y_routed(${fmtSigned(yr, 3)}) + y_shared(${fmtSigned(ys, 3)}) = ${fmtSigned(ym, 3)}`,
+        equation: `y_moe[${ch}, t${absTok(t)}] = y_routed(${fmtSigned(yr, 3)}) + y_shared(${fmtSigned(ys, 3)}) = ${fmtSigned(ym, 3)}`,
         subEquation: `Parallel merge of Top-6 sparse routed output and always-on 2× shared expert.`,
         upstreamSpans: [
           { tensor: 'routed_sum', rowStart: t, rowEnd: t, colStart: ch, colEnd: ch, tokenIndex: t },
@@ -1185,7 +1185,7 @@ export function describeMoeCellFormula(
       const xv = sim.X[ch * T + t];
       const ym = sim.y_moe[ch * T + t];
       const yv = sim.Y[ch * T + t];
-      const tl = sim.tokenLabels[t] ?? `t${t}`;
+      const tl = sim.tokenLabels[t] ?? `t${absTok(t)}`;
       return {
         cell: { tensor: 'residual', row: t, col: ch, tokenIndex: t },
         tensorLabel: 'Residual Out Y',

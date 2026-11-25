@@ -7,14 +7,37 @@
  *  - Mamba-2 (`M`, 23 bays): strictly fixed-size rolling Conv1D buffer + FP32 persistent SSM state
  *  - Granular MoE (`E`, 23 bays): strictly stateless across tokens (`0 B` sequence cache)
  *
- * Ownership & Immutability Contract:
- *  - Every `HybridDecodeCacheState` snapshot and every nested `GqaLayerKvCache` /
- *    `MambaLayerBoundaryState` owns private, non-aliased `Float32Array` backing buffers.
- *  - Snapshots are strictly IMMUTABLE BY CONTRACT (copy-on-step): stepping or branching from
- *    a prior snapshot NEVER mutates any typed array inside `prevState`.
- *  - External boundary seeds passed into `createExternalDecodeCacheState()` are defensively
- *    cloned and validated (coverage, dimensions, capacities, finite populated values, and
- *    `parameterFingerprint`) so subsequent caller mutations cannot corrupt any snapshot.
+ * Ownership & Mutation Rules:
+ *  1. **Typed Arrays (`Float32Array`, `Int32Array`)**:
+ *     Every `HybridDecodeCacheState` snapshot and every nested `GqaLayerKvCache` /
+ *     `MambaLayerBoundaryState` owns private, non-aliased backing `ArrayBuffer`s.
+ *     Snapshots are strictly IMMUTABLE BY CONTRACT (copy-on-step): stepping or branching
+ *     from a prior snapshot NEVER mutates any typed array inside `prevState`. Mutating an
+ *     exposed typed array in place violates this contract, invalidates `stateDigest`
+ *     (rejected by `validateDecodeCacheState()`), and is isolated from lazy trace
+ *     reconstruction via private cloned boundary snapshots.
+ *  2. **`Map` Containers (`gqaCaches`, `mambaStates`, session `branches`)**:
+ *     Exposed as `ReadonlyMap` on frozen snapshots and sessions. Because JavaScript's
+ *     `Object.freeze()` does not prevent `.set()` / `.delete()` / `.clear()` calls on a
+ *     `Map` instance at runtime, callers MUST treat exposed `Map` containers as strictly
+ *     read-only. Internal lazy-reconstruction closures capture private non-exposed `Map`
+ *     snapshots so runtime container mutation cannot corrupt trace reconstruction.
+ *  3. **Residual Checkpoints (`residualStreams`, `X_embed`)**:
+ *     Each step exposes a frozen `residualStreams` array whose `Float32Array` buffers are
+ *     detached (`.slice()`) from both `eagerTrace.sim.Y` and internal lazy-reconstruction
+ *     checkpoints. Mutating returned `residualStreams`, `X_embed`, or eager trace outputs
+ *     cannot corrupt subsequent lazy `getLayerTrace(bayId)` reconstruction.
+ *  4. **Shared Parameter Buffers (`HybridModelParameters`)**:
+ *     `W_embed`, `finalNormGamma`, `W_lm_head`, and per-bay weights returned by
+ *     `getBayWeights(bayId)` (retained in a bounded LRU cache defaulting to all 52 bays,
+ *     ~1.14 MiB) are owned by `HybridModelParameters` and shared by read-only reference
+ *     across executions, decode steps, and layer traces. Callers MUST NEVER mutate weight
+ *     buffers in place.
+ *  5. **External Boundary Seeds (`createExternalDecodeCacheState`)**:
+ *     External typed arrays are defensively cloned and validated (coverage, dimensions,
+ *     explicit capacity bounds `maxTokens >= processedTokens`, unambiguous K/V stride
+ *     matching, finite populated values, `parameterFingerprint`, and `stateDigest`) so
+ *     subsequent caller mutations cannot corrupt any snapshot.
  *
  * Exact Default Miniature Snapshot Accounting (`L = 52`, `23 M`, `6 *`, `23 E`, `maxTokens = 16`):
  *  - Mamba-2 fixed state: `23 × (128×4 + 16×4×4) × 4 B = 23 × 3,072 B = 70,656 B = 69.00 KiB`
@@ -124,7 +147,7 @@ export interface HybridDecodeCacheState {
   readonly modelId: string;
   /** Canonical 64-bit model parameter fingerprint binding this snapshot to exact weights & pattern. */
   readonly parameterFingerprint: string;
-  /** Deterministic 64-bit hex digest over fingerprint, processedTokens, and all populated state bytes. */
+  /** Deterministic 64-bit hex digest over fingerprint, processedTokens, prefixTokenIds, prefixTokenLabels, and all populated state bytes. */
   readonly stateDigest: string;
   readonly precisionMetadata: PrecisionMode;
   /** Total prefix tokens already absorbed into `gqaCaches` and `mambaStates`. */

@@ -65,7 +65,13 @@ import type {
 } from './cacheContracts';
 
 export const DEFAULT_DECODE_MAX_TOKENS = 16 as const;
+/** Maximum number of newly arrived tokens `S` accepted by a single incremental decode step. */
+export const MAX_INCREMENTAL_STEP_TOKENS = 16 as const;
 export const DEFAULT_DECODE_PRECISION_METADATA: PrecisionMode = 'fp8_selective';
+/** Default conservative cap on retained continuation branches per `HybridDecodeSession`. */
+export const DEFAULT_SESSION_MAX_BRANCHES = 16 as const;
+/** Default conservative cap on unique retained steps across all branches in a `HybridDecodeSession`. */
+export const DEFAULT_SESSION_MAX_UNIQUE_STEPS = 128 as const;
 
 /** Per-bay trace returned by an incremental step, tagged with unambiguous provenance and origin. */
 export type HybridIncrementalLayerTrace =
@@ -191,7 +197,8 @@ function makeDualHasher() {
 
 /**
  * Compute a deterministic 64-bit hex digest over `parameterFingerprint`, `processedTokens`,
- * `prefixTokenIds`, and every populated Float32 element of every Mamba and GQA cache bay.
+ * `maxTokens`, `prefixTokenIds`, length-prefixed `prefixTokenLabels`, and every populated
+ * Float32 element of every Mamba and GQA cache bay.
  * Unpopulated trailing KV slots (`k >= seqLen`) are intentionally excluded.
  */
 export function computeDecodeStateDigest(params: {
@@ -199,6 +206,7 @@ export function computeDecodeStateDigest(params: {
   readonly processedTokens: number;
   readonly maxTokens: number;
   readonly prefixTokenIds: Int32Array;
+  readonly prefixTokenLabels: readonly string[];
   readonly gqaCaches: ReadonlyMap<number, GqaLayerKvCache>;
   readonly mambaStates: ReadonlyMap<number, MambaLayerBoundaryState>;
 }): string {
@@ -209,6 +217,10 @@ export function computeDecodeStateDigest(params: {
   h.feedU32(params.prefixTokenIds.length);
   for (let i = 0; i < params.prefixTokenIds.length; i++) {
     h.feedI32(params.prefixTokenIds[i]);
+  }
+  h.feedU32(params.prefixTokenLabels.length);
+  for (let i = 0; i < params.prefixTokenLabels.length; i++) {
+    h.feedStr(params.prefixTokenLabels[i]);
   }
 
   const mambaIds = Array.from(params.mambaStates.keys()).sort((a, b) => a - b);
@@ -333,6 +345,7 @@ function assertAllFinite(arr: Float32Array, label: string): void {
  *  - Exact tensor dimensions, prefix length consistency, and capacity bounds
  *  - Strictly finite values across all Mamba state buffers and all populated GQA KV slots (`0..seqLen-1`)
  *  - Strict private typed-array ownership (no shared backing `ArrayBuffer` aliasing between bays/tensors)
+ *  - Verified `stateDigest` integrity matching `computeDecodeStateDigest(state)`
  */
 export function validateDecodeCacheState(
   model: HybridModelParameters,
@@ -495,6 +508,13 @@ export function validateDecodeCacheState(
       }
     }
   }
+
+  const expectedDigest = computeDecodeStateDigest(state);
+  if (state.stateDigest !== expectedDigest) {
+    throw new Error(
+      `Decode cache stateDigest mismatch: recorded=${state.stateDigest} !== computed=${expectedDigest}`,
+    );
+  }
 }
 
 // ============================================================================
@@ -569,6 +589,7 @@ export function createZeroDecodeCacheState(
     processedTokens: 0,
     maxTokens,
     prefixTokenIds,
+    prefixTokenLabels,
     gqaCaches,
     mambaStates,
   });
@@ -601,7 +622,22 @@ export function createExternalDecodeCacheState(
   if (!Number.isInteger(P) || P < 0) {
     throw new RangeError(`External decode seed processedTokens must be integer >= 0, got ${P}`);
   }
-  const maxTokens = Math.max(P, Math.trunc(seed.maxTokens ?? Math.max(DEFAULT_DECODE_MAX_TOKENS, P)));
+  let maxTokens: number;
+  if (seed.maxTokens !== undefined) {
+    if (!Number.isInteger(seed.maxTokens) || seed.maxTokens < 1) {
+      throw new RangeError(
+        `External decode seed maxTokens must be integer >= 1, got ${seed.maxTokens}`,
+      );
+    }
+    if (seed.maxTokens < P) {
+      throw new RangeError(
+        `External decode seed maxTokens (${seed.maxTokens}) < processedTokens (${P})`,
+      );
+    }
+    maxTokens = seed.maxTokens;
+  } else {
+    maxTokens = Math.max(DEFAULT_DECODE_MAX_TOKENS, P);
+  }
   const precisionMetadata = seed.precisionMetadata ?? DEFAULT_DECODE_PRECISION_METADATA;
   const kvDtype: 'bf16' | 'fp8' = precisionMetadata === 'fp8_selective' ? 'fp8' : 'bf16';
 
@@ -673,13 +709,26 @@ export function createExternalDecodeCacheState(
       if (srcSeqLen !== P) {
         throw new RangeError(`External GQA bay ${bayId} seqLen (${srcSeqLen}) !== seed (${P})`);
       }
-      const srcStride =
-        src.maxTokens ??
-        (src.K.length % kvRows === 0 ? src.K.length / kvRows : -1);
-      if (!Number.isInteger(srcStride) || srcStride < P) {
-        throw new RangeError(
-          `External GQA bay ${bayId} K/V stride (${srcStride}) invalid for seqLen (${P})`,
-        );
+      let srcStride: number;
+      if (src.maxTokens !== undefined) {
+        if (!Number.isInteger(src.maxTokens) || src.maxTokens < P) {
+          throw new RangeError(
+            `External GQA bay ${bayId} maxTokens (${src.maxTokens}) invalid for seqLen (${P})`,
+          );
+        }
+        srcStride = src.maxTokens;
+      } else {
+        if (src.V.length !== src.K.length) {
+          throw new RangeError(
+            `External GQA bay ${bayId} K/V length mismatch (${src.K.length} !== ${src.V.length}) when inferring stride without explicit maxTokens`,
+          );
+        }
+        srcStride = src.K.length % kvRows === 0 ? src.K.length / kvRows : -1;
+        if (!Number.isInteger(srcStride) || srcStride < P) {
+          throw new RangeError(
+            `External GQA bay ${bayId} K/V stride (${srcStride}) invalid for seqLen (${P})`,
+          );
+        }
       }
       if (src.K.length < kvRows * srcStride || src.V.length < kvRows * srcStride) {
         throw new RangeError(
@@ -733,6 +782,7 @@ export function createExternalDecodeCacheState(
     processedTokens: P,
     maxTokens,
     prefixTokenIds,
+    prefixTokenLabels: frozenLabels,
     gqaCaches,
     mambaStates,
   });
@@ -795,6 +845,103 @@ function addUniqueBytes(seen: Set<ArrayBufferLike>, arr: ArrayBufferView | undef
   seen.add(arr.buffer);
   return arr.buffer.byteLength;
 }
+
+function collectCacheStateUniqueBytes(
+  seen: Set<ArrayBufferLike>,
+  state: HybridDecodeCacheState,
+): number {
+  let bytes = addUniqueBytes(seen, state.prefixTokenIds);
+  for (const m of state.mambaStates.values()) {
+    bytes += addUniqueBytes(seen, m.convState) + addUniqueBytes(seen, m.ssmState);
+  }
+  for (const g of state.gqaCaches.values()) {
+    bytes += addUniqueBytes(seen, g.K) + addUniqueBytes(seen, g.V);
+  }
+  return bytes;
+}
+
+/**
+ * Module-private immutable boundary snapshots keyed by the validated `HybridDecodeCacheState`.
+ * Shared across all sibling steps/branches forking from the same `prevState` and automatically
+ * garbage-collected once the parent snapshot is no longer referenced.
+ */
+const privateBoundarySnapshots = new WeakMap<HybridDecodeCacheState, HybridDecodeCacheState>();
+
+function getOrCreatePrivateBoundarySnapshot(
+  state: HybridDecodeCacheState,
+): HybridDecodeCacheState {
+  const existing = privateBoundarySnapshots.get(state);
+  if (existing) return existing;
+
+  if (state.processedTokens === 0) {
+    const emptySnap: HybridDecodeCacheState = Object.freeze({
+      modelId: state.modelId,
+      parameterFingerprint: state.parameterFingerprint,
+      stateDigest: state.stateDigest,
+      precisionMetadata: state.precisionMetadata,
+      processedTokens: 0,
+      maxTokens: state.maxTokens,
+      prefixTokenIds: new Int32Array(0),
+      prefixTokenLabels: Object.freeze([] as string[]),
+      gqaCaches: new Map<number, GqaLayerKvCache>(),
+      mambaStates: new Map<number, MambaLayerBoundaryState>(),
+      moeLayerIds: Object.freeze([...state.moeLayerIds]),
+    });
+    privateBoundarySnapshots.set(state, emptySnap);
+    return emptySnap;
+  }
+
+  const mambaStates = new Map<number, MambaLayerBoundaryState>();
+  for (const [bayId, m] of state.mambaStates.entries()) {
+    mambaStates.set(
+      bayId,
+      Object.freeze({
+        ...m,
+        convState: new Float32Array(m.convState),
+        ssmState: new Float32Array(m.ssmState),
+        storageDtypeMetadata: Object.freeze({ ...m.storageDtypeMetadata }),
+      }),
+    );
+  }
+
+  const gqaCaches = new Map<number, GqaLayerKvCache>();
+  for (const [bayId, g] of state.gqaCaches.entries()) {
+    gqaCaches.set(
+      bayId,
+      Object.freeze({
+        ...g,
+        K: new Float32Array(g.K),
+        V: new Float32Array(g.V),
+      }),
+    );
+  }
+
+  const cloned: HybridDecodeCacheState = Object.freeze({
+    modelId: state.modelId,
+    parameterFingerprint: state.parameterFingerprint,
+    stateDigest: state.stateDigest,
+    precisionMetadata: state.precisionMetadata,
+    processedTokens: state.processedTokens,
+    maxTokens: state.maxTokens,
+    prefixTokenIds: new Int32Array(state.prefixTokenIds),
+    prefixTokenLabels: Object.freeze([...state.prefixTokenLabels]),
+    gqaCaches,
+    mambaStates,
+    moeLayerIds: Object.freeze([...state.moeLayerIds]),
+  });
+  privateBoundarySnapshots.set(state, cloned);
+  return cloned;
+}
+
+const stepByteCollectors = new WeakMap<
+  HybridIncrementalStepResult,
+  (seen: Set<ArrayBufferLike>) => number
+>();
+
+const stepTracePruners = new WeakMap<
+  HybridIncrementalStepResult,
+  () => HybridIncrementalStepResult
+>();
 
 function collectIncrementalTraceBytes(
   seen: Set<ArrayBufferLike>,
@@ -898,7 +1045,7 @@ function runSingleIncrementalBay(
   const P = prevState.processedTokens;
 
   if (weights.kind === 'M') {
-    const prevM = prevState.mambaStates.get(bayId)!;
+    const prevM = P > 0 ? prevState.mambaStates.get(bayId) : undefined;
     const fixture: MambaSimFixture = {
       X: X_in,
       gamma_in: weights.gamma_in,
@@ -913,7 +1060,7 @@ function runSingleIncrementalBay(
       eps,
       tokenIds: newTokenIds,
       tokenLabels: newTokenLabels,
-      ...(P > 0
+      ...(P > 0 && prevM
         ? {
             initialConvState: prevM.convState,
             initialSsmState: prevM.ssmState,
@@ -956,7 +1103,7 @@ function runSingleIncrementalBay(
     };
   }
 
-  const prevG = prevState.gqaCaches.get(bayId)!;
+  const prevG = P > 0 ? prevState.gqaCaches.get(bayId) : undefined;
   const fixture: GqaSimFixture = {
     X: X_in,
     gamma: weights.gamma,
@@ -967,7 +1114,7 @@ function runSingleIncrementalBay(
     rmsEps: eps,
     tokenIds: newTokenIds,
     tokenLabels: newTokenLabels,
-    ...(P > 0
+    ...(P > 0 && prevG
       ? {
           kvCacheIn: {
             seqLen: prevG.seqLen,
@@ -1008,6 +1155,11 @@ export function runIncrementalDecodeStep(
   if (rawIds.length < 1) {
     throw new RangeError('Incremental decode step requires at least 1 new token ID');
   }
+  if (rawIds.length > MAX_INCREMENTAL_STEP_TOKENS) {
+    throw new RangeError(
+      `Incremental decode step accepts at most ${MAX_INCREMENTAL_STEP_TOKENS} new tokens per step, received ${rawIds.length}`,
+    );
+  }
   const S = rawIds.length;
 
   const prevState =
@@ -1018,6 +1170,9 @@ export function runIncrementalDecodeStep(
           precisionMetadata: input.precisionMetadata ?? DEFAULT_DECODE_PRECISION_METADATA,
         });
   validateDecodeCacheState(model, prevState);
+  // Capture an isolated private boundary snapshot so post-step caller mutations to
+  // `prevState` (or its Maps/typed arrays) cannot corrupt lazy `getLayerTrace(bayId)` calls.
+  const privatePrevState = getOrCreatePrivateBoundarySnapshot(prevState);
 
   const P = prevState.processedTokens;
   const totalTokens = P + S;
@@ -1034,13 +1189,14 @@ export function runIncrementalDecodeStep(
     newTokenIds[t] = id;
     newTokenLabelsArr.push(input.newTokenLabels?.[t] ?? model.vocab[id] ?? `id:${id}`);
   }
+  const privateNewTokenIds = new Int32Array(newTokenIds);
   const newTokenLabels = Object.freeze(newTokenLabelsArr);
 
   const sequenceTokenIds = new Int32Array(totalTokens);
-  sequenceTokenIds.set(prevState.prefixTokenIds, 0);
-  sequenceTokenIds.set(newTokenIds, P);
+  sequenceTokenIds.set(privatePrevState.prefixTokenIds, 0);
+  sequenceTokenIds.set(privateNewTokenIds, P);
   const sequenceTokenLabels = Object.freeze([
-    ...prevState.prefixTokenLabels,
+    ...privatePrevState.prefixTokenLabels,
     ...newTokenLabels,
   ]);
 
@@ -1062,7 +1218,7 @@ export function runIncrementalDecodeStep(
     prevStateDigest: prevState.stateDigest,
     stepIndex,
     tokenRange,
-    newTokenIds,
+    newTokenIds: privateNewTokenIds,
     newTokenLabels,
   });
 
@@ -1079,9 +1235,12 @@ export function runIncrementalDecodeStep(
     stepExecutionId,
   };
 
-  // Stage 0: Untied NoPE Token Embedding ONLY for the S newly arriving tokens
-  const X_embed = embedTokens(newTokenIds, model.W_embed, d);
-  const residualStreams: Float32Array[] = [X_embed];
+  // Stage 0: Untied NoPE Token Embedding ONLY for the S newly arriving tokens.
+  // Detach exposed `X_embed`, exposed `residualStreams`, and closure-private `privateResidualStreams`
+  // so mutating any returned buffer cannot corrupt lazy trace reconstruction.
+  const X_embed = embedTokens(privateNewTokenIds, model.W_embed, d);
+  const residualStreams: Float32Array[] = [X_embed.slice()];
+  const privateResidualStreams: Float32Array[] = [X_embed.slice()];
   const baySummaries: HybridBaySummary[] = [];
 
   const eagerSet = new Set<number>(input.retainedTraceBays ?? DEFAULT_RETAINED_TRACE_BAYS);
@@ -1094,7 +1253,7 @@ export function runIncrementalDecodeStep(
   const kvRows = GQA_SIM_CONFIG.nKv * GQA_SIM_CONFIG.dHead;
   const kvDtype: 'bf16' | 'fp8' = prevState.precisionMetadata === 'fp8_selective' ? 'fp8' : 'bf16';
 
-  let currentX = X_embed;
+  let currentX = privateResidualStreams[0];
   let currentRms = computeStreamRms(currentX, d, S);
 
   for (let bayId = 1; bayId <= numLayers; bayId++) {
@@ -1106,9 +1265,9 @@ export function runIncrementalDecodeStep(
       bayId,
       currentX,
       S,
-      newTokenIds,
+      privateNewTokenIds,
       newTokenLabels,
-      prevState,
+      privatePrevState,
     );
 
     if (trace.kind === 'M') {
@@ -1156,8 +1315,13 @@ export function runIncrementalDecodeStep(
     }
 
     const nextX = trace.sim.Y;
-    const nextRms = computeStreamRms(nextX, d, S);
-    const deltaRms = computeDeltaRms(currentX, nextX, d, S);
+    // Detach exposed `residualStreams[bayId]` from `eagerTrace.sim.Y` via `.slice()`,
+    // and keep `privateResidualStreams[bayId]` isolated from both exposed surfaces.
+    const isEager = eagerSet.has(bayId);
+    const detachedResidual = nextX.slice();
+    const privateNextX = isEager ? nextX.slice() : nextX;
+    const nextRms = computeStreamRms(privateNextX, d, S);
+    const deltaRms = computeDeltaRms(currentX, privateNextX, d, S);
     const isFeeder =
       bayId <= NEMOTRON_SPEC.bays.length && pattern === HYBRID_OVERRIDE_PATTERN
         ? NEMOTRON_SPEC.bays[bayId - 1].feeder
@@ -1184,15 +1348,19 @@ export function runIncrementalDecodeStep(
           };
 
     baySummaries.push(summary);
-    residualStreams.push(nextX);
+    residualStreams.push(detachedResidual);
+    privateResidualStreams.push(privateNextX);
 
-    if (eagerSet.has(bayId)) {
+    if (isEager) {
       eagerTracesRaw.push(trace);
     }
 
-    currentX = nextX;
+    currentX = privateNextX;
     currentRms = nextRms;
   }
+
+  const frozenResidualStreams = Object.freeze(residualStreams);
+  const frozenBaySummaries = Object.freeze(baySummaries);
 
   // Finalize immutable nextState snapshot + digest + final provenance
   const nextStateDigest = computeDecodeStateDigest({
@@ -1200,6 +1368,7 @@ export function runIncrementalDecodeStep(
     processedTokens: totalTokens,
     maxTokens: prevState.maxTokens,
     prefixTokenIds: sequenceTokenIds,
+    prefixTokenLabels: sequenceTokenLabels,
     gqaCaches: nextGqaCaches,
     mambaStates: nextMambaStates,
   });
@@ -1230,13 +1399,13 @@ export function runIncrementalDecodeStep(
     stepExecutionId,
   });
 
-  const retainedTraces = new Map<number, HybridIncrementalLayerTrace>();
+  const initialRetainedTraces = new Map<number, HybridIncrementalLayerTrace>();
   for (const tr of eagerTracesRaw) {
-    retainedTraces.set(tr.bayId, { ...tr, provenance });
+    initialRetainedTraces.set(tr.bayId, { ...tr, provenance });
   }
 
   // Stage L+1: Final RMSNorm (eps = 1e-5)
-  const finalX = residualStreams[numLayers];
+  const finalX = privateResidualStreams[numLayers];
   const { rms: finalRms, X_norm: finalXNorm, U: finalU } = applyRmsNorm(
     finalX,
     model.finalNormGamma,
@@ -1250,154 +1419,169 @@ export function runIncrementalDecodeStep(
   const predictedNextTokens = Object.freeze([...lmHead.topKByToken[S - 1]]);
   const greedyNextToken = predictedNextTokens[0];
   const cacheAccounting = measureDecodeCacheBytes(nextState);
+  const finalNormResult: HybridFinalNormResult = Object.freeze({
+    eps: rmsNormEps,
+    gamma: model.finalNormGamma,
+    rms: finalRms,
+    X_norm: finalXNorm,
+    U_final: finalU,
+  });
 
-  const getLayerTrace = (bayId: number): HybridIncrementalLayerTrace => {
-    if (!Number.isInteger(bayId) || bayId < 1 || bayId > numLayers) {
-      throw new RangeError(`Bay ID ${bayId} out of bounds [1..${numLayers}]`);
-    }
-    const existing = retainedTraces.get(bayId);
-    if (existing) {
-      retainedTraces.delete(bayId);
-      retainedTraces.set(bayId, existing);
-      return existing;
-    }
-    // Lazy deterministic reconstruction from immutable (prevState, residualStreams[bayId - 1])
-    const rebuilt = runSingleIncrementalBay(
-      model,
+  const createStepView = (
+    retainedTraces: Map<number, HybridIncrementalLayerTrace>,
+  ): HybridIncrementalStepResult => {
+    const getLayerTrace = (bayId: number): HybridIncrementalLayerTrace => {
+      if (!Number.isInteger(bayId) || bayId < 1 || bayId > numLayers) {
+        throw new RangeError(`Bay ID ${bayId} out of bounds [1..${numLayers}]`);
+      }
+      const existing = retainedTraces.get(bayId);
+      if (existing) {
+        retainedTraces.delete(bayId);
+        retainedTraces.set(bayId, existing);
+        return existing;
+      }
+      // Lazy deterministic reconstruction strictly from private isolated
+      // `(privatePrevState, privateResidualStreams[bayId - 1], privateNewTokenIds)`.
+      const rebuilt = runSingleIncrementalBay(
+        model,
+        stepExecutionId,
+        provenance,
+        'reconstructed_from_checkpoint',
+        bayId,
+        privateResidualStreams[bayId - 1],
+        S,
+        privateNewTokenIds,
+        newTokenLabels,
+        privatePrevState,
+      );
+      retainedTraces.set(bayId, rebuilt);
+      while (retainedTraces.size > maxRetainedTraces) {
+        let evictId: number | null = null;
+        for (const k of retainedTraces.keys()) {
+          if (!eagerSet.has(k)) {
+            evictId = k;
+            break;
+          }
+        }
+        if (evictId === null) {
+          evictId = retainedTraces.keys().next().value ?? null;
+        }
+        if (evictId === null || evictId === bayId) break;
+        retainedTraces.delete(evictId);
+      }
+      return rebuilt;
+    };
+
+    const getMambaTrace = (bayId: number): MambaSimResult => {
+      const tr = getLayerTrace(bayId);
+      if (tr.kind !== 'M') {
+        throw new TypeError(`Bay ${bayId} has kind "${tr.kind}", expected Mamba-2 ("M")`);
+      }
+      return tr.sim;
+    };
+
+    const getMoeTrace = (bayId: number): MoeSimResult => {
+      const tr = getLayerTrace(bayId);
+      if (tr.kind !== 'E') {
+        throw new TypeError(`Bay ${bayId} has kind "${tr.kind}", expected MoE ("E")`);
+      }
+      return tr.sim;
+    };
+
+    const getGqaTrace = (bayId: number): GqaSimResult => {
+      const tr = getLayerTrace(bayId);
+      if (tr.kind !== '*') {
+        throw new TypeError(`Bay ${bayId} has kind "${tr.kind}", expected GQA ("*")`);
+      }
+      return tr.sim;
+    };
+
+    const getLayerTraceOrigin = (bayId: number): IncrementalTraceOrigin | null =>
+      retainedTraces.get(bayId)?.traceOrigin ?? null;
+
+    const retainedTraceBayIds = (): readonly number[] =>
+      Array.from(retainedTraces.keys()).sort((a, b) => a - b);
+
+    const collectOwnBytes = (seen: Set<ArrayBufferLike>): number => {
+      let bytes =
+        addUniqueBytes(seen, newTokenIds) +
+        addUniqueBytes(seen, privateNewTokenIds) +
+        addUniqueBytes(seen, sequenceTokenIds) +
+        addUniqueBytes(seen, X_embed) +
+        addUniqueBytes(seen, finalRms) +
+        addUniqueBytes(seen, finalXNorm) +
+        addUniqueBytes(seen, finalU) +
+        addUniqueBytes(seen, lmHead.logits) +
+        addUniqueBytes(seen, lmHead.probs);
+      bytes += collectCacheStateUniqueBytes(seen, nextState);
+      bytes += collectCacheStateUniqueBytes(seen, privatePrevState);
+      for (const s of frozenResidualStreams) bytes += addUniqueBytes(seen, s);
+      for (const s of privateResidualStreams) bytes += addUniqueBytes(seen, s);
+      for (const b of frozenBaySummaries) {
+        bytes +=
+          addUniqueBytes(seen, b.rmsIn) +
+          addUniqueBytes(seen, b.rmsDelta) +
+          addUniqueBytes(seen, b.rmsOut) +
+          addUniqueBytes(seen, b.moeTopkIndices);
+      }
+      for (const tr of retainedTraces.values()) {
+        bytes += collectIncrementalTraceBytes(seen, tr);
+      }
+      return bytes;
+    };
+
+    const retainedTypedArrayBytes = (): number =>
+      collectOwnBytes(new Set<ArrayBufferLike>());
+
+    const view: HybridIncrementalStepResult = Object.freeze({
+      modelId: model.modelId,
+      parameterFingerprint: model.parameterFingerprint,
+      executionId: stepExecutionId,
       stepExecutionId,
       provenance,
-      'reconstructed_from_checkpoint',
-      bayId,
-      residualStreams[bayId - 1],
-      S,
+      prevState,
+      nextState,
+      logits: lmHead.logits,
+      probs: lmHead.probs,
+      tokens: S,
+      prefixTokens: P,
+      totalTokens,
+      d,
+      vocabSize,
+      vocab: model.vocab,
       newTokenIds,
       newTokenLabels,
-      prevState,
+      sequenceTokenIds,
+      sequenceTokenLabels,
+      X_embed,
+      residualStreams: frozenResidualStreams,
+      baySummaries: frozenBaySummaries,
+      finalNorm: finalNormResult,
+      lmHead,
+      predictedNextTokens,
+      greedyNextToken,
+      cacheAccounting,
+      getLayerTrace,
+      getMambaTrace,
+      getMoeTrace,
+      getGqaTrace,
+      getLayerTraceOrigin,
+      retainedTraceBayIds,
+      retainedTypedArrayBytes,
+    });
+
+    stepByteCollectors.set(view, collectOwnBytes);
+    stepTracePruners.set(view, () =>
+      retainedTraces.size === 0 ? view : createStepView(new Map()),
     );
-    retainedTraces.set(bayId, rebuilt);
-    while (retainedTraces.size > maxRetainedTraces) {
-      let evictId: number | null = null;
-      for (const k of retainedTraces.keys()) {
-        if (!eagerSet.has(k)) {
-          evictId = k;
-          break;
-        }
-      }
-      if (evictId === null) {
-        evictId = retainedTraces.keys().next().value ?? null;
-      }
-      if (evictId === null || evictId === bayId) break;
-      retainedTraces.delete(evictId);
-    }
-    return rebuilt;
+    return view;
   };
 
-  const getMambaTrace = (bayId: number): MambaSimResult => {
-    const tr = getLayerTrace(bayId);
-    if (tr.kind !== 'M') {
-      throw new TypeError(`Bay ${bayId} has kind "${tr.kind}", expected Mamba-2 ("M")`);
-    }
-    return tr.sim;
-  };
-
-  const getMoeTrace = (bayId: number): MoeSimResult => {
-    const tr = getLayerTrace(bayId);
-    if (tr.kind !== 'E') {
-      throw new TypeError(`Bay ${bayId} has kind "${tr.kind}", expected MoE ("E")`);
-    }
-    return tr.sim;
-  };
-
-  const getGqaTrace = (bayId: number): GqaSimResult => {
-    const tr = getLayerTrace(bayId);
-    if (tr.kind !== '*') {
-      throw new TypeError(`Bay ${bayId} has kind "${tr.kind}", expected GQA ("*")`);
-    }
-    return tr.sim;
-  };
-
-  const getLayerTraceOrigin = (bayId: number): IncrementalTraceOrigin | null =>
-    retainedTraces.get(bayId)?.traceOrigin ?? null;
-
-  const retainedTraceBayIds = (): readonly number[] =>
-    Array.from(retainedTraces.keys()).sort((a, b) => a - b);
-
-  const retainedTypedArrayBytes = (): number => {
-    const seen = new Set<ArrayBufferLike>();
-    let bytes =
-      addUniqueBytes(seen, newTokenIds) +
-      addUniqueBytes(seen, sequenceTokenIds) +
-      addUniqueBytes(seen, finalRms) +
-      addUniqueBytes(seen, finalXNorm) +
-      addUniqueBytes(seen, finalU) +
-      addUniqueBytes(seen, lmHead.logits) +
-      addUniqueBytes(seen, lmHead.probs);
-    for (const m of nextState.mambaStates.values()) {
-      bytes += addUniqueBytes(seen, m.convState) + addUniqueBytes(seen, m.ssmState);
-    }
-    for (const g of nextState.gqaCaches.values()) {
-      bytes += addUniqueBytes(seen, g.K) + addUniqueBytes(seen, g.V);
-    }
-    for (const s of residualStreams) bytes += addUniqueBytes(seen, s);
-    for (const b of baySummaries) {
-      bytes +=
-        addUniqueBytes(seen, b.rmsIn) +
-        addUniqueBytes(seen, b.rmsDelta) +
-        addUniqueBytes(seen, b.rmsOut) +
-        addUniqueBytes(seen, b.moeTopkIndices);
-    }
-    for (const tr of retainedTraces.values()) {
-      bytes += collectIncrementalTraceBytes(seen, tr);
-    }
-    return bytes;
-  };
-
-  return {
-    modelId: model.modelId,
-    parameterFingerprint: model.parameterFingerprint,
-    executionId: stepExecutionId,
-    stepExecutionId,
-    provenance,
-    prevState,
-    nextState,
-    logits: lmHead.logits,
-    probs: lmHead.probs,
-    tokens: S,
-    prefixTokens: P,
-    totalTokens,
-    d,
-    vocabSize,
-    vocab: model.vocab,
-    newTokenIds,
-    newTokenLabels,
-    sequenceTokenIds,
-    sequenceTokenLabels,
-    X_embed,
-    residualStreams,
-    baySummaries,
-    finalNorm: {
-      eps: rmsNormEps,
-      gamma: model.finalNormGamma,
-      rms: finalRms,
-      X_norm: finalXNorm,
-      U_final: finalU,
-    },
-    lmHead,
-    predictedNextTokens,
-    greedyNextToken,
-    cacheAccounting,
-    getLayerTrace,
-    getMambaTrace,
-    getMoeTrace,
-    getGqaTrace,
-    getLayerTraceOrigin,
-    retainedTraceBayIds,
-    retainedTypedArrayBytes,
-  };
+  return createStepView(initialRetainedTraces);
 }
 
 // ============================================================================
-// IMMUTABLE INTERACTIVE PREFILL / DECODE SESSION WITH SAFE BRANCHING
+// IMMUTABLE INTERACTIVE PREFILL / DECODE SESSION WITH SAFE BOUNDED BRANCHING
 // ============================================================================
 
 export interface HybridDecodeBranch {
@@ -1415,6 +1599,12 @@ export interface HybridDecodeSession {
   readonly activeBranchId: string;
   readonly activeStepIndex: number;
   readonly nextBranchNumber: number;
+  /** Maximum number of branches retained in this session (default 16; >= 1). */
+  readonly maxBranches: number;
+  /** Maximum number of unique step snapshots retained across all branches (default 128; >= 1). */
+  readonly maxUniqueSteps: number;
+  /** When true (default), non-active historical steps drop reconstructible eager traces. */
+  readonly pruneInactiveStepTraces: boolean;
   readonly branches: ReadonlyMap<string, HybridDecodeBranch>;
 }
 
@@ -1424,6 +1614,41 @@ export interface CreateDecodeSessionOptions {
   readonly initialState?: HybridDecodeCacheState | null;
   readonly maxTokens?: number;
   readonly precisionMetadata?: PrecisionMode;
+  /** Conservative cap on retained continuation branches (defaults to `16`, must be integer `>= 1`). */
+  readonly maxBranches?: number;
+  /** Conservative cap on unique retained steps across all branches (defaults to `128`, must be integer `>= 1`). */
+  readonly maxUniqueSteps?: number;
+  /** Drop reconstructible eager layer traces on non-active historical steps (defaults to `true`). */
+  readonly pruneInactiveStepTraces?: boolean;
+}
+
+export interface PruneDecodeSessionOptions {
+  /** Override maximum retained branches (defaults to `session.maxBranches`). */
+  readonly maxBranches?: number;
+  /** Override maximum unique retained steps across surviving branches (defaults to `session.maxUniqueSteps`). */
+  readonly maxUniqueSteps?: number;
+  /** Drop reconstructible eager layer traces on non-active historical steps (defaults to `session.pruneInactiveStepTraces`). */
+  readonly pruneInactiveStepTraces?: boolean;
+}
+
+function validatePositiveIntBound(value: number | undefined, fallback: number, name: string): number {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || value < 1) {
+    throw new RangeError(`${name} must be an integer >= 1, got ${value}`);
+  }
+  return value;
+}
+
+function countUniqueStepsAcrossBranches(
+  branches: ReadonlyMap<string, HybridDecodeBranch>,
+): number {
+  const seen = new Set<string>();
+  for (const branch of branches.values()) {
+    for (const step of branch.steps) {
+      seen.add(step.stepExecutionId);
+    }
+  }
+  return seen.size;
 }
 
 /**
@@ -1436,6 +1661,17 @@ export function createDecodeSession(
 ): HybridDecodeSession {
   const maxTokens = Math.max(1, Math.trunc(options?.maxTokens ?? DEFAULT_DECODE_MAX_TOKENS));
   const precisionMetadata = options?.precisionMetadata ?? DEFAULT_DECODE_PRECISION_METADATA;
+  const maxBranches = validatePositiveIntBound(
+    options?.maxBranches,
+    DEFAULT_SESSION_MAX_BRANCHES,
+    'maxBranches',
+  );
+  const maxUniqueSteps = validatePositiveIntBound(
+    options?.maxUniqueSteps,
+    DEFAULT_SESSION_MAX_UNIQUE_STEPS,
+    'maxUniqueSteps',
+  );
+  const pruneInactiveTraces = options?.pruneInactiveStepTraces ?? true;
   const promptTokenIds = options?.promptTokenIds
     ? [...options.promptTokenIds]
     : [0, 1, 2, 3];
@@ -1467,6 +1703,9 @@ export function createDecodeSession(
     activeBranchId: 'branch-0',
     activeStepIndex: 0,
     nextBranchNumber: 1,
+    maxBranches,
+    maxUniqueSteps,
+    pruneInactiveStepTraces: pruneInactiveTraces,
     branches,
   };
 }
@@ -1491,6 +1730,139 @@ export function getActiveDecodeBranch(session: HybridDecodeSession): HybridDecod
 }
 
 /**
+ * Return a session copy whose non-active historical steps drop reconstructible eager layer
+ * traces (while keeping the currently active step's eager traces and leaving any prior
+ * `HybridDecodeSession` or previously held step references strictly untouched).
+ * Shared prefix steps across surviving branches are deduplicated to the same pruned view.
+ */
+export function pruneInactiveStepTraces(session: HybridDecodeSession): HybridDecodeSession {
+  const activeStepId = getActiveDecodeStep(session).stepExecutionId;
+  const prunedCache = new Map<string, HybridIncrementalStepResult>();
+  let anyChanged = false;
+  const nextBranches = new Map<string, HybridDecodeBranch>();
+
+  for (const [branchId, branch] of session.branches.entries()) {
+    let branchChanged = false;
+    const nextSteps = branch.steps.map((step) => {
+      if (step.stepExecutionId === activeStepId) {
+        return step;
+      }
+      const cached = prunedCache.get(step.stepExecutionId);
+      if (cached) {
+        if (cached !== step) branchChanged = true;
+        return cached;
+      }
+      const pruner = stepTracePruners.get(step);
+      const pruned = pruner ? pruner() : step;
+      prunedCache.set(step.stepExecutionId, pruned);
+      if (pruned !== step) branchChanged = true;
+      return pruned;
+    });
+
+    if (branchChanged) {
+      anyChanged = true;
+      nextBranches.set(branchId, {
+        ...branch,
+        steps: Object.freeze(nextSteps),
+      });
+    } else {
+      nextBranches.set(branchId, branch);
+    }
+  }
+
+  return anyChanged ? { ...session, branches: nextBranches } : session;
+}
+
+/**
+ * Explicitly delete an inactive continuation branch from `session`.
+ *
+ * Invariants:
+ *  - Refuses (throws `RangeError`) if `branchId` does not exist, if `branchId` is
+ *    `session.activeBranchId`, or if it is the only remaining branch.
+ *  - Never mutates or destroys any shared ancestor step still referenced by surviving branches.
+ */
+export function deleteDecodeSessionBranch(
+  session: HybridDecodeSession,
+  branchId: string,
+): HybridDecodeSession {
+  if (!session.branches.has(branchId)) {
+    throw new RangeError(`Unknown decode session branch "${branchId}"`);
+  }
+  if (branchId === session.activeBranchId) {
+    throw new RangeError(
+      `Cannot delete active decode session branch "${branchId}"; switch to another branch first`,
+    );
+  }
+  if (session.branches.size <= 1) {
+    throw new RangeError(`Cannot delete the only remaining decode session branch "${branchId}"`);
+  }
+
+  const nextBranches = new Map(session.branches);
+  nextBranches.delete(branchId);
+  return {
+    ...session,
+    branches: nextBranches,
+  };
+}
+
+/**
+ * Enforce conservative retention bounds on `session` by pruning only the oldest inactive
+ * branches until `branches.size <= maxBranches` and `uniqueSteps <= maxUniqueSteps`, and
+ * optionally dropping reconstructible eager traces from inactive historical steps.
+ *
+ * Invariants:
+ *  - NEVER deletes or truncates `session.activeBranchId` (even if the active branch alone
+ *    exceeds `maxUniqueSteps`).
+ *  - NEVER corrupts or drops any shared ancestor step referenced by surviving branches.
+ */
+export function pruneDecodeSessionBranches(
+  session: HybridDecodeSession,
+  options?: PruneDecodeSessionOptions,
+): HybridDecodeSession {
+  const maxBranches = validatePositiveIntBound(
+    options?.maxBranches,
+    session.maxBranches,
+    'maxBranches',
+  );
+  const maxUniqueSteps = validatePositiveIntBound(
+    options?.maxUniqueSteps,
+    session.maxUniqueSteps,
+    'maxUniqueSteps',
+  );
+  const dropInactiveTraces =
+    options?.pruneInactiveStepTraces ?? session.pruneInactiveStepTraces;
+
+  let nextBranches: Map<string, HybridDecodeBranch> | null = null;
+  const currentBranches = () => nextBranches ?? session.branches;
+
+  while (
+    currentBranches().size > 1 &&
+    (currentBranches().size > maxBranches ||
+      countUniqueStepsAcrossBranches(currentBranches()) > maxUniqueSteps)
+  ) {
+    let oldestInactiveId: string | null = null;
+    for (const branchId of currentBranches().keys()) {
+      if (branchId !== session.activeBranchId) {
+        oldestInactiveId = branchId;
+        break;
+      }
+    }
+    if (oldestInactiveId === null) break;
+    if (nextBranches === null) {
+      nextBranches = new Map(session.branches);
+    }
+    nextBranches.delete(oldestInactiveId);
+  }
+
+  let resultSession: HybridDecodeSession =
+    nextBranches !== null ? { ...session, branches: nextBranches } : session;
+  if (dropInactiveTraces) {
+    resultSession = pruneInactiveStepTraces(resultSession);
+  }
+  return resultSession;
+}
+
+/**
  * Append one newly chosen token (`nextTokenId`) as a cached single-token AR decode step
  * after the currently inspected step.
  *
@@ -1498,6 +1870,8 @@ export function getActiveDecodeBranch(session: HybridDecodeSession): HybridDecod
  * - If currently inspecting an earlier historical step (`activeStepIndex < branch.steps.length - 1`),
  *   cleanly spawns a new immutable branch (`branch-N`) sharing the immutable prefix steps up to
  *   `activeStepIndex`, so the prior branch and its snapshots remain untouched!
+ * - Automatically enforces the session's `maxBranches`, `maxUniqueSteps`, and
+ *   `pruneInactiveStepTraces` retention bounds without ever deleting or corrupting the active branch.
  */
 export function stepDecodeSession(
   session: HybridDecodeSession,
@@ -1542,13 +1916,14 @@ export function stepDecodeSession(
     });
   }
 
-  return {
+  const candidateSession: HybridDecodeSession = {
     ...session,
     activeBranchId: targetBranchId,
     activeStepIndex: nextStepIndex,
     nextBranchNumber: isFork ? session.nextBranchNumber + 1 : session.nextBranchNumber,
     branches: nextBranches,
   };
+  return pruneDecodeSessionBranches(candidateSession);
 }
 
 /** Convenience helper inserting and processing the active step's Greedy argmax candidate. */
@@ -1584,25 +1959,55 @@ export function switchDecodeSessionBranch(
   };
 }
 
-/** Measure exact deduplicated retained bytes across all unique steps stored in `session`. */
+/**
+ * Measure exact deduplicated retained typed-array bytes across all unique steps stored in
+ * `session`, deduplicating shared step objects (by both `stepExecutionId` and object identity)
+ * as well as shared underlying `ArrayBuffer`s across steps, and accurately including
+ * `rootStep.prevState` bytes.
+ */
 export function measureDecodeSessionRetainedBytes(session: HybridDecodeSession): {
   readonly uniqueSteps: number;
   readonly branchCount: number;
+  readonly rootPrevStateBytes: number;
   readonly totalRetainedBytes: number;
 } {
-  const uniqueStepMap = new Map<string, HybridIncrementalStepResult>();
+  const seenStepIds = new Set<string>();
+  const seenStepObjects = new Set<HybridIncrementalStepResult>();
+  const uniqueStepsList: HybridIncrementalStepResult[] = [];
   for (const branch of session.branches.values()) {
     for (const step of branch.steps) {
-      uniqueStepMap.set(step.stepExecutionId, step);
+      if (seenStepIds.has(step.stepExecutionId) || seenStepObjects.has(step)) {
+        continue;
+      }
+      seenStepIds.add(step.stepExecutionId);
+      seenStepObjects.add(step);
+      uniqueStepsList.push(step);
     }
   }
-  let totalRetainedBytes = 0;
-  for (const step of uniqueStepMap.values()) {
-    totalRetainedBytes += step.retainedTypedArrayBytes();
+
+  const seenBuffers = new Set<ArrayBufferLike>();
+  let stepOwnedBytes = 0;
+  for (const step of uniqueStepsList) {
+    const collector = stepByteCollectors.get(step);
+    if (collector) {
+      stepOwnedBytes += collector(seenBuffers);
+    } else {
+      stepOwnedBytes += step.retainedTypedArrayBytes();
+      stepOwnedBytes += collectCacheStateUniqueBytes(seenBuffers, step.nextState);
+    }
   }
+
+  // Pass 2: account for `prevState` buffers not already owned as any surviving step's `nextState`
+  // (e.g., `rootStep.prevState` zero or external seed snapshot).
+  let rootPrevStateBytes = 0;
+  for (const step of uniqueStepsList) {
+    rootPrevStateBytes += collectCacheStateUniqueBytes(seenBuffers, step.prevState);
+  }
+
   return {
-    uniqueSteps: uniqueStepMap.size,
+    uniqueSteps: uniqueStepsList.length,
     branchCount: session.branches.size,
-    totalRetainedBytes,
+    rootPrevStateBytes,
+    totalRetainedBytes: stepOwnedBytes + rootPrevStateBytes,
   };
 }

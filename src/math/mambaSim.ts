@@ -16,7 +16,7 @@
  */
 
 import { EDUCATIONAL_TOKENS, formatEpsLabel, resolveSimTokens } from './gqaSim';
-import { fmtSigned, type LayerFormulaReadout, type StepperStepDef } from '../scene/sheetInspector';
+import { fmtSigned, type LayerFormulaReadout, type StepperStepDef } from './formulaFormat';
 
 export { EDUCATIONAL_TOKENS };
 
@@ -478,7 +478,15 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
         `Mamba initialConvState length ${fixture.initialConvState.length} !== expected ${expectedConvLen}`,
       );
     }
-    initialConvState = new Float32Array(fixture.initialConvState);
+    const clonedConv = new Float32Array(fixture.initialConvState);
+    for (let i = 0; i < expectedConvLen; i++) {
+      if (!Number.isFinite(clonedConv[i])) {
+        throw new RangeError(
+          `Non-finite value (${clonedConv[i]}) in Mamba initialConvState[${i}]`,
+        );
+      }
+    }
+    initialConvState = clonedConv;
   }
   if (fixture?.initialSsmState) {
     if (fixture.initialSsmState.length !== stateStride) {
@@ -486,7 +494,15 @@ export function runMambaSim(tokens: number, fixture?: MambaSimFixture): MambaSim
         `Mamba initialSsmState length ${fixture.initialSsmState.length} !== expected ${stateStride}`,
       );
     }
-    initialSsmState = new Float32Array(fixture.initialSsmState);
+    const clonedSsm = new Float32Array(fixture.initialSsmState);
+    for (let i = 0; i < stateStride; i++) {
+      if (!Number.isFinite(clonedSsm[i])) {
+        throw new RangeError(
+          `Non-finite value (${clonedSsm[i]}) in Mamba initialSsmState[${i}]`,
+        );
+      }
+    }
+    initialSsmState = clonedSsm;
   }
   const hasInitialState = initialConvState !== undefined || initialSsmState !== undefined;
 

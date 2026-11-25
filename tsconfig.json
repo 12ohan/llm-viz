@@ -23,6 +23,7 @@
   },
   "include": [
     "src/main.ts",
+    "src/math/**/*.ts",
     "src/model/**/*.ts",
     "src/render/**/*.ts",
     "src/scene/**/*.ts",

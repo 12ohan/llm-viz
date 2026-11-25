@@ -17,26 +17,11 @@ import {
   SHEET_HL_OPERAND_A,
   SHEET_HL_OPERAND_B,
 } from '../render/sheets';
-
-/** Layer-agnostic readout contract consumed by the docked Formula Inspector bar. */
-export interface LayerFormulaReadout {
-  readonly tensorLabel: string;
-  readonly coordLabel: string;
-  readonly headBadge: string | null;
-  readonly value: number;
-  readonly isMasked: boolean;
-  readonly valueText: string;
-  readonly equation: string;
-  readonly subEquation: string;
-}
-
-/** Layer-agnostic stepper stage definition for the 6-step Math Stepper bar. */
-export interface StepperStepDef {
-  readonly index: number;
-  readonly shortLabel: string;
-  readonly title: string;
-  readonly summary: string;
-}
+export {
+  fmtSigned,
+  type LayerFormulaReadout,
+  type StepperStepDef,
+} from '../math/formulaFormat';
 
 export interface SheetGeomRecord {
   readonly cx: number;
@@ -568,11 +553,4 @@ export function drawOperandDependencyXZ(
       20,
     );
   }
-}
-
-export function fmtSigned(v: number, digits = 3): string {
-  if (!Number.isFinite(v)) return v < 0 ? '−∞' : '+∞';
-  const r = Math.abs(v) < 0.5 * Math.pow(10, -digits) ? 0 : v;
-  const sign = r < 0 ? '−' : '+';
-  return `${sign}${Math.abs(r).toFixed(digits)}`;
 }

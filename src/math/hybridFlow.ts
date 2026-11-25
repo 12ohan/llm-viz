@@ -64,6 +64,8 @@ export const DEFAULT_HYBRID_MODEL_SEED = 0x4e454d33; // "NEM3"
 export const HYBRID_MINI_D = 8 as const;
 export const HYBRID_MINI_VOCAB_SIZE = 32 as const;
 export const HYBRID_UNIFIED_RMS_EPS = 1e-5 as const;
+/** Default retained bay weight capacity (all 52 miniature bays = ~1.14 MiB; eliminates per-step PRNG thrash). */
+export const DEFAULT_MAX_RETAINED_WEIGHT_BAYS = 52 as const;
 
 /** Default primary cutaway bays retained immediately after a forward pass (all 52 bays remain lazily accessible). */
 export const DEFAULT_RETAINED_TRACE_BAYS: readonly number[] = Object.freeze([
@@ -508,7 +510,10 @@ export function createHybridModelParameters(
   const rmsNormEps = options?.rmsNormEps ?? HYBRID_UNIFIED_RMS_EPS;
   const residualOutputScale =
     options?.residualOutputScale ?? 1.42 / Math.sqrt(Math.max(2, 2 * numLayers));
-  const maxRetainedWeightBays = Math.max(1, options?.maxRetainedWeightBays ?? 8);
+  const maxRetainedWeightBays = Math.max(
+    1,
+    Math.trunc(options?.maxRetainedWeightBays ?? DEFAULT_MAX_RETAINED_WEIGHT_BAYS),
+  );
   const parameterFingerprint = computeModelParameterFingerprint({
     seed,
     pattern,
@@ -582,30 +587,35 @@ export function createHybridModelParameters(
     }
 
     const kind = pattern[bayId - 1] as Kind;
-    const generated: HybridBayWeights =
+    const generated: HybridBayWeights = Object.freeze(
       kind === 'M'
         ? generateMambaBayWeights(bayId, seed, residualOutputScale)
         : kind === 'E'
           ? generateMoeBayWeights(bayId, seed, residualOutputScale)
-          : generateGqaBayWeights(bayId, seed, residualOutputScale);
+          : generateGqaBayWeights(bayId, seed, residualOutputScale),
+    );
 
-    // Only retain in bounded cache if pinned or room remains; evict oldest non-pinned first
-    if (pinnedSet.has(bayId) || weightCache.size < maxRetainedWeightBays) {
-      weightCache.set(bayId, generated);
-      while (weightCache.size > maxRetainedWeightBays) {
-        let evictedKey: number | null = null;
+    // Always insert newly generated bay into the bounded LRU cache and evict the oldest
+    // non-pinned entry first (preserving pinned bays whenever capacity allows).
+    weightCache.set(bayId, generated);
+    while (weightCache.size > maxRetainedWeightBays) {
+      let evictedKey: number | null = null;
+      for (const key of weightCache.keys()) {
+        if (key !== bayId && !pinnedSet.has(key)) {
+          evictedKey = key;
+          break;
+        }
+      }
+      if (evictedKey === null) {
         for (const key of weightCache.keys()) {
-          if (!pinnedSet.has(key)) {
+          if (key !== bayId) {
             evictedKey = key;
             break;
           }
         }
-        if (evictedKey === null) {
-          evictedKey = weightCache.keys().next().value ?? null;
-        }
-        if (evictedKey === null || evictedKey === bayId) break;
-        weightCache.delete(evictedKey);
       }
+      if (evictedKey === null) break;
+      weightCache.delete(evictedKey);
     }
 
     return generated;
