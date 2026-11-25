@@ -4,6 +4,7 @@ import type { MoeSimResult } from '../math/moeSim';
 import type { AABB } from '../render/camera';
 import type { PickBox } from '../render/pick';
 import type { ActiveSheetCellGrid, CellPopoverSpec } from '../ui/overlay';
+import type { FocusedAccumulationResult } from './accumulation';
 import type { Rg32fValueAtlas } from './atlasPacker';
 import type { EmbeddingCellFormula } from './embeddingCutaway';
 import type { OutputCellFormula } from './outputCutaway';
@@ -44,6 +45,7 @@ export {
   type SpatialOutputFitOptions,
 } from './outputCutaway';
 export type { ActiveSheetCellGrid, CellPopoverSpec } from '../ui/overlay';
+export type { FocusedAccumulationResult } from './accumulation';
 
 export {
   buildGqaCutaway,
@@ -179,6 +181,8 @@ export interface CutawaySceneGeometry {
   readonly cellPopover?: CellPopoverSpec | null;
   /** Active/inspected thin sheets eligible for V3 zoom-adaptive cell value overlays. */
   readonly activeCellGrids?: readonly ActiveSheetCellGrid[];
+  /** Optional focused-cell term-by-term accumulation readout for RC1 progressive reveal. */
+  readonly focusedAccumulation?: FocusedAccumulationResult | null;
   readonly fitBounds: AABB;
   /** Per-operation camera focus AABBs keyed by stepper step index 0..5. */
   readonly opFocusBounds?: Readonly<Record<number, AABB>>;

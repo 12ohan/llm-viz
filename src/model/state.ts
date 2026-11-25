@@ -25,6 +25,8 @@ export type GqaViewAngle = 'three_quarter' | 'near_plan';
 
 export type ExecutionMode = 'full_sequence' | 'ar_decode';
 
+export type SpineWaveMode = 'fast' | 'instructional';
+
 export type TocSectionId =
   | 'overview'
   | 'embedding'
@@ -56,6 +58,7 @@ export interface SceneState {
   mambaStepperPlaying: boolean;
   mambaStepperStep: number;
   mambaStepperSubProgress: number;
+  mambaAccumTermProgress: number;
   gqaBayId: 6 | 43;
   gqaViewAngle: GqaViewAngle;
   gqaActiveGroup0Head: number;
@@ -66,6 +69,7 @@ export interface SceneState {
   gqaStepperPlaying: boolean;
   gqaStepperStep: number;
   gqaStepperSubProgress: number;
+  gqaAccumTermProgress: number;
   moeBayId: 2 | 52;
   moeViewAngle: GqaViewAngle;
   /** null means follow latest token (T - 1); integer 0..T-1 pins a specific token in MoE cutaway. */
@@ -79,6 +83,7 @@ export interface SceneState {
   moeStepperPlaying: boolean;
   moeStepperStep: number;
   moeStepperSubProgress: number;
+  moeAccumTermProgress: number;
   stepperAutoFollow: boolean;
   embeddingFocusToken: number;
   outputFocusToken: number;
@@ -86,6 +91,8 @@ export interface SceneState {
   outputActiveCell: OutputCellRef | null;
   /** 0..1 progress during animated 52-layer AR propagation wave; null when idle. */
   spineWaveProgress: number | null;
+  spineWaveMode: SpineWaveMode;
+  spineWavePaused: boolean;
   camera: CameraPose;
   savedMacroCamera: CameraPose;
   savedEmbedPose: CameraPose | null;
@@ -166,6 +173,7 @@ export function createInitialState(defaultPose: CameraPose, reducedMotion = fals
     mambaStepperPlaying: false,
     mambaStepperStep: 0,
     mambaStepperSubProgress: 0,
+    mambaAccumTermProgress: 1,
     gqaBayId: 6,
     gqaViewAngle: 'three_quarter',
     gqaActiveGroup0Head: 0,
@@ -176,6 +184,7 @@ export function createInitialState(defaultPose: CameraPose, reducedMotion = fals
     gqaStepperPlaying: false,
     gqaStepperStep: 0,
     gqaStepperSubProgress: 0,
+    gqaAccumTermProgress: 1,
     moeBayId: 2,
     moeViewAngle: 'three_quarter',
     moeFocusToken: null,
@@ -187,12 +196,15 @@ export function createInitialState(defaultPose: CameraPose, reducedMotion = fals
     moeStepperPlaying: false,
     moeStepperStep: 0,
     moeStepperSubProgress: 0,
+    moeAccumTermProgress: 1,
     stepperAutoFollow: true,
     embeddingFocusToken: 7,
     outputFocusToken: 7,
     embeddingActiveCell: null,
     outputActiveCell: null,
     spineWaveProgress: null,
+    spineWaveMode: 'fast',
+    spineWavePaused: false,
     camera: cloneCameraPose(defaultPose),
     savedMacroCamera: cloneCameraPose(defaultPose),
     savedEmbedPose: null,
