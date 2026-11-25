@@ -48,6 +48,7 @@ export interface TwoTowerOverlayUpdateInput {
   readonly snapshot: CameraSnapshot;
   readonly selectedPartId?: string | null;
   readonly hoveredPartId?: string | null;
+  readonly highlightPartId?: string | null;
   readonly activeTokens?: number;
   readonly topInsetPx?: number;
   readonly bottomInsetPx?: number;
@@ -350,7 +351,8 @@ export class TwoTowerSpatialOverlay {
 
     const minY = Math.max(8, input.topInsetPx ?? 40);
     const maxY = Math.max(minY + 48, hostHeight - Math.max(12, input.bottomInsetPx ?? 64));
-    const activePart = input.hoveredPartId ?? input.selectedPartId ?? null;
+    const activePart =
+      input.hoveredPartId ?? input.selectedPartId ?? input.highlightPartId ?? null;
     const activeOpPartIds = scene.activeOpPartIds;
     const hasActiveOpFocus = activeOpPartIds != null && activeOpPartIds.size > 0;
     const isSheetCutaway = Boolean(scene.sheetCount && scene.sheetCount > 0 && scene.viewMode !== 'macro');

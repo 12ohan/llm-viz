@@ -2,7 +2,8 @@
  * Nemotron-Labs-TwoTower Topology A Browser Entry (`src/twotower/app/main.ts`)
  *
  * Clean, zero-dependency MPA entry root isolated from Nano v1.0.0 (`index.html` / `src/main.ts`).
- * Mounts the Stage TT3 Interactive WebGL2 Spatial Application + synced Developer Workbench drawer.
+ * Mounts the Stage TT4 Interactive WebGL2 Spatial Application with Persistent Nested Timeline,
+ * Advanced Sampler & Architectural Readout Tabs, 4-Act Guided Tour HUD, and synced Developer Workbench drawer.
  */
 
 import './spatial.css';

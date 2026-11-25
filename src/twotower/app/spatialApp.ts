@@ -1,12 +1,24 @@
 /**
- * Nemotron-Labs-TwoTower Stage TT3 Interactive WebGL2 Spatial Application
+ * Nemotron-Labs-TwoTower Stage TT4 Interactive WebGL2 Spatial Application
  * (`src/twotower/app/spatialApp.ts`)
  *
  * Directly composes:
  *   - Nano's 5 WebGL2 render passes (`RenderDevice`, `SolidsPass`, `SheetsPass`, `LinesPass`,
  *     `RibbonsPass`, `FlatFlowRibbonsPass`) on a studio-white `#F7F8FA` editorial drafting table
- *   - All 7 Stage TT3 headless TwoTower spatial scene builders (`src/twotower/scene/index.ts`)
+ *   - All 7 headless TwoTower spatial scene builders (`src/twotower/scene/index.ts`)
  *   - Projected editorial overlay (`TwoTowerSpatialOverlay` reusing `src/ui/overlay.ts`)
+ *   - Stage TT4 Wave 1–4 features:
+ *       * Wave 1: Canonical `t = nMasked / B` timestep status, unmistakable historical Denoiser
+ *         provenance boundary warnings, `TWOTOWER_MINI_MODEL_INVENTORY` distinction, RB-2 partial-
+ *         accumulation non-exposure preservation
+ *       * Wave 2: Persistent Nested Generation Timeline dock, segmented editorial right sidebar
+ *         (`Inspect` | `Sampler` | `Architecture`), Advanced MDLM Sampler Inspector with
+ *         Future vs Historical Config Scope controls, and Production Architectural & Memory
+ *         Scaling Readouts (with inline SVG 262,144 max_pos boundary & 8,035 crossover chart)
+ *       * Wave 3: Isolated 4-Act / 28-Beat Guided Educational Walkthrough HUD
+ *       * Wave 4: On-demand idle RAF sleep, discrete replay/stepper ticks (zero 60Hz full-scene
+ *         rebuilds), hover deduplication, cached memory accounting, and rich WebGL2 telemetry on
+ *         `window.__TWOTOWER_SPATIAL_DEBUG__`
  *   - Retained Developer Diagnostic Workbench inside a collapsible drawer synced bidirectionally
  *     with the live `TwoTowerSession`.
  *
@@ -61,30 +73,52 @@ import { SolidsPass } from '../../render/solids';
 import type { EmbeddingCellRef } from '../../scene/embeddingCutaway';
 import type { OutputCellRef } from '../../scene/outputCutaway';
 import {
+  buildAdvancedSamplerInspectorModel,
+  buildTwoTowerArchitecturalReadout,
+  buildTwoTowerConfigScopeModel,
+  buildTwoTowerTimelineModel,
   commitTwoTowerActiveBlockToContext,
   commitTwoTowerRefinementConfidence,
   createDefaultTwoTowerModel,
   createTwoTowerSession,
+  createTwoTowerTourController,
+  deleteTwoTowerSessionBranch,
   forkTwoTowerSessionBranch,
   getActiveBranch,
   getActiveRecord,
   getSessionCapabilities,
   initTwoTowerDiffusionBlock,
   measureTwoTowerSessionRetainedBytes,
+  navigateTwoTowerSession,
   navigateTwoTowerSessionBack,
   navigateTwoTowerSessionForward,
+  restartTwoTowerSession,
   runTwoTowerDiffusionRefinement,
   stepTwoTowerSessionAr,
   stepTwoTowerSessionMockAr,
   stepTwoTowerSessionNext,
   switchTwoTowerSessionBranch,
+  TWOTOWER_CONFIDENCE_PRESETS,
   TWOTOWER_MINI_CONFIG,
   TWOTOWER_SPEC,
+  TWOTOWER_TOUR_ACTS,
   updateTwoTowerSessionConfig,
+  type SamplerInspectorSlotRow,
+  type SamplerInspectorSlotStatus,
+  type TimelineNode,
+  type TimelineSegment,
+  type TwoTowerAdvancedSamplerInspectorModel,
+  type TwoTowerArchitecturalReadout,
+  type TwoTowerConfigScopeModel,
+  type TwoTowerContextLengthScalingSeries,
   type TwoTowerExecutionMode,
   type TwoTowerSession,
   type TwoTowerSessionCapabilities,
+  type TwoTowerSessionMemoryBreakdown,
   type TwoTowerSessionRecord,
+  type TwoTowerTimelineModel,
+  type TwoTowerTourController,
+  type TwoTowerTourSnapshot,
 } from '../index';
 import {
   buildTwoTowerEmbeddingScene,
@@ -108,12 +142,15 @@ import {
   pickHitToEmbeddingCell,
   pickHitToOutputCell,
   pickHitToTimestepCell,
+  resolveNearestBayOfKind,
   resolveTwoTowerSessionViewState,
   TWO_TOWER_MACRO_FIT_BOUNDS,
+  TWOTOWER_MINI_MODEL_INVENTORY,
   type PairedGqaDiagnostics,
   type PairedMambaDiagnostics,
   type TimestepCellRef,
   type TimestepCutawayDiagnostics,
+  type TwoTowerDenoiserPassLookup,
   type TwoTowerEmbeddingDiagnostics,
   type TwoTowerLinkerChannel,
   type TwoTowerMacroDiagnostics,
@@ -121,8 +158,11 @@ import {
   type TwoTowerOutputDiagnostics,
   type TwoTowerPairedFocus,
   type TwoTowerSelectionIdentity,
+  type TwoTowerSessionViewState,
   type TwoTowerSpatialScene,
   type TwoTowerSpatialViewMode,
+  type TwoTowerTimestepConditioningMode,
+  type TwoTowerTimestepStatus,
   type TwoTowerTowerRole,
 } from '../scene/index';
 import {
@@ -132,15 +172,27 @@ import {
 import { TwoTowerSpatialOverlay } from './spatialOverlay';
 
 // ============================================================================
-// PUBLIC TELEMETRY & INSPECTION CONTRACTS
+// PUBLIC TELEMETRY, DEBUG & INSPECTION CONTRACTS
 // ============================================================================
+
+export type TwoTowerSidebarTab = 'inspect' | 'sampler' | 'architecture';
 
 export interface TwoTowerTelemetrySnapshot {
   readonly viewMode: TwoTowerSpatialViewMode;
   readonly drawCallsLastFrame: number;
   readonly lastFrameMs: number;
   readonly avgFrameMs: number;
+  readonly medianFrameMs: number;
+  readonly p95FrameMs: number;
+  readonly frameSampleCount: number;
+  readonly geometryRebuilds: number;
   readonly atlasUploads: number;
+  readonly rafIdlePauses: number;
+  readonly rafActive: boolean;
+  readonly layoutResizeCount: number;
+  readonly glVendor: string;
+  readonly glRenderer: string;
+  readonly isSoftwareRenderer: boolean;
   readonly currentAtlasDims: readonly [number, number] | null;
   readonly maxTextureSize: number;
   readonly retainedSessionBytes: number;
@@ -158,6 +210,25 @@ export interface TwoTowerTelemetrySnapshot {
   readonly glErrorCount: number;
   readonly reducedMotion: boolean;
   readonly rafFramesRendered: number;
+  readonly tourActive: boolean;
+  readonly tourBeatIndex: number;
+  readonly tourActIndex: number;
+  readonly activeSidebarTab: TwoTowerSidebarTab;
+}
+
+export interface TwoTowerSpatialDebugHandle extends TwoTowerTelemetrySnapshot {
+  resetPerfCounters(): void;
+  startTour(): TwoTowerTourSnapshot;
+  exitTour(): void;
+  goToTourBeat(idx: number): TwoTowerTourSnapshot;
+  goToTourAct(actIdx: number): TwoTowerTourSnapshot;
+  setSidebarTab(tab: TwoTowerSidebarTab): void;
+  jumpToRecord(idx: number): void;
+  orbitDelta(dx: number, dy: number): void;
+  triggerMacroReplay(on: boolean): void;
+  triggerOpStepper(on: boolean): void;
+  getTourSnapshot(): TwoTowerTourSnapshot | null;
+  getSnapshot(): TwoTowerTelemetrySnapshot;
 }
 
 export interface TwoTowerAppHandle {
@@ -173,6 +244,9 @@ export interface TwoTowerAppHandle {
     readonly stepperTermProgress: number;
     readonly reducedMotion: boolean;
     readonly workbenchOpen: boolean;
+    readonly activeSidebarTab: TwoTowerSidebarTab;
+    readonly tourActive: boolean;
+    readonly tourBeatIndex: number;
     readonly activeSelection: TwoTowerSelectionIdentity | null;
     readonly warningBanner: string | null;
     readonly diagnostics: Readonly<Record<string, unknown>> | undefined;
@@ -191,14 +265,29 @@ declare global {
   interface Window {
     __TWOTOWER_TELEMETRY__?: TwoTowerTelemetrySnapshot;
     __TWOTOWER_APP__?: TwoTowerAppHandle;
+    __TWOTOWER_SPATIAL_DEBUG__?: TwoTowerSpatialDebugHandle;
   }
 }
 
 // ============================================================================
-// SMALL PURE HELPERS
+// CONSTANTS & PURE HELPERS
 // ============================================================================
 
 const DRAG_THRESHOLD_PX = 5;
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const MAX_FRAME_SAMPLES = 240;
+const MACRO_REPLAY_STAGE_COUNT = 8;
+const MACRO_REPLAY_DURATION_MS = 3200;
+const STEPPER_SUBTERM_BUCKETS = 6;
+const STEPPER_CELL_DURATION_SEC = 1.4;
+const TOUR_AUTOPLAY_MS = 6500;
+const TELEMETRY_FOOTER_THROTTLE_MS = 250;
+
+const MINI_INVENTORY_SUMMARY =
+  `${TWOTOWER_MINI_MODEL_INVENTORY.gqa.queryHeads} Q / ${TWOTOWER_MINI_MODEL_INVENTORY.gqa.kvHeads} KV, ` +
+  `d_head=${TWOTOWER_MINI_MODEL_INVENTORY.gqa.headDim} · ` +
+  `${TWOTOWER_MINI_MODEL_INVENTORY.mamba.heads} Mamba / ${TWOTOWER_MINI_MODEL_INVENTORY.mamba.groups} groups / ` +
+  `${TWOTOWER_MINI_MODEL_INVENTORY.mamba.ssmStateMatrixShape[0]}×${TWOTOWER_MINI_MODEL_INVENTORY.mamba.ssmStateMatrixShape[1]} SSM`;
 
 const VIEW_TABS: readonly {
   readonly mode: TwoTowerSpatialViewMode;
@@ -214,6 +303,16 @@ const VIEW_TABS: readonly {
   { mode: 'output', label: 'Output', title: 'Unmodulated Final RMSNorm, Untied LM Head & MDLM Sampler' },
 ]);
 
+const SIDEBAR_TABS: readonly {
+  readonly id: TwoTowerSidebarTab;
+  readonly label: string;
+  readonly title: string;
+}[] = Object.freeze([
+  { id: 'inspect', label: 'Inspect', title: 'Spatial Inspector: 10-Axis Provenance, Timestep Status & Formula' },
+  { id: 'sampler', label: 'Sampler', title: 'Advanced MDLM Sampler Inspector & Future Config Scope' },
+  { id: 'architecture', label: 'Architecture', title: 'Production 63.19B Inventory, Weights vs Caches & Scaling' },
+]);
+
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   className?: string,
@@ -225,10 +324,32 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+function svgEl<K extends keyof SVGElementTagNameMap>(
+  tag: K,
+  attrs?: Record<string, string | number>,
+  textContent?: string,
+): SVGElementTagNameMap[K] {
+  const node = document.createElementNS(SVG_NS, tag);
+  if (attrs) {
+    for (const [k, v] of Object.entries(attrs)) {
+      node.setAttribute(k, String(v));
+    }
+  }
+  if (textContent !== undefined) node.textContent = textContent;
+  return node;
+}
+
 function fmtBytesCompact(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MiB`;
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
   return `${bytes} B`;
+}
+
+function fmtParamsBillions(params: number): string {
+  if (params >= 1e9) return `${(params / 1e9).toFixed(2)}B`;
+  if (params >= 1e6) return `${(params / 1e6).toFixed(2)}M`;
+  if (params >= 1e3) return `${(params / 1e3).toFixed(1)}K`;
+  return String(params);
 }
 
 function fmtL2(arr: Float32Array): string {
@@ -244,6 +365,26 @@ function fmtVecPreview(arr: Float32Array, max = 4): string {
     parts.push(`${v >= 0 ? '+' : ''}${v.toFixed(2)}`);
   }
   return `[${parts.join(', ')}${arr.length > max ? ', …' : ''}]`;
+}
+
+function computeQuantiles(samples: readonly number[]): {
+  readonly avg: number;
+  readonly median: number;
+  readonly p95: number;
+} {
+  const n = samples.length;
+  if (n === 0) return { avg: 0, median: 0, p95: 0 };
+  let sum = 0;
+  for (let i = 0; i < n; i++) sum += samples[i];
+  const sorted = [...samples].sort((a, b) => a - b);
+  const mid = Math.floor(n / 2);
+  const median = n % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) * 0.5;
+  const p95Idx = Math.min(n - 1, Math.max(0, Math.ceil(n * 0.95) - 1));
+  return {
+    avg: sum / n,
+    median,
+    p95: sorted[p95Idx],
+  };
 }
 
 function isInteractiveControl(target: EventTarget | null): boolean {
@@ -318,6 +459,121 @@ function originBadgeClass(origin: string): string {
   return 'sp-badge sp-badge--den';
 }
 
+function conditioningModeLabel(mode: TwoTowerTimestepConditioningMode): string {
+  switch (mode) {
+    case 'active_diffusion':
+      return 'Active Diffusion';
+    case 'inactive_no_pass_yet':
+      return 'Inactive (No Pass Yet)';
+    case 'historical_prior_pass':
+      return 'Historical Prior Pass';
+    case 'bypassed_ar':
+      return 'Bypassed (AR)';
+    case 'bypassed_mock_ar':
+      return 'Bypassed (Mock-AR)';
+  }
+}
+
+function conditioningModeBadgeClass(mode: TwoTowerTimestepConditioningMode): string {
+  switch (mode) {
+    case 'active_diffusion':
+      return 'sp-badge sp-badge--time';
+    case 'historical_prior_pass':
+      return 'sp-badge sp-badge--warn';
+    case 'inactive_no_pass_yet':
+    case 'bypassed_ar':
+    case 'bypassed_mock_ar':
+      return 'sp-badge sp-badge--muted';
+  }
+}
+
+function samplerDecisionChip(status: SamplerInspectorSlotStatus): {
+  readonly label: string;
+  readonly cls: string;
+} {
+  switch (status) {
+    case 'committed_threshold':
+      return { label: 'Threshold', cls: 'sp-badge sp-badge--emerald' };
+    case 'committed_budget_floor':
+      return { label: 'Budget Floor', cls: 'sp-badge sp-badge--time' };
+    case 'committed_final_step':
+      return { label: 'Final Step', cls: 'sp-badge sp-badge--ctx' };
+    case 'remasked':
+      return { label: 'Remasked', cls: 'sp-badge sp-badge--den' };
+    case 'locked_prior':
+      return { label: 'Locked', cls: 'sp-badge sp-badge--muted' };
+  }
+}
+
+function tourToneBadgeClass(tone: string): string {
+  switch (tone) {
+    case 'context':
+      return 'sp-badge sp-badge--ctx';
+    case 'denoiser':
+      return 'sp-badge sp-badge--den';
+    case 'shared':
+      return 'sp-badge sp-badge--teal';
+    case 'gold':
+      return 'sp-badge sp-badge--time';
+    case 'warn':
+      return 'sp-badge sp-badge--warn';
+    default:
+      return 'sp-badge sp-badge--muted';
+  }
+}
+
+function formatCompactTimestepPill(ts: TwoTowerTimestepStatus): string {
+  const modeLbl = conditioningModeLabel(ts.conditioningMode);
+  if (ts.conditioningMode === 'active_diffusion' && ts.executedPass) {
+    const ep = ts.executedPass;
+    return `t=${ep.tModel.toFixed(2)} (${ep.nMaskedInput}/${ep.blockSize}) · ${modeLbl}`;
+  }
+  if (ts.conditioningMode === 'historical_prior_pass' && ts.executedPass) {
+    const ep = ts.executedPass;
+    return `Prior t=${ep.tModel.toFixed(2)} (Rec #${ep.sourceRecordIndex}) · ${modeLbl}`;
+  }
+  if (ts.conditioningMode === 'inactive_no_pass_yet') {
+    if (ts.nextEligibleStep) {
+      const ns = ts.nextEligibleStep;
+      return `Next t=${ns.nextTModel.toFixed(2)} (${ns.nextNMasked}/${ns.blockSize}) · ${modeLbl}`;
+    }
+    return modeLbl;
+  }
+  return `t=null · ${modeLbl}`;
+}
+
+function sameGqaHover(
+  a: { readonly tower: 'context' | 'denoiser'; readonly cell: GqaCellRef } | null,
+  b: { readonly tower: 'context' | 'denoiser'; readonly cell: GqaCellRef } | null,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.tower === b.tower &&
+    a.cell.tensor === b.cell.tensor &&
+    a.cell.row === b.cell.row &&
+    a.cell.col === b.cell.col &&
+    a.cell.headIndex === b.cell.headIndex &&
+    a.cell.kvHeadIndex === b.cell.kvHeadIndex
+  );
+}
+
+function sameMambaHover(
+  a: { readonly tower: 'context' | 'denoiser'; readonly cell: MambaCellRef } | null,
+  b: { readonly tower: 'context' | 'denoiser'; readonly cell: MambaCellRef } | null,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.tower === b.tower &&
+    a.cell.tensor === b.cell.tensor &&
+    a.cell.row === b.cell.row &&
+    a.cell.col === b.cell.col &&
+    a.cell.headIndex === b.cell.headIndex &&
+    a.cell.groupIndex === b.cell.groupIndex
+  );
+}
+
 function buildCapabilityTooltips(
   session: TwoTowerSession,
   record: TwoTowerSessionRecord,
@@ -325,7 +581,7 @@ function buildCapabilityTooltips(
 ) {
   const autoFork = caps.willAutoForkOnMutatingStep ? ' (rewound: will auto-fork branch)' : '';
   const term = caps.isTerminated
-    ? `Disabled: branch terminated (${caps.terminationReason}). Rewind, fork, or open Workbench to restart.`
+    ? `Disabled: branch terminated (${caps.terminationReason}). Rewind, fork, or restart.`
     : null;
   const maxBr =
     !caps.isAtBranchTail && session.bounds.maxBranches < 2
@@ -348,7 +604,7 @@ function buildCapabilityTooltips(
           : caps.activeBlockStatus === 'awaiting_confidence_commit'
             ? 'Disabled: pending denoised refinement is awaiting Commit Conf.'
             : caps.activeBlockStatus === 'completed_uncommitted'
-              ? 'Disabled: block has 0 masks remaining — click Commit Block.'
+              ? 'Disabled: block has 0 masks remaining — click Commit → Context.'
               : 'Disabled: refinement budget K exhausted.'),
     conf: caps.canCommitRefinementConfidence
       ? `Apply MDLM [MASK]=0 constraints & confidence unmasking (γ=${session.pendingConfig.confidenceThreshold.toFixed(2)})${autoFork}.`
@@ -387,6 +643,314 @@ interface FlyAnimation {
   readonly durationMs: number;
 }
 
+interface PreTourExplorationState {
+  readonly viewMode: TwoTowerSpatialViewMode;
+  readonly selectedBayId: number | null;
+  readonly selectedTower: TwoTowerTowerRole;
+  readonly towerFocus: TwoTowerPairedFocus;
+  readonly activeLinkerChannel: TwoTowerLinkerChannel;
+  readonly gqaBayId: number;
+  readonly mambaBayId: number;
+  readonly mambaLocalPos: number;
+  readonly timestepBayId: number;
+  readonly timestepLocalPos: number;
+  readonly moeBayId: number;
+  readonly moeTowerRole: 'context' | 'denoiser' | undefined;
+  readonly embedTowerRole: 'context' | 'denoiser' | undefined;
+  readonly outputTowerRole: 'context' | 'denoiser' | undefined;
+  readonly outputFocusToken: number | undefined;
+  readonly stepperStep: number | null;
+  readonly activeSidebarTab: TwoTowerSidebarTab;
+  readonly cameraPose: CameraPose;
+}
+
+// ============================================================================
+// CONTEXT-LENGTH MEMORY SCALING INLINE SVG CHART BUILDER
+// ============================================================================
+
+function buildContextLengthScalingSvg(series: TwoTowerContextLengthScalingSeries): SVGSVGElement {
+  const W = 304;
+  const H = 176;
+  const padL = 40;
+  const padR = 10;
+  const padT = 18;
+  const padB = 28;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+
+  const minLogX = Math.log2(1_024); // 10
+  const maxLogX = Math.log2(1_048_576); // 20
+  const minLogY = Math.log10(1 * 1024 * 1024); // 1 MiB
+  const maxLogY = Math.log10(100 * 1024 * 1024 * 1024); // 100 GiB
+
+  const xOf = (tokens: number): number => {
+    const clamped = Math.max(1_024, Math.min(1_048_576, tokens));
+    const u = (Math.log2(clamped) - minLogX) / (maxLogX - minLogX);
+    return padL + u * plotW;
+  };
+
+  const yOf = (bytes: number): number => {
+    const safe = Math.max(1 * 1024 * 1024, Math.min(100 * 1024 * 1024 * 1024, bytes));
+    const v = (Math.log10(safe) - minLogY) / (maxLogY - minLogY);
+    return padT + (1 - v) * plotH;
+  };
+
+  const svg = svgEl('svg', {
+    class: 'sp-scaling-svg',
+    viewBox: `0 0 ${W} ${H}`,
+    role: 'img',
+    'aria-label':
+      'Context-length memory scaling chart from 1K to 1M tokens with 262,144 max_position_embeddings boundary and 8,035 Mamba/KV crossover',
+  });
+
+  const boundaryX = xOf(series.maxPositionEmbeddings); // 262,144
+  const crossoverX = xOf(series.crossoverTokens); // 8,035
+  const mambaY = yOf(series.fixedMambaBytes); // 47.08 MiB
+
+  // Supported vs Extrapolated background regimes
+  svg.append(
+    svgEl('rect', {
+      x: padL,
+      y: padT,
+      width: Math.max(0, boundaryX - padL),
+      height: plotH,
+      fill: '#F8FAFC',
+    }),
+    svgEl('rect', {
+      x: boundaryX,
+      y: padT,
+      width: Math.max(0, padL + plotW - boundaryX),
+      height: plotH,
+      fill: '#FFFBEB',
+    }),
+  );
+
+  // Regime labels at top of chart
+  svg.append(
+    svgEl(
+      'text',
+      {
+        x: padL + (boundaryX - padL) * 0.5,
+        y: padT - 5,
+        'text-anchor': 'middle',
+        class: 'sp-svg-regime sp-svg-regime--ok',
+      },
+      'Supported (≤256K)',
+    ),
+    svgEl(
+      'text',
+      {
+        x: boundaryX + (padL + plotW - boundaryX) * 0.5,
+        y: padT - 5,
+        'text-anchor': 'middle',
+        class: 'sp-svg-regime sp-svg-regime--extrap',
+      },
+      'Extrapolated',
+    ),
+  );
+
+  // Horizontal log Y gridlines & labels
+  const yTicks: readonly [number, string][] = [
+    [1 * 1024 * 1024, '1M'],
+    [10 * 1024 * 1024, '10M'],
+    [100 * 1024 * 1024, '100M'],
+    [1 * 1024 * 1024 * 1024, '1G'],
+    [10 * 1024 * 1024 * 1024, '10G'],
+    [100 * 1024 * 1024 * 1024, '100G'],
+  ];
+  for (const [b, lbl] of yTicks) {
+    const yy = yOf(b);
+    svg.append(
+      svgEl('line', {
+        x1: padL,
+        y1: yy.toFixed(1),
+        x2: padL + plotW,
+        y2: yy.toFixed(1),
+        stroke: '#E2E8F0',
+        'stroke-width': 0.8,
+      }),
+      svgEl(
+        'text',
+        {
+          x: padL - 4,
+          y: (yy + 3).toFixed(1),
+          'text-anchor': 'end',
+          class: 'sp-svg-axis',
+        },
+        lbl,
+      ),
+    );
+  }
+
+  // X ticks across standard context lengths
+  const xTicks: readonly [number, string][] = [
+    [1_024, '1K'],
+    [4_096, '4K'],
+    [16_384, '16K'],
+    [65_536, '64K'],
+    [262_144, '256K'],
+    [1_048_576, '1M'],
+  ];
+  for (const [tok, lbl] of xTicks) {
+    const xx = xOf(tok);
+    svg.append(
+      svgEl('line', {
+        x1: xx.toFixed(1),
+        y1: padT,
+        x2: xx.toFixed(1),
+        y2: padT + plotH,
+        stroke: '#E2E8F0',
+        'stroke-width': 0.6,
+      }),
+      svgEl(
+        'text',
+        {
+          x: xx.toFixed(1),
+          y: H - 12,
+          'text-anchor': 'middle',
+          class: 'sp-svg-axis',
+        },
+        lbl,
+      ),
+    );
+  }
+
+  // Standard points >= 1024 for curves
+  const curvePts = series.points.filter((p) => p.tokens >= 1_024);
+  const pathFor = (getter: (p: TwoTowerContextLengthScalingSeries['points'][number]) => number): string =>
+    curvePts
+      .map((p, idx) => `${idx === 0 ? 'M' : 'L'}${xOf(p.tokens).toFixed(1)},${yOf(getter(p)).toFixed(1)}`)
+      .join(' ');
+
+  // 1. 52-Layer Pure GQA reference (dashed muted slate)
+  svg.append(
+    svgEl('path', {
+      d: pathFor((p) => p.reference52LayerGqaKvBytes),
+      fill: 'none',
+      stroke: '#94A3B8',
+      'stroke-width': 1.25,
+      'stroke-dasharray': '3 2.5',
+    }),
+  );
+
+  // 2. Fixed 47.08 MiB Mamba-2 state (teal horizontal)
+  svg.append(
+    svgEl('line', {
+      x1: padL,
+      y1: mambaY.toFixed(1),
+      x2: padL + plotW,
+      y2: mambaY.toFixed(1),
+      stroke: '#0F766E',
+      'stroke-width': 1.6,
+    }),
+  );
+
+  // 3. Growing GQA KV cache (cobalt blue)
+  svg.append(
+    svgEl('path', {
+      d: pathFor((p) => p.persistentKvBytes),
+      fill: 'none',
+      stroke: '#2563EB',
+      'stroke-width': 1.6,
+    }),
+  );
+
+  // 4. Hybrid Total Persistent Context Cache (navy)
+  svg.append(
+    svgEl('path', {
+      d: pathFor((p) => p.persistentTotalBytes),
+      fill: 'none',
+      stroke: '#1B2340',
+      'stroke-width': 2.1,
+    }),
+  );
+
+  // Explicit dashed vertical boundary at 262,144 (max_position_embeddings)
+  svg.append(
+    svgEl('line', {
+      x1: boundaryX.toFixed(1),
+      y1: padT,
+      x2: boundaryX.toFixed(1),
+      y2: padT + plotH,
+      stroke: '#B45309',
+      'stroke-width': 1.5,
+      'stroke-dasharray': '4 2.5',
+      'data-testid': 'scaling-max-pos-boundary',
+    }),
+    svgEl(
+      'text',
+      {
+        x: (boundaryX - 3).toFixed(1),
+        y: (padT + 11).toFixed(1),
+        'text-anchor': 'end',
+        class: 'sp-svg-callout sp-svg-callout--amber',
+      },
+      '262,144 max_pos',
+    ),
+  );
+
+  // Explicit 8,035-token Mamba/KV crossover marker
+  svg.append(
+    svgEl('line', {
+      x1: crossoverX.toFixed(1),
+      y1: mambaY.toFixed(1),
+      x2: crossoverX.toFixed(1),
+      y2: padT + plotH,
+      stroke: '#DC4C34',
+      'stroke-width': 1.1,
+      'stroke-dasharray': '2 2',
+    }),
+    svgEl('circle', {
+      cx: crossoverX.toFixed(1),
+      cy: mambaY.toFixed(1),
+      r: 3.4,
+      fill: '#DC4C34',
+      stroke: '#FFFFFF',
+      'stroke-width': 1.2,
+      'data-testid': 'scaling-crossover-marker',
+    }),
+    svgEl(
+      'text',
+      {
+        x: (crossoverX + 4).toFixed(1),
+        y: (mambaY + 11).toFixed(1),
+        'text-anchor': 'start',
+        class: 'sp-svg-callout sp-svg-callout--coral',
+      },
+      `${series.crossoverTokens.toLocaleString('en-US')} crossover`,
+    ),
+  );
+
+  // Outer plot border
+  svg.append(
+    svgEl('rect', {
+      x: padL,
+      y: padT,
+      width: plotW,
+      height: plotH,
+      fill: 'none',
+      stroke: '#CBD5E1',
+      'stroke-width': 1,
+    }),
+  );
+
+  // Bottom axis caption
+  svg.append(
+    svgEl(
+      'text',
+      {
+        x: padL + plotW * 0.5,
+        y: H - 2,
+        'text-anchor': 'middle',
+        class: 'sp-svg-axis-caption',
+      },
+      'Context Prefix Length (log₂ tokens) · Persistent Cache Bytes (log₁₀)',
+    ),
+  );
+
+  return svg;
+}
+
 // ============================================================================
 // MAIN SPATIAL APPLICATION MOUNT
 // ============================================================================
@@ -403,12 +967,18 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
 
   // Spatial UI state
   let viewMode: TwoTowerSpatialViewMode = 'macro';
+  let activeSidebarTab: TwoTowerSidebarTab = 'inspect';
+  let mobileInspectorOpen = false;
   let selectedBayId: number | null = null;
   let selectedTower: TwoTowerTowerRole = 'shared';
   let hoveredBayId: number | null = null;
   let hoveredTower: TwoTowerTowerRole | null = null;
   let activeLinkerChannel: TwoTowerLinkerChannel = 'all';
+
+  // Discrete macro replay state (avoids 60Hz full-scene rebuilds!)
   let macroReplayActive = false;
+  let macroReplayElapsedMs = 0;
+  let macroReplayStage = -1;
   let macroReplayPhase: number | null = null;
   let macroReplayLastMs: number | null = null;
 
@@ -461,20 +1031,34 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   let outputActiveCell: OutputCellRef | null = null;
   let outputSelectedCandidateId: number | null = null;
 
-  // Stepper & partial-denominator accumulation playback
+  // Stepper & partial-denominator accumulation playback (discrete sub-term ticks!)
   let stepperStep: number | null = null;
   let stepperPlaying = false;
   let stepperStepProgress = 0;
   let stepperTermProgress = 1;
+  let stepperAccumSec = 0;
   let stepperLastTickMs: number | null = null;
+
+  // Guided Tour state (strictly isolated session, never mutates user exploration `session`!)
+  let tourController: TwoTowerTourController | null = null;
+  let tourActive = false;
+  let tourSnapshot: TwoTowerTourSnapshot | null = null;
+  let preTourState: PreTourExplorationState | null = null;
+  let tourAutoplayTimerId: number | null = null;
 
   // Drawer state
   let workbenchOpen = false;
   let workbenchCtrl: DiagnosticWorkbenchController | null = null;
 
-  // Renderer, camera & telemetry state
+  // Renderer, camera & rich Wave 4 performance telemetry state
   let currentScene: TwoTowerSpatialScene | null = null;
-  let currentMetrics: ViewportMetrics = makeViewportMetrics(0, 0, 960, 680, window.devicePixelRatio || 1);
+  let currentMetrics: ViewportMetrics = makeViewportMetrics(
+    0,
+    0,
+    960,
+    680,
+    window.devicePixelRatio || 1,
+  );
   let cameraPose: CameraPose = fitTwoTowerMacroCamera(TWO_TOWER_MACRO_FIT_BOUNDS, currentMetrics);
   let currentSnapshot: CameraSnapshot | null = null;
   let flyAnim: FlyAnimation | null = null;
@@ -486,15 +1070,39 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   let hoverClientY = 0;
 
   let lastAtlasKey: string | null = null;
+  let geometryRebuilds = 0;
   let atlasUploads = 0;
   let currentAtlasDims: readonly [number, number] | null = null;
   let maxTextureSize = 0;
+  let glVendor = 'unavailable';
+  let glRenderer = 'unavailable';
+  let isSoftwareRenderer = false;
   let drawCallsLastFrame = 0;
   let lastFrameMs = 0;
   let totalFrameMs = 0;
+  const frameTimesMs: number[] = [];
   let rafFramesRendered = 0;
+  let rafIdlePauses = 0;
+  let rafActive = false;
+  let layoutResizeCount = 0;
   let glErrorCount = 0;
   let lastOverlayKey = '';
+  let lastFooterRefreshMs = 0;
+  let cachedMemBreakdown: TwoTowerSessionMemoryBreakdown | null = null;
+  let cachedMemSessionRef: TwoTowerSession | null = null;
+
+  function getActiveDisplaySession(): TwoTowerSession {
+    return tourActive && tourController ? tourController.getSession() : session;
+  }
+
+  function getCachedMemoryBreakdown(): TwoTowerSessionMemoryBreakdown {
+    const active = getActiveDisplaySession();
+    if (cachedMemBreakdown === null || cachedMemSessionRef !== active) {
+      cachedMemSessionRef = active;
+      cachedMemBreakdown = measureTwoTowerSessionRetainedBytes(active);
+    }
+    return cachedMemBreakdown;
+  }
 
   // ==========================================================================
   // BUILD DOM SHELL
@@ -505,7 +1113,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   // 1. Top Header / View Bar (~48px)
   const topbar = el('header', 'sp-topbar');
   const brand = el('div', 'sp-brand');
-  const titleEl = el('h1', 'sp-title', 'Nemotron-Labs-TwoTower · Spatial TT3');
+  const titleEl = el('h1', 'sp-title', 'Nemotron-Labs-TwoTower');
   const epistemicPill = el(
     'span',
     'sp-epistemic-pill',
@@ -544,7 +1152,9 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     ) {
       return;
     }
-    const curIdx = tabButtons.findIndex((t) => t === ev.target || t.getAttribute('aria-selected') === 'true');
+    const curIdx = tabButtons.findIndex(
+      (t) => t === ev.target || t.getAttribute('aria-selected') === 'true',
+    );
     const baseIdx = curIdx >= 0 ? curIdx : 0;
     let nextIdx = baseIdx;
     if (ev.key === 'ArrowRight') nextIdx = (baseIdx + 1) % tabButtons.length;
@@ -561,6 +1171,13 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   });
 
   const topActions = el('div', 'sp-top-actions');
+
+  const btnTourToggle = el('button', 'sp-top-btn sp-top-btn--tour', 'Guided Tour');
+  btnTourToggle.type = 'button';
+  btnTourToggle.dataset.testid = 'tt-tour-toggle';
+  btnTourToggle.setAttribute('aria-pressed', 'false');
+  btnTourToggle.title = 'Launch isolated 4-Act / 28-Beat Guided Educational Walkthrough (T)';
+
   const btnResetCamera = el('button', 'sp-top-btn', 'Reset View');
   btnResetCamera.type = 'button';
   btnResetCamera.dataset.testid = 'btn-reset-camera';
@@ -571,16 +1188,24 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   btnToggleWorkbench.dataset.testid = 'btn-toggle-workbench';
   btnToggleWorkbench.setAttribute('aria-expanded', 'false');
   btnToggleWorkbench.setAttribute('aria-controls', 'workbench-drawer');
-  btnToggleWorkbench.title = 'Open collapsible Developer Diagnostic Workbench synced with this session';
+  btnToggleWorkbench.title = 'Open collapsible Developer Diagnostic Workbench (W)';
 
-  topActions.append(btnResetCamera, btnToggleWorkbench);
+  const btnToggleMobileInspector = el('button', 'sp-top-btn sp-mobile-inspector-btn', 'Inspector');
+  btnToggleMobileInspector.type = 'button';
+  btnToggleMobileInspector.dataset.testid = 'btn-toggle-inspector';
+  btnToggleMobileInspector.setAttribute('aria-expanded', 'false');
+  btnToggleMobileInspector.title = 'Toggle spatial inspector drawer';
+
+  topActions.append(btnTourToggle, btnResetCamera, btnToggleWorkbench, btnToggleMobileInspector);
   topbar.append(brand, tablist, topActions);
 
-  // 2. Compact Session & Context Control Strip (~42px)
+  // 2. Compact Session Execution & Instructional Playback Control Strip (~40px)
   const sessionStrip = el('section', 'sp-session-strip');
-  sessionStrip.setAttribute('aria-label', 'TwoTower session lifecycle and history controls');
+  sessionStrip.setAttribute('aria-label', 'TwoTower execution actions and status');
 
-  const leftStrip = el('div', 'sp-strip-group');
+  // Left cluster: Execution Actions
+  const execCluster = el('div', 'sp-strip-group sp-strip-cluster--exec');
+  const execTag = el('span', 'sp-cluster-tag', 'Exec');
   const modeSelect = el('select', 'sp-select');
   modeSelect.dataset.testid = 'spatial-mode-select';
   modeSelect.setAttribute('aria-label', 'Execution mode');
@@ -606,7 +1231,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   spBtnConf.type = 'button';
   spBtnConf.dataset.testid = 'sp-btn-conf';
 
-  const spBtnCommit = el('button', 'sp-btn sp-btn--emerald', 'Commit Block');
+  const spBtnCommit = el('button', 'sp-btn sp-btn--emerald', 'Commit → Context');
   spBtnCommit.type = 'button';
   spBtnCommit.dataset.testid = 'sp-btn-commit';
 
@@ -618,13 +1243,13 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   spBtnMockAr.type = 'button';
   spBtnMockAr.dataset.testid = 'sp-btn-mock-ar';
 
-  const spBtnNext = el('button', 'sp-btn sp-btn--primary', 'Next Step');
+  const spBtnNext = el('button', 'sp-btn sp-btn--primary', 'Step');
   spBtnNext.type = 'button';
   spBtnNext.dataset.testid = 'sp-btn-next';
 
-  leftStrip.append(
+  execCluster.append(
+    execTag,
     modeSelect,
-    el('span', 'sp-strip-sep'),
     spBtnInit,
     spBtnRefine,
     spBtnConf,
@@ -635,22 +1260,8 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     spBtnNext,
   );
 
-  const rightStrip = el('div', 'sp-strip-group');
-  const spBtnBack = el('button', 'sp-btn', '← Back');
-  spBtnBack.type = 'button';
-  spBtnBack.dataset.testid = 'sp-btn-back';
-
-  const spBtnFwd = el('button', 'sp-btn', 'Forward →');
-  spBtnFwd.type = 'button';
-  spBtnFwd.dataset.testid = 'sp-btn-fwd';
-
-  const spBtnFork = el('button', 'sp-btn', 'Fork');
-  spBtnFork.type = 'button';
-  spBtnFork.dataset.testid = 'sp-btn-fork';
-
-  const spBranchSelect = el('select', 'sp-select');
-  spBranchSelect.dataset.testid = 'sp-branch-select';
-  spBranchSelect.setAttribute('aria-label', 'Active session branch');
+  // Right cluster: Live Status Pills + Clearly Separated Instructional Playback Tag
+  const statusAndPlaybackCluster = el('div', 'sp-strip-group sp-strip-cluster--right');
 
   const spPhaseBadge = el('span', 'sp-badge');
   spPhaseBadge.dataset.testid = 'sp-phase-badge';
@@ -658,16 +1269,29 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   const spCapacityBadge = el('span', 'sp-badge sp-badge--ctx');
   spCapacityBadge.dataset.testid = 'sp-capacity-badge';
 
-  rightStrip.append(
-    spBtnBack,
-    spBtnFwd,
-    spBtnFork,
-    spBranchSelect,
-    el('span', 'sp-strip-sep'),
+  const spTimestepBadge = el('span', 'sp-badge sp-badge--muted');
+  spTimestepBadge.dataset.testid = 'sp-timestep-badge';
+
+  const playbackCluster = el('div', 'sp-playback-cluster');
+  playbackCluster.dataset.testid = 'instructional-playback-cluster';
+  const playbackTag = el(
+    'span',
+    'sp-playback-tag',
+    'Instructional replay ≠ measured compute',
+  );
+  const playbackQuickBtn = el('button', 'sp-btn sp-btn--subtle', 'Macro Flow Replay');
+  playbackQuickBtn.type = 'button';
+  playbackQuickBtn.dataset.testid = 'sp-btn-instructional-replay';
+  playbackCluster.append(playbackTag, playbackQuickBtn);
+
+  statusAndPlaybackCluster.append(
     spPhaseBadge,
     spCapacityBadge,
+    spTimestepBadge,
+    el('span', 'sp-strip-sep'),
+    playbackCluster,
   );
-  sessionStrip.append(leftStrip, rightStrip);
+  sessionStrip.append(execCluster, statusAndPlaybackCluster);
 
   // 3. Main Split Stage
   const stageSplit = el('div', 'sp-stage-split');
@@ -680,7 +1304,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   canvas.tabIndex = 0;
   canvas.setAttribute('aria-label', 'TwoTower 3D WebGL2 Canvas');
 
-  const overlaySvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  const overlaySvg = document.createElementNS(SVG_NS, 'svg');
   overlaySvg.id = 'twotower-overlay-svg';
   overlaySvg.setAttribute('class', 'tt-overlay-svg');
   overlaySvg.setAttribute('aria-hidden', 'true');
@@ -694,7 +1318,24 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   const canvasTitleEl = el('span', 'sp-canvas-title');
   const canvasSubEl = el('span', 'sp-canvas-sub');
   canvasTitleBox.append(canvasTitleEl, canvasSubEl);
-  canvasHud.append(canvasTitleBox);
+
+  const canvasHistBadge = el('div', 'sp-canvas-hist-badge');
+  canvasHistBadge.dataset.testid = 'canvas-historical-badge';
+  canvasHistBadge.hidden = true;
+
+  canvasHud.append(canvasTitleBox, canvasHistBadge);
+
+  // Guided Tour Floating Editorial HUD Card (non-occluding bottom-left overlay)
+  const tourCard = el('section', 'sp-tour-card');
+  tourCard.dataset.testid = 'tt-tour-card';
+  tourCard.setAttribute('role', 'region');
+  tourCard.setAttribute('aria-label', 'Guided Educational Walkthrough');
+  tourCard.hidden = true;
+
+  const tourAriaLive = el('div', 'sr-only');
+  tourAriaLive.dataset.testid = 'tour-aria-live';
+  tourAriaLive.setAttribute('aria-live', 'polite');
+  tourAriaLive.setAttribute('aria-atomic', 'true');
 
   const bottomDock = el('div', 'sp-bottom-dock');
   bottomDock.dataset.testid = 'view-controls-dock';
@@ -705,18 +1346,88 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   fallbackEl.id = 'webgl-fallback';
   fallbackEl.hidden = true;
 
-  viewportHost.append(canvas, overlaySvg, overlayLabels, canvasHud, bottomDock, fallbackEl);
+  viewportHost.append(
+    canvas,
+    overlaySvg,
+    overlayLabels,
+    canvasHud,
+    tourCard,
+    tourAriaLive,
+    bottomDock,
+    fallbackEl,
+  );
 
-  // Right Editorial Inspector Rail
+  // Right Editorial Inspector Rail with 3 Segmented Tabs (Inspect | Sampler | Architecture)
   const inspector = el('aside', 'sp-inspector');
+  inspector.dataset.testid = 'sp-inspector';
   inspector.setAttribute('aria-label', 'TwoTower Spatial Inspector');
+
+  const sidebarTablist = el('div', 'sp-sidebar-tabs');
+  sidebarTablist.setAttribute('role', 'tablist');
+  sidebarTablist.setAttribute('aria-label', 'Inspector Sidebar Tabs');
+  const sidebarTabButtons: HTMLButtonElement[] = [];
+
+  for (const st of SIDEBAR_TABS) {
+    const b = el('button', 'sp-sidebar-tab', st.label);
+    b.type = 'button';
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', st.id === activeSidebarTab ? 'true' : 'false');
+    b.setAttribute('tabindex', st.id === activeSidebarTab ? '0' : '-1');
+    b.title = st.title;
+    b.dataset.sidebarTab = st.id;
+    b.dataset.testid = `sidebar-tab-${st.id}`;
+    b.addEventListener('click', () => setSidebarTab(st.id));
+    sidebarTablist.append(b);
+    sidebarTabButtons.push(b);
+  }
+
+  sidebarTablist.addEventListener('keydown', (ev) => {
+    if (
+      ev.key !== 'ArrowLeft' &&
+      ev.key !== 'ArrowRight' &&
+      ev.key !== 'Home' &&
+      ev.key !== 'End'
+    ) {
+      return;
+    }
+    const curIdx = sidebarTabButtons.findIndex(
+      (t) => t === ev.target || t.getAttribute('aria-selected') === 'true',
+    );
+    const baseIdx = curIdx >= 0 ? curIdx : 0;
+    let nextIdx = baseIdx;
+    if (ev.key === 'ArrowRight') nextIdx = (baseIdx + 1) % sidebarTabButtons.length;
+    else if (ev.key === 'ArrowLeft')
+      nextIdx = (baseIdx - 1 + sidebarTabButtons.length) % sidebarTabButtons.length;
+    else if (ev.key === 'Home') nextIdx = 0;
+    else if (ev.key === 'End') nextIdx = sidebarTabButtons.length - 1;
+
+    ev.preventDefault();
+    ev.stopPropagation();
+    const targetBtn = sidebarTabButtons[nextIdx];
+    setSidebarTab(targetBtn.dataset.sidebarTab as TwoTowerSidebarTab);
+    targetBtn.focus();
+  });
 
   const warningBannerEl = el('div', 'sp-warning-banner');
   warningBannerEl.dataset.testid = 'inspector-warning-banner';
   warningBannerEl.hidden = true;
 
+  const historicalDenoiserBannerEl = el('div', 'sp-hist-denoiser-banner');
+  historicalDenoiserBannerEl.dataset.testid = 'historical-denoiser-banner';
+  historicalDenoiserBannerEl.hidden = true;
+
+  const inspectorScroll = el('div', 'sp-inspector-scroll');
+
+  // Panel 1: Inspect (default visible — preserves all existing E2E selectors!)
+  const inspectPanel = el('div', 'sp-tab-panel');
+  inspectPanel.setAttribute('role', 'tabpanel');
+  inspectPanel.dataset.testid = 'sidebar-panel-inspect';
+
   const historicalConfigCard = el('section', 'sp-card sp-card--muted');
   historicalConfigCard.dataset.testid = 'historical-config-card';
+
+  const timestepStatusCard = el('section', 'sp-card');
+  timestepStatusCard.dataset.testid = 'timestep-status-card';
 
   const selectionIdentityCard = el('section', 'sp-card');
   selectionIdentityCard.dataset.testid = 'selection-identity-card';
@@ -727,21 +1438,242 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   const viewDiagnosticCard = el('section', 'sp-card');
   viewDiagnosticCard.dataset.testid = 'view-diagnostic-card';
 
+  inspectPanel.append(
+    historicalConfigCard,
+    timestepStatusCard,
+    selectionIdentityCard,
+    formulaCard,
+    viewDiagnosticCard,
+  );
+
+  // Panel 2: Advanced Sampler Inspector & Future Config Scope
+  const samplerPanel = el('div', 'sp-tab-panel');
+  samplerPanel.setAttribute('role', 'tabpanel');
+  samplerPanel.dataset.testid = 'sidebar-panel-sampler';
+  samplerPanel.hidden = true;
+
+  const samplerReadoutMount = el('div', 'sp-panel-stack');
+  const samplerConfigMount = el('section', 'sp-card');
+  samplerConfigMount.dataset.testid = 'sampler-config-card';
+  samplerPanel.append(samplerReadoutMount, samplerConfigMount);
+
+  // Stable interactive controls inside Sampler Config Card (so sliders/inputs never lose focus!)
+  const cfgHead = el('div', 'sp-card-head');
+  cfgHead.append(
+    el('h2', 'sp-card-title', 'Sampler & Block Config Scope'),
+    el('span', 'sp-badge sp-badge--ctx', 'Non-Retroactive'),
+  );
+  const cfgDiffBanner = el('div', 'sp-config-diff-banner');
+  cfgDiffBanner.dataset.testid = 'config-scope-diff-banner';
+  cfgDiffBanner.hidden = true;
+
+  // Threshold γ controls
+  const gammaGroup = el('div', 'sp-cfg-field');
+  const gammaTop = el('div', 'sp-cfg-field-head');
+  const gammaLabel = el('label', 'sp-cfg-label', 'Confidence Threshold γ');
+  gammaLabel.htmlFor = 'sp-sampler-gamma-num';
+  const gammaScopeBadge = el('span', 'sp-scope-badge', 'Applies: Next Refinement');
+  gammaScopeBadge.dataset.testid = 'scope-badge-gamma';
+  gammaTop.append(gammaLabel, gammaScopeBadge);
+
+  const presetRow = el('div', 'sp-preset-row');
+  const presetMiniBtn = el('button', 'sp-dock-pill', '0.22 Mini Default');
+  presetMiniBtn.type = 'button';
+  presetMiniBtn.dataset.testid = 'sampler-preset-mini';
+  presetMiniBtn.title = TWOTOWER_CONFIDENCE_PRESETS[0].provenanceNote;
+  const presetPaperBtn = el('button', 'sp-dock-pill', '0.80 Paper');
+  presetPaperBtn.type = 'button';
+  presetPaperBtn.dataset.testid = 'sampler-preset-paper';
+  presetPaperBtn.title = TWOTOWER_CONFIDENCE_PRESETS[1].provenanceNote;
+  const presetCodeBtn = el('button', 'sp-dock-pill', '0.90 Ref Code');
+  presetCodeBtn.type = 'button';
+  presetCodeBtn.dataset.testid = 'sampler-preset-code';
+  presetCodeBtn.title = TWOTOWER_CONFIDENCE_PRESETS[2].provenanceNote;
+  presetRow.append(presetMiniBtn, presetPaperBtn, presetCodeBtn);
+
+  const gammaInputRow = el('div', 'sp-cfg-slider-row');
+  const gammaRange = el('input', 'sp-range');
+  gammaRange.type = 'range';
+  gammaRange.min = '0';
+  gammaRange.max = '1';
+  gammaRange.step = '0.01';
+  gammaRange.setAttribute('aria-label', 'Confidence threshold gamma slider');
+  gammaRange.dataset.testid = 'sampler-threshold-slider';
+  const gammaNum = el('input', 'sp-num-input');
+  gammaNum.id = 'sp-sampler-gamma-num';
+  gammaNum.type = 'number';
+  gammaNum.min = '0';
+  gammaNum.max = '1';
+  gammaNum.step = '0.01';
+  gammaNum.dataset.testid = 'sampler-threshold-input';
+  gammaInputRow.append(gammaRange, gammaNum);
+  const gammaDiffNote = el('div', 'sp-cfg-sub');
+  gammaGroup.append(gammaTop, presetRow, gammaInputRow, gammaDiffNote);
+
+  // Independent Block Width B (4 / 8)
+  const blockBGroup = el('div', 'sp-cfg-field');
+  const blockBTop = el('div', 'sp-cfg-field-head');
+  const blockBLabel = el('span', 'sp-cfg-label', 'Block Width B');
+  const blockBScopeBadge = el('span', 'sp-scope-badge', 'Applies: Next Block');
+  blockBScopeBadge.dataset.testid = 'scope-badge-block-size';
+  blockBTop.append(blockBLabel, blockBScopeBadge);
+
+  const blockBRow = el('div', 'sp-preset-row');
+  const btnB4 = el('button', 'sp-dock-pill', 'B = 4');
+  btnB4.type = 'button';
+  btnB4.dataset.testid = 'sampler-block-size-4';
+  const btnB8 = el('button', 'sp-dock-pill', 'B = 8');
+  btnB8.type = 'button';
+  btnB8.dataset.testid = 'sampler-block-size-8';
+  blockBRow.append(btnB4, btnB8);
+  const blockBDiffNote = el('div', 'sp-cfg-sub');
+  blockBGroup.append(blockBTop, blockBRow, blockBDiffNote);
+
+  // Independent Refinement Budget K (1..12)
+  const stepsKGroup = el('div', 'sp-cfg-field');
+  const stepsKTop = el('div', 'sp-cfg-field-head');
+  const stepsKLabel = el('label', 'sp-cfg-label', 'Refinement Budget K (1..12)');
+  stepsKLabel.htmlFor = 'sp-sampler-k-num';
+  const stepsKScopeBadge = el('span', 'sp-scope-badge', 'Applies: Next Block');
+  stepsKScopeBadge.dataset.testid = 'scope-badge-steps';
+  stepsKTop.append(stepsKLabel, stepsKScopeBadge);
+
+  const stepsKRow = el('div', 'sp-cfg-slider-row');
+  const stepsKRange = el('input', 'sp-range');
+  stepsKRange.type = 'range';
+  stepsKRange.min = '1';
+  stepsKRange.max = '12';
+  stepsKRange.step = '1';
+  stepsKRange.setAttribute('aria-label', 'Refinement budget K slider');
+  stepsKRange.dataset.testid = 'sampler-steps-slider';
+  const stepsKNum = el('input', 'sp-num-input');
+  stepsKNum.id = 'sp-sampler-k-num';
+  stepsKNum.type = 'number';
+  stepsKNum.min = '1';
+  stepsKNum.max = '12';
+  stepsKNum.step = '1';
+  stepsKNum.dataset.testid = 'sampler-steps-input';
+  stepsKRow.append(stepsKRange, stepsKNum);
+  const stepsKDiffNote = el('div', 'sp-cfg-sub');
+  stepsKGroup.append(stepsKTop, stepsKRow, stepsKDiffNote);
+
+  // Temperature & Seed controls
+  const tempSeedGroup = el('div', 'sp-cfg-field');
+  const tempSeedTop = el('div', 'sp-cfg-field-head');
+  const tempSeedLabel = el('span', 'sp-cfg-label', 'Temperature T & Seed');
+  const tempSeedScopeBadge = el('span', 'sp-scope-badge', 'Applies: Next Refinement');
+  tempSeedTop.append(tempSeedLabel, tempSeedScopeBadge);
+
+  const tempSeedRow = el('div', 'sp-cfg-pair-row');
+  const tempWrap = el('label', 'sp-cfg-inline');
+  tempWrap.append(document.createTextNode('T '));
+  const tempNum = el('input', 'sp-num-input');
+  tempNum.type = 'number';
+  tempNum.min = '0';
+  tempNum.max = '2';
+  tempNum.step = '0.1';
+  tempNum.dataset.testid = 'sampler-temp-input';
+  tempWrap.append(tempNum);
+
+  const seedWrap = el('label', 'sp-cfg-inline');
+  seedWrap.append(document.createTextNode('Seed '));
+  const seedNum = el('input', 'sp-num-input sp-num-input--wide');
+  seedNum.type = 'number';
+  seedNum.step = '1';
+  seedNum.dataset.testid = 'sampler-seed-input';
+  seedWrap.append(seedNum);
+  tempSeedRow.append(tempWrap, seedWrap);
+  const tempSeedNote = el('div', 'sp-cfg-sub');
+  tempSeedGroup.append(tempSeedTop, tempSeedRow, tempSeedNote);
+
+  // Mode & Restart scope summary footer inside config card
+  const scopeLegendRow = el('div', 'sp-pill-row');
+  const modeScopeChip = el('span', 'sp-scope-badge', 'Mode · Applies: Next Step');
+  const restartScopeChip = el('span', 'sp-scope-badge', 'Prompt/KV · Applies: Session Restart');
+  scopeLegendRow.append(modeScopeChip, restartScopeChip);
+
+  samplerConfigMount.append(
+    cfgHead,
+    cfgDiffBanner,
+    gammaGroup,
+    blockBGroup,
+    stepsKGroup,
+    tempSeedGroup,
+    scopeLegendRow,
+  );
+
+  // Panel 3: Production Architectural & Scaling Readouts
+  const archPanel = el('div', 'sp-tab-panel');
+  archPanel.setAttribute('role', 'tabpanel');
+  archPanel.dataset.testid = 'sidebar-panel-architecture';
+  archPanel.hidden = true;
+
+  inspectorScroll.append(inspectPanel, samplerPanel, archPanel);
+
   const telemetryFooter = el('footer', 'sp-telemetry-footer');
   telemetryFooter.dataset.testid = 'inspector-telemetry-footer';
 
   inspector.append(
+    sidebarTablist,
     warningBannerEl,
-    historicalConfigCard,
-    selectionIdentityCard,
-    formulaCard,
-    viewDiagnosticCard,
+    historicalDenoiserBannerEl,
+    inspectorScroll,
     telemetryFooter,
   );
 
   stageSplit.append(viewportHost, inspector);
 
-  // 4. Collapsible Developer Diagnostic Workbench Drawer
+  // 4. Persistent Nested Generation Timeline Dock (Bottom Editorial Strip)
+  const timelineDock = el('section', 'sp-timeline-dock');
+  timelineDock.dataset.testid = 'tt-timeline-dock';
+  timelineDock.setAttribute('aria-label', 'Persistent Nested Generation Timeline and Branch Controls');
+
+  const tlControls = el('div', 'sp-tl-controls');
+  const spBtnBack = el('button', 'sp-btn', '← Back');
+  spBtnBack.type = 'button';
+  spBtnBack.dataset.testid = 'sp-btn-back';
+
+  const spBtnFwd = el('button', 'sp-btn', 'Forward →');
+  spBtnFwd.type = 'button';
+  spBtnFwd.dataset.testid = 'sp-btn-fwd';
+
+  const spBranchSelect = el('select', 'sp-select');
+  spBranchSelect.dataset.testid = 'sp-branch-select';
+  spBranchSelect.setAttribute('aria-label', 'Active session branch');
+
+  const spBtnFork = el('button', 'sp-btn', 'Fork');
+  spBtnFork.type = 'button';
+  spBtnFork.dataset.testid = 'sp-btn-fork';
+
+  const spBtnDeleteBranch = el('button', 'sp-btn sp-btn--danger', 'Delete Branch');
+  spBtnDeleteBranch.type = 'button';
+  spBtnDeleteBranch.dataset.testid = 'sp-btn-delete-branch';
+
+  const spBtnRestart = el('button', 'sp-btn', 'Restart');
+  spBtnRestart.type = 'button';
+  spBtnRestart.dataset.testid = 'sp-btn-restart';
+
+  const tlRetentionBadge = el('span', 'sp-badge sp-badge--muted sp-tl-retention');
+  tlRetentionBadge.dataset.testid = 'tt-timeline-retention';
+
+  tlControls.append(
+    spBtnBack,
+    spBtnFwd,
+    spBranchSelect,
+    spBtnFork,
+    spBtnDeleteBranch,
+    spBtnRestart,
+    tlRetentionBadge,
+  );
+
+  const tlTrack = el('div', 'sp-tl-track');
+  tlTrack.dataset.testid = 'tt-timeline-track';
+  tlTrack.setAttribute('role', 'list');
+  tlTrack.setAttribute('aria-label', 'Generation milestones');
+
+  timelineDock.append(tlControls, tlTrack);
+
+  // 5. Collapsible Developer Diagnostic Workbench Drawer
   const workbenchDrawer = el('aside', 'tt-workbench-drawer');
   workbenchDrawer.id = 'workbench-drawer';
   workbenchDrawer.dataset.testid = 'workbench-drawer';
@@ -763,11 +1695,11 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   const drawerBody = el('div', 'tt-drawer-body');
   workbenchDrawer.append(drawerBar, drawerBody);
 
-  shell.append(topbar, sessionStrip, stageSplit, workbenchDrawer);
+  shell.append(topbar, sessionStrip, stageSplit, timelineDock, workbenchDrawer);
   root.append(shell);
 
   // ==========================================================================
-  // INITIALIZE WEBGL2 DEVICE, PASSES & OVERLAY
+  // INITIALIZE WEBGL2 DEVICE, PASSES, VENDOR TELEMETRY & OVERLAY
   // ==========================================================================
   let device: RenderDevice | null = null;
   let solidsPass: SolidsPass | null = null;
@@ -775,6 +1707,18 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   let linesPass: LinesPass | null = null;
   let ribbonsPass: RibbonsPass | null = null;
   let flatFlowPass: FlatFlowRibbonsPass | null = null;
+
+  const queryGlRendererInfo = (gl: WebGL2RenderingContext) => {
+    const dbgExt = gl.getExtension('WEBGL_debug_renderer_info');
+    glVendor = dbgExt
+      ? String(gl.getParameter(dbgExt.UNMASKED_VENDOR_WEBGL) ?? gl.getParameter(gl.VENDOR) ?? 'unknown')
+      : String(gl.getParameter(gl.VENDOR) ?? 'unknown');
+    glRenderer = dbgExt
+      ? String(gl.getParameter(dbgExt.UNMASKED_RENDERER_WEBGL) ?? gl.getParameter(gl.RENDERER) ?? 'unknown')
+      : String(gl.getParameter(gl.RENDERER) ?? 'unknown');
+    isSoftwareRenderer = /swiftshader|llvmpipe|softpipe|mesa offscreen|basic render/i.test(glRenderer);
+    maxTextureSize = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 0;
+  };
 
   const showFallback = (heading: string, detail: string) => {
     fallbackEl.innerHTML = '';
@@ -785,7 +1729,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       el(
         'p',
         'sp-note',
-        'You can still inspect the session, lifecycle stepping, and full Developer Workbench drawer.',
+        'You can still inspect the session, persistent timeline, sampler inspector, architectural readouts, and Developer Workbench drawer.',
       ),
     );
     fallbackEl.append(card);
@@ -799,7 +1743,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     linesPass = new LinesPass(device.gl);
     ribbonsPass = new RibbonsPass(device.gl);
     flatFlowPass = new FlatFlowRibbonsPass(device.gl);
-    maxTextureSize = Number(device.gl.getParameter(device.gl.MAX_TEXTURE_SIZE)) || 0;
+    queryGlRendererInfo(device.gl);
   } catch (err) {
     const detail = err instanceof Error ? err.message : 'WebGL2 unavailable';
     showFallback('WebGL2 Viewport Unavailable', `Could not initialize WebGL2 context (${detail}).`);
@@ -821,7 +1765,10 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     };
   }
 
-  function computeFitPoseForScene(scene: TwoTowerSpatialScene, bounds: AABB = scene.fitBounds): CameraPose {
+  function computeFitPoseForScene(
+    scene: TwoTowerSpatialScene,
+    bounds: AABB = scene.fitBounds,
+  ): CameraPose {
     const { topInsetPx, bottomInsetPx, isNarrow } = getCanvasInsets();
     switch (scene.viewMode) {
       case 'macro':
@@ -885,7 +1832,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     scheduleDraw();
   }
 
-  function focusOpStepCamera(stepIdx: number): void {
+  function focusOpStepCamera(stepIdx: number, instant = false): void {
     if (!currentScene) return;
     const opBounds = currentScene.opFocusBounds?.[stepIdx];
     if (!opBounds) return;
@@ -899,16 +1846,17 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       fillFraction: 0.80,
       isNarrow,
     });
-    flyToPose(pose);
+    flyToPose(pose, instant);
   }
 
   // ==========================================================================
-  // SCENE BUILDING & GPU UPLOAD (WITH ATLAS DEDUPLICATION)
+  // SCENE BUILDING & GPU UPLOAD (WITH ATLAS DEDUPLICATION & REBUILD COUNTER)
   // ==========================================================================
   function buildActiveScene(): TwoTowerSpatialScene {
+    const activeSession = getActiveDisplaySession();
     switch (viewMode) {
       case 'macro':
-        return buildTwoTowerMacroScene(session, {
+        return buildTwoTowerMacroScene(activeSession, {
           selectedTower,
           selectedBayId,
           hoveredBayId,
@@ -918,7 +1866,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
           reducedMotion,
         });
       case 'paired_gqa':
-        return buildTwoTowerPairedGqaScene(session, {
+        return buildTwoTowerPairedGqaScene(activeSession, {
           bayId: gqaBayId,
           towerFocus,
           group0Head: gqaGroup0Head,
@@ -931,7 +1879,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
           reducedMotion,
         });
       case 'paired_mamba':
-        return buildTwoTowerPairedMambaScene(session, {
+        return buildTwoTowerPairedMambaScene(activeSession, {
           bayId: mambaBayId,
           towerFocus,
           activeHead: mambaHead,
@@ -944,7 +1892,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
           reducedMotion,
         });
       case 'timestep':
-        return buildTwoTowerTimestepScene(session, {
+        return buildTwoTowerTimestepScene(activeSession, {
           bayId: timestepBayId,
           localTokenIndex: timestepLocalPos,
           selectedPartId: timestepSelectedPart,
@@ -953,7 +1901,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
           stepperStep,
         });
       case 'moe':
-        return buildTwoTowerMoeScene(session, {
+        return buildTwoTowerMoeScene(activeSession, {
           bayId: moeBayId,
           towerRole: moeTowerRole,
           focusToken: moeFocusToken,
@@ -968,7 +1916,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
           termProgress: stepperTermProgress,
         });
       case 'embedding':
-        return buildTwoTowerEmbeddingScene(session, {
+        return buildTwoTowerEmbeddingScene(activeSession, {
           towerRole: embedTowerRole,
           focusToken: embedFocusToken,
           selectedPart: embedSelectedPart,
@@ -976,7 +1924,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
           activeCell: embedActiveCell,
         });
       case 'output':
-        return buildTwoTowerOutputScene(session, {
+        return buildTwoTowerOutputScene(activeSession, {
           towerRole: outputTowerRole,
           focusToken: outputFocusToken,
           selectedPart: outputSelectedPart,
@@ -1038,71 +1986,88 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     if (!geometryDirty && currentScene !== null) return;
     geometryDirty = false;
     currentScene = buildActiveScene();
+    geometryRebuilds += 1;
     sceneVersion += 1;
     uploadSceneToGpu(currentScene);
     syncAllUi();
   }
 
   // ==========================================================================
-  // UI SYNCHRONIZATION (HEADER, STRIP, DOCK, INSPECTOR, TELEMETRY)
+  // SIDEBAR TAB SWITCHING & MOBILE INSPECTOR SHEET
   // ==========================================================================
-  function syncHeaderAndSessionStrip(): void {
+  function setSidebarTab(tab: TwoTowerSidebarTab): void {
+    activeSidebarTab = tab;
+    for (const btn of sidebarTabButtons) {
+      const isAct = btn.dataset.sidebarTab === tab;
+      btn.setAttribute('aria-selected', isAct ? 'true' : 'false');
+      btn.setAttribute('tabindex', isAct ? '0' : '-1');
+    }
+    inspectPanel.hidden = tab !== 'inspect';
+    samplerPanel.hidden = tab !== 'sampler';
+    archPanel.hidden = tab !== 'architecture';
+
+    // Re-render newly visible tab cleanly
+    if (currentScene) {
+      const view = resolveTwoTowerSessionViewState(getActiveDisplaySession());
+      if (tab === 'sampler') {
+        renderSamplerTab(getActiveDisplaySession());
+      } else if (tab === 'architecture') {
+        renderArchitectureTab(view);
+      }
+    }
+    publishTelemetry();
+  }
+
+  function setMobileInspectorOpen(open: boolean): void {
+    mobileInspectorOpen = open;
+    inspector.classList.toggle('is-mobile-open', open);
+    btnToggleMobileInspector.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
+  btnToggleMobileInspector.addEventListener('click', () => {
+    setMobileInspectorOpen(!mobileInspectorOpen);
+  });
+
+  // ==========================================================================
+  // UI SYNCHRONIZATION: HEADER, SESSION STRIP, TIMELINE, DOCK, INSPECTOR TABS
+  // ==========================================================================
+  function syncHeaderAndSessionStrip(view: TwoTowerSessionViewState): void {
     for (const tab of tabButtons) {
       const active = tab.dataset.viewMode === viewMode;
       tab.setAttribute('aria-selected', active ? 'true' : 'false');
       tab.setAttribute('tabindex', active ? '0' : '-1');
     }
 
-    const record = getActiveRecord(session);
-    const caps = getSessionCapabilities(session);
-    const tips = buildCapabilityTooltips(session, record, caps);
+    const activeSession = getActiveDisplaySession();
+    const record = getActiveRecord(activeSession);
+    const caps = getSessionCapabilities(activeSession);
+    const tips = buildCapabilityTooltips(activeSession, record, caps);
+    const lockedByTour = tourActive;
 
-    modeSelect.value = session.pendingConfig.mode;
+    modeSelect.value = activeSession.pendingConfig.mode;
+    modeSelect.disabled = lockedByTour;
 
-    spBtnInit.disabled = !caps.canInitDiffusionBlock;
-    spBtnInit.title = tips.init;
-    spBtnInit.textContent = `Init Block`;
+    spBtnInit.disabled = lockedByTour || !caps.canInitDiffusionBlock;
+    spBtnInit.title = lockedByTour ? 'Exit Guided Tour to step exploration session' : tips.init;
+    spBtnInit.textContent = 'Init Block';
 
-    spBtnRefine.disabled = !caps.canRunDiffusionRefinement;
-    spBtnRefine.title = tips.refine;
+    spBtnRefine.disabled = lockedByTour || !caps.canRunDiffusionRefinement;
+    spBtnRefine.title = lockedByTour ? 'Exit Guided Tour to step exploration session' : tips.refine;
 
-    spBtnConf.disabled = !caps.canCommitRefinementConfidence;
-    spBtnConf.title = tips.conf;
+    spBtnConf.disabled = lockedByTour || !caps.canCommitRefinementConfidence;
+    spBtnConf.title = lockedByTour ? 'Exit Guided Tour to step exploration session' : tips.conf;
 
-    spBtnCommit.disabled = !caps.canCommitActiveBlockToContext;
-    spBtnCommit.title = tips.commit;
+    spBtnCommit.disabled = lockedByTour || !caps.canCommitActiveBlockToContext;
+    spBtnCommit.title = lockedByTour ? 'Exit Guided Tour to step exploration session' : tips.commit;
 
-    spBtnAr.disabled = !caps.canStepAr;
-    spBtnAr.title = tips.ar;
+    spBtnAr.disabled = lockedByTour || !caps.canStepAr;
+    spBtnAr.title = lockedByTour ? 'Exit Guided Tour to step exploration session' : tips.ar;
 
-    spBtnMockAr.disabled = !caps.canStepMockAr;
-    spBtnMockAr.title = tips.mockAr;
+    spBtnMockAr.disabled = lockedByTour || !caps.canStepMockAr;
+    spBtnMockAr.title = lockedByTour ? 'Exit Guided Tour to step exploration session' : tips.mockAr;
 
-    spBtnNext.disabled = !caps.canStepNext;
-    spBtnNext.title = tips.next;
-
-    spBtnBack.disabled = !caps.canNavigateBack;
-    spBtnBack.title = caps.canNavigateBack
-      ? 'Step backward in active branch history'
-      : 'Disabled: at root prefill record (#0)';
-
-    spBtnFwd.disabled = !caps.canNavigateForward;
-    spBtnFwd.title = caps.canNavigateForward
-      ? 'Step forward in active branch history'
-      : 'Disabled: at branch tail';
-
-    spBtnFork.disabled = !caps.canForkBranch;
-    spBtnFork.title = caps.canForkBranch
-      ? 'Fork a new branch from the current record'
-      : 'Disabled: maxBranches < 2';
-
-    spBranchSelect.textContent = '';
-    for (const br of session.branches) {
-      const opt = el('option', undefined, `${br.branchId} (#${br.cursorIndex}/${br.records.length - 1})`);
-      opt.value = br.branchId;
-      spBranchSelect.append(opt);
-    }
-    spBranchSelect.value = session.activeBranchId;
+    spBtnNext.disabled = lockedByTour || !caps.canStepNext;
+    spBtnNext.title = lockedByTour ? 'Exit Guided Tour to step exploration session' : tips.next;
 
     spPhaseBadge.className = phaseBadgeClass(record.lifecyclePhase);
     spPhaseBadge.textContent = record.lifecyclePhase;
@@ -1110,7 +2075,233 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     spCapacityBadge.textContent = `Context ${caps.committedPrefixLen} / ${caps.kvCapacity}`;
     spCapacityBadge.title = `${caps.remainingKvCapacity} free KV slots of ${caps.kvCapacity}`;
 
+    // Wave 1 Timestep & Conditioning Mode pill
+    const ts = view.timestepStatus;
+    spTimestepBadge.className = conditioningModeBadgeClass(ts.conditioningMode);
+    spTimestepBadge.textContent = formatCompactTimestepPill(ts);
+    spTimestepBadge.title = `${ts.summaryLabel} — ${ts.blockCompletionNote}`;
+
+    // Instructional Playback quick trigger (visually separated from Exec actions)
+    const isMacro = viewMode === 'macro';
+    const supportsStepperPlay =
+      viewMode === 'paired_gqa' || viewMode === 'paired_mamba' || viewMode === 'moe';
+    if (isMacro) {
+      playbackQuickBtn.disabled = reducedMotion;
+      playbackQuickBtn.textContent = macroReplayActive ? 'Stop Flow Replay' : 'Macro Flow Replay';
+      playbackQuickBtn.classList.toggle('is-active', macroReplayActive);
+      playbackQuickBtn.title = reducedMotion
+        ? 'Disabled under prefers-reduced-motion: reduce'
+        : 'Instructional macro dataflow wave replay (not measured compute)';
+    } else if (supportsStepperPlay) {
+      playbackQuickBtn.disabled = reducedMotion;
+      playbackQuickBtn.textContent = stepperPlaying ? 'Pause Op Stepper' : 'Op Stepper';
+      playbackQuickBtn.classList.toggle('is-active', stepperPlaying);
+      playbackQuickBtn.title = reducedMotion
+        ? 'Disabled under prefers-reduced-motion: reduce (manual Op steps remain active)'
+        : 'Instructional operation stepper playback (not measured compute)';
+    } else {
+      playbackQuickBtn.disabled = true;
+      playbackQuickBtn.textContent = 'Op Stepper';
+      playbackQuickBtn.classList.remove('is-active');
+      playbackQuickBtn.title = 'Switch to Macro, GQA, Mamba, or MoE view for instructional replay';
+    }
+
+    btnTourToggle.textContent = tourActive ? 'Exit Tour' : 'Guided Tour';
+    btnTourToggle.setAttribute('aria-pressed', tourActive ? 'true' : 'false');
+    btnTourToggle.classList.toggle('is-active', tourActive);
+
     btnToggleWorkbench.setAttribute('aria-expanded', workbenchOpen ? 'true' : 'false');
+  }
+
+  function renderTimelineDock(activeSession: TwoTowerSession): void {
+    const timeline: TwoTowerTimelineModel = buildTwoTowerTimelineModel(activeSession);
+    const nav = timeline.navigation;
+    const rh = timeline.retainedHistory;
+    const lockedByTour = tourActive;
+
+    spBtnBack.disabled = lockedByTour || !nav.canBack;
+    spBtnBack.title = lockedByTour
+      ? 'Guided Tour active — use Tour Prev/Next or Exit Tour'
+      : nav.canBack
+        ? 'Step backward in active branch history'
+        : 'Disabled: at root prefill record (#0)';
+
+    spBtnFwd.disabled = lockedByTour || !nav.canForward;
+    spBtnFwd.title = lockedByTour
+      ? 'Guided Tour active — use Tour Prev/Next or Exit Tour'
+      : nav.canForward
+        ? 'Step forward in active branch history'
+        : 'Disabled: at branch tail';
+
+    spBtnFork.disabled = lockedByTour || !nav.canFork;
+    spBtnFork.title = lockedByTour
+      ? 'Guided Tour active — Exit Tour to fork exploration session'
+      : nav.canFork
+        ? 'Fork a new branch from the current record'
+        : 'Disabled: maxBranches < 2';
+
+    spBranchSelect.textContent = '';
+    for (const br of timeline.branches) {
+      const opt = el(
+        'option',
+        undefined,
+        `${br.branchId} (#${br.cursorIndex}/${br.recordCount - 1})`,
+      );
+      opt.value = br.branchId;
+      spBranchSelect.append(opt);
+    }
+    spBranchSelect.value = timeline.activeBranchId;
+    spBranchSelect.disabled = lockedByTour;
+
+    // Delete Branch: strictly disabled on active branch when no other branch exists!
+    const canDeleteInactive = !lockedByTour && nav.canDeleteAnyInactiveBranch;
+    spBtnDeleteBranch.disabled = !canDeleteInactive;
+    if (canDeleteInactive) {
+      const victim = findDeletableBranchId(activeSession);
+      spBtnDeleteBranch.title = `Delete inactive branch ${victim ?? ''} (active branch is protected and cannot be deleted)`;
+    } else {
+      spBtnDeleteBranch.title = lockedByTour
+        ? 'Guided Tour active'
+        : 'Disabled: active branch cannot be deleted (fork or switch away first)';
+    }
+
+    spBtnRestart.disabled = lockedByTour;
+    spBtnRestart.title = lockedByTour
+      ? 'Exit Guided Tour to restart exploration session'
+      : 'Restart session on default 8-token prompt';
+
+    const prunedTag =
+      rh.prunedRecordCount > 0 || rh.hasPrunedContextTraces
+        ? ` · ${rh.prunedRecordCount} pruned`
+        : '';
+    tlRetentionBadge.textContent = `Rec ${rh.retainedRecordCount}/${rh.maxRecords} · ${rh.retainedBytesDisplay}${prunedTag}`;
+    tlRetentionBadge.title =
+      `Unique retained records: ${rh.totalUniqueRecordCount} across ${rh.branchCount}/${rh.maxBranches} branch(es)` +
+      (rh.hasPrunedContextTraces
+        ? ' · Historical Context execution trace pruned (persistent cache remains authoritative)'
+        : '');
+
+    // Render nested milestone nodes
+    tlTrack.textContent = '';
+    if (tourActive && tourSnapshot) {
+      tlTrack.append(
+        el(
+          'span',
+          'sp-badge sp-badge--time sp-tl-tour-pill',
+          `Tour Trajectory (${tourSnapshot.provenance.branchId} · Beat ${tourSnapshot.beatIndex + 1}/${tourSnapshot.totalBeats})`,
+        ),
+      );
+    }
+
+    const makeNodeButton = (node: TimelineNode, compactLabel: string, extraCls = ''): HTMLButtonElement => {
+      const clsParts = ['sp-tl-node'];
+      if (extraCls) clsParts.push(extraCls);
+      if (node.isActiveCursor) clsParts.push('is-active');
+      else if (node.isAfterCursor) clsParts.push('is-after');
+      if (node.isCompletedUncommitted) clsParts.push('is-uncommitted');
+      if (node.kind === 'diffusion_block_commit') clsParts.push('is-committed');
+      if (node.terminationMarker !== null) clsParts.push('is-stop');
+
+      const btn = el('button', clsParts.join(' '));
+      btn.type = 'button';
+      btn.dataset.testid = `timeline-node-${node.cursorIndex}`;
+      btn.dataset.recordKind = node.kind;
+      if (node.isActiveCursor) btn.setAttribute('aria-current', 'step');
+      btn.disabled = lockedByTour;
+      btn.title = `#${node.recordIndex} ${node.label} · P=${node.contextPrefixLen} · cache ${node.cacheDigestShort}`;
+
+      btn.append(el('span', 'sp-tl-node-label', compactLabel));
+      if (node.isCompletedUncommitted) {
+        btn.append(el('span', 'sp-tl-chip sp-tl-chip--gold', 'Uncommitted'));
+      }
+      if (node.terminationMarker === 'eos_terminated') {
+        btn.append(el('span', 'sp-tl-chip sp-tl-chip--stop', 'EOS'));
+      } else if (node.terminationMarker === 'capacity_exhausted') {
+        btn.append(el('span', 'sp-tl-chip sp-tl-chip--stop', 'Cap Exhausted'));
+      }
+
+      btn.addEventListener('click', () => {
+        if (!tourActive) {
+          jumpToRecordIndex(node.cursorIndex);
+        }
+      });
+      return btn;
+    };
+
+    for (const seg of timeline.segments) {
+      const segEl = renderTimelineSegment(seg, makeNodeButton);
+      tlTrack.append(segEl);
+    }
+
+    // Auto-scroll active milestone smoothly into view (horizontal only)
+    const activeNodeEl = tlTrack.querySelector('.sp-tl-node.is-active') as HTMLElement | null;
+    if (activeNodeEl && typeof activeNodeEl.scrollIntoView === 'function') {
+      activeNodeEl.scrollIntoView({
+        behavior: reducedMotion ? 'auto' : 'smooth',
+        inline: 'nearest',
+        block: 'nearest',
+      });
+    }
+  }
+
+  function renderTimelineSegment(
+    seg: TimelineSegment,
+    makeNodeButton: (node: TimelineNode, compactLabel: string, extraCls?: string) => HTMLButtonElement,
+  ): HTMLElement {
+    const item = el('div', 'sp-tl-seg');
+    item.setAttribute('role', 'listitem');
+
+    if (seg.kind !== 'diffusion_block') {
+      const node = seg.nodes[0];
+      let text = node.shortLabel;
+      let cls = 'sp-tl-node--ctx';
+      if (seg.kind === 'prefill') {
+        text = `Prefill P=${node.contextPrefixLen}`;
+        cls = 'sp-tl-node--ctx';
+      } else if (seg.kind === 'ar_step') {
+        text = `AR #${node.absoluteTokenRange[0]}`;
+        cls = 'sp-tl-node--ctx';
+      } else {
+        text = `Mock-AR #${node.absoluteTokenRange[0]}`;
+        cls = 'sp-tl-node--den';
+      }
+      item.append(makeNodeButton(node, text, cls));
+      return item;
+    }
+
+    // Grouped Diffusion Block card containing nested child milestones
+    const group = el(
+      'div',
+      `sp-tl-block-group${seg.containsActiveCursor ? ' has-active' : ''}${
+        seg.isCompletedUncommitted ? ' is-uncommitted' : ''
+      }${seg.isCommittedToContext ? ' is-committed' : ''}`,
+    );
+    group.dataset.testid = `timeline-block-${seg.blockId}`;
+
+    const head = el('span', 'sp-tl-block-head', `Block #${seg.blockId}`);
+    head.title = seg.label;
+    group.append(head);
+
+    for (const node of seg.nodes) {
+      let compact = node.shortLabel;
+      let extra = 'sp-tl-node--child';
+      if (node.kind === 'diffusion_block_init') {
+        compact = `Init`;
+      } else if (node.kind === 'diffusion_refinement') {
+        compact = `Eval r${node.refinementIndex ?? 0}`;
+        extra += ' sp-tl-node--eval';
+      } else if (node.kind === 'diffusion_confidence_commit') {
+        compact = `Commit r${node.refinementIndex ?? 0}`;
+        extra += ' sp-tl-node--conf';
+      } else if (node.kind === 'diffusion_block_commit') {
+        compact = `→ Context`;
+        extra += ' sp-tl-node--ctx-commit';
+      }
+      group.append(makeNodeButton(node, compact, extra));
+    }
+
+    item.append(group);
+    return item;
   }
 
   function renderStepperDockGroup(
@@ -1129,6 +2320,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       b.addEventListener('click', () => {
         stepperPlaying = false;
         stepperLastTickMs = null;
+        stepperAccumSec = 0;
         stepperStep = i;
         stepperStepProgress = 0;
         stepperTermProgress = 1;
@@ -1148,6 +2340,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     offBtn.addEventListener('click', () => {
       stepperPlaying = false;
       stepperLastTickMs = null;
+      stepperAccumSec = 0;
       stepperStep = null;
       stepperStepProgress = 0;
       stepperTermProgress = 1;
@@ -1169,24 +2362,49 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       playBtn.disabled = reducedMotion;
       playBtn.title = reducedMotion
         ? 'Disabled under prefers-reduced-motion: reduce (manual steps remain active)'
-        : 'Animate operation steps and term-by-term accumulation';
+        : 'Animate operation steps and term-by-term accumulation (instructional replay ≠ measured compute)';
       playBtn.addEventListener('click', () => {
-        if (reducedMotion) return;
-        if (stepperPlaying) {
-          stepperPlaying = false;
-          stepperLastTickMs = null;
-        } else {
-          if (stepperStep === null) stepperStep = 0;
-          stepperPlaying = true;
-          stepperLastTickMs = performance.now();
-          stepperTermProgress = 0.05;
-        }
-        geometryDirty = true;
-        scheduleDraw();
+        toggleOpStepperPlayback(!stepperPlaying);
       });
       group.append(playBtn);
     }
     return group;
+  }
+
+  function toggleMacroReplay(on: boolean): void {
+    if (reducedMotion && on) return;
+    if (!on) {
+      macroReplayActive = false;
+      macroReplayElapsedMs = 0;
+      macroReplayStage = -1;
+      macroReplayPhase = null;
+      macroReplayLastMs = null;
+    } else {
+      macroReplayActive = true;
+      macroReplayElapsedMs = 0;
+      macroReplayStage = 0;
+      macroReplayPhase = 0.05;
+      macroReplayLastMs = performance.now();
+    }
+    geometryDirty = true;
+    scheduleDraw();
+  }
+
+  function toggleOpStepperPlayback(on: boolean): void {
+    if (reducedMotion && on) return;
+    if (!on) {
+      stepperPlaying = false;
+      stepperLastTickMs = null;
+      stepperAccumSec = 0;
+    } else {
+      if (stepperStep === null) stepperStep = 0;
+      stepperPlaying = true;
+      stepperLastTickMs = performance.now();
+      stepperAccumSec = 0;
+      stepperTermProgress = 1 / STEPPER_SUBTERM_BUCKETS;
+    }
+    geometryDirty = true;
+    scheduleDraw();
   }
 
   function renderBottomDock(scene: TwoTowerSpatialScene): void {
@@ -1231,18 +2449,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
         ? 'Instructional wave replay disabled under prefers-reduced-motion: reduce'
         : 'Instructional visual propagation replay (not measured latency)';
       replayBtn.addEventListener('click', () => {
-        if (reducedMotion) return;
-        if (macroReplayActive) {
-          macroReplayActive = false;
-          macroReplayPhase = null;
-          macroReplayLastMs = null;
-        } else {
-          macroReplayActive = true;
-          macroReplayPhase = 0.02;
-          macroReplayLastMs = performance.now();
-        }
-        geometryDirty = true;
-        scheduleDraw();
+        toggleMacroReplay(!macroReplayActive);
       });
       replayGroup.append(replayBtn);
 
@@ -1290,15 +2497,13 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       const headSelect = el('select', 'sp-dock-select');
       headSelect.dataset.testid = 'gqa-head-select';
       headSelect.setAttribute('aria-label', 'GQA Query Head');
-      for (let h = 0; h < 32; h++) {
+      for (let h = 0; h < TWOTOWER_MINI_MODEL_INVENTORY.gqa.queryHeads; h++) {
         const g = h < 16 ? 0 : 1;
         const opt = el('option', undefined, `Q${String(h).padStart(2, '0')} (KV${g})`);
         opt.value = String(h);
         headSelect.append(opt);
       }
-      headSelect.value = String(
-        gqaSelectedCell?.cell.headIndex ?? gqaGroup0Head,
-      );
+      headSelect.value = String(gqaSelectedCell?.cell.headIndex ?? gqaGroup0Head);
       headSelect.addEventListener('change', () => {
         const h = Number(headSelect.value);
         if (h < 16) gqaGroup0Head = h;
@@ -1364,7 +2569,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       const headSelect = el('select', 'sp-dock-select');
       headSelect.dataset.testid = 'mamba-head-select';
       headSelect.setAttribute('aria-label', 'Mamba-2 Head');
-      for (let h = 0; h < 16; h++) {
+      for (let h = 0; h < TWOTOWER_MINI_MODEL_INVENTORY.mamba.heads; h++) {
         const opt = el('option', undefined, `${formatMambaHeadId(h)} (G${Math.floor(h / 2)})`);
         opt.value = String(h);
         headSelect.append(opt);
@@ -1479,7 +2684,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
         scheduleDraw();
       });
 
-      const view = resolveTwoTowerSessionViewState(session);
+      const view = resolveTwoTowerSessionViewState(getActiveDisplaySession());
       const moeTrace =
         activeTower === 'denoiser'
           ? view.resolveDenoiserBayTrace(moeBayId)
@@ -1649,10 +2854,134 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     dl.append(cell);
   }
 
-  function renderInspector(scene: TwoTowerSpatialScene): void {
-    const view = resolveTwoTowerSessionViewState(session);
+  function renderHistoricalDenoiserBanner(view: TwoTowerSessionViewState): void {
+    const dl: TwoTowerDenoiserPassLookup = view.denoiserLookup;
+    const showBanner =
+      dl.isHistoricalInspection || (dl.pass !== null && !dl.matchesCurrentContextBoundary);
 
-    // 1. Warning Banner
+    if (!showBanner) {
+      historicalDenoiserBannerEl.hidden = true;
+      historicalDenoiserBannerEl.textContent = '';
+      canvasHistBadge.hidden = true;
+      canvasHistBadge.textContent = '';
+      return;
+    }
+
+    const mismatch = !dl.matchesCurrentContextBoundary;
+    const srcDigest = dl.sourceContextCacheDigest ? dl.sourceContextCacheDigest.slice(0, 8) : 'n/a';
+    const curDigest = view.contextSnapshot.ctxState.stateDigest.slice(0, 8);
+    const badgeLabel = mismatch
+      ? 'HISTORICAL DENOISER · BOUNDARY MISMATCH'
+      : 'HISTORICAL PRIOR PASS';
+
+    // Canvas HUD compact badge
+    canvasHistBadge.hidden = false;
+    canvasHistBadge.className = `sp-canvas-hist-badge${mismatch ? ' is-mismatch' : ''}`;
+    canvasHistBadge.textContent =
+      `${badgeLabel} · Rec #${dl.sourceRecordIndex ?? '-'} b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'} · ` +
+      `P=${dl.sourceContextPrefixLen ?? 'n/a'} (cur P=${view.committedPrefixLen}) · ${srcDigest}`;
+
+    // Sidebar prominent provenance banner
+    historicalDenoiserBannerEl.hidden = false;
+    historicalDenoiserBannerEl.className = `sp-hist-denoiser-banner${mismatch ? ' is-mismatch' : ''}`;
+    historicalDenoiserBannerEl.textContent = '';
+
+    const head = el('div', 'sp-hist-denoiser-head');
+    head.append(
+      el('span', mismatch ? 'sp-badge sp-badge--warn' : 'sp-badge sp-badge--time', badgeLabel),
+      el(
+        'span',
+        'sp-badge sp-badge--muted',
+        `Rec #${dl.sourceRecordIndex ?? '-'} · b${dl.sourceBlockId ?? '-'} · r=${dl.sourceRefinementIndex ?? '-'}`,
+      ),
+    );
+    const meta = el('div', 'sp-pill-row');
+    meta.append(
+      el(
+        'span',
+        'sp-badge sp-badge--ctx',
+        `Source Context P=${dl.sourceContextPrefixLen ?? 'n/a'} · digest ${srcDigest}`,
+      ),
+      el(
+        'span',
+        'sp-badge',
+        `Current P=${view.committedPrefixLen} · digest ${curDigest}`,
+      ),
+    );
+    const warnText = el(
+      'p',
+      'sp-note',
+      dl.historicalProvenanceWarning ??
+        `Prior Denoiser pass conditioned on Context P=${dl.sourceContextPrefixLen ?? 'n/a'} (${srcDigest}) — does not match current Context boundary P=${view.committedPrefixLen} (${curDigest}).`,
+    );
+    historicalDenoiserBannerEl.append(head, meta, warnText);
+  }
+
+  function renderTimestepStatusCard(ts: TwoTowerTimestepStatus): void {
+    timestepStatusCard.textContent = '';
+    const head = el('div', 'sp-card-head');
+    const condBadge = el(
+      'span',
+      conditioningModeBadgeClass(ts.conditioningMode),
+      conditioningModeLabel(ts.conditioningMode),
+    );
+    condBadge.dataset.testid = 'timestep-conditioning-mode';
+    head.append(el('h2', 'sp-card-title', 'Timestep Status (t = nMasked / B)'), condBadge);
+    timestepStatusCard.append(head);
+
+    const dl = el('dl', 'sp-kv-grid');
+    if (ts.executedPass) {
+      const ep = ts.executedPass;
+      const overrideNote = ep.isDiagnosticOverride
+        ? ` [override; empirical ${ep.nMaskedInput}/${ep.blockSize}]`
+        : '';
+      addKvCell(
+        dl,
+        'Executed Pass t',
+        `t = ${ep.tModel.toFixed(3)} (${ep.nMaskedInput}/${ep.blockSize} masked · Rec #${ep.sourceRecordIndex} b${ep.sourceBlockId ?? '-'} r${ep.sourceRefinementIndex ?? '-'})${overrideNote}`,
+        true,
+      );
+      addKvCell(dl, 'Executed Pass ID', ep.passExecutionId, true);
+    } else {
+      addKvCell(dl, 'Executed Pass t', 'None executed', true);
+    }
+
+    if (ts.currentBlockMask) {
+      const cm = ts.currentBlockMask;
+      addKvCell(
+        dl,
+        'Current Unresolved',
+        `${cm.currentUnresolvedCount} / ${cm.blockSize} [MASK] (${(cm.currentMaskFraction * 100).toFixed(0)}%)`,
+      );
+    } else {
+      addKvCell(dl, 'Current Unresolved', 'No active block');
+    }
+
+    if (ts.nextEligibleStep) {
+      const ns = ts.nextEligibleStep;
+      addKvCell(
+        dl,
+        'Next Eligible t',
+        `t = ${ns.nextTModel.toFixed(3)} (${ns.nextNMasked}/${ns.blockSize} · ${ns.remainingSteps} rem)`,
+      );
+    } else if (
+      ts.blockCompletionState === 'completed_uncommitted' ||
+      ts.blockCompletionState === 'committed_to_context'
+    ) {
+      addKvCell(dl, 'Next Eligible t', 'None (complete — no pass required)');
+    } else {
+      addKvCell(dl, 'Next Eligible t', '—');
+    }
+
+    addKvCell(dl, 'Block Completion', ts.blockCompletionState, true);
+    timestepStatusCard.append(dl, el('p', 'sp-note', ts.blockCompletionNote));
+  }
+
+  function renderInspector(scene: TwoTowerSpatialScene, view: TwoTowerSessionViewState): void {
+    const activeSession = getActiveDisplaySession();
+    const configScope = buildTwoTowerConfigScopeModel(activeSession);
+
+    // 1. Warning Banner & Unmistakable Historical Denoiser Provenance Banner
     if (scene.warningBanner) {
       warningBannerEl.hidden = false;
       warningBannerEl.textContent = scene.warningBanner;
@@ -1660,8 +2989,9 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       warningBannerEl.hidden = true;
       warningBannerEl.textContent = '';
     }
+    renderHistoricalDenoiserBanner(view);
 
-    // 2. Historical Config Guard Badge
+    // 2. Historical Config Guard Card (with Future Config Diff badge)
     historicalConfigCard.textContent = '';
     const cfg = view.historicalConfig;
     const hHead = el('div', 'sp-card-head');
@@ -1687,18 +3017,24 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       el('span', 'sp-badge', `γ=${cfg.confidenceThreshold.toFixed(2)}`),
       el('span', 'sp-badge', `T=${cfg.temperature}`),
     );
-    historicalConfigCard.append(hHead, cfgPills);
-    if (view.isHistoricalCursor) {
-      historicalConfigCard.append(
+    if (configScope.hasPendingDiffFromHistorical) {
+      cfgPills.append(
         el(
-          'p',
-          'sp-note',
-          'Rewound cursor: strictly renders frozen historical configAtStep. Pending future settings never alter historical records.',
+          'span',
+          'sp-badge sp-badge--time',
+          `Pending ≠ Hist (${configScope.diffKeysFromHistorical.join(', ')})`,
         ),
       );
     }
+    historicalConfigCard.append(hHead, cfgPills);
+    if (view.isHistoricalCursor || configScope.hasPendingDiffFromHistorical) {
+      historicalConfigCard.append(el('p', 'sp-note', configScope.badgeText));
+    }
 
-    // 3. Active Selection Identity Card (ALL 10 AXES!)
+    // 3. Wave 1 Canonical Timestep & Conditioning Status Card
+    renderTimestepStatusCard(view.timestepStatus);
+
+    // 4. Active Selection Identity Card (ALL 10 AXES!)
     selectionIdentityCard.textContent = '';
     const sel = scene.activeSelection;
     const idHead = el('div', 'sp-card-head');
@@ -1772,7 +3108,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       selectionIdentityCard.append(idDl);
     }
 
-    // 4. Active Formula & Accumulation Card
+    // 5. Active Formula & Accumulation Card (RB-2 Partial Accumulation Contract Preserved!)
     formulaCard.textContent = '';
     const fHead = el('div', 'sp-card-head');
     const fTitle = el('h2', 'sp-card-title', 'Active Formula & Accumulation');
@@ -1809,16 +3145,513 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       );
     }
 
-    // 5. View-Specific Diagnostic Card
+    // 6. View-Specific Diagnostic Card (includes TWOTOWER_MINI_MODEL_INVENTORY distinction!)
     viewDiagnosticCard.textContent = '';
     renderViewSpecificDiagnostics(scene, viewDiagnosticCard);
 
-    // 6. Retained Memory & Telemetry Footer (updated live after each WebGL2 draw too)
-    refreshTelemetryFooter();
+    // 7. Render active secondary tab if currently visible
+    if (activeSidebarTab === 'sampler') {
+      renderSamplerTab(activeSession);
+    } else if (activeSidebarTab === 'architecture') {
+      renderArchitectureTab(view);
+    } else {
+      // Keep Sampler config controls synced silently
+      syncSamplerConfigControls(configScope);
+    }
+
+    // 8. Refresh telemetry footer immediately on scene/state change
+    refreshTelemetryFooter(true);
   }
 
-  function refreshTelemetryFooter(): void {
-    const mem = measureTwoTowerSessionRetainedBytes(session);
+  function renderSamplerTab(activeSession: TwoTowerSession): void {
+    const sm: TwoTowerAdvancedSamplerInspectorModel = buildAdvancedSamplerInspectorModel(activeSession);
+    const configScope: TwoTowerConfigScopeModel = buildTwoTowerConfigScopeModel(activeSession);
+
+    samplerReadoutMount.textContent = '';
+
+    // 1. Explicit calibration caveat banner
+    const caveat = el('div', 'sp-calibration-banner');
+    caveat.dataset.testid = 'sampler-calibration-banner';
+    const caveatStrong = el(
+      'strong',
+      undefined,
+      'Unscaled confidence is a heuristic, not calibrated semantic correctness. ',
+    );
+    caveat.append(caveatStrong, document.createTextNode(sm.calibrationDisclaimer));
+    samplerReadoutMount.append(caveat);
+
+    // 2. Summary Metrics Card
+    const summaryCard = el('section', 'sp-card');
+    summaryCard.dataset.testid = 'sampler-summary-card';
+    const sHead = el('div', 'sp-card-head');
+    const sourceBadge =
+      sm.source === 'current_record'
+        ? el('span', 'sp-badge sp-badge--emerald', `Active Commit Rec #${sm.sourceRecordIndex}`)
+        : sm.source === 'prior_commit_record'
+          ? el('span', 'sp-badge sp-badge--time', `Prior Commit Rec #${sm.sourceRecordIndex}`)
+          : el('span', 'sp-badge sp-badge--muted', 'No Commit Yet');
+    sHead.append(el('h2', 'sp-card-title', 'MDLM Confidence Unmasking Summary'), sourceBadge);
+    summaryCard.append(sHead, el('p', 'sp-note', sm.sourceNote));
+
+    if (sm.hasSamplerCommit && sm.executedTModel && sm.commitmentDecomposition) {
+      const et = sm.executedTModel;
+      const cd = sm.commitmentDecomposition;
+
+      const dl = el('dl', 'sp-kv-grid');
+      addKvCell(
+        dl,
+        'Executed t = nMasked/B',
+        `${et.nMaskedBefore}/${et.blockSize} = ${et.tModel.toFixed(3)}`,
+      );
+      addKvCell(
+        dl,
+        'Remaining Steps',
+        `${et.remainingSteps} / ${et.stepsPerBlock} (step ${et.stepIndex + 1})`,
+      );
+      addKvCell(
+        dl,
+        'Commitment Floor',
+        `ceil(${et.nMaskedBefore}/${et.remainingSteps}) = ${et.minCommitFloor}`,
+      );
+      addKvCell(dl, 'Active γ Preset', sm.threshold.matchedPresetLabel);
+      addKvCell(
+        dl,
+        'Qualified by Confidence',
+        `${cd.thresholdQualifiedCount} slot${cd.thresholdQualifiedCount === 1 ? '' : 's'} (> γ=${sm.threshold.value.toFixed(2)})`,
+      );
+      addKvCell(
+        dl,
+        'Extra for Budget Floor',
+        `${cd.budgetFloorExtraCount} (prog=${cd.progressFloorExtraCount} · bud=${cd.budgetFloorOnlyExtraCount} · fin=${cd.finalStepExtraCount})`,
+      );
+      addKvCell(dl, 'Remasked', `${cd.remaskedCount} slot${cd.remaskedCount === 1 ? '' : 's'}`);
+      addKvCell(dl, 'Prior Locked', `${cd.priorLockedCount} slot${cd.priorLockedCount === 1 ? '' : 's'}`);
+      addKvCell(
+        dl,
+        'Candidate Selection',
+        sm.variateMode !== null && sm.variateMode !== 'greedy_none'
+          ? `Gumbel-max (${sm.variateMode}, T=${sm.temperature}, seed=${sm.samplingSeed ?? '—'}, digest=${sm.variateDigest?.slice(0, 8) ?? '—'})`
+          : `Deterministic Greedy (T=${sm.temperature})`,
+        true,
+      );
+      summaryCard.append(dl);
+    } else {
+      summaryCard.append(
+        el(
+          'p',
+          'sp-note sp-note--ctx',
+          'Run Init Block → Refine → Commit Conf in Mask-Diffusion mode to inspect per-position Raw LM-head vs Constrained MDLM ([MASK]=0%) distributions and confidence thresholds.',
+        ),
+      );
+    }
+    samplerReadoutMount.append(summaryCard);
+
+    // 3. Per-Position Interactive Cards (pos 0..B-1)
+    if (sm.slots.length > 0) {
+      const slotsCard = el('section', 'sp-card');
+      slotsCard.dataset.testid = 'sampler-slots-list';
+      const slHead = el('div', 'sp-card-head');
+      slHead.append(
+        el('h2', 'sp-card-title', `Per-Position Decisions (pos 0..${sm.slots.length - 1})`),
+        el('span', 'sp-badge sp-badge--ctx', '[MASK] = 0% enforced'),
+      );
+      slotsCard.append(slHead);
+
+      const list = el('div', 'sp-slot-list');
+      for (const slot of sm.slots) {
+        list.append(renderSamplerSlotCard(slot, sm.threshold.value));
+      }
+      slotsCard.append(list);
+      samplerReadoutMount.append(slotsCard);
+    }
+
+    // 4. Sync Non-Retroactive Config Scope Controls
+    syncSamplerConfigControls(configScope);
+  }
+
+  function renderSamplerSlotCard(slot: SamplerInspectorSlotRow, gamma: number): HTMLElement {
+    const chip = samplerDecisionChip(slot.status);
+    const card = el('button', `sp-slot-card sp-slot-card--${slot.status}`);
+    card.type = 'button';
+    card.dataset.testid = `sampler-slot-${slot.blockPosition}`;
+    card.title = 'Click to focus this block position in Mamba/Output cutaways';
+    card.addEventListener('click', () => {
+      mambaLocalPos = slot.blockPosition;
+      timestepLocalPos = slot.blockPosition;
+      outputFocusToken = slot.blockPosition;
+      geometryDirty = true;
+      scheduleDraw();
+    });
+
+    const top = el('div', 'sp-slot-top');
+    const posTag = el(
+      'span',
+      'sp-slot-pos',
+      `pos ${slot.blockPosition} (t${slot.absolutePosition ?? slot.blockPosition})`,
+    );
+    const tokFlow = el(
+      'span',
+      'sp-slot-tok',
+      `${slot.inputToken.label} → ${slot.outputToken.label}`,
+    );
+    const decBadge = el('span', chip.cls, chip.label);
+    top.append(posTag, tokFlow, decBadge);
+
+    const confRow = el('div', 'sp-slot-meta');
+    const candLabel =
+      slot.candidateMode === 'gumbel_max'
+        ? `Gumbel${slot.variateDigest ? ` (${slot.variateDigest.slice(0, 8)})` : ''}`
+        : 'Greedy';
+    confRow.append(el('span', 'sp-badge sp-badge--muted', candLabel));
+
+    if (slot.confidence.kind === 'locked_prior') {
+      confRow.append(el('span', 'sp-badge sp-badge--muted', 'Locked (prior step)'));
+    } else {
+      confRow.append(
+        el('span', 'sp-badge sp-badge--ctx', `conf=${slot.confidenceDisplay}`),
+        el(
+          'span',
+          slot.passesStrictThreshold ? 'sp-badge sp-badge--emerald' : 'sp-badge sp-badge--den',
+          slot.passesStrictThreshold
+            ? `> γ (${gamma.toFixed(2)})`
+            : `≤ γ (${gamma.toFixed(2)})`,
+        ),
+      );
+    }
+
+    const rawTop3 = slot.rawLmHeadTop.topK
+      .slice(0, 3)
+      .map((c) => `${c.tokenLabel} ${(c.prob * 100).toFixed(1)}%`)
+      .join(' · ');
+    const mdlmTop3 = slot.constrainedMdlmTop.topK
+      .slice(0, 3)
+      .map((c) => `${c.tokenLabel} ${(c.prob * 100).toFixed(1)}%`)
+      .join(' · ');
+
+    const distWrap = el('div', 'sp-slot-dists');
+    distWrap.append(
+      el(
+        'div',
+        'sp-slot-dist-line',
+        `Raw LM Top-3: ${rawTop3} (raw [MASK]=${(slot.rawLmHeadTop.maskTokenProb * 100).toFixed(1)}%)`,
+      ),
+      el('div', 'sp-slot-dist-line', `MDLM Top-3 ([MASK]=0%): ${mdlmTop3}`),
+    );
+
+    card.append(top, confRow, distWrap);
+    return card;
+  }
+
+  function syncSamplerConfigControls(scope: TwoTowerConfigScopeModel): void {
+    const pending = scope.pendingConfig;
+    const locked = tourActive;
+    const activeEl = document.activeElement;
+
+    if (scope.hasPendingDiffFromHistorical || scope.hasPendingDiffFromActiveBlock) {
+      cfgDiffBanner.hidden = false;
+      cfgDiffBanner.textContent = scope.badgeText;
+    } else {
+      cfgDiffBanner.hidden = true;
+      cfgDiffBanner.textContent = '';
+    }
+
+    const pGamma = scope.parametersByKey.confidenceThreshold;
+    gammaScopeBadge.textContent = `Applies: ${pGamma.scopeBadge}`;
+    gammaScopeBadge.classList.toggle('is-diff', pGamma.differsFromHistorical);
+    gammaDiffNote.textContent = pGamma.differsFromHistorical
+      ? `Historical: ${Number(pGamma.historicalValue).toFixed(2)} → Future pending: ${pending.confidenceThreshold.toFixed(2)}`
+      : pGamma.scopeNote;
+
+    presetMiniBtn.classList.toggle('is-active', Math.abs(pending.confidenceThreshold - 0.22) < 1e-6);
+    presetPaperBtn.classList.toggle('is-active', Math.abs(pending.confidenceThreshold - 0.8) < 1e-6);
+    presetCodeBtn.classList.toggle('is-active', Math.abs(pending.confidenceThreshold - 0.9) < 1e-6);
+    presetMiniBtn.disabled = locked;
+    presetPaperBtn.disabled = locked;
+    presetCodeBtn.disabled = locked;
+
+    gammaRange.disabled = locked;
+    gammaNum.disabled = locked;
+    if (activeEl !== gammaRange) gammaRange.value = pending.confidenceThreshold.toFixed(2);
+    if (activeEl !== gammaNum) gammaNum.value = pending.confidenceThreshold.toFixed(2);
+
+    const pB = scope.parametersByKey.blockSize;
+    blockBScopeBadge.textContent = `Applies: ${pB.scopeBadge}`;
+    blockBScopeBadge.classList.toggle('is-diff', pB.differsFromHistorical || pB.differsFromActiveBlock);
+    btnB4.classList.toggle('is-active', pending.blockSize === 4);
+    btnB8.classList.toggle('is-active', pending.blockSize === 8);
+    btnB4.disabled = locked;
+    btnB8.disabled = locked;
+    blockBDiffNote.textContent = pB.differsFromActiveBlock
+      ? `Active block frozen at B=${pB.activeBlockValue} · Pending B=${pending.blockSize} applies next block`
+      : pB.differsFromHistorical
+        ? `Historical B=${pB.historicalValue} → Pending B=${pending.blockSize}`
+        : pB.scopeNote;
+
+    const pK = scope.parametersByKey.stepsPerBlock;
+    stepsKScopeBadge.textContent = `Applies: ${pK.scopeBadge}`;
+    stepsKScopeBadge.classList.toggle('is-diff', pK.differsFromHistorical || pK.differsFromActiveBlock);
+    stepsKRange.disabled = locked;
+    stepsKNum.disabled = locked;
+    if (activeEl !== stepsKRange) stepsKRange.value = String(pending.stepsPerBlock);
+    if (activeEl !== stepsKNum) stepsKNum.value = String(pending.stepsPerBlock);
+    stepsKDiffNote.textContent = pK.differsFromActiveBlock
+      ? `Active block frozen at K=${pK.activeBlockValue} · Pending K=${pending.stepsPerBlock} applies next block`
+      : pK.differsFromHistorical
+        ? `Historical K=${pK.historicalValue} → Pending K=${pending.stepsPerBlock}`
+        : pK.scopeNote;
+
+    const pT = scope.parametersByKey.temperature;
+    const pSeed = scope.parametersByKey.samplingSeed;
+    tempSeedScopeBadge.classList.toggle(
+      'is-diff',
+      pT.differsFromHistorical || pSeed.differsFromHistorical,
+    );
+    tempNum.disabled = locked;
+    seedNum.disabled = locked;
+    if (activeEl !== tempNum) tempNum.value = String(pending.temperature);
+    if (activeEl !== seedNum) seedNum.value = String(pending.samplingSeed);
+    tempSeedNote.textContent =
+      pending.temperature === 0
+        ? 'T = 0 runs deterministic greedy argmax (zero Gumbel noise).'
+        : `T = ${pending.temperature} runs seeded Gumbel-max (seed=${pending.samplingSeed}) using unscaled confidence.`;
+
+    const pMode = scope.parametersByKey.mode;
+    modeScopeChip.textContent = `Mode (${pending.mode}) · Applies: ${pMode.scopeBadge}`;
+    modeScopeChip.classList.toggle('is-diff', pMode.differsFromHistorical);
+  }
+
+  function renderArchitectureTab(view: TwoTowerSessionViewState): void {
+    const activeBlockSize =
+      view.activeBlock?.blockConfig.blockSize ?? view.historicalConfig.blockSize;
+    const readout: TwoTowerArchitecturalReadout = buildTwoTowerArchitecturalReadout(
+      view.committedPrefixLen,
+      activeBlockSize,
+      view.modeAtRecord,
+    );
+    const inv = readout.inventory;
+    const wvc = readout.weightsVsCaches;
+    const sc = readout.scaling;
+
+    archPanel.textContent = '';
+
+    // 1. Independent Tower Parameter Inventory Card
+    const invCard = el('section', 'sp-card');
+    invCard.dataset.testid = 'arch-inventory-card';
+    const invHead = el('div', 'sp-card-head');
+    invHead.append(
+      el('h2', 'sp-card-title', 'Independent Dual-Tower Inventory'),
+      el('span', 'sp-badge sp-badge--emerald', `${inv.grandTotal.payloadByteDiscrepancy} B audit diff`),
+    );
+    invCard.append(invHead);
+
+    const invDl = el('dl', 'sp-kv-grid');
+    addKvCell(
+      invDl,
+      'Context Tower',
+      `${fmtParamsBillions(inv.contextTower.params)} (${inv.contextTower.payloadDisplay} · ${inv.contextTower.tensorCount.toLocaleString('en-US')} tensors)`,
+    );
+    addKvCell(
+      invDl,
+      'Denoiser + Time-Cond',
+      `${fmtParamsBillions(inv.denoiserBackbone.params)} + ${fmtParamsBillions(inv.denoiserTimeConditioning.params)} (${inv.denoiserTotal.payloadDisplay})`,
+    );
+    addKvCell(
+      invDl,
+      'Grand Total (24 Shards)',
+      `${fmtParamsBillions(inv.grandTotal.params)} · ${(inv.grandTotal.payloadBytes / 1e9).toFixed(2)} GB (${inv.grandTotal.payloadDisplay}) · 0 B discrepancy`,
+      true,
+    );
+    addKvCell(invDl, 'Miniature Model Inventory', MINI_INVENTORY_SUMMARY, true);
+    invCard.append(invDl);
+
+    const tcList = el('div', 'sp-tc-list');
+    for (const c of inv.denoiserTimeConditioning.components) {
+      tcList.append(
+        el(
+          'div',
+          'sp-tc-row',
+          `${c.label}: ${fmtParamsBillions(c.params)} (${c.tensorCount} tensors)`,
+        ),
+      );
+    }
+    invCard.append(tcList, el('p', 'sp-note', inv.grandTotal.auditSummary));
+    archPanel.append(invCard);
+
+    // 2. "Two Resident Weight Sets ≠ Two Persistent Caches" Comparison Card
+    const wvcCard = el('section', 'sp-card');
+    wvcCard.dataset.testid = 'arch-weights-vs-caches';
+    const wvcHead = el('div', 'sp-card-head');
+    wvcHead.append(
+      el('h2', 'sp-card-title', wvc.headline),
+      el('span', 'sp-badge sp-badge--teal', '1 Persistent Cache'),
+    );
+    wvcCard.append(wvcHead);
+
+    const makeCompareBar = (
+      title: string,
+      valueText: string,
+      pctWidth: number,
+      barCls: string,
+      note: string,
+    ): HTMLDivElement => {
+      const box = el('div', 'sp-bar-item');
+      const top = el('div', 'sp-bar-head');
+      top.append(el('span', 'sp-bar-title', title), el('span', 'sp-bar-val', valueText));
+      const track = el('div', 'sp-bar-track');
+      const fill = el('div', `sp-bar-fill ${barCls}`);
+      fill.style.width = `${Math.max(4, Math.min(100, pctWidth)).toFixed(1)}%`;
+      track.append(fill);
+      box.append(top, track, el('div', 'sp-bar-note', note));
+      return box;
+    };
+
+    wvcCard.append(
+      makeCompareBar(
+        `Resident Weights (${wvc.residentWeights.activeTowerCount} active / 2 resident)`,
+        `${wvc.residentWeights.contextTowerDisplay} + ${wvc.residentWeights.denoiserTowerDisplay}`,
+        100,
+        'sp-bar-fill--navy',
+        wvc.residentWeights.note,
+      ),
+      makeCompareBar(
+        'Persistent Context Cache (Unique Sequence Cache)',
+        `${wvc.persistentContextCache.fixedMambaDisplay} Mamba + ${wvc.persistentContextCache.kvPerTokenDisplay}/tok GQA KV`,
+        42,
+        'sp-bar-fill--ctx',
+        wvc.persistentContextCache.note,
+      ),
+      makeCompareBar(
+        'Ephemeral Denoiser Scratchpad (Discarded Post-Step)',
+        wvc.transientDenoiserWorkspace.totalTransientDisplay,
+        12,
+        'sp-bar-fill--den',
+        wvc.transientDenoiserWorkspace.note,
+      ),
+    );
+    archPanel.append(wvcCard);
+
+    // 3. Context-Length Memory Scaling Inline SVG Chart (1K..1M, 262,144 boundary, 8,035 crossover)
+    const scCard = el('section', 'sp-card');
+    scCard.dataset.testid = 'arch-scaling-chart';
+    const scHead = el('div', 'sp-card-head');
+    scHead.append(
+      el('h2', 'sp-card-title', 'Context-Length Memory Scaling (1K–1M)'),
+      el(
+        'span',
+        'sp-badge sp-badge--den',
+        `Crossover: ${sc.crossoverTokens.toLocaleString('en-US')} tok`,
+      ),
+    );
+    scCard.append(scHead);
+    scCard.append(buildContextLengthScalingSvg(sc));
+
+    const legend = el('div', 'sp-svg-legend');
+    for (const [dotCls, txt] of [
+      ['is-navy', 'Hybrid Total'],
+      ['is-teal', 'Mamba 47.08 MiB'],
+      ['is-blue', 'GQA KV 6 KiB/tok'],
+      ['is-slate', '52L Pure GQA'],
+    ] as const) {
+      const it = el('span', 'sp-svg-legend-item');
+      it.append(el('span', `sp-svg-dot ${dotCls}`), document.createTextNode(txt));
+      legend.append(it);
+    }
+    scCard.append(legend);
+
+    // Compact scaling table for anchor lengths
+    const scTblWrap = el('div', 'sp-mini-table-wrap');
+    const scTbl = el('table', 'sp-mini-table');
+    const scThead = el('thead');
+    const scHr = el('tr');
+    for (const h of ['Prefix', 'Regime', 'Persistent', 'vs 52L GQA']) {
+      scHr.append(el('th', undefined, h));
+    }
+    scThead.append(scHr);
+    const scTbody = el('tbody');
+    for (const pt of sc.points) {
+      if (pt.isCustomPoint && pt.tokens < 1_024) continue;
+      const tr = el('tr', pt.regime === 'extrapolated_beyond_max_pos' ? 'is-extrap' : '');
+      tr.append(
+        el('td', undefined, pt.tokenLabel),
+        el('td', undefined, pt.regime === 'supported' ? 'Supported' : 'Extrapolated'),
+        el('td', undefined, pt.persistentTotalDisplay),
+        el('td', undefined, `${pt.hybridVsFullGqaSavingsRatio.toFixed(1)}×`),
+      );
+      scTbody.append(tr);
+    }
+    scTbl.append(scThead, scTbody);
+    scTblWrap.append(scTbl);
+    scCard.append(scTblWrap, el('p', 'sp-note sp-note--callout', sc.extrapolationDisclaimer));
+    archPanel.append(scCard);
+
+    // 4. Production BF16/FP32/FP64 vs Miniature Float32 Comparison Table
+    const precCard = el('section', 'sp-card');
+    precCard.dataset.testid = 'arch-precision-table';
+    const precHead = el('div', 'sp-card-head');
+    precHead.append(
+      el('h2', 'sp-card-title', 'Production BF16/FP32/FP64 vs Miniature Float32'),
+      el('span', 'sp-badge sp-badge--ctx', 'Exact / Ratio / Mini'),
+    );
+    precCard.append(precHead);
+
+    const pTblWrap = el('div', 'sp-mini-table-wrap');
+    const pTbl = el('table', 'sp-mini-table');
+    const pThead = el('thead');
+    const pHr = el('tr');
+    for (const h of ['Axis', 'Production', 'Miniature']) pHr.append(el('th', undefined, h));
+    pThead.append(pHr);
+    const pTbody = el('tbody');
+    for (const row of readout.precisionVsMiniature.rows) {
+      const tr = el('tr');
+      tr.title = row.note;
+      tr.append(
+        el('td', undefined, row.dimension),
+        el('td', undefined, row.productionValue),
+        el('td', undefined, row.miniatureValue),
+      );
+      pTbody.append(tr);
+    }
+    pTbl.append(pThead, pTbody);
+    pTblWrap.append(pTbl);
+    precCard.append(pTblWrap);
+    archPanel.append(precCard);
+
+    // 5. Collapsible Paper vs Checkpoint Discrepancy Ledger
+    const ledCard = el('section', 'sp-card');
+    ledCard.dataset.testid = 'arch-discrepancy-ledger';
+    const ledHead = el('div', 'sp-card-head');
+    ledHead.append(
+      el('h2', 'sp-card-title', 'Paper vs Checkpoint Discrepancy Ledger'),
+      el('span', 'sp-badge sp-badge--time', `${readout.discrepancyLedger.length} audited`),
+    );
+    ledCard.append(ledHead);
+
+    for (const entry of readout.discrepancyLedger) {
+      const det = el('details', 'sp-discrepancy-item');
+      const sum = el('summary', 'sp-discrepancy-summary', `${entry.index}. ${entry.topic}`);
+      const body = el('div', 'sp-discrepancy-body');
+      body.append(
+        el('div', 'sp-note', `Paper: ${entry.paperClaim}`),
+        el('div', 'sp-note', `Model Card: ${entry.modelCardClaim}`),
+        el('div', 'sp-note', `Config / Checkpoint: ${entry.configOrIndexFact}`),
+        el('div', 'sp-note', `Reference Code: ${entry.codeFact}`),
+        el('div', 'sp-note sp-note--ctx', `Resolution: ${entry.authoritativeResolution}`),
+      );
+      det.append(sum, body);
+      ledCard.append(det);
+    }
+    archPanel.append(ledCard);
+  }
+
+  function refreshTelemetryFooter(force = false): void {
+    const now = performance.now();
+    if (!force && now - lastFooterRefreshMs < TELEMETRY_FOOTER_THROTTLE_MS) {
+      return;
+    }
+    lastFooterRefreshMs = now;
+    const mem = getCachedMemoryBreakdown();
+    const q = computeQuantiles(frameTimesMs);
+
     telemetryFooter.textContent = '';
     telemetryFooter.append(
       el(
@@ -1831,8 +3664,12 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     telGrid.append(
       el('span', undefined, `Retained: ${fmtBytesCompact(mem.totalRetainedBytes)}`),
       el('span', undefined, `Weights: ${fmtBytesCompact(mem.sharedModelWeightBytes)}`),
-      el('span', undefined, `Draws: ${drawCallsLastFrame} · Atlas: ${atlasUploads}`),
-      el('span', undefined, `MaxTex: ${maxTextureSize} · ${lastFrameMs.toFixed(1)}ms`),
+      el('span', undefined, `Draws: ${drawCallsLastFrame} · Rebuilds: ${geometryRebuilds} · Atlas: ${atlasUploads}`),
+      el(
+        'span',
+        undefined,
+        `Frame: ${lastFrameMs.toFixed(1)}ms (p95 ${q.p95.toFixed(1)}ms · ${isSoftwareRenderer ? 'SW' : 'HW'})`,
+      ),
     );
     telemetryFooter.append(telGrid);
   }
@@ -1858,6 +3695,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       addKvCell(dl, 'Refinement Loop', String(d?.refinementLoopState ?? 'dormant'));
       addKvCell(dl, 'Commit Pathway', String(d?.blockCommitPathwayState ?? 'dormant'));
       addKvCell(dl, 'Timestep Rail', String(d?.timestepStatusLabel ?? 'BYPASSED'), true);
+      addKvCell(dl, 'Model Inventory (Full)', MINI_INVENTORY_SUMMARY, true);
       container.append(dl);
 
       const inspectBtn = el(
@@ -1899,12 +3737,20 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       addKvCell(
         dl,
         'RG32F Atlas',
-        d ? `${d.atlasDimensions[0]}×${d.atlasDimensions[1]} (${d.atlasPrimaryMaskedCells} masked)` : '128×128',
+        d
+          ? `${d.atlasDimensions[0]}×${d.atlasDimensions[1]} (${d.atlasPrimaryMaskedCells} masked)`
+          : '128×128',
       );
       addKvCell(
         dl,
         'AdaLN / Gate',
         `${d?.hasDenoiserPreNormMod ? 'pre-norm ON' : 'bypassed'} · ${d?.hasDenoiserResidualGate ? 'gate ON' : 'off'}`,
+      );
+      addKvCell(
+        dl,
+        'Model Inventory vs Atlas Slice',
+        `Model: ${TWOTOWER_MINI_MODEL_INVENTORY.gqa.queryHeads} Q / ${TWOTOWER_MINI_MODEL_INVENTORY.gqa.kvHeads} KV (d_head=${TWOTOWER_MINI_MODEL_INVENTORY.gqa.headDim}) · Atlas Slice: ${TWOTOWER_MINI_MODEL_INVENTORY.gqa.atlasSelectedScoreHeadCount} selected Q heads (Q${gqaGroup0Head}, Q${gqaGroup1Head})`,
+        true,
       );
       container.append(dl);
       container.append(
@@ -1932,6 +3778,14 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       );
       container.append(head);
 
+      container.append(
+        el(
+          'p',
+          'sp-note',
+          `Model Inventory: ${TWOTOWER_MINI_MODEL_INVENTORY.mamba.heads} Mamba / ${TWOTOWER_MINI_MODEL_INVENTORY.mamba.groups} groups / ${TWOTOWER_MINI_MODEL_INVENTORY.mamba.ssmStateMatrixShape[0]}×${TWOTOWER_MINI_MODEL_INVENTORY.mamba.ssmStateMatrixShape[1]} SSM · Atlas Slice: ${TWOTOWER_MINI_MODEL_INVENTORY.mamba.atlasSelectedDecompHeadCount} selected head (${formatMambaHeadId(mambaHead)})`,
+        ),
+      );
+
       if (dec) {
         const cw = dec.convWindow;
         const convRow = el('div', 'sp-pill-row');
@@ -1956,7 +3810,10 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
           ['gated (y·SiLU(z))', fmtVecPreview(dec.gatedActivation)],
           ['rms_gate (G' + dec.groupIndex + ')', dec.groupRmsDenominator.toFixed(4)],
           ['y_norm', fmtVecPreview(dec.normalizedOutput)],
-          ['Inherited Retention', `‖·‖₂=${dec.inheritedRetentionL2Norm.toFixed(4)} (Π dA=${dec.cumulativeDecay.toFixed(4)})`],
+          [
+            'Inherited Retention',
+            `‖·‖₂=${dec.inheritedRetentionL2Norm.toFixed(4)} (Π dA=${dec.cumulativeDecay.toFixed(4)})`,
+          ],
           ['Block Write', `‖·‖₂=${dec.accumulatedBlockWriteL2Norm.toFixed(4)}`],
           ['F32 Residual', `max |sum−H| = ${dec.roundingResidualMaxAbs.toExponential(2)}`],
         ];
@@ -1993,7 +3850,11 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       container.append(head);
 
       const dl = el('dl', 'sp-kv-grid');
-      addKvCell(dl, 'tModel', d?.tModel === null || d?.tModel === undefined ? 'null (BYPASSED)' : d.tModel.toFixed(4));
+      addKvCell(
+        dl,
+        'tModel',
+        d?.tModel === null || d?.tModel === undefined ? 'null (BYPASSED)' : d.tModel.toFixed(4),
+      );
       addKvCell(dl, 'Ordering', d?.modulationOrder ?? 'modulate_then_norm');
       addKvCell(dl, 'Equation', d?.modulationOrderEquation ?? '—', true);
       addKvCell(
@@ -2052,7 +3913,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       }
       container.append(pills);
 
-      // Partial-Denominator-Safe Top-6 Sidebar Weights (STRICTLY uses d.sidebarWeights!)
+      // Partial-Denominator-Safe Top-6 Sidebar Weights (STRICTLY uses d.sidebarWeights — RB-2!)
       if (d && d.sidebarWeights.length > 0) {
         const wWrap = el('div');
         wWrap.dataset.testid = 'moe-sidebar-weights';
@@ -2148,7 +4009,12 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       const dl = el('dl', 'sp-kv-grid');
       addKvCell(dl, 'Tower Fingerprint', d?.towerParameterFingerprint ?? '—');
       addKvCell(dl, 'Other Tower FP', d?.otherTowerParameterFingerprint ?? '—');
-      addKvCell(dl, 'Vocab / Special', `V=${d?.vocabSize ?? 34} ([MASK]=#${d?.maskTokenId ?? 32}, <eos>=#${d?.eosTokenId ?? 33})`, true);
+      addKvCell(
+        dl,
+        'Vocab / Special',
+        `V=${d?.vocabSize ?? 34} ([MASK]=#${d?.maskTokenId ?? 32}, <eos>=#${d?.eosTokenId ?? 33})`,
+        true,
+      );
       addKvCell(
         dl,
         'Active Token Range',
@@ -2162,11 +4028,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
           ? d.maskTokenAbsolutePositions.map((p) => `t${p}`).join(', ')
           : 'none in slice',
       );
-      addKvCell(
-        dl,
-        'Untied / NoPE',
-        'Untied from W_lm_head · Zero RoPE',
-      );
+      addKvCell(dl, 'Untied / NoPE', 'Untied from W_lm_head · Zero RoPE');
       container.append(dl);
       return;
     }
@@ -2198,7 +4060,11 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       if (pres) {
         const meta = el('div', 'sp-pill-row');
         meta.append(
-          el('span', 'sp-badge sp-badge--time', `step ${pres.stepIndex + 1}/${pres.stepsPerBlock} · t=${pres.tModel.toFixed(3)}`),
+          el(
+            'span',
+            'sp-badge sp-badge--time',
+            `step ${pres.stepIndex + 1}/${pres.stepsPerBlock} · t=${pres.tModel.toFixed(3)}`,
+          ),
           el('span', 'sp-badge sp-badge--emerald', `reason=${pres.commitReason}`),
         );
         container.append(meta);
@@ -2264,18 +4130,414 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     }
   }
 
-  function publishTelemetry(): void {
-    const record = getActiveRecord(session);
-    const branch = getActiveBranch(session);
-    const mem = measureTwoTowerSessionRetainedBytes(session);
-    const scene = currentScene;
+  // ==========================================================================
+  // WAVE 3 — GUIDED EDUCATIONAL WALKTHROUGH HUD & STRICT ISOLATION
+  // ==========================================================================
+  function clearTourAutoplayTimer(): void {
+    if (tourAutoplayTimerId !== null) {
+      window.clearTimeout(tourAutoplayTimerId);
+      tourAutoplayTimerId = null;
+    }
+  }
 
-    window.__TWOTOWER_TELEMETRY__ = Object.freeze({
+  function scheduleTourAutoplayIfPlaying(): void {
+    clearTourAutoplayTimer();
+    if (!tourActive || !tourSnapshot || !tourSnapshot.isPlaying || !tourSnapshot.canNext) {
+      return;
+    }
+    tourAutoplayTimerId = window.setTimeout(() => {
+      tourAutoplayTimerId = null;
+      if (!tourActive || !tourController || !tourSnapshot?.isPlaying) return;
+      const nextSnap = tourController.next();
+      applyTourSnapshot(nextSnap);
+    }, TOUR_AUTOPLAY_MS);
+  }
+
+  function ensureTourController(): TwoTowerTourController {
+    if (!tourController) {
+      tourController = createTwoTowerTourController(model);
+    }
+    return tourController;
+  }
+
+  function capturePreTourState(): PreTourExplorationState {
+    return {
+      viewMode,
+      selectedBayId,
+      selectedTower,
+      towerFocus,
+      activeLinkerChannel,
+      gqaBayId,
+      mambaBayId,
+      mambaLocalPos,
+      timestepBayId,
+      timestepLocalPos,
+      moeBayId,
+      moeTowerRole,
+      embedTowerRole,
+      outputTowerRole,
+      outputFocusToken,
+      stepperStep,
+      activeSidebarTab,
+      cameraPose: cloneCameraPose(cameraPose),
+    };
+  }
+
+  function applyTourSnapshot(snap: TwoTowerTourSnapshot, instantCamera = false): void {
+    tourSnapshot = snap;
+    tourActive = snap.isActive;
+    cachedMemBreakdown = null;
+
+    // Stop any exploration playback animations cleanly
+    macroReplayActive = false;
+    macroReplayPhase = null;
+    macroReplayStage = -1;
+    stepperPlaying = false;
+    stepperLastTickMs = null;
+    stepperTermProgress = 1;
+    clearDirectCellSelectionForView();
+
+    viewMode = snap.viewMode;
+    towerFocus = snap.towerFocus;
+    activeLinkerChannel = snap.linkerChannel;
+    mambaLocalPos = snap.blockPos;
+    timestepLocalPos = snap.blockPos;
+    outputFocusToken = snap.blockPos;
+    stepperStep = snap.opStep;
+
+    if (snap.viewMode === 'macro') {
+      selectedBayId = snap.bayId;
+      selectedTower =
+        snap.towerFocus === 'context_solo'
+          ? 'context'
+          : snap.towerFocus === 'denoiser_solo'
+            ? 'denoiser'
+            : 'shared';
+    } else if (snap.viewMode === 'paired_gqa') {
+      gqaBayId = resolveNearestBayOfKind(Math.max(1, Math.min(52, snap.bayId)), '*');
+    } else if (snap.viewMode === 'paired_mamba') {
+      mambaBayId = resolveNearestBayOfKind(Math.max(1, Math.min(52, snap.bayId)), 'M');
+    } else if (snap.viewMode === 'timestep') {
+      timestepBayId = Math.max(1, Math.min(52, snap.bayId));
+    } else if (snap.viewMode === 'moe') {
+      moeBayId = resolveNearestBayOfKind(Math.max(1, Math.min(52, snap.bayId)), 'E');
+      moeTowerRole =
+        snap.towerFocus === 'context_solo'
+          ? 'context'
+          : snap.towerFocus === 'denoiser_solo'
+            ? 'denoiser'
+            : undefined;
+    } else if (snap.viewMode === 'embedding') {
+      embedTowerRole =
+        snap.towerFocus === 'context_solo'
+          ? 'context'
+          : snap.towerFocus === 'denoiser_solo'
+            ? 'denoiser'
+            : undefined;
+    } else if (snap.viewMode === 'output') {
+      outputTowerRole =
+        snap.towerFocus === 'context_solo'
+          ? 'context'
+          : snap.towerFocus === 'denoiser_solo'
+            ? 'denoiser'
+            : undefined;
+    }
+
+    // Apply beat-directed sidebar panel
+    const desiredTab: TwoTowerSidebarTab = snap.showSamplerPanel
+      ? 'sampler'
+      : snap.showArchPanel
+        ? 'architecture'
+        : 'inspect';
+    activeSidebarTab = desiredTab;
+    for (const btn of sidebarTabButtons) {
+      const isAct = btn.dataset.sidebarTab === desiredTab;
+      btn.setAttribute('aria-selected', isAct ? 'true' : 'false');
+      btn.setAttribute('tabindex', isAct ? '0' : '-1');
+    }
+    inspectPanel.hidden = desiredTab !== 'inspect';
+    samplerPanel.hidden = desiredTab !== 'sampler';
+    archPanel.hidden = desiredTab !== 'architecture';
+
+    geometryDirty = true;
+    rebuildSceneIfNeeded();
+    renderTourCard(snap);
+
+    if (currentScene) {
+      if (snap.opStep !== null && currentScene.opFocusBounds?.[snap.opStep]) {
+        focusOpStepCamera(snap.opStep, reducedMotion || instantCamera);
+      } else {
+        flyToPose(computeFitPoseForScene(currentScene), reducedMotion || instantCamera);
+      }
+    }
+
+    tourAriaLive.textContent = `Beat ${snap.beatIndex + 1} of ${snap.totalBeats}: ${snap.title}`;
+    scheduleTourAutoplayIfPlaying();
+    drawFrame(performance.now());
+  }
+
+  function startTour(): TwoTowerTourSnapshot {
+    if (!tourActive) {
+      preTourState = capturePreTourState();
+    }
+    const ctrl = ensureTourController();
+    const snap = ctrl.start();
+    applyTourSnapshot(snap);
+    return snap;
+  }
+
+  function goToTourBeat(idx: number): TwoTowerTourSnapshot {
+    if (!tourActive) {
+      preTourState = capturePreTourState();
+    }
+    const ctrl = ensureTourController();
+    const snap = ctrl.goToBeat(idx);
+    applyTourSnapshot(snap, true);
+    return snap;
+  }
+
+  function goToTourAct(actIdx: number): TwoTowerTourSnapshot {
+    if (!tourActive) {
+      preTourState = capturePreTourState();
+    }
+    const ctrl = ensureTourController();
+    const snap = ctrl.goToAct(actIdx);
+    applyTourSnapshot(snap, true);
+    return snap;
+  }
+
+  function exitTour(): void {
+    clearTourAutoplayTimer();
+    if (!tourActive) return;
+    if (tourController) {
+      tourSnapshot = tourController.exit();
+    }
+    tourActive = false;
+    tourCard.hidden = true;
+    cachedMemBreakdown = null;
+
+    // Restore user's EXACT pre-tour exploration state untouched!
+    if (preTourState) {
+      const s = preTourState;
+      viewMode = s.viewMode;
+      selectedBayId = s.selectedBayId;
+      selectedTower = s.selectedTower;
+      towerFocus = s.towerFocus;
+      activeLinkerChannel = s.activeLinkerChannel;
+      gqaBayId = s.gqaBayId;
+      mambaBayId = s.mambaBayId;
+      mambaLocalPos = s.mambaLocalPos;
+      timestepBayId = s.timestepBayId;
+      timestepLocalPos = s.timestepLocalPos;
+      moeBayId = s.moeBayId;
+      moeTowerRole = s.moeTowerRole;
+      embedTowerRole = s.embedTowerRole;
+      outputTowerRole = s.outputTowerRole;
+      outputFocusToken = s.outputFocusToken;
+      stepperStep = s.stepperStep;
+      activeSidebarTab = s.activeSidebarTab;
+      flyAnim = null;
+      cameraPose = cloneCameraPose(s.cameraPose);
+      preTourState = null;
+
+      for (const btn of sidebarTabButtons) {
+        const isAct = btn.dataset.sidebarTab === activeSidebarTab;
+        btn.setAttribute('aria-selected', isAct ? 'true' : 'false');
+        btn.setAttribute('tabindex', isAct ? '0' : '-1');
+      }
+      inspectPanel.hidden = activeSidebarTab !== 'inspect';
+      samplerPanel.hidden = activeSidebarTab !== 'sampler';
+      archPanel.hidden = activeSidebarTab !== 'architecture';
+    }
+
+    geometryDirty = true;
+    rebuildSceneIfNeeded();
+    drawFrame(performance.now());
+    btnTourToggle.focus();
+  }
+
+  function renderTourCard(snap: TwoTowerTourSnapshot): void {
+    tourCard.hidden = !snap.isActive;
+    if (!snap.isActive) return;
+
+    tourCard.textContent = '';
+
+    // 4 Act chapter-jump buttons
+    const actsBar = el('div', 'sp-tour-acts');
+    actsBar.setAttribute('role', 'group');
+    actsBar.setAttribute('aria-label', 'Guided Tour Acts');
+    const actNumerals = ['Act I', 'Act II', 'Act III', 'Act IV'] as const;
+    for (let i = 0; i < TWOTOWER_TOUR_ACTS.length; i++) {
+      const act = TWOTOWER_TOUR_ACTS[i];
+      const b = el(
+        'button',
+        `sp-tour-act-btn${snap.actIndex === i ? ' is-active' : ''}`,
+        actNumerals[i] ?? `Act ${i + 1}`,
+      );
+      b.type = 'button';
+      b.dataset.testid = `tour-act-${i}`;
+      b.title = act.title;
+      b.setAttribute('aria-pressed', snap.actIndex === i ? 'true' : 'false');
+      b.addEventListener('click', () => {
+        if (!tourController) return;
+        applyTourSnapshot(tourController.goToAct(i));
+      });
+      actsBar.append(b);
+    }
+
+    // Header: Beat counter + badge + progress bar
+    const head = el('div', 'sp-tour-head');
+    const counter = el(
+      'span',
+      'sp-tour-counter',
+      `Beat ${snap.beatIndex + 1} / ${snap.totalBeats} · ${snap.beatId}`,
+    );
+    counter.dataset.testid = 'tour-beat-counter';
+    const badge = el('span', 'sp-badge sp-badge--ctx', snap.badge);
+    head.append(counter, badge);
+
+    const progTrack = el('div', 'sp-tour-progress');
+    const progFill = el('div', 'sp-tour-progress-fill');
+    progFill.style.width = `${(snap.progressFraction * 100).toFixed(1)}%`;
+    progTrack.append(progFill);
+
+    // Title & subtitle
+    const titleWrap = el('div', 'sp-tour-titles');
+    const h3 = el('h3', 'sp-tour-title', snap.title);
+    h3.dataset.testid = 'tour-beat-title';
+    titleWrap.append(
+      el('div', 'sp-tour-act-label', snap.actTitle),
+      h3,
+      el('div', 'sp-tour-subtitle', snap.subtitle),
+    );
+
+    // Concise narrative body (scrollable max-height)
+    const body = el('div', 'sp-tour-body');
+    for (const p of snap.paragraphs) {
+      body.append(el('p', 'sp-tour-p', p));
+    }
+    if (snap.takeaways.length > 0) {
+      const ul = el('ul', 'sp-tour-takeaways');
+      for (const tk of snap.takeaways) {
+        ul.append(el('li', undefined, tk));
+      }
+      body.append(ul);
+    }
+
+    // Live metrics chips computed from real tour record
+    const metricsRow = el('div', 'sp-tour-metrics');
+    metricsRow.dataset.testid = 'tour-live-metrics';
+    for (const m of snap.liveMetrics) {
+      const chip = el('span', tourToneBadgeClass(m.tone), `${m.label}: ${m.value}`);
+      metricsRow.append(chip);
+    }
+
+    // Provenance footer
+    const prov = snap.provenance;
+    const provEl = el(
+      'div',
+      'sp-tour-prov',
+      `Rec #${prov.recordIndex} · Blk ${prov.blockId ?? '—'} · Ref ${prov.refinementIndex ?? '—'} · ` +
+        `Abs Pos [${prov.absoluteTokenRange[0]}..${prov.absoluteTokenRange[1]}] · ` +
+        `Cache ${prov.sourceCacheDigest.slice(0, 8)}`,
+    );
+    provEl.dataset.testid = 'tour-provenance';
+
+    // Epistemic tag badge
+    const epiEl = el('div', 'sp-tour-epistemic', snap.epistemicTag);
+    epiEl.dataset.testid = 'tour-epistemic-tag';
+
+    // Interactive controls: Prev, Play/Pause, Next, Restart Tour, Exit Tour
+    const ctrlBar = el('div', 'sp-tour-controls');
+    const prevBtn = el('button', 'sp-btn', '← Prev');
+    prevBtn.type = 'button';
+    prevBtn.dataset.testid = 'tour-btn-prev';
+    prevBtn.disabled = !snap.canPrev;
+    prevBtn.addEventListener('click', () => {
+      if (!tourController) return;
+      applyTourSnapshot(tourController.prev());
+    });
+
+    const playBtn = el(
+      'button',
+      `sp-btn ${snap.isPlaying ? 'sp-btn--den' : 'sp-btn--primary'}`,
+      snap.isPlaying ? 'Pause' : 'Play',
+    );
+    playBtn.type = 'button';
+    playBtn.dataset.testid = 'tour-btn-play';
+    playBtn.addEventListener('click', () => {
+      if (!tourController) return;
+      const toggled = tourController.togglePlay();
+      tourSnapshot = toggled;
+      renderTourCard(toggled);
+      scheduleTourAutoplayIfPlaying();
+      publishTelemetry();
+    });
+
+    const nextBtn = el('button', 'sp-btn sp-btn--primary', 'Next →');
+    nextBtn.type = 'button';
+    nextBtn.dataset.testid = 'tour-btn-next';
+    nextBtn.disabled = !snap.canNext;
+    nextBtn.addEventListener('click', () => {
+      if (!tourController) return;
+      applyTourSnapshot(tourController.next());
+    });
+
+    const restartBtn = el('button', 'sp-btn', 'Restart Tour');
+    restartBtn.type = 'button';
+    restartBtn.dataset.testid = 'tour-btn-restart';
+    restartBtn.addEventListener('click', () => {
+      if (!tourController) return;
+      applyTourSnapshot(tourController.restart());
+    });
+
+    const exitBtn = el('button', 'sp-btn sp-btn--danger', 'Exit Tour');
+    exitBtn.type = 'button';
+    exitBtn.dataset.testid = 'tour-btn-exit';
+    exitBtn.addEventListener('click', () => exitTour());
+
+    ctrlBar.append(prevBtn, playBtn, nextBtn, restartBtn, exitBtn);
+
+    tourCard.append(
+      actsBar,
+      head,
+      progTrack,
+      titleWrap,
+      body,
+      metricsRow,
+      provEl,
+      epiEl,
+      ctrlBar,
+    );
+  }
+
+  // ==========================================================================
+  // TELEMETRY SNAPSHOT & WINDOW.__TWOTOWER_SPATIAL_DEBUG__
+  // ==========================================================================
+  function buildTelemetrySnapshot(): TwoTowerTelemetrySnapshot {
+    const activeSession = getActiveDisplaySession();
+    const record = getActiveRecord(activeSession);
+    const branch = getActiveBranch(activeSession);
+    const mem = getCachedMemoryBreakdown();
+    const scene = currentScene;
+    const q = computeQuantiles(frameTimesMs);
+
+    return Object.freeze({
       viewMode,
       drawCallsLastFrame,
       lastFrameMs,
-      avgFrameMs: rafFramesRendered > 0 ? totalFrameMs / rafFramesRendered : 0,
+      avgFrameMs: frameTimesMs.length > 0 ? q.avg : rafFramesRendered > 0 ? totalFrameMs / rafFramesRendered : 0,
+      medianFrameMs: q.median,
+      p95FrameMs: q.p95,
+      frameSampleCount: frameTimesMs.length,
+      geometryRebuilds,
       atlasUploads,
+      rafIdlePauses,
+      rafActive,
+      layoutResizeCount,
+      glVendor,
+      glRenderer,
+      isSoftwareRenderer,
       currentAtlasDims,
       maxTextureSize,
       retainedSessionBytes: mem.totalRetainedBytes,
@@ -2293,16 +4555,27 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       glErrorCount,
       reducedMotion,
       rafFramesRendered,
+      tourActive,
+      tourBeatIndex: tourActive && tourSnapshot ? tourSnapshot.beatIndex : -1,
+      tourActIndex: tourActive && tourSnapshot ? tourSnapshot.actIndex : -1,
+      activeSidebarTab,
     });
   }
 
+  function publishTelemetry(): void {
+    window.__TWOTOWER_TELEMETRY__ = buildTelemetrySnapshot();
+  }
+
   function syncAllUi(): void {
-    syncHeaderAndSessionStrip();
+    const activeSession = getActiveDisplaySession();
+    const view = resolveTwoTowerSessionViewState(activeSession);
+    syncHeaderAndSessionStrip(view);
+    renderTimelineDock(activeSession);
     if (currentScene) {
       canvasTitleEl.textContent = currentScene.title;
       canvasSubEl.textContent = currentScene.subtitle;
       renderBottomDock(currentScene);
-      renderInspector(currentScene);
+      renderInspector(currentScene, view);
     }
     publishTelemetry();
   }
@@ -2326,10 +4599,13 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     viewMode = nextMode;
     stepperPlaying = false;
     stepperLastTickMs = null;
+    stepperAccumSec = 0;
     stepperStep = null;
     stepperStepProgress = 0;
     stepperTermProgress = 1;
     macroReplayActive = false;
+    macroReplayElapsedMs = 0;
+    macroReplayStage = -1;
     macroReplayPhase = null;
     macroReplayLastMs = null;
     hoveredBayId = null;
@@ -2372,9 +4648,18 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     }
   }
 
+  function findDeletableBranchId(targetSession: TwoTowerSession): string | null {
+    for (let i = targetSession.branches.length - 1; i >= 0; i--) {
+      if (targetSession.branches[i].branchId !== targetSession.activeBranchId) {
+        return targetSession.branches[i].branchId;
+      }
+    }
+    return null;
+  }
+
   function applySessionUpdate(next: TwoTowerSession, fromWorkbench = false, note?: string): void {
     session = next;
-    // Clamp token indices safely after session changes
+    cachedMemBreakdown = null;
     mambaLocalPos = 0;
     timestepLocalPos = 0;
     moeFocusToken = undefined;
@@ -2391,16 +4676,26 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   }
 
   function runSessionAction(fn: () => TwoTowerSession, note?: string): void {
+    if (tourActive) return;
     try {
       const next = fn();
       applySessionUpdate(next, false, note);
     } catch {
-      // Capabilities prevent illegal calls; silently ignore defensive throw
-      syncHeaderAndSessionStrip();
+      const view = resolveTwoTowerSessionViewState(getActiveDisplaySession());
+      syncHeaderAndSessionStrip(view);
+      renderTimelineDock(getActiveDisplaySession());
     }
   }
 
-  // Wire Session Strip buttons
+  function jumpToRecordIndex(cursorIndex: number): void {
+    if (tourActive) return;
+    runSessionAction(
+      () => navigateTwoTowerSession(session, cursorIndex),
+      `Navigated to record #${cursorIndex}.`,
+    );
+  }
+
+  // Wire Execution Strip & Timeline Controls
   modeSelect.addEventListener('change', () => {
     const mode = modeSelect.value as TwoTowerExecutionMode;
     runSessionAction(() => updateTwoTowerSessionConfig(session, { mode }), `Mode set to ${mode}.`);
@@ -2415,7 +4710,10 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     runSessionAction(() => commitTwoTowerRefinementConfidence(session), 'Committed MDLM confidence step.'),
   );
   spBtnCommit.addEventListener('click', () =>
-    runSessionAction(() => commitTwoTowerActiveBlockToContext(session), 'Committed completed block to Context.'),
+    runSessionAction(
+      () => commitTwoTowerActiveBlockToContext(session),
+      'Committed completed block to Context.',
+    ),
   );
   spBtnAr.addEventListener('click', () =>
     runSessionAction(() => stepTwoTowerSessionAr(session), 'Executed Context AR step.'),
@@ -2426,6 +4724,14 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   spBtnNext.addEventListener('click', () =>
     runSessionAction(() => stepTwoTowerSessionNext(session), 'Executed next step.'),
   );
+  playbackQuickBtn.addEventListener('click', () => {
+    if (viewMode === 'macro') {
+      toggleMacroReplay(!macroReplayActive);
+    } else if (viewMode === 'paired_gqa' || viewMode === 'paired_mamba' || viewMode === 'moe') {
+      toggleOpStepperPlayback(!stepperPlaying);
+    }
+  });
+
   spBtnBack.addEventListener('click', () =>
     runSessionAction(() => navigateTwoTowerSessionBack(session), 'Rewound history.'),
   );
@@ -2438,6 +4744,84 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   spBranchSelect.addEventListener('change', () => {
     const id = spBranchSelect.value;
     runSessionAction(() => switchTwoTowerSessionBranch(session, id), `Switched to ${id}.`);
+  });
+  spBtnDeleteBranch.addEventListener('click', () => {
+    const victim = findDeletableBranchId(session);
+    if (!victim) return;
+    runSessionAction(
+      () => deleteTwoTowerSessionBranch(session, victim),
+      `Deleted inactive branch ${victim}.`,
+    );
+  });
+  spBtnRestart.addEventListener('click', () =>
+    runSessionAction(() => restartTwoTowerSession(session), 'Restarted session.'),
+  );
+
+  // Wire Sampler Tab Future Config Controls
+  const applyThreshold = (val: number, label: string) => {
+    if (!Number.isFinite(val)) return;
+    const clamped = Math.max(0, Math.min(1, val));
+    runSessionAction(
+      () => updateTwoTowerSessionConfig(session, { confidenceThreshold: clamped }),
+      `Confidence threshold set to ${clamped.toFixed(2)} (${label}).`,
+    );
+  };
+  presetMiniBtn.addEventListener('click', () => applyThreshold(0.22, 'Mini Default'));
+  presetPaperBtn.addEventListener('click', () => applyThreshold(0.8, 'Paper'));
+  presetCodeBtn.addEventListener('click', () => applyThreshold(0.9, 'Ref Code'));
+  gammaRange.addEventListener('input', () => {
+    gammaNum.value = Number(gammaRange.value).toFixed(2);
+  });
+  gammaRange.addEventListener('change', () => applyThreshold(Number(gammaRange.value), 'Custom'));
+  gammaNum.addEventListener('change', () => applyThreshold(Number(gammaNum.value), 'Custom'));
+
+  const applyBlockWidth = (b: 4 | 8) => {
+    runSessionAction(
+      () => updateTwoTowerSessionConfig(session, { blockSize: b }),
+      `Next-block width B set to ${b}.`,
+    );
+  };
+  btnB4.addEventListener('click', () => applyBlockWidth(4));
+  btnB8.addEventListener('click', () => applyBlockWidth(8));
+
+  const applyStepsK = (raw: number) => {
+    if (!Number.isFinite(raw)) return;
+    const clamped = Math.max(1, Math.min(12, Math.round(raw)));
+    runSessionAction(
+      () => updateTwoTowerSessionConfig(session, { stepsPerBlock: clamped }),
+      `Next-block refinement budget K set to ${clamped}.`,
+    );
+  };
+  stepsKRange.addEventListener('input', () => {
+    stepsKNum.value = stepsKRange.value;
+  });
+  stepsKRange.addEventListener('change', () => applyStepsK(Number(stepsKRange.value)));
+  stepsKNum.addEventListener('change', () => applyStepsK(Number(stepsKNum.value)));
+
+  tempNum.addEventListener('change', () => {
+    const val = Number(tempNum.value);
+    if (!Number.isFinite(val)) return;
+    const clamped = Math.max(0, Math.min(2, val));
+    runSessionAction(
+      () => updateTwoTowerSessionConfig(session, { temperature: clamped }),
+      `Sampling temperature set to ${clamped}.`,
+    );
+  });
+
+  seedNum.addEventListener('change', () => {
+    const val = Number(seedNum.value);
+    if (!Number.isFinite(val)) return;
+    const seed = Math.trunc(val);
+    runSessionAction(
+      () => updateTwoTowerSessionConfig(session, { samplingSeed: seed }),
+      `Sampling seed set to ${seed}.`,
+    );
+  });
+
+  // Wire Topbar Tour, Reset & Workbench buttons
+  btnTourToggle.addEventListener('click', () => {
+    if (tourActive) exitTour();
+    else startTour();
   });
 
   btnResetCamera.addEventListener('click', () => {
@@ -2478,10 +4862,11 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   drawerCloseBtn.addEventListener('click', () => setWorkbenchOpen(false));
 
   // ==========================================================================
-  // RENDER LOOP (STRICT IDLE-RAF GATING & ZERO Z-FIGHTING)
+  // RENDER LOOP (ON-DEMAND IDLE RAF SLEEP, DISCRETE REPLAY TICKS, ZERO Z-FIGHT)
   // ==========================================================================
   const scheduleDraw = () => {
     if (pendingRafId !== null) return;
+    rafActive = true;
     pendingRafId = window.requestAnimationFrame(drawFrame);
   };
 
@@ -2490,14 +4875,17 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     const t0 = performance.now();
 
     const measured = measureHostMetrics(viewportHost);
-    if (!measured) return;
+    if (!measured) {
+      rafActive = false;
+      return;
+    }
     currentMetrics = measured;
 
     const canAnimate = device !== null && !device.isLost;
     let continueAnimating = false;
 
     if (canAnimate) {
-      // 1. Camera fly animation
+      // 1. Camera fly animation (ZERO geometry rebuilds!)
       if (flyAnim) {
         const t = Math.max(0, Math.min(1, (nowMs - flyAnim.startMs) / flyAnim.durationMs));
         cameraPose = interpolateCameraPose(flyAnim.from, flyAnim.to, t);
@@ -2505,24 +4893,36 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
         else continueAnimating = true;
       }
 
-      // 2. Macro instructional wave replay (disabled under reducedMotion)
+      // 2. Macro instructional wave replay: discrete ~2.5 Hz stages (8 stages over 3.2s)
+      //    while FlatFlowRibbonsPass GPU shader animates smoothly at 60Hz!
       if (viewMode === 'macro' && macroReplayActive && !reducedMotion) {
         const dtMs =
-          macroReplayLastMs === null ? 0 : Math.max(0, Math.min(80, nowMs - macroReplayLastMs));
+          macroReplayLastMs === null ? 0 : Math.max(0, Math.min(100, nowMs - macroReplayLastMs));
         macroReplayLastMs = nowMs;
-        const nextPhase = (macroReplayPhase ?? 0) + dtMs / 3200;
-        if (nextPhase >= 1) {
+        macroReplayElapsedMs += dtMs;
+        if (macroReplayElapsedMs >= MACRO_REPLAY_DURATION_MS) {
           macroReplayActive = false;
+          macroReplayElapsedMs = 0;
+          macroReplayStage = -1;
           macroReplayPhase = null;
           macroReplayLastMs = null;
+          geometryDirty = true;
         } else {
-          macroReplayPhase = nextPhase;
+          const nextStage = Math.min(
+            MACRO_REPLAY_STAGE_COUNT - 1,
+            Math.floor((macroReplayElapsedMs / MACRO_REPLAY_DURATION_MS) * MACRO_REPLAY_STAGE_COUNT),
+          );
+          if (nextStage !== macroReplayStage) {
+            macroReplayStage = nextStage;
+            macroReplayPhase = (nextStage + 0.5) / MACRO_REPLAY_STAGE_COUNT;
+            geometryDirty = true;
+          }
           continueAnimating = true;
         }
-        geometryDirty = true;
       }
 
-      // 3. Operation stepper playback (GQA / Mamba / MoE, disabled under reducedMotion)
+      // 3. Operation stepper playback: discrete sub-term buckets (~4.3 Hz)
+      //    instead of rebuilding geometry 60 times/sec!
       if (
         stepperPlaying &&
         !reducedMotion &&
@@ -2530,29 +4930,40 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
         (viewMode === 'paired_gqa' || viewMode === 'paired_mamba' || viewMode === 'moe')
       ) {
         const dtSec =
-          stepperLastTickMs === null ? 0 : Math.max(0, Math.min(0.1, (nowMs - stepperLastTickMs) / 1000));
+          stepperLastTickMs === null
+            ? 0
+            : Math.max(0, Math.min(0.1, (nowMs - stepperLastTickMs) / 1000));
         stepperLastTickMs = nowMs;
-        // Advance termProgress across [0..1] over ~1.4s per cell, then advance step
-        const nextTerm = stepperTermProgress + dtSec / 1.4;
-        if (nextTerm >= 1) {
-          stepperTermProgress = 0.05;
-          const nextStepP = stepperStepProgress + 0.25;
-          if (nextStepP >= 1) {
-            stepperStepProgress = 0;
-            stepperStep = (stepperStep + 1) % 6;
+        stepperAccumSec += dtSec;
+        const bucketDuration = STEPPER_CELL_DURATION_SEC / STEPPER_SUBTERM_BUCKETS;
+        if (stepperAccumSec >= bucketDuration) {
+          const ticks = Math.max(1, Math.floor(stepperAccumSec / bucketDuration));
+          stepperAccumSec -= ticks * bucketDuration;
+          const prevBucket = Math.round(stepperTermProgress * STEPPER_SUBTERM_BUCKETS);
+          const nextBucket = prevBucket + ticks;
+          if (nextBucket > STEPPER_SUBTERM_BUCKETS) {
+            stepperTermProgress = 1 / STEPPER_SUBTERM_BUCKETS;
+            const nextStepP = stepperStepProgress + 0.25;
+            if (nextStepP >= 1) {
+              stepperStepProgress = 0;
+              stepperStep = (stepperStep + 1) % 6;
+            } else {
+              stepperStepProgress = nextStepP;
+            }
           } else {
-            stepperStepProgress = nextStepP;
+            stepperTermProgress = Math.min(1, nextBucket / STEPPER_SUBTERM_BUCKETS);
           }
-        } else {
-          stepperTermProgress = nextTerm;
+          geometryDirty = true;
         }
-        geometryDirty = true;
         continueAnimating = true;
       }
     }
 
     rebuildSceneIfNeeded();
-    if (!currentScene) return;
+    if (!currentScene) {
+      rafActive = false;
+      return;
+    }
 
     currentSnapshot = buildCameraSnapshot(cameraPose, currentScene.fitBounds, currentMetrics);
 
@@ -2609,11 +5020,12 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
 
     // Synchronous projected editorial overlay (deduplicated by camera + scene version)
     const { topInsetPx, bottomInsetPx } = getCanvasInsets();
+    const tourHighlightPart = tourActive ? tourSnapshot?.highlightPartId ?? null : null;
     const overlayKey =
       `${viewMode}|v${sceneVersion}|${currentMetrics.hostWidth.toFixed(1)}x${currentMetrics.hostHeight.toFixed(1)}|` +
       `${cameraPose.target[0].toFixed(3)},${cameraPose.target[1].toFixed(3)},${cameraPose.target[2].toFixed(3)},` +
       `${cameraPose.distance.toFixed(3)},${cameraPose.azimuthDeg.toFixed(2)},${cameraPose.elevationDeg.toFixed(2)}|` +
-      `${topInsetPx}:${bottomInsetPx}`;
+      `${topInsetPx}:${bottomInsetPx}|${tourHighlightPart ?? ''}`;
     if (overlayKey !== lastOverlayKey) {
       lastOverlayKey = overlayKey;
       const activePart =
@@ -2630,7 +5042,8 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
         scene: currentScene,
         snapshot: currentSnapshot,
         selectedPartId: activePart,
-        activeTokens: getActiveRecord(session).committedPrefixLen,
+        highlightPartId: tourHighlightPart,
+        activeTokens: getActiveRecord(getActiveDisplaySession()).committedPrefixLen,
         topInsetPx,
         bottomInsetPx,
       });
@@ -2638,12 +5051,22 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
 
     lastFrameMs = performance.now() - t0;
     totalFrameMs += lastFrameMs;
+    frameTimesMs.push(lastFrameMs);
+    if (frameTimesMs.length > MAX_FRAME_SAMPLES) {
+      frameTimesMs.shift();
+    }
     rafFramesRendered += 1;
-    publishTelemetry();
-    refreshTelemetryFooter();
 
     if (continueAnimating && canAnimate) {
+      refreshTelemetryFooter(false);
+      publishTelemetry();
       scheduleDraw();
+    } else {
+      // On-demand Idle RAF sleep!
+      rafActive = false;
+      rafIdlePauses += 1;
+      refreshTelemetryFooter(false);
+      publishTelemetry();
     }
   }
 
@@ -2707,7 +5130,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   });
 
   function resolveMoeTopKForPick(): Int32Array | undefined {
-    const view = resolveTwoTowerSessionViewState(session);
+    const view = resolveTwoTowerSessionViewState(getActiveDisplaySession());
     const activeTower =
       (currentScene?.diagnostics as TwoTowerMoeDiagnostics | undefined)?.towerRole ??
       moeTowerRole ??
@@ -2753,7 +5176,10 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     if (viewMode === 'paired_gqa') {
       const cell = hit ? pickHitToGqaCell(hit, gqaGroup0Head, gqaGroup1Head) : null;
       const wrapped = cell
-        ? { tower: (hit?.towerRole === 'context' ? 'context' : 'denoiser') as 'context' | 'denoiser', cell }
+        ? {
+            tower: (hit?.towerRole === 'context' ? 'context' : 'denoiser') as 'context' | 'denoiser',
+            cell,
+          }
         : null;
       if (isClick) {
         const h = inferGqaCellHead(cell);
@@ -2768,6 +5194,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
           stepperStep = null;
         }
       } else {
+        if (sameGqaHover(gqaHoveredCell, wrapped)) return;
         gqaHoveredCell = wrapped;
       }
       geometryDirty = true;
@@ -2779,7 +5206,10 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       const diag = currentScene.diagnostics as PairedMambaDiagnostics | undefined;
       const cell = hit ? pickHitToMambaCell(hit, mambaHead, diag?.blockLength ?? 4) : null;
       const wrapped = cell
-        ? { tower: (hit?.towerRole === 'context' ? 'context' : 'denoiser') as 'context' | 'denoiser', cell }
+        ? {
+            tower: (hit?.towerRole === 'context' ? 'context' : 'denoiser') as 'context' | 'denoiser',
+            cell,
+          }
         : null;
       if (isClick) {
         const h = inferMambaCellHead(cell);
@@ -2791,6 +5221,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
           stepperStep = null;
         }
       } else {
+        if (sameMambaHover(mambaHoveredCell, wrapped)) return;
         mambaHoveredCell = wrapped;
       }
       geometryDirty = true;
@@ -2822,7 +5253,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       if (isClick) {
         moeSelectedPart = hit?.partId ?? null;
         moeSelectedCell = cell;
-        const view = resolveTwoTowerSessionViewState(session);
+        const view = resolveTwoTowerSessionViewState(getActiveDisplaySession());
         const activeTower = diag?.towerRole ?? moeTowerRole ?? 'context';
         const trace =
           activeTower === 'denoiser'
@@ -3003,14 +5434,27 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   );
 
   // ==========================================================================
-  // KEYBOARD, REDUCED MOTION, RESIZE & WEBGL CONTEXT RECOVERY
+  // KEYBOARD SHORTCUTS, REDUCED MOTION, RESIZE & WEBGL CONTEXT RECOVERY
   // ==========================================================================
   window.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape' && workbenchOpen) {
-      ev.preventDefault();
-      setWorkbenchOpen(false);
-      return;
+    if (ev.key === 'Escape') {
+      if (workbenchOpen) {
+        ev.preventDefault();
+        setWorkbenchOpen(false);
+        return;
+      }
+      if (tourActive) {
+        ev.preventDefault();
+        exitTour();
+        return;
+      }
+      if (mobileInspectorOpen) {
+        ev.preventDefault();
+        setMobileInspectorOpen(false);
+        return;
+      }
     }
+
     // NEVER hijack Space or Enter on any interactive control!
     if ((ev.key === ' ' || ev.key === 'Enter') && isInteractiveControl(ev.target)) {
       return;
@@ -3018,10 +5462,49 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     if (isTextInputTarget(ev.target) || ev.metaKey || ev.ctrlKey || ev.altKey) {
       return;
     }
+
+    if (ev.key === 't' || ev.key === 'T') {
+      ev.preventDefault();
+      if (tourActive) exitTour();
+      else startTour();
+      return;
+    }
+
+    if (ev.key === 'w' || ev.key === 'W') {
+      ev.preventDefault();
+      setWorkbenchOpen(!workbenchOpen);
+      return;
+    }
+
     if (ev.key === 'r' || ev.key === 'R') {
       if (currentScene) {
         ev.preventDefault();
         flyToPose(computeFitPoseForScene(currentScene));
+      }
+      return;
+    }
+
+    if (tourActive && tourController) {
+      const inTablist =
+        ev.target instanceof HTMLElement && ev.target.closest('[role="tablist"]') !== null;
+      if (!inTablist && ev.key === 'ArrowRight') {
+        ev.preventDefault();
+        applyTourSnapshot(tourController.next());
+        return;
+      }
+      if (!inTablist && ev.key === 'ArrowLeft') {
+        ev.preventDefault();
+        applyTourSnapshot(tourController.prev());
+        return;
+      }
+      if (ev.key === ' ') {
+        ev.preventDefault();
+        const toggled = tourController.togglePlay();
+        tourSnapshot = toggled;
+        renderTourCard(toggled);
+        scheduleTourAutoplayIfPlaying();
+        publishTelemetry();
+        return;
       }
     }
   });
@@ -3036,8 +5519,11 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       }
       stepperPlaying = false;
       stepperLastTickMs = null;
+      stepperAccumSec = 0;
       stepperTermProgress = 1;
       macroReplayActive = false;
+      macroReplayElapsedMs = 0;
+      macroReplayStage = -1;
       macroReplayPhase = null;
       macroReplayLastMs = null;
     }
@@ -3060,11 +5546,15 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   const resizeObserver = new ResizeObserver(() => {
     const next = measureHostMetrics(viewportHost);
     if (!next) return;
-    if (Math.abs(next.hostWidth - lastResizeW) < 0.5 && Math.abs(next.hostHeight - lastResizeH) < 0.5) {
+    if (
+      Math.abs(next.hostWidth - lastResizeW) < 0.5 &&
+      Math.abs(next.hostHeight - lastResizeH) < 0.5
+    ) {
       return;
     }
     lastResizeW = next.hostWidth;
     lastResizeH = next.hostHeight;
+    layoutResizeCount += 1;
     currentMetrics = next;
     lastOverlayKey = '';
     if (currentScene && !flyAnim) {
@@ -3079,10 +5569,12 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     flyAnim = null;
     stepperPlaying = false;
     macroReplayActive = false;
+    clearTourAutoplayTimer();
     if (pendingRafId !== null) {
       window.cancelAnimationFrame(pendingRafId);
       pendingRafId = null;
     }
+    rafActive = false;
     lastAtlasKey = null;
     if (device) device.markLost(true);
     showFallback('WebGL2 Context Lost', 'Waiting for the browser to restore the graphics context.');
@@ -3096,7 +5588,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       linesPass = new LinesPass(device.gl);
       ribbonsPass = new RibbonsPass(device.gl);
       flatFlowPass = new FlatFlowRibbonsPass(device.gl);
-      maxTextureSize = Number(device.gl.getParameter(device.gl.MAX_TEXTURE_SIZE)) || maxTextureSize;
+      queryGlRendererInfo(device.gl);
       lastAtlasKey = null;
       lastOverlayKey = '';
       device.markLost(false);
@@ -3110,7 +5602,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   });
 
   // ==========================================================================
-  // INITIAL BOOT & EXPOSED HANDLE
+  // INITIAL BOOT & EXPOSED HANDLES (`__TWOTOWER_APP__`, `__TWOTOWER_SPATIAL_DEBUG__`)
   // ==========================================================================
   const initialMetrics = measureHostMetrics(viewportHost);
   if (initialMetrics) {
@@ -3139,6 +5631,9 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
         stepperTermProgress,
         reducedMotion,
         workbenchOpen,
+        activeSidebarTab,
+        tourActive,
+        tourBeatIndex: tourActive && tourSnapshot ? tourSnapshot.beatIndex : -1,
         activeSelection: currentScene?.activeSelection ?? null,
         warningBanner: currentScene?.warningBanner ?? null,
         diagnostics: currentScene?.diagnostics,
@@ -3150,6 +5645,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     setStepperStep(step: number | null) {
       stepperPlaying = false;
       stepperLastTickMs = null;
+      stepperAccumSec = 0;
       stepperStep = step;
       stepperStepProgress = 0;
       clearDirectCellSelectionForView();
@@ -3160,6 +5656,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     setStepperTermProgress(progress: number) {
       stepperPlaying = false;
       stepperLastTickMs = null;
+      stepperAccumSec = 0;
       stepperTermProgress = Math.max(0, Math.min(1, progress));
       geometryDirty = true;
       rebuildSceneIfNeeded();
@@ -3181,6 +5678,108 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     },
   };
 
+  // Expose live `window.__TWOTOWER_SPATIAL_DEBUG__` with all telemetry getters & helper methods
+  const debugMethods = {
+    resetPerfCounters(): void {
+      frameTimesMs.length = 0;
+      lastFrameMs = 0;
+      totalFrameMs = 0;
+      geometryRebuilds = 0;
+      atlasUploads = 0;
+      rafIdlePauses = 0;
+      rafFramesRendered = 0;
+      layoutResizeCount = 0;
+      publishTelemetry();
+    },
+    startTour(): TwoTowerTourSnapshot {
+      return startTour();
+    },
+    exitTour(): void {
+      exitTour();
+    },
+    goToTourBeat(idx: number): TwoTowerTourSnapshot {
+      return goToTourBeat(idx);
+    },
+    goToTourAct(actIdx: number): TwoTowerTourSnapshot {
+      return goToTourAct(actIdx);
+    },
+    setSidebarTab(tab: TwoTowerSidebarTab): void {
+      setSidebarTab(tab);
+    },
+    jumpToRecord(idx: number): void {
+      jumpToRecordIndex(idx);
+    },
+    orbitDelta(dx: number, dy: number): void {
+      flyAnim = null;
+      cameraPose = orbitCameraByCssDelta(cameraPose, dx, dy);
+      drawFrame(performance.now());
+    },
+    triggerMacroReplay(on: boolean): void {
+      if (viewMode !== 'macro' && on) {
+        switchViewMode('macro', true);
+      }
+      toggleMacroReplay(on);
+    },
+    triggerOpStepper(on: boolean): void {
+      toggleOpStepperPlayback(on);
+    },
+    getTourSnapshot(): TwoTowerTourSnapshot | null {
+      return tourActive ? tourSnapshot : null;
+    },
+    getSnapshot(): TwoTowerTelemetrySnapshot {
+      return buildTelemetrySnapshot();
+    },
+  };
+
+  const debugHandle = Object.create(null) as TwoTowerSpatialDebugHandle;
+  const telemetryKeys: readonly (keyof TwoTowerTelemetrySnapshot)[] = [
+    'viewMode',
+    'drawCallsLastFrame',
+    'lastFrameMs',
+    'avgFrameMs',
+    'medianFrameMs',
+    'p95FrameMs',
+    'frameSampleCount',
+    'geometryRebuilds',
+    'atlasUploads',
+    'rafIdlePauses',
+    'rafActive',
+    'layoutResizeCount',
+    'glVendor',
+    'glRenderer',
+    'isSoftwareRenderer',
+    'currentAtlasDims',
+    'maxTextureSize',
+    'retainedSessionBytes',
+    'sharedWeightBytes',
+    'solidCount',
+    'sheetCount',
+    'lineCount',
+    'ribbonCount',
+    'flowTriangleCount',
+    'lifecyclePhase',
+    'committedPrefixLen',
+    'kvCapacity',
+    'recordIndex',
+    'branchId',
+    'glErrorCount',
+    'reducedMotion',
+    'rafFramesRendered',
+    'tourActive',
+    'tourBeatIndex',
+    'tourActIndex',
+    'activeSidebarTab',
+  ];
+  for (const key of telemetryKeys) {
+    Object.defineProperty(debugHandle, key, {
+      enumerable: true,
+      configurable: false,
+      get: () => buildTelemetrySnapshot()[key],
+    });
+  }
+  Object.assign(debugHandle, debugMethods);
+
   window.__TWOTOWER_APP__ = handle;
+  window.__TWOTOWER_SPATIAL_DEBUG__ = debugHandle;
   return handle;
 }
