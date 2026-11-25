@@ -36,14 +36,21 @@ import {
 import {
   bayCenterY,
   buildMacroSpine,
+  describeSpineWaveStage,
   EMBED_Y,
+  FINAL_NORM_Y,
+  INSTRUCTIONAL_BAY_WINDOW,
   KV_TRACK_LENGTH,
   KV_TRACK_START_Z,
+  LM_HEAD_Y,
   OUTPUT_LOGITS_Y,
   RESIDUAL_X,
+  RIBBON_COLOR_AMBER,
+  RIBBON_COLOR_CYAN,
   RIBBON_COLOR_EMERALD,
   RIBBON_INSTANCE_FLOATS,
   SOLID_INSTANCE_FLOATS,
+  SPINE_REPLAY_DISCLAIMER,
   TOWER_FIT_BOUNDS,
 } from '../src/scene/spine';
 
@@ -575,5 +582,302 @@ describe('V4 · 52-Layer Residual-Spine Propagation Wave', () => {
     for (const slice of hlSlices) {
       expect(slice.cz).toBeCloseTo(expectedZ, 5);
     }
+  });
+});
+
+describe('RC3 · Spine Propagation Pacing & Instructional Replay Stage Model', () => {
+  function extractSolids(scene: ReturnType<typeof buildMacroSpine>) {
+    const list: Array<{
+      cx: number;
+      cy: number;
+      cz: number;
+      ex: number;
+      ey: number;
+      ez: number;
+      cellFamily: number;
+      fp8: number;
+      bayId: number;
+      hl: number;
+    }> = [];
+    for (let i = 0; i < scene.solidCount; i++) {
+      const o = i * SOLID_INSTANCE_FLOATS;
+      list.push({
+        cx: scene.solidData[o + 0],
+        cy: scene.solidData[o + 1],
+        cz: scene.solidData[o + 2],
+        ex: scene.solidData[o + 3],
+        ey: scene.solidData[o + 4],
+        ez: scene.solidData[o + 5],
+        cellFamily: scene.solidData[o + 6],
+        fp8: scene.solidData[o + 7],
+        bayId: scene.solidData[o + 9],
+        hl: scene.solidData[o + 11],
+      });
+    }
+    return list;
+  }
+
+  function extractRibbons(scene: ReturnType<typeof buildMacroSpine>) {
+    const list: Array<{
+      cx: number;
+      cy: number;
+      ex: number;
+      ey: number;
+      kind: number;
+      colorId: number;
+      alpha: number;
+    }> = [];
+    for (let i = 0; i < scene.ribbonCount; i++) {
+      const o = i * RIBBON_INSTANCE_FLOATS;
+      list.push({
+        cx: scene.ribbonData[o + 0],
+        cy: scene.ribbonData[o + 1],
+        ex: scene.ribbonData[o + 3],
+        ey: scene.ribbonData[o + 4],
+        kind: scene.ribbonData[o + 6],
+        colorId: scene.ribbonData[o + 7],
+        alpha: scene.ribbonData[o + 8],
+      });
+    }
+    return list;
+  }
+
+  it('describes all spine replay stages with precision-accurate KV copy, optional RMS, and explicit educational disclaimer', () => {
+    expect(SPINE_REPLAY_DISCLAIMER).toBe('Educational replay · not measured compute time');
+    expect(INSTRUCTIONAL_BAY_WINDOW).toBe(1.2);
+
+    const summaries = [
+      { bayId: 1, rmsOut: [0.84, 1.12] },
+      { bayId: 2, rmsOut: new Float32Array([0.92, 1.37]) },
+      { bayId: 6, rmsOut: [1.05, 1.48] },
+      { bayId: 43, rmsOut: [1.21, 1.64] },
+    ];
+
+    // 1. Embedding (< 0.05)
+    const embedStage = describeSpineWaveStage(0.01, NEMOTRON_SPEC, 'bf16', summaries, 1);
+    expect(embedStage.stageKind).toBe('embedding');
+    expect(embedStage.bayId).toBeNull();
+    expect(embedStage.title).toContain('Embedding');
+    expect(embedStage.title).toContain('NoPE');
+    expect(embedStage.rmsText).toBeNull();
+    expect(embedStage.progressPct).toBe(1);
+    expect(embedStage.disclaimer).toBe(SPINE_REPLAY_DISCLAIMER);
+
+    // 2. Bay 01 Mamba-2 (0.06)
+    const mambaStage = describeSpineWaveStage(0.06, NEMOTRON_SPEC, 'bf16', summaries, 1);
+    expect(mambaStage.stageKind).toBe('mamba');
+    expect(mambaStage.bayId).toBe(1);
+    expect(mambaStage.title).toContain('Bay 01');
+    expect(mambaStage.title).toContain('Mamba-2');
+    expect(mambaStage.actionDetail).toContain('47.1 MiB');
+    expect(mambaStage.actionDetail).toContain('in place');
+    expect(mambaStage.rmsText).toBe('RMS 1.12');
+    expect(mambaStage.progressPct).toBe(6);
+    expect(mambaStage.disclaimer).toBe(SPINE_REPLAY_DISCLAIMER);
+
+    // Active token index selects exact RMS slot (0 vs default last)
+    const mambaTok0 = describeSpineWaveStage(0.06, NEMOTRON_SPEC, 'bf16', summaries, 0);
+    expect(mambaTok0.rmsText).toBe('RMS 0.84');
+    const mambaNoSummaries = describeSpineWaveStage(0.06, NEMOTRON_SPEC, 'bf16', null);
+    expect(mambaNoSummaries.rmsText).toBeNull();
+
+    // 3. Bay 02 MoE (progress = 0.075 -> bay 2)
+    const moeStage = describeSpineWaveStage(0.075, NEMOTRON_SPEC, 'fp8_selective', summaries);
+    expect(moeStage.stageKind).toBe('moe');
+    expect(moeStage.bayId).toBe(2);
+    expect(moeStage.title).toContain('Bay 02');
+    expect(moeStage.title).toContain('MoE');
+    expect(moeStage.actionDetail).toContain('6/128');
+    expect(moeStage.actionDetail).toContain('0 B cache');
+    expect(moeStage.rmsText).toBe('RMS 1.37');
+    expect(moeStage.disclaimer).toBe(SPINE_REPLAY_DISCLAIMER);
+
+    // 4. Bay 06 GQA (progress = 0.14 -> bay 6) in BF16 vs FP8 Selective
+    const gqaBf16 = describeSpineWaveStage(0.14, NEMOTRON_SPEC, 'bf16', summaries, 1);
+    expect(gqaBf16.stageKind).toBe('gqa');
+    expect(gqaBf16.bayId).toBe(6);
+    expect(gqaBf16.title).toContain('Bay 06');
+    expect(gqaBf16.title).toContain('GQA Attention');
+    expect(gqaBf16.title).toContain('1/6 KV bays');
+    expect(gqaBf16.actionDetail).toContain('+6 KiB/tok');
+    expect(gqaBf16.actionDetail).toContain('BF16');
+    expect(gqaBf16.actionDetail).not.toContain('+3 KiB/tok');
+    expect(gqaBf16.rmsText).toBe('RMS 1.48');
+    expect(gqaBf16.disclaimer).toBe(SPINE_REPLAY_DISCLAIMER);
+
+    const gqaFp8 = describeSpineWaveStage(0.14, NEMOTRON_SPEC, 'fp8_selective', summaries, 1);
+    expect(gqaFp8.stageKind).toBe('gqa');
+    expect(gqaFp8.bayId).toBe(6);
+    expect(gqaFp8.actionDetail).toContain('+3 KiB/tok');
+    expect(gqaFp8.actionDetail).toContain('FP8');
+    expect(gqaFp8.actionDetail).not.toContain('+6 KiB/tok');
+    expect(gqaFp8.disclaimer).toBe(SPINE_REPLAY_DISCLAIMER);
+
+    // 5. Final RMSNorm (0.93)
+    const normStage = describeSpineWaveStage(0.93, NEMOTRON_SPEC, 'bf16', summaries);
+    expect(normStage.stageKind).toBe('final_norm');
+    expect(normStage.bayId).toBeNull();
+    expect(normStage.title).toContain('Final RMSNorm');
+    expect(normStage.rmsText).toBeNull();
+    expect(normStage.progressPct).toBe(93);
+    expect(normStage.disclaimer).toBe(SPINE_REPLAY_DISCLAIMER);
+
+    // 6. Output LM Head (0.99)
+    const outStage = describeSpineWaveStage(0.99, NEMOTRON_SPEC, 'fp8_selective', summaries);
+    expect(outStage.stageKind).toBe('output');
+    expect(outStage.bayId).toBeNull();
+    expect(outStage.title).toContain('Output');
+    expect(outStage.actionDetail).toContain('131,072');
+    expect(outStage.rmsText).toBeNull();
+    expect(outStage.progressPct).toBe(99);
+    expect(outStage.disclaimer).toBe(SPINE_REPLAY_DISCLAIMER);
+
+    // Out-of-range clamping safety
+    expect(describeSpineWaveStage(-0.5, NEMOTRON_SPEC, 'bf16').stageKind).toBe('embedding');
+    expect(describeSpineWaveStage(1.5, NEMOTRON_SPEC, 'bf16').stageKind).toBe('output');
+    expect(describeSpineWaveStage(Number.NaN, NEMOTRON_SPEC, 'bf16').disclaimer).toBe(
+      SPINE_REPLAY_DISCLAIMER,
+    );
+  });
+
+  it('preserves bit-for-bit fast wave defaults and sharpens single-bay focus in instructional mode', () => {
+    const none = buildMacroSpine({
+      spec: NEMOTRON_SPEC,
+      tokens: 8,
+      precision: 'bf16',
+      selectedBay: null,
+      hoveredBay: null,
+      propagationWave: null,
+    });
+    const fastDefault = buildMacroSpine({
+      spec: NEMOTRON_SPEC,
+      tokens: 8,
+      precision: 'bf16',
+      selectedBay: null,
+      hoveredBay: null,
+      propagationWave: { progress: 0.5 },
+    });
+    const fastExplicit = buildMacroSpine({
+      spec: NEMOTRON_SPEC,
+      tokens: 8,
+      precision: 'bf16',
+      selectedBay: null,
+      hoveredBay: null,
+      propagationWave: { progress: 0.5, mode: 'fast' },
+    });
+    const instructionalMid = buildMacroSpine({
+      spec: NEMOTRON_SPEC,
+      tokens: 8,
+      precision: 'bf16',
+      selectedBay: null,
+      hoveredBay: null,
+      propagationWave: { progress: 0.5, mode: 'instructional' },
+    });
+
+    // Omitted mode === explicit 'fast' bit-for-bit
+    expect(Array.from(fastExplicit.solidData)).toEqual(Array.from(fastDefault.solidData));
+    expect(Array.from(fastExplicit.ribbonData)).toEqual(Array.from(fastDefault.ribbonData));
+    expect(Array.from(fastExplicit.lineData)).toEqual(Array.from(fastDefault.lineData));
+
+    const highlightedResidualBays = (sc: ReturnType<typeof buildMacroSpine>) =>
+      extractSolids(sc)
+        .filter((s) => s.bayId > 0 && Math.abs(s.cx - RESIDUAL_X) < 1e-4 && s.hl === 1)
+        .map((s) => s.bayId)
+        .sort((a, b) => a - b);
+
+    // Null wave highlights 0 residual bay nodes
+    expect(highlightedResidualBays(none)).toEqual([]);
+
+    // Fast wave at 0.5 spans a wider multi-bay blur (4 residual nodes: bays 25..28)
+    expect(highlightedResidualBays(fastExplicit)).toEqual([25, 26, 27, 28]);
+
+    // Instructional wave at 0.5 focuses strictly on the single active bay matching describeSpineWaveStage (Bay 28 MoE)
+    const midStage = describeSpineWaveStage(0.5, NEMOTRON_SPEC, 'bf16');
+    expect(midStage.bayId).toBe(28);
+    expect(midStage.stageKind).toBe('moe');
+    expect(highlightedResidualBays(instructionalMid)).toEqual([28]);
+
+    const midSolids = extractSolids(instructionalMid);
+    const moe28Router = midSolids.find((s) => s.bayId === 28 && Math.abs(s.cx - -0.05) < 1e-4);
+    const mamba26Ssm = midSolids.find((s) => s.bayId === 26 && Math.abs(s.cx - -1.35) < 1e-4);
+    const moe25Router = midSolids.find((s) => s.bayId === 25 && Math.abs(s.cx - -0.05) < 1e-4);
+    expect(moe28Router?.hl).toBe(1);
+    expect(mamba26Ssm?.hl).toBe(0);
+    expect(moe25Router?.hl).toBe(0);
+
+    // Instructional MoE bay emits amber focus ribbons while spine beacon stays tighter (ey = 1.55 vs 2.5)
+    const midRibbons = extractRibbons(instructionalMid);
+    const fastBeacon = extractRibbons(fastExplicit).find(
+      (r) => Math.abs(r.cx - RESIDUAL_X) < 1e-4 && r.colorId === RIBBON_COLOR_EMERALD && r.alpha >= 0.85,
+    );
+    const instrBeacon = midRibbons.find(
+      (r) => Math.abs(r.cx - RESIDUAL_X) < 1e-4 && r.colorId === RIBBON_COLOR_EMERALD && r.alpha >= 0.90,
+    );
+    expect(fastBeacon?.ey).toBeCloseTo(2.5, 4);
+    expect(instrBeacon?.ey).toBeCloseTo(1.55, 4);
+    expect(midRibbons.some((r) => r.colorId === RIBBON_COLOR_AMBER && r.alpha >= 0.85)).toBe(true);
+
+    // Verify instructional single-bay focus on Bay 01 Mamba (0.06), Bay 06 GQA (0.14), Final Norm (0.93), and Output (0.99)
+    const instrMamba = buildMacroSpine({
+      spec: NEMOTRON_SPEC,
+      tokens: 8,
+      precision: 'bf16',
+      selectedBay: null,
+      hoveredBay: null,
+      propagationWave: { progress: 0.06, mode: 'instructional' },
+    });
+    expect(highlightedResidualBays(instrMamba)).toEqual([1]);
+    expect(
+      extractSolids(instrMamba).find((s) => s.bayId === 1 && Math.abs(s.cx - -1.35) < 1e-4)?.hl,
+    ).toBe(1);
+    expect(
+      extractRibbons(instrMamba).some((r) => r.colorId === RIBBON_COLOR_CYAN && r.alpha >= 0.85),
+    ).toBe(true);
+
+    const instrGqa = buildMacroSpine({
+      spec: NEMOTRON_SPEC,
+      tokens: 8,
+      precision: 'fp8_selective',
+      selectedBay: null,
+      hoveredBay: null,
+      propagationWave: { progress: 0.14, mode: 'instructional' },
+    });
+    expect(highlightedResidualBays(instrGqa)).toEqual([6]);
+    const gqa06KvSlices = extractSolids(instrGqa).filter(
+      (s) =>
+        Math.abs(s.ex - 0.36) < 1e-4 &&
+        Math.abs(s.ey - 0.52) < 1e-4 &&
+        Math.abs(s.ez - 0.30) < 1e-4 &&
+        s.hl === 1,
+    );
+    expect(gqa06KvSlices).toHaveLength(4);
+    expect(gqa06KvSlices.every((s) => s.bayId === 6 && s.fp8 === 1)).toBe(true);
+
+    const instrNorm = buildMacroSpine({
+      spec: NEMOTRON_SPEC,
+      tokens: 8,
+      precision: 'bf16',
+      selectedBay: null,
+      hoveredBay: null,
+      propagationWave: { progress: 0.93, mode: 'instructional' },
+    });
+    expect(highlightedResidualBays(instrNorm)).toEqual([]);
+    const normSolids = extractSolids(instrNorm);
+    expect(normSolids.find((s) => s.bayId === 0 && Math.abs(s.cy - FINAL_NORM_Y) < 1e-4)?.hl).toBe(1);
+    expect(normSolids.find((s) => s.bayId === 0 && Math.abs(s.cy - LM_HEAD_Y) < 1e-4)?.hl).toBe(0);
+    expect(normSolids.find((s) => s.bayId === 0 && Math.abs(s.cy - OUTPUT_LOGITS_Y) < 1e-4)?.hl).toBe(0);
+
+    const instrOut = buildMacroSpine({
+      spec: NEMOTRON_SPEC,
+      tokens: 8,
+      precision: 'bf16',
+      selectedBay: null,
+      hoveredBay: null,
+      propagationWave: { progress: 0.99, mode: 'instructional' },
+    });
+    const outSolids = extractSolids(instrOut);
+    expect(outSolids.find((s) => s.bayId === 0 && Math.abs(s.cy - FINAL_NORM_Y) < 1e-4)?.hl).toBe(0);
+    expect(outSolids.find((s) => s.bayId === 0 && Math.abs(s.cy - LM_HEAD_Y) < 1e-4)?.hl).toBe(1);
+    expect(outSolids.find((s) => s.bayId === 0 && Math.abs(s.cy - OUTPUT_LOGITS_Y) < 1e-4)?.hl).toBe(1);
   });
 });

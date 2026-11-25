@@ -1,5 +1,8 @@
+import { formatKiB, formatMiB, memoryFor } from '../model/memory';
 import {
   bodyPrecision,
+  countByKind,
+  formatBayId,
   kvCachePrecision,
   type BayDescriptor,
   type NemotronSpec,
@@ -290,11 +293,49 @@ function emitCuboidEdges(s: SolidSpec, dedupMap: Map<string, LineSpec>): void {
   }
 }
 
+export type SpinePropagationWaveMode = 'fast' | 'instructional';
+
+/** Tight single-bay neighborhood window (in bay units) used by instructional replay mode. */
+export const INSTRUCTIONAL_BAY_WINDOW = 1.2 as const;
+
+/** Normalized stage thresholds shared by instructional replay geometry and the Tower stage HUD. */
+export const SPINE_STAGE_EMBED_END = 0.05 as const;
+export const SPINE_STAGE_BAYS_END = 0.91 as const;
+export const SPINE_STAGE_NORM_END = 0.96 as const;
+
+export const SPINE_REPLAY_DISCLAIMER =
+  'Educational replay · not measured compute time' as const;
+
+export type SpineWaveStageKind =
+  | 'embedding'
+  | 'mamba'
+  | 'moe'
+  | 'gqa'
+  | 'final_norm'
+  | 'output';
+
+export interface SpineWaveStageInfo {
+  readonly stageKind: SpineWaveStageKind;
+  readonly bayId: number | null;
+  readonly title: string;
+  readonly actionDetail: string;
+  readonly rmsText: string | null;
+  readonly progressPct: number;
+  readonly disclaimer: typeof SPINE_REPLAY_DISCLAIMER;
+}
+
+export interface SpineWaveBaySummaryInput {
+  readonly bayId: number;
+  readonly rmsOut: ArrayLike<number>;
+}
+
 export interface SpinePropagationWave {
   /** Normalized progress in [0, 1] descending from Embedding (0.0) -> Bays 01..52 -> Output (1.0). */
   readonly progress: number;
   /** Optional 1-based token index (defaults to clampedTokens) highlighted on crossed GQA KV tracks. */
   readonly activeTokenIndex?: number;
+  /** Optional pacing/focus mode: `'fast'` (default macro sweep) vs `'instructional'` (tight single-bay focus). */
+  readonly mode?: SpinePropagationWaveMode;
 }
 
 export interface BuildTowerOptions {
@@ -304,6 +345,145 @@ export interface BuildTowerOptions {
   readonly selectedBay: number | null;
   readonly hoveredBay: number | null;
   readonly propagationWave?: SpinePropagationWave | null;
+}
+
+function clampProgress(progress: number): number {
+  return Number.isFinite(progress) ? Math.max(0, Math.min(1, progress)) : 0;
+}
+
+function instructionalBayIndexForProgress(waveP: number, bayCount: number): number {
+  const span = SPINE_STAGE_BAYS_END - SPINE_STAGE_EMBED_END;
+  const norm = (waveP - SPINE_STAGE_EMBED_END) / span;
+  return Math.min(bayCount - 1, Math.max(0, Math.floor(norm * bayCount)));
+}
+
+function extractStageRmsText(
+  bayId: number | null,
+  baySummaries?: readonly SpineWaveBaySummaryInput[] | null,
+  activeTokenIndex?: number,
+): string | null {
+  if (bayId === null || !baySummaries || baySummaries.length === 0) return null;
+  const summary = baySummaries.find((entry) => entry.bayId === bayId);
+  if (!summary || summary.rmsOut.length === 0) return null;
+  const rawIdx =
+    activeTokenIndex !== undefined && Number.isFinite(activeTokenIndex)
+      ? Math.trunc(activeTokenIndex)
+      : summary.rmsOut.length - 1;
+  const idx = Math.max(0, Math.min(summary.rmsOut.length - 1, rawIdx));
+  const val = summary.rmsOut[idx];
+  if (!Number.isFinite(val)) return null;
+  return `RMS ${val.toFixed(2)}`;
+}
+
+/**
+ * Pure stage descriptor for the Tower propagation replay HUD.
+ * Maps progress in [0, 1] across Embedding (< 0.05), Bays 01..52 (0.05..0.91),
+ * Final RMSNorm (0.91..0.96), and Output LM Head (>= 0.96) with precision-accurate
+ * architectural copy and an explicit educational-replay disclaimer.
+ */
+export function describeSpineWaveStage(
+  progress: number,
+  spec: NemotronSpec,
+  precision: PrecisionMode,
+  baySummaries?: readonly SpineWaveBaySummaryInput[] | null,
+  activeTokenIndex?: number,
+): SpineWaveStageInfo {
+  const p = clampProgress(progress);
+  const progressPct = Math.round(p * 100);
+
+  if (p < SPINE_STAGE_EMBED_END) {
+    return {
+      stageKind: 'embedding',
+      bayId: null,
+      title: `Embedding · Untied ${spec.positionalEncoding}`,
+      actionDetail: `Maps token ID into ${spec.hidden.toLocaleString('en-US')}-dim residual stream (${spec.vocabSize.toLocaleString('en-US')} vocab · no positional embedding)`,
+      rmsText: null,
+      progressPct,
+      disclaimer: SPINE_REPLAY_DISCLAIMER,
+    };
+  }
+
+  if (p >= SPINE_STAGE_NORM_END) {
+    return {
+      stageKind: 'output',
+      bayId: null,
+      title: 'Output · Untied LM Head',
+      actionDetail: `Projects ${spec.hidden.toLocaleString('en-US')} → ${spec.vocabSize.toLocaleString('en-US')} vocab logits and next-token softmax`,
+      rmsText: null,
+      progressPct,
+      disclaimer: SPINE_REPLAY_DISCLAIMER,
+    };
+  }
+
+  if (p >= SPINE_STAGE_BAYS_END) {
+    return {
+      stageKind: 'final_norm',
+      bayId: null,
+      title: `Final RMSNorm · Post-${spec.bays.length} Stream`,
+      actionDetail: `Normalizes final ${spec.hidden.toLocaleString('en-US')}-dim residual stream (ε = 1e-5) before untied LM head`,
+      rmsText: null,
+      progressPct,
+      disclaimer: SPINE_REPLAY_DISCLAIMER,
+    };
+  }
+
+  const bayIdx = instructionalBayIndexForProgress(p, spec.bays.length);
+  const bay = spec.bays[bayIdx];
+  const counts = countByKind(spec);
+  let kindOrdinal = 0;
+  for (let i = 0; i <= bayIdx; i++) {
+    if (spec.bays[i].kind === bay.kind) kindOrdinal++;
+  }
+
+  const mem = memoryFor(spec, 1, precision);
+  const rmsText = extractStageRmsText(bay.id, baySummaries, activeTokenIndex);
+  const bayLabel = `Bay ${formatBayId(bay.id)}`;
+
+  if (bay.kind === 'M') {
+    const fixedMambaText = formatMiB(mem.fixedMambaBytes, 1);
+    const precisionNote =
+      precision === 'fp8_selective'
+        ? bay.feeder
+          ? 'BF16 feeder preserved'
+          : 'BF16 Conv1D · FP8 body'
+        : '0 B/tok growth';
+    return {
+      stageKind: 'mamba',
+      bayId: bay.id,
+      title: `${bayLabel} · Mamba-2${bay.feeder ? ' Feeder' : ''} (${kindOrdinal}/${counts.M})`,
+      actionDetail: `Updates fixed ${fixedMambaText} SSM state in place (FP32 · ${precisionNote})`,
+      rmsText,
+      progressPct,
+      disclaimer: SPINE_REPLAY_DISCLAIMER,
+    };
+  }
+
+  if (bay.kind === 'E') {
+    const sharedRatio = Math.round(spec.moe.sharedWidth / spec.moe.width);
+    const bodyLabel = precision === 'fp8_selective' ? 'FP8' : 'BF16';
+    return {
+      stageKind: 'moe',
+      bayId: bay.id,
+      title: `${bayLabel} · MoE ${spec.moe.routed}+${spec.moe.shared} (${kindOrdinal}/${counts.E})`,
+      actionDetail: `Activates ${spec.moe.active}/${spec.moe.routed} routed + ${sharedRatio}× shared (0 B cache · ${bodyLabel})`,
+      rmsText,
+      progressPct,
+      disclaimer: SPINE_REPLAY_DISCLAIMER,
+    };
+  }
+
+  const kvPerBayBytes = counts['*'] > 0 ? mem.kvBytesPerToken / counts['*'] : 0;
+  const kvPrecLabel = precision === 'fp8_selective' ? 'FP8' : 'BF16';
+  const bodySuffix = precision === 'fp8_selective' ? ' · BF16 body' : '';
+  return {
+    stageKind: 'gqa',
+    bayId: bay.id,
+    title: `${bayLabel} · GQA Attention (${kindOrdinal}/${counts['*']} KV bays)`,
+    actionDetail: `Appends +1 KV slice onto +Z (+${formatKiB(kvPerBayBytes)}/bay · +${formatKiB(mem.kvBytesPerToken)}/tok ${kvPrecLabel}${bodySuffix})`,
+    rmsText,
+    progressPct,
+    disclaimer: SPINE_REPLAY_DISCLAIMER,
+  };
 }
 
 /**
@@ -327,6 +507,53 @@ function waveProgressToWorldY(waveP: number): number {
 }
 
 /**
+ * Continuous world-Y mapping for instructional replay mode, synchronized exactly with
+ * `describeSpineWaveStage` stage boundaries (Embedding < 0.05, Bays 01..52 in 0.05..0.91,
+ * Final RMSNorm in 0.91..0.96, Output LM Head >= 0.96).
+ */
+function instructionalWaveProgressToWorldY(waveP: number, bayCount: number): number {
+  if (waveP <= 0) return EMBED_Y;
+  if (waveP >= 1) return OUTPUT_LOGITS_Y;
+
+  const embedExitY = 0.5 * (EMBED_Y + bayCenterY(1));
+  if (waveP < SPINE_STAGE_EMBED_END) {
+    const t = waveP / SPINE_STAGE_EMBED_END;
+    return EMBED_Y + (embedExitY - EMBED_Y) * t;
+  }
+
+  const normEntryY = 0.5 * (bayCenterY(bayCount) + FINAL_NORM_Y);
+  if (waveP < SPINE_STAGE_BAYS_END) {
+    const span = SPINE_STAGE_BAYS_END - SPINE_STAGE_EMBED_END;
+    const bayCoord = 0.5 + ((waveP - SPINE_STAGE_EMBED_END) / span) * bayCount;
+    if (bayCoord <= 1) {
+      return embedExitY + (bayCenterY(1) - embedExitY) * ((bayCoord - 0.5) * 2);
+    }
+    if (bayCoord >= bayCount) {
+      return bayCenterY(bayCount) + (normEntryY - bayCenterY(bayCount)) * ((bayCoord - bayCount) * 2);
+    }
+    const lo = Math.floor(bayCoord);
+    const hi = Math.min(bayCount, lo + 1);
+    const frac = bayCoord - lo;
+    return bayCenterY(lo) + (bayCenterY(hi) - bayCenterY(lo)) * frac;
+  }
+
+  const normExitY = 0.5 * (FINAL_NORM_Y + LM_HEAD_Y);
+  if (waveP < SPINE_STAGE_NORM_END) {
+    const t = (waveP - SPINE_STAGE_BAYS_END) / (SPINE_STAGE_NORM_END - SPINE_STAGE_BAYS_END);
+    if (t <= 0.5) {
+      return normEntryY + (FINAL_NORM_Y - normEntryY) * (t * 2);
+    }
+    return FINAL_NORM_Y + (normExitY - FINAL_NORM_Y) * ((t - 0.5) * 2);
+  }
+
+  const t = (waveP - SPINE_STAGE_NORM_END) / (1 - SPINE_STAGE_NORM_END);
+  if (t <= 0.5) {
+    return normExitY + (LM_HEAD_Y - normExitY) * (t * 2);
+  }
+  return LM_HEAD_Y + (OUTPUT_LOGITS_Y - LM_HEAD_Y) * ((t - 0.5) * 2);
+}
+
+/**
  * Build the vertical top-to-bottom 52-layer Nemotron 3 Nano 3D tower in llm-viz visual language.
  */
 export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry {
@@ -336,9 +563,31 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
   const isFp8Mode = precision === 'fp8_selective';
 
   const waveActive = propagationWave != null && Number.isFinite(propagationWave.progress);
-  const waveP = waveActive ? Math.max(0, Math.min(1, propagationWave!.progress)) : -1;
-  const waveBay = waveActive ? waveP * 53 : -100;
-  const waveY = waveActive ? waveProgressToWorldY(waveP) : 0;
+  const waveP = waveActive ? clampProgress(propagationWave!.progress) : -1;
+  const waveMode: SpinePropagationWaveMode =
+    waveActive && propagationWave!.mode === 'instructional' ? 'instructional' : 'fast';
+  const isInstructional = waveActive && waveMode === 'instructional';
+  const bayWindow = isInstructional ? INSTRUCTIONAL_BAY_WINDOW : 2.2;
+  const instructionalActiveBayId =
+    isInstructional && waveP >= SPINE_STAGE_EMBED_END && waveP < SPINE_STAGE_BAYS_END
+      ? spec.bays[instructionalBayIndexForProgress(waveP, spec.bays.length)].id
+      : null;
+  const waveBay = !waveActive
+    ? -100
+    : isInstructional
+      ? waveP < SPINE_STAGE_EMBED_END
+        ? -10
+        : waveP >= SPINE_STAGE_BAYS_END
+          ? spec.bays.length + 10
+          : 0.5 +
+            ((waveP - SPINE_STAGE_EMBED_END) / (SPINE_STAGE_BAYS_END - SPINE_STAGE_EMBED_END)) *
+              spec.bays.length
+      : waveP * 53;
+  const waveY = !waveActive
+    ? 0
+    : isInstructional
+      ? instructionalWaveProgressToWorldY(waveP, spec.bays.length)
+      : waveProgressToWorldY(waveP);
   const waveToken = waveActive
     ? Math.max(1, Math.min(clampedTokens, Math.round(propagationWave!.activeTokenIndex ?? clampedTokens)))
     : clampedTokens;
@@ -418,21 +667,21 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
       cx: RESIDUAL_X,
       cy: waveY,
       cz: 0,
-      ex: 0.74,
-      ey: 2.5,
-      ez: 0.74,
+      ex: isInstructional ? 0.82 : 0.74,
+      ey: isInstructional ? 1.55 : 2.5,
+      ez: isInstructional ? 0.82 : 0.74,
       kind: RIBBON_KIND_BOX,
       colorId: RIBBON_COLOR_EMERALD,
-      alpha: 0.86,
+      alpha: isInstructional ? 0.94 : 0.86,
     });
     // Leading downward directional emerald arrowhead along the spine
     if (waveY > spineBottomY + 1.2) {
       ribbons.push({
         cx: RESIDUAL_X,
-        cy: Math.max(spineBottomY + 0.6, waveY - 1.55),
+        cy: Math.max(spineBottomY + 0.6, waveY - (isInstructional ? 1.25 : 1.55)),
         cz: 0,
         ex: 0.64,
-        ey: 1.15,
+        ey: isInstructional ? 0.96 : 1.15,
         ez: 0.64,
         kind: RIBBON_KIND_ARROW_NEG_Y,
         colorId: RIBBON_COLOR_EMERALD,
@@ -442,7 +691,7 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
   }
 
   // --- 2. Top Bookend: Embedding Matrix (131,072 × 2,688) ---
-  const waveAtEmbed = waveActive && waveP <= 0.08;
+  const waveAtEmbed = waveActive && (isInstructional ? waveP < SPINE_STAGE_EMBED_END : waveP <= 0.08);
   pushSolid(
     {
       cx: 1.2, cy: EMBED_Y, cz: 0,
@@ -500,9 +749,14 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
     const isPreservedBf16 = isFp8Mode && bay.sensitive;
 
     const waveDist = waveActive ? Math.abs(bay.id - waveBay) : Infinity;
-    const nearWave = waveActive && waveDist <= 2.2;
-    const onWaveCore = waveActive && waveDist <= 1.25;
-    const waveCrossed = waveActive && waveBay >= bay.id - 0.35;
+    const nearWave = waveActive && waveDist <= bayWindow;
+    const onWaveCore = isInstructional
+      ? bay.id === instructionalActiveBayId
+      : waveActive && waveDist <= 1.25;
+    const waveCrossed = isInstructional
+      ? waveP >= SPINE_STAGE_BAYS_END ||
+        (instructionalActiveBayId !== null && bay.id <= instructionalActiveBayId)
+      : waveActive && waveBay >= bay.id - 0.35;
 
     const lineStyle = isActive
       ? LINE_STYLE_ACTIVE
@@ -515,7 +769,7 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
     const fp8Flag = bodyIsFp8 ? 1 : 0;
 
     // Residual stream activation node on the right spine
-    const resNodeActive = isActive || nearWave;
+    const resNodeActive = isActive || (isInstructional ? onWaveCore : nearWave);
     pushSolid(
       {
         cx: RESIDUAL_X, cy, cz: 0,
@@ -527,8 +781,18 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
         cellScale: 0.20,
         highlightFlag: resNodeActive ? 1 : 0,
         lineStyle: resNodeActive ? LINE_STYLE_ACTIVE : LINE_STYLE_NEUTRAL,
-        cssWidth: isActive ? 1.6 : onWaveCore ? 1.8 : nearWave ? 1.4 : 0.85,
-        lineAlpha: resNodeActive ? 1.0 : 0.45,
+        cssWidth: isActive
+          ? 1.6
+          : onWaveCore
+            ? isInstructional
+              ? 1.95
+              : 1.8
+            : nearWave
+              ? isInstructional
+                ? 1.2
+                : 1.4
+              : 0.85,
+        lineAlpha: resNodeActive ? 1.0 : isInstructional && nearWave ? 0.72 : 0.45,
         pickPart: 'residual-node',
       },
       true,
@@ -546,8 +810,8 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
         cellScale: 0.18,
         highlightFlag: onWaveCore ? 1 : highlightFlag,
         lineStyle: onWaveCore ? LINE_STYLE_ACTIVE : lineStyle,
-        cssWidth: onWaveCore ? 1.55 : cssWidth,
-        lineAlpha: onWaveCore ? 0.96 : lineAlpha,
+        cssWidth: onWaveCore ? (isInstructional ? 1.7 : 1.55) : cssWidth,
+        lineAlpha: onWaveCore ? (isInstructional ? 0.98 : 0.96) : lineAlpha,
         pickPart: 'rmsnorm',
       },
       true,
@@ -556,10 +820,24 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
     // Emerald tap ribbon connecting residual spine <-> pre-norm
     ribbons.push({
       cx: 3.88, cy, cz: 0,
-      ex: 0.98, ey: onWaveCore ? 0.36 : 0.28, ez: onWaveCore ? 0.34 : 0.26,
+      ex: 0.98,
+      ey: onWaveCore ? (isInstructional ? 0.44 : 0.36) : 0.28,
+      ez: onWaveCore ? (isInstructional ? 0.40 : 0.34) : 0.26,
       kind: RIBBON_KIND_BOX,
       colorId: RIBBON_COLOR_EMERALD,
-      alpha: onWaveCore ? 0.88 : nearWave ? 0.68 : isActive ? 0.62 : bodyIsFp8 ? 0.18 : 0.36,
+      alpha: onWaveCore
+        ? isInstructional
+          ? 0.94
+          : 0.88
+        : nearWave
+          ? isInstructional
+            ? 0.52
+            : 0.68
+          : isActive
+            ? 0.62
+            : bodyIsFp8
+              ? 0.18
+              : 0.36,
     });
 
     if (bay.kind === 'M') {
@@ -596,7 +874,7 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
           cellScale: 0.20,
           highlightFlag: convHot ? 1 : convGold ? 2 : 0,
           lineStyle: convHot ? LINE_STYLE_ACTIVE : convGold ? LINE_STYLE_BF16_GOLD : LINE_STYLE_NEUTRAL,
-          cssWidth: convHot ? 1.7 : convGold ? 1.2 : 0.95,
+          cssWidth: convHot ? (isInstructional && onWaveCore ? 1.85 : 1.7) : convGold ? 1.2 : 0.95,
           lineAlpha: convHot ? 1.0 : convGold ? 0.82 : 0.55,
           pickPart: 'conv1d',
         },
@@ -604,19 +882,19 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
       );
 
       // Square Cyan-Speckled SSM State Register (64 × 64 × 128, FP32 storage, phase steps with T!)
-      const ssmPulsed = isActive || nearWave;
+      const ssmPulsed = isActive || (isInstructional ? onWaveCore : nearWave);
       pushSolid(
         {
           cx: -1.35, cy, cz: 0,
           ex: 1.50, ey: 1.10, ez: 1.10,
           cellFamily: CELL_SSM_CYAN,
           fp8Flag: 0, // SSM state is always FP32
-          phase: ssmPhase + bay.id * 0.37,
+          phase: ssmPhase + bay.id * 0.37 + (isInstructional && onWaveCore ? 0.5 : 0),
           bayId: bay.id,
           cellScale: 0.20,
           highlightFlag: ssmPulsed ? 1 : highlightFlag,
           lineStyle: ssmPulsed ? LINE_STYLE_ACTIVE : lineStyle,
-          cssWidth: ssmPulsed ? 1.8 : isPreservedBf16 ? 1.45 : 1.0,
+          cssWidth: ssmPulsed ? (isInstructional && onWaveCore ? 2.0 : 1.8) : isPreservedBf16 ? 1.45 : 1.0,
           lineAlpha: ssmPulsed ? 1.0 : isPreservedBf16 ? 0.95 : 0.62,
           pickPart: 'ssm-register',
         },
@@ -626,11 +904,22 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
       if (onWaveCore) {
         ribbons.push({
           cx: -0.45, cy, cz: 0.04,
-          ex: 1.10, ey: 0.44, ez: 0.44,
+          ex: 1.10,
+          ey: isInstructional ? 0.56 : 0.44,
+          ez: isInstructional ? 0.52 : 0.44,
           kind: RIBBON_KIND_ARROW_NEG_X,
           colorId: RIBBON_COLOR_CYAN,
-          alpha: 0.68,
+          alpha: isInstructional ? 0.88 : 0.68,
         });
+        if (isInstructional) {
+          ribbons.push({
+            cx: -2.42, cy, cz: 0.04,
+            ex: 0.80, ey: 0.44, ez: 0.40,
+            kind: RIBBON_KIND_ARROW_NEG_X,
+            colorId: RIBBON_COLOR_CYAN,
+            alpha: 0.78,
+          });
+        }
       }
 
       // Gated Output Projection (4,096 -> 2,688)
@@ -680,7 +969,7 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
       });
     } else if (bay.kind === 'E') {
       // MoE (×23): Double-width Shared Expert (3,712) + Sigmoid Router (amber) + Tiled Bank of Routed Experts (6 active amber!)
-      const moeFlashed = isActive || nearWave;
+      const moeFlashed = isActive || (isInstructional ? onWaveCore : nearWave);
       // Double-width shared expert slab connected cleanly beside pre-norm
       pushSolid(
         {
@@ -756,11 +1045,22 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
       if (onWaveCore) {
         ribbons.push({
           cx: -0.58, cy, cz: 0,
-          ex: 0.76, ey: 0.36, ez: 0.36,
+          ex: 0.76,
+          ey: isInstructional ? 0.48 : 0.36,
+          ez: isInstructional ? 0.44 : 0.36,
           kind: RIBBON_KIND_ARROW_NEG_X,
           colorId: RIBBON_COLOR_AMBER,
-          alpha: 0.70,
+          alpha: isInstructional ? 0.88 : 0.70,
         });
+        if (isInstructional) {
+          ribbons.push({
+            cx: -2.82, cy: cy + 0.08, cz: 0,
+            ex: 4.35, ey: 0.28, ez: 1.50,
+            kind: RIBBON_KIND_BOX,
+            colorId: RIBBON_COLOR_AMBER,
+            alpha: 0.30,
+          });
+        }
       }
 
       // Periwinkle block arrow from pre-norm into shared + router
@@ -885,13 +1185,15 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
         alpha: onWaveCore ? 0.82 : 0.48,
       });
 
-      if (nearWave) {
+      if (isInstructional ? onWaveCore : nearWave) {
         ribbons.push({
           cx: -0.30, cy: cy + 0.08, cz: kvSliceCenterZ(waveToken) - 0.55,
-          ex: 0.46, ey: 0.36, ez: 0.95,
+          ex: isInstructional ? 0.62 : 0.46,
+          ey: isInstructional ? 0.48 : 0.36,
+          ez: 0.95,
           kind: RIBBON_KIND_ARROW_POS_Z,
           colorId: RIBBON_COLOR_CYAN,
-          alpha: onWaveCore ? 0.80 : 0.58,
+          alpha: isInstructional ? 0.92 : onWaveCore ? 0.80 : 0.58,
         });
       }
 
@@ -1011,8 +1313,11 @@ export function buildMacroSpine(options: BuildTowerOptions): MacroSceneGeometry 
   }
 
   // --- 5. Bottom Bookends: Final RMSNorm -> Untied LM Head -> Output Logits (131,072) ---
-  const waveAtFinalNorm = waveActive && waveP >= 0.94;
-  const waveAtOutput = waveActive && waveP >= 0.97;
+  const waveAtFinalNorm =
+    waveActive &&
+    (isInstructional ? waveP >= SPINE_STAGE_BAYS_END && waveP < SPINE_STAGE_NORM_END : waveP >= 0.94);
+  const waveAtOutput =
+    waveActive && (isInstructional ? waveP >= SPINE_STAGE_NORM_END : waveP >= 0.97);
   pushSolid(
     {
       cx: 1.6, cy: FINAL_NORM_Y, cz: 0,
