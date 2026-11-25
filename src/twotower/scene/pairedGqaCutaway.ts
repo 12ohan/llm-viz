@@ -36,7 +36,7 @@ import {
   type GqaSimResult,
   type GqaTensorKey,
 } from '../../math/gqaSim';
-import type { CameraPose } from '../../model/state';
+import { MIN_CAMERA_DISTANCE, type CameraPose } from '../../model/state';
 import type { AABB, ViewportMetrics } from '../../render/camera';
 import {
   LINE_INSTANCE_FLOATS,
@@ -238,13 +238,25 @@ export interface PairedGqaDiagnostics {
   readonly atlasSecondaryMaskedCells: number;
 }
 
-/** Reuse Nano's exact 8-corner projective camera fitter for paired & solo TwoTower GQA views. */
+/**
+ * Calibrated 8-corner projective camera fitter for paired & solo TwoTower GQA views.
+ * Uses a slightly tighter default viewing angle and margin so 3D sheets fill ~60–75% of the canvas.
+ */
 export function fitPairedGqaCamera(
   bounds: AABB,
   metrics: ViewportMetrics,
   options?: SpatialGqaFitOptions,
 ): CameraPose {
-  return fitSpatialGqaCamera(bounds, metrics, options);
+  const isNarrow = options?.isNarrow ?? metrics.innerWidth < 760;
+  const pose = fitSpatialGqaCamera(bounds, metrics, {
+    ...options,
+    azimuthDeg: options?.azimuthDeg ?? (isNarrow ? 12 : 14),
+    elevationDeg: options?.elevationDeg ?? (isNarrow ? 26 : 25),
+  });
+  return {
+    ...pose,
+    distance: Math.max(MIN_CAMERA_DISTANCE, pose.distance * 0.90),
+  };
 }
 
 // ============================================================================
@@ -1287,7 +1299,7 @@ export function buildTwoTowerPairedGqaScene(
     b.landmarks.push({
       id: 'ctx-wing-header',
       label: historicalBoundaryMismatch
-        ? `Context Tower Provenance · Current P=${currentContextPrefixLen} (≠ Prior Denoiser P_cond=${contextPrefixKvLen})`
+        ? `Context Provenance · Cur P=${currentContextPrefixLen} (≠ Prior P_cond=${contextPrefixKvLen})`
         : 'Context Tower Provenance (Causal)',
       sublabel:
         ctxLookup.status === 'available'
@@ -2139,7 +2151,7 @@ export function buildTwoTowerPairedGqaScene(
         {
           id: 'den-kv-bank-landmark',
           label: historicalBoundaryMismatch
-            ? `Historical Concatenated KV (Prior Prefix KV[0..${Math.max(0, P - 1)}] P_cond=${contextPrefixKvLen} ≠ P=${currentContextPrefixLen} + ${blockKvLen} Block / ${allocatedKvCapacity} Cap)`
+            ? `Historical KV · KV[0..${Math.max(0, P - 1)}] (P_cond=${contextPrefixKvLen} ≠ P=${currentContextPrefixLen}) + ${blockKvLen} Blk / ${allocatedKvCapacity} Cap`
             : `Concatenated KV (${contextPrefixKvLen} Prefix + ${blockKvLen} Block / ${allocatedKvCapacity} Cap)`,
           sublabel: historicalBoundaryMismatch
             ? `Prior pass prefix [0..${Math.max(0, P - 1)}] from Rec #${dl.sourceRecordIndex} (NOT current Context P=${currentContextPrefixLen}) · Block [${P}..${K - 1}] denoiser_scratch`
@@ -2287,7 +2299,7 @@ export function buildTwoTowerPairedGqaScene(
     b.landmarks.push({
       id: 'conditioning-bridge-landmark',
       label: historicalBoundaryMismatch
-        ? `Historical Read-Only Prefix Bridge (${prefixSliceDesc} · P_cond=${contextPrefixKvLen} ≠ P=${currentContextPrefixLen})`
+        ? `Historical Prefix Bridge (${prefixSliceDesc} · P_cond=${contextPrefixKvLen} ≠ P=${currentContextPrefixLen})`
         : `Logical Read-Only Prefix Bridge (${prefixSliceDesc})`,
       sublabel: historicalBoundaryMismatch
         ? `${historicalTag} · Prior conditioning does NOT belong to current Context P=${currentContextPrefixLen}`

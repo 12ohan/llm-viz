@@ -2881,39 +2881,42 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       `${badgeLabel} · Rec #${dl.sourceRecordIndex ?? '-'} b${dl.sourceBlockId ?? '-'} r${dl.sourceRefinementIndex ?? '-'} · ` +
       `P=${dl.sourceContextPrefixLen ?? 'n/a'} (cur P=${view.committedPrefixLen}) · ${srcDigest}`;
 
-    // Sidebar prominent provenance banner
+    // Sidebar crisp compact provenance banner
     historicalDenoiserBannerEl.hidden = false;
     historicalDenoiserBannerEl.className = `sp-hist-denoiser-banner${mismatch ? ' is-mismatch' : ''}`;
     historicalDenoiserBannerEl.textContent = '';
+    if (dl.historicalProvenanceWarning) {
+      historicalDenoiserBannerEl.title = dl.historicalProvenanceWarning;
+    } else {
+      historicalDenoiserBannerEl.removeAttribute('title');
+    }
 
     const head = el('div', 'sp-hist-denoiser-head');
     head.append(
       el('span', mismatch ? 'sp-badge sp-badge--warn' : 'sp-badge sp-badge--time', badgeLabel),
-      el(
-        'span',
-        'sp-badge sp-badge--muted',
-        `Rec #${dl.sourceRecordIndex ?? '-'} · b${dl.sourceBlockId ?? '-'} · r=${dl.sourceRefinementIndex ?? '-'}`,
-      ),
     );
     const meta = el('div', 'sp-pill-row');
     meta.append(
       el(
         'span',
-        'sp-badge sp-badge--ctx',
-        `Source Context P=${dl.sourceContextPrefixLen ?? 'n/a'} · digest ${srcDigest}`,
+        'sp-badge sp-badge--muted',
+        `Rec #${dl.sourceRecordIndex ?? '-'} · Blk b${dl.sourceBlockId ?? '-'} · Ref r${dl.sourceRefinementIndex ?? '-'}`,
       ),
       el(
         'span',
-        'sp-badge',
-        `Current P=${view.committedPrefixLen} · digest ${curDigest}`,
+        'sp-badge sp-badge--ctx',
+        `Source P=${dl.sourceContextPrefixLen ?? 'n/a'} (${srcDigest}) → Cur P=${view.committedPrefixLen} (${curDigest})`,
       ),
     );
-    const warnText = el(
-      'p',
-      'sp-note',
-      dl.historicalProvenanceWarning ??
-        `Prior Denoiser pass conditioned on Context P=${dl.sourceContextPrefixLen ?? 'n/a'} (${srcDigest}) — does not match current Context boundary P=${view.committedPrefixLen} (${curDigest}).`,
-    );
+
+    const activeBlk = view.activeBlock;
+    const conciseSummary =
+      activeBlk !== null && dl.sourceBlockId !== activeBlk.blockId
+        ? `Block b${activeBlk.blockId} has not been denoised yet; showing prior Denoiser pass from Rec #${dl.sourceRecordIndex ?? '-'} (P=${dl.sourceContextPrefixLen ?? 'n/a'} ≠ cur P=${view.committedPrefixLen}).`
+        : mismatch
+          ? `Prior Denoiser KV/Mamba conditioning (P=${dl.sourceContextPrefixLen ?? 'n/a'}, ${srcDigest}) does NOT belong to current Context boundary P=${view.committedPrefixLen} (${curDigest}).`
+          : `Showing prior Denoiser pass from Rec #${dl.sourceRecordIndex ?? '-'} at matching Context boundary P=${view.committedPrefixLen}.`;
+    const warnText = el('p', 'sp-note', conciseSummary);
     historicalDenoiserBannerEl.append(head, meta, warnText);
   }
 
@@ -2981,15 +2984,30 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     const activeSession = getActiveDisplaySession();
     const configScope = buildTwoTowerConfigScopeModel(activeSession);
 
-    // 1. Warning Banner & Unmistakable Historical Denoiser Provenance Banner
-    if (scene.warningBanner) {
+    // 1. Warning Banner & Unmistakable Historical Denoiser Provenance Banner (strictly deduplicated!)
+    renderHistoricalDenoiserBanner(view);
+    const historicalBannerShown = !historicalDenoiserBannerEl.hidden;
+    let distinctWarningText: string | null = scene.warningBanner ?? null;
+    if (distinctWarningText && historicalBannerShown) {
+      const histWarn = view.denoiserLookup.historicalProvenanceWarning;
+      const distinctParts = distinctWarningText
+        .split(' | ')
+        .map((part) => part.trim())
+        .filter(
+          (part) =>
+            part.length > 0 &&
+            part !== histWarn &&
+            !part.startsWith('Historical Denoiser pass inspection:'),
+        );
+      distinctWarningText = distinctParts.length > 0 ? distinctParts.join(' | ') : null;
+    }
+    if (distinctWarningText) {
       warningBannerEl.hidden = false;
-      warningBannerEl.textContent = scene.warningBanner;
+      warningBannerEl.textContent = distinctWarningText;
     } else {
       warningBannerEl.hidden = true;
       warningBannerEl.textContent = '';
     }
-    renderHistoricalDenoiserBanner(view);
 
     // 2. Historical Config Guard Card (with Future Config Diff badge)
     historicalConfigCard.textContent = '';
@@ -4411,7 +4429,11 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       el('div', 'sp-tour-subtitle', snap.subtitle),
     );
 
-    // Concise narrative body (scrollable max-height)
+    // Pinned Top Header: Act tabs + Beat counter + progress bar + Title/Subtitle
+    const headerZone = el('div', 'sp-tour-header');
+    headerZone.append(actsBar, head, progTrack, titleWrap);
+
+    // Scrollable Middle Body: Narrative + Takeaways + Live Metrics + Provenance + Epistemic Tag
     const body = el('div', 'sp-tour-body');
     for (const p of snap.paragraphs) {
       body.append(el('p', 'sp-tour-p', p));
@@ -4447,7 +4469,9 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     const epiEl = el('div', 'sp-tour-epistemic', snap.epistemicTag);
     epiEl.dataset.testid = 'tour-epistemic-tag';
 
-    // Interactive controls: Prev, Play/Pause, Next, Restart Tour, Exit Tour
+    body.append(metricsRow, provEl, epiEl);
+
+    // Pinned Bottom Footer Controls: Prev, Play/Pause, Next, Restart Tour, Exit Tour
     const ctrlBar = el('div', 'sp-tour-controls');
     const prevBtn = el('button', 'sp-btn', '← Prev');
     prevBtn.type = 'button';
@@ -4498,17 +4522,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
 
     ctrlBar.append(prevBtn, playBtn, nextBtn, restartBtn, exitBtn);
 
-    tourCard.append(
-      actsBar,
-      head,
-      progTrack,
-      titleWrap,
-      body,
-      metricsRow,
-      provEl,
-      epiEl,
-      ctrlBar,
-    );
+    tourCard.append(headerZone, body, ctrlBar);
   }
 
   // ==========================================================================
@@ -4594,7 +4608,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     outputActiveCell = null;
   }
 
-  function switchViewMode(nextMode: TwoTowerSpatialViewMode, instantFit = false): void {
+  function switchViewMode(nextMode: TwoTowerSpatialViewMode, instantFit = true): void {
     if (nextMode === viewMode && currentScene !== null) return;
     viewMode = nextMode;
     stepperPlaying = false;
@@ -5021,11 +5035,15 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     // Synchronous projected editorial overlay (deduplicated by camera + scene version)
     const { topInsetPx, bottomInsetPx } = getCanvasInsets();
     const tourHighlightPart = tourActive ? tourSnapshot?.highlightPartId ?? null : null;
+    const tourCardVisible = tourActive && !tourCard.hidden && currentMetrics.hostWidth >= 680;
+    const tourRectKey = tourCardVisible
+      ? `${tourCard.offsetLeft},${tourCard.offsetTop},${tourCard.offsetWidth},${tourCard.offsetHeight}`
+      : '';
     const overlayKey =
       `${viewMode}|v${sceneVersion}|${currentMetrics.hostWidth.toFixed(1)}x${currentMetrics.hostHeight.toFixed(1)}|` +
       `${cameraPose.target[0].toFixed(3)},${cameraPose.target[1].toFixed(3)},${cameraPose.target[2].toFixed(3)},` +
       `${cameraPose.distance.toFixed(3)},${cameraPose.azimuthDeg.toFixed(2)},${cameraPose.elevationDeg.toFixed(2)}|` +
-      `${topInsetPx}:${bottomInsetPx}|${tourHighlightPart ?? ''}`;
+      `${topInsetPx}:${bottomInsetPx}|${tourHighlightPart ?? ''}|${tourRectKey}`;
     if (overlayKey !== lastOverlayKey) {
       lastOverlayKey = overlayKey;
       const activePart =
@@ -5038,6 +5056,17 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
               : viewMode === 'output'
                 ? outputHoveredPart ?? outputSelectedPart
                 : null;
+      const popoverAvoidRects =
+        tourCardVisible && tourCard.offsetWidth > 0 && tourCard.offsetHeight > 0
+          ? [
+              {
+                x0: Math.max(0, tourCard.offsetLeft - 8),
+                y0: Math.max(0, tourCard.offsetTop - 8),
+                x1: tourCard.offsetLeft + tourCard.offsetWidth + 8,
+                y1: tourCard.offsetTop + tourCard.offsetHeight + 8,
+              },
+            ]
+          : undefined;
       overlay.update({
         scene: currentScene,
         snapshot: currentSnapshot,
@@ -5046,6 +5075,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
         activeTokens: getActiveRecord(getActiveDisplaySession()).committedPrefixLen,
         topInsetPx,
         bottomInsetPx,
+        popoverAvoidRects,
       });
     }
 

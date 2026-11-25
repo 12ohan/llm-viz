@@ -25,13 +25,14 @@ import {
   type MoeSimResult,
   type RouterPrecisionPolicy,
 } from '../../math/moeSim';
-import type { GqaViewAngle } from '../../model/state';
+import { MIN_CAMERA_DISTANCE, type CameraPose, type GqaViewAngle } from '../../model/state';
+import type { AABB, ViewportMetrics } from '../../render/camera';
 import type { PickBox } from '../../render/pick';
 import { SHEET_REVEAL_UNCOMPUTED } from '../../render/sheets';
 import type { CutawayPartInfo } from '../../scene/cutaways';
 import {
   buildMoECutaway,
-  fitSpatialMoeCamera,
+  fitSpatialMoeCamera as nanoFitSpatialMoeCamera,
   MOE_FIT_BOUNDS,
   MOE_SPATIAL_FIT_BOUNDS,
   parseMoeExpertPartId,
@@ -49,7 +50,28 @@ import {
   type TwoTowerSpatialScene,
 } from './provenance';
 
-export { fitSpatialMoeCamera, MOE_FIT_BOUNDS, MOE_SPATIAL_FIT_BOUNDS, parseMoeExpertPartId };
+export { MOE_FIT_BOUNDS, MOE_SPATIAL_FIT_BOUNDS, parseMoeExpertPartId };
+
+/**
+ * Calibrated TwoTower MoE camera fitter tightening default framing so 3D sheets fill
+ * ~60–75% of the viewport cleanly while preserving all Nano spatial invariants.
+ */
+export function fitSpatialMoeCamera(
+  bounds: AABB,
+  metrics: ViewportMetrics,
+  options?: Parameters<typeof nanoFitSpatialMoeCamera>[2],
+): CameraPose {
+  const isNarrow = options?.isNarrow ?? metrics.innerWidth < 760;
+  const pose = nanoFitSpatialMoeCamera(bounds, metrics, {
+    ...options,
+    azimuthDeg: options?.azimuthDeg ?? (isNarrow ? 13 : 15),
+    elevationDeg: options?.elevationDeg ?? (isNarrow ? 25 : 24),
+  });
+  return {
+    ...pose,
+    distance: Math.max(MIN_CAMERA_DISTANCE, pose.distance * 0.88),
+  };
+}
 
 export interface MoeTop8MarginEntry {
   readonly rank: number; // 1..8
@@ -641,16 +663,29 @@ export function buildTwoTowerMoeScene(
     },
   };
 
-  // Augment landmarks with TwoTower margin + stateless + AdaLN badges (keeping existing IDs intact)
+  // Augment landmarks with concise TwoTower FP64 margin pill & demote redundant secondary labels to
+  // detail tier so overview pills stay well-spaced and never bury Router Bank / Input / W_up sheets.
+  const MOE_DETAIL_LANDMARK_IDS = new Set([
+    'moe-rms',
+    'moe-routed-act',
+    'moe-routed-down',
+    'moe-shared-act',
+    'moe-shared-down',
+  ]);
   const landmarks: LandmarkAnchor[] = [
-    ...nanoScene.landmarks,
+    ...nanoScene.landmarks.map((lm) =>
+      MOE_DETAIL_LANDMARK_IDS.has(lm.id) ? { ...lm, tier: 'detail' as const } : lm,
+    ),
     {
       id: 'twotower-moe-margin',
-      label: `FP64 Top-6 Cutoff: ${marginText}${selectionMargin.isTightMargin ? ' (TIGHT)' : ''}`,
+      label:
+        `FP64 Top-6 Cutoff: #6 ${formatExpertId(selectionMargin.rank6ExpertId)} vs ` +
+        `#7 ${formatExpertId(selectionMargin.rank7ExpertId)} · ` +
+        `Δ = ${selectionMargin.choiceScoreMargin.toFixed(4)}${selectionMargin.isTightMargin ? ' (TIGHT)' : ''}`,
       sublabel:
-        `${towerLabel} ${bayStr} · ${modulationActive ? 'Post-Norm AdaLN + Outer Gate ACTIVE' : 'AdaLN BYPASSED'} · 0 B Stateless` +
+        `${marginText} · ${towerLabel} ${bayStr} · ${modulationActive ? 'Post-Norm AdaLN + Outer Gate ACTIVE' : 'AdaLN BYPASSED'} · 0 B Stateless` +
         (historicalTag ? ` · ${historicalTag}` : ''),
-      world: [0.0, 3.08, -2.55],
+      world: [1.6, 3.25, -3.55],
       partId: 'w-router',
       align: 'top',
       tier: 'primary',

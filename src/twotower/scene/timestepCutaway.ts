@@ -2436,7 +2436,7 @@ export function buildTwoTowerTimestepScene(
     },
     {
       id: 'time-outer-gate',
-      label: 'Outer Residual Gate (d = 8) vs Mamba Internal SiLU(z) Gate (d_inner = 64)',
+      label: 'Outer Gate (d = 8) vs Mamba SiLU(z) (d_inner = 64)',
       sublabel: 'Y = X + gate[8] ⊙ Mixer_out · Distinct from Mamba norm_before_gate=False SiLU(z)',
       world: [4.55, 0.20, 2.86],
       partId: 'gate-contrast',

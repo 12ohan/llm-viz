@@ -796,8 +796,9 @@ test.describe('Nemotron-Labs-TwoTower Stage TT4 · Walkthrough, Timeline, Sample
     await expect(histDenoiserBanner).toBeVisible();
     await expect(histDenoiserBanner).toHaveClass(/is-mismatch/);
     await expect(histDenoiserBanner).toContainText('HISTORICAL DENOISER · BOUNDARY MISMATCH');
-    await expect(histDenoiserBanner).toContainText('Source Context P=8');
-    await expect(histDenoiserBanner).toContainText('Current P=12');
+    await expect(histDenoiserBanner).toContainText('Source P=8');
+    await expect(histDenoiserBanner).toContainText('Cur P=12');
+    await expect(histDenoiserBanner).toContainText('does NOT belong to current Context boundary P=12');
 
     const canvasHistBadge = page.getByTestId('canvas-historical-badge');
     await expect(canvasHistBadge).toBeVisible();

@@ -52,6 +52,7 @@ export interface TwoTowerOverlayUpdateInput {
   readonly activeTokens?: number;
   readonly topInsetPx?: number;
   readonly bottomInsetPx?: number;
+  readonly popoverAvoidRects?: readonly OverlayRect[];
 }
 
 interface PlacedRect {
@@ -403,8 +404,8 @@ export class TwoTowerSpatialOverlay {
 
       const isDetail = lm.tier === 'detail';
       const font = isSheetCutaway ? (isDetail ? monoFont : sheetFont) : pillFont;
-      const maxLabelW = Math.max(140, Math.min(360, hostWidth * 0.48));
-      const rawW = this.measureText(lm.label, font) + (isSheetCutaway ? (isDetail ? 10 : 12) : 16);
+      const maxLabelW = Math.max(180, Math.min(540, hostWidth - 20));
+      const rawW = this.measureText(lm.label, font) + (isSheetCutaway ? (isDetail ? 16 : 18) : 22);
       const w = Math.min(rawW, maxLabelW);
       const h = isSheetCutaway ? (isDetail ? 17 : 18) : 20;
       const gap = isSheetCutaway ? 4 : 6;
@@ -469,7 +470,7 @@ export class TwoTowerSpatialOverlay {
       el.style.opacity = isParticipating ? '1' : DIMMED_LABEL_OPACITY;
       el.style.maxWidth = `${maxLabelW}px`;
       el.textContent = lm.label;
-      el.style.display = 'inline-flex';
+      el.style.display = 'inline-block';
       el.style.transform = `translate3d(${lx.toFixed(1)}px, ${ly.toFixed(1)}px, 0)`;
 
       const placedRect: PlacedRect = { x0: lx, y0: ly, x1: lx + w, y1: ly + h };
@@ -499,6 +500,7 @@ export class TwoTowerSpatialOverlay {
       minY,
       maxY,
       scene.activeCellGrids,
+      input.popoverAvoidRects,
     );
 
     // KV Depth Ticks (1..24)
@@ -583,6 +585,7 @@ export class TwoTowerSpatialOverlay {
     minY: number,
     maxY: number,
     activeCellGrids?: readonly ActiveSheetCellGrid[] | null,
+    extraAvoidRects?: readonly OverlayRect[] | null,
   ): PlacedRect | null {
     if (!spec) return null;
     const { hostWidth, hostHeight } = snapshot.metrics;
@@ -636,24 +639,25 @@ export class TwoTowerSpatialOverlay {
     const headW =
       this.measureText(spec.tensorLabel, headFont) +
       this.measureText(spec.coordLabel, coordFont) +
-      (spec.badge ? this.measureText(spec.badge, badgeFont) + 14 : 0) +
-      34;
+      (spec.badge ? this.measureText(spec.badge, badgeFont) + 24 : 0) +
+      38;
     const dotsW = dotCount > 0 ? dotCount * 9 + 6 : 0;
     const bodyW =
       dotsW +
       this.measureText(spec.equation, eqFont) +
       this.measureText(spec.valueText, valFont) +
-      48;
+      52;
 
-    const maxCardW = Math.max(140, Math.min(396, hostWidth - 16));
-    const cardW = clamp(Math.max(headW, bodyW), Math.min(164, maxCardW), maxCardW);
-    const cardH = bodyW > maxCardW ? 64 : 48;
+    const maxCardW = Math.max(180, Math.min(460, hostWidth - 24));
+    const cardW = clamp(Math.max(headW, bodyW), Math.min(180, maxCardW), maxCardW);
+    const cardH = 48 + (headW > cardW ? 16 : 0) + (bodyW > cardW ? 16 : 0);
 
     const anchorX = clamp(pt.x, 6, hostWidth - 6);
     const anchorY = clamp(pt.y, minY, maxY);
 
     const projectedSources: { sx: number; sy: number; role: 'indigo' | 'teal' }[] = [];
-    const avoidRects: OverlayRect[] = [];
+    const avoidRects: OverlayRect[] = extraAvoidRects ? [...extraAvoidRects] : [];
+    const popoverOccupied: PlacedRect[] = extraAvoidRects ? [...occupied, ...extraAvoidRects] : occupied;
     let targetSheetRect: OverlayRect | null = null;
     let bestTargetDist = Infinity;
 
@@ -724,7 +728,7 @@ export class TwoTowerSpatialOverlay {
       hostWidth,
       minY,
       maxY,
-      occupied,
+      occupied: popoverOccupied,
       avoidRects,
       targetSheetRect,
       marginX: 8,

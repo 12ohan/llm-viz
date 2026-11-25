@@ -38,7 +38,7 @@ import {
   type MambaSimResult,
   type MambaTensorKey,
 } from '../../math/mambaSim';
-import type { CameraPose } from '../../model/state';
+import { MIN_CAMERA_DISTANCE, type CameraPose } from '../../model/state';
 import type { AABB, ViewportMetrics } from '../../render/camera';
 import {
   LINE_INSTANCE_FLOATS,
@@ -648,13 +648,25 @@ export interface PairedMambaDiagnostics {
   readonly atlasDimensions: readonly [number, number];
 }
 
-/** Reuse Nano's exact 8-corner projective camera fitter for paired & solo TwoTower Mamba views. */
+/**
+ * Calibrated 8-corner projective camera fitter for paired & solo TwoTower Mamba views.
+ * Tightens viewing angle and margin so paired 3D sheets fill ~60–75% of the canvas cleanly.
+ */
 export function fitPairedMambaCamera(
   bounds: AABB,
   metrics: ViewportMetrics,
   options?: SpatialMambaFitOptions,
 ): CameraPose {
-  return fitSpatialMambaCamera(bounds, metrics, options);
+  const isNarrow = options?.isNarrow ?? metrics.innerWidth < 760;
+  const pose = fitSpatialMambaCamera(bounds, metrics, {
+    ...options,
+    azimuthDeg: options?.azimuthDeg ?? (isNarrow ? 12 : 14),
+    elevationDeg: options?.elevationDeg ?? (isNarrow ? 26 : 25),
+  });
+  return {
+    ...pose,
+    distance: Math.max(MIN_CAMERA_DISTANCE, pose.distance * 0.90),
+  };
 }
 
 // ============================================================================

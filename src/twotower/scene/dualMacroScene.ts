@@ -3347,6 +3347,23 @@ export function buildTwoTowerMacroScene(
   // 6. LANDMARKS, KV DEPTH TICKS & DIMENSION CALIPERS
   // ============================================================================
 
+  const timestepPillLabel =
+    ts.conditioningMode === 'bypassed_ar' || ts.conditioningMode === 'bypassed_mock_ar'
+      ? 'BYPASSED (t = null)'
+      : ts.conditioningMode === 'inactive_no_pass_yet'
+        ? ts.nextEligibleStep
+          ? `INACTIVE · Next t=${ts.nextEligibleStep.nextTModel.toFixed(2)} (${ts.nextEligibleStep.nextNMasked}/${ts.nextEligibleStep.blockSize})`
+          : 'INACTIVE (no pass yet)'
+        : ts.conditioningMode === 'historical_prior_pass' && ts.executedPass
+          ? `Prior Rec #${ts.executedPass.sourceRecordIndex} (t=${ts.executedPass.tModel.toFixed(2)}, ${ts.executedPass.nMaskedInput}/${ts.executedPass.blockSize} in)`
+          : ts.executedPass
+            ? ts.blockCompletionState === 'completed_uncommitted'
+              ? `Pass t=${ts.executedPass.tModel.toFixed(2)} (${ts.executedPass.nMaskedInput}/${ts.executedPass.blockSize} in) · Block complete`
+              : ts.currentBlockMask && ts.nextEligibleStep
+                ? `Pass t=${ts.executedPass.tModel.toFixed(2)} (${ts.executedPass.nMaskedInput}/${ts.executedPass.blockSize} in) · Now ${ts.currentBlockMask.currentUnresolvedCount}/${ts.executedPass.blockSize} [MASK]`
+                : `ACTIVE · t=${ts.executedPass.tModel.toFixed(2)} (${ts.executedPass.nMaskedInput}/${ts.executedPass.blockSize} in)`
+            : timestepStatusLabel;
+
   landmarks.push(
     {
       id: 'header-context',
@@ -3361,7 +3378,7 @@ export function buildTwoTowerMacroScene(
     },
     {
       id: 'header-timestep',
-      label: `Timestep Rail · ${timestepStatusLabel}`,
+      label: `Timestep Rail · ${timestepPillLabel}`,
       sublabel: ts.executedPass?.isDiagnosticOverride
         ? 'Canonical t = nMasked / B (diagnostic override active) → φ(t) → MLP → 3d tEmb'
         : 'Canonical t = nMasked / B (never r / K) → φ(t) → MLP → 3d tEmb',
@@ -3379,7 +3396,7 @@ export function buildTwoTowerMacroScene(
         : isMockArMode
           ? 'Denoiser Tower · Mock-AR Causal (S = 1)'
           : isHistoricalDenoiser
-            ? `Denoiser Tower · Historical Prior Pass (Rec #${dl.sourceRecordIndex}, P_cond=${dl.sourceContextPrefixLen ?? 'n/a'})`
+            ? `Denoiser · Prior Pass (Rec #${dl.sourceRecordIndex}, P_cond=${dl.sourceContextPrefixLen ?? 'n/a'})`
             : `Denoiser Tower · Ephemeral Block (B = ${activeBlockSize})`,
       sublabel: isArMode
         ? isHistoricalDenoiser
