@@ -234,11 +234,11 @@ All TwoTower spatial views distinguish the miniature model's **complete logical 
 
 `vite.config.ts` compiles two isolated HTML entry points under `build.rollupOptions.input` while preserving `base: process.env.VITE_BASE_PATH ?? '/'`:
 
-| Entry | Source HTML & Boot Script | Root Deployment (`/`) | GitHub Pages Subpath (`/llm-viz/`) | Measured Transitive JS+CSS Gzip |
+| Entry | Source HTML & Boot Script | Root Deployment (`/`) | GitHub Pages Subpath (`/llm-viz/`) | Measured Transitive JS+CSS Gzip (Identical on `/` & `/llm-viz/`) |
 | --- | --- | --- | --- | ---: |
-| **Nano `v1.0.0`** | `index.html` → `/src/main.ts` | `/` | `/llm-viz/` | **`207.53 KiB`** (`212,508 B` vs. `215.00 KiB` / `220,160 B` hard budget; `7.47 KiB` headroom) |
-| **Shared Nano Primitives** | `assets/overlay-*.js` (`31` shared Nano modules) | Shared chunk | Shared chunk | **`127.27 KiB`** (`130,321 B`, subset included in both entries) |
-| **TwoTower `v1.0.0`** | `twotower/index.html` → `/src/twotower/app/main.ts` | `/twotower/` | `/llm-viz/twotower/` | **`~311 KiB`** (`310.80 KiB` / `318,259 B`) |
+| **Nano `v1.0.0`** | `index.html` → `/src/main.ts` | `/` | `/llm-viz/` | **`207.60 KiB`** (`212,585 B` vs. `215.00 KiB` / `220,160 B` hard budget; `7.40 KiB` headroom; `+77 B` gzip CSS for quiet `TwoTower ↗` link, `0 B` Nano JS, `0` leaks, `0` markers) |
+| **Shared Nano Primitives** | `assets/overlay-*.js` (`0` TwoTower sources) | Shared chunk | Shared chunk | **`127.27 KiB`** (`130,321 B` gzip / `442,996 B` raw, subset included in both entries) |
+| **TwoTower `v1.0.0`** | `twotower/index.html` → `/src/twotower/app/main.ts` | `/twotower/` | `/llm-viz/twotower/` | **`317.76 KiB`** (`325,382 B` / `~318 KiB`, `22` confirmed `src/twotower/*` modules, `0` runtime dependencies) |
 
 `scripts/verify_bundle_isolation.mjs` enforces **7 hard gates** across both root (`/`) and GitHub Pages (`/llm-viz/`) builds in CI and Pages deploy:
 
@@ -247,8 +247,8 @@ All TwoTower spatial views distinguish the miniature model's **complete logical 
 3. **Full Transitive ES Graph Walk:** Uses TypeScript's ECMAScript AST parser to walk every static `import` / `export ... from` edge and literal dynamic `import(...)` edge reachable from both entries.
 4. **Strict Source-Map Isolation Gate:** Reads every `.map` file in Nano's transitive JS graph and fails if any source path references `src/twotower/` or `twotower/`.
 5. **Strict Payload Marker Gate:** Scans every JS and CSS asset in Nano's transitive graph and fails if any TwoTower identifier appears (`NemotronHTwoTowerForCausalLM`, `twotower-denoiser-v1`, `twotower-context-v1`, `TwoTowerSession`, `diffusion_block_commit`, `TWOTOWER_SPEC`).
-6. **TwoTower Positive Presence Gate:** Confirms TwoTower's transitive JS sourcemaps include `src/twotower/` sources (preventing vacuous passes).
-7. **Nano Payload Budget Gate:** Enforces Nano transitive JS+CSS gzip (level 9) `<= 215.00 KiB` (`220,160 B`).
+6. **TwoTower Positive Presence Gate:** Confirms TwoTower's transitive JS sourcemaps include `src/twotower/` sources (`22` confirmed `src/twotower/*` modules, preventing vacuous passes).
+7. **Nano Payload Budget Gate:** Enforces Nano transitive JS+CSS gzip (level 9) `<= 215.00 KiB` (`220,160 B`; measured `207.60 KiB` / `212,585 B`, `7.40 KiB` headroom).
 
 ### Immutable Ownership & Historical Cache Boundary Provenance
 

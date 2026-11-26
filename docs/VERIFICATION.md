@@ -25,7 +25,7 @@ npm ci
 # 2. Strict TypeScript verification
 npm run typecheck
 
-# 3. Full Vitest unit, contract & PyTorch-parity suite (365+ tests across 45 files; zero Python needed)
+# 3. Full Vitest unit, contract & PyTorch-parity suite (369 tests across 46 files; zero Python needed)
 npm test
 
 # 4. (Optional) Regenerate independent PyTorch 2.15.0 parity fixtures (Nano + TwoTower Categories 1-8)
@@ -51,9 +51,9 @@ npm run test:e2e
 
 ---
 
-## 2. Vitest Unit, Contract & PyTorch `2.15.0` Parity Suite (`365+` Tests Across `45` Files)
+## 2. Vitest Unit, Contract & PyTorch `2.15.0` Parity Suite (`369` Tests Across `46` Files)
 
-The Node regression suite runs `45` test files (`33` Nano files + `12` TwoTower files) totaling **`365+` tests** (`236` Nano + `129+` TwoTower):
+The Node regression suite runs `46` test files (`33` Nano files + `13` TwoTower files) totaling **`369` tests** (`236` Nano + `133` TwoTower):
 
 ### A. Nano `v1.0.0` Core Suite (`236` Tests Across `33` Files)
 
@@ -66,7 +66,7 @@ The Node regression suite runs `45` test files (`33` Nano files + `12` TwoTower 
 | **3D Cutaways, Line Packing & Focused Accumulation** | `cutaways.test.ts`, `bookend-cutaways.test.ts`, `gqa-foundation.test.ts`, `gqa-spatial.test.ts`, `mamba-spatial.test.ts`, `moe-spatial.test.ts`, `unified-cutaways.test.ts`, `incremental-cutaways.test.ts`, `line-packing.test.ts`, `spatial-primitives.test.ts`, `visual-renderer.test.ts`, `focused-accumulation.test.ts`, `v2-gqa-reveal.test.ts`, `v2-mamba-reveal.test.ts`, `v2-moe-reveal.test.ts` | Shared 18-float `LinesPass` guide-line packing across all 8 cutaway builders, `RG32F` atlas packing, progressive reveal frontiers, focused-cell partial sums, running MoE `Σσ` denominator without premature weight exposure, and Output Top-5 label visibility. |
 | **Walkthrough, Controls, Picking & A11y/Perf** | `walkthrough.test.ts`, `walkthrough-beats.test.ts`, `v5-controls.test.ts`, `phase1-camera-ui.test.ts`, `phase1-focus.test.ts`, `pick.test.ts`, `overlay-callout.test.ts`, `rc-continuity-integration.test.ts`, `hardening-a11y-perf.test.ts` | 22-beat 3-Act walkthrough continuity, isolated Tour vs. Free Explore AR sessions, native `Space`/`Enter` deferral, WAI-ARIA `role="tab"` roving `tabindex` and modal focus traps, `RenderDevice` FBO leak/latch guards, idle-RAF gating, `RG32F` atlas content-key dedup, and spine-wave geometry throttling. |
 
-### B. TwoTower `v1.0.0` Suite (`129+` Tests Across `12` Files)
+### B. TwoTower `v1.0.0` Suite (`133` Tests Across `13` Files)
 
 | Category | Test File | Verified Properties |
 | --- | --- | --- |
@@ -77,11 +77,12 @@ The Node regression suite runs `45` test files (`33` Nano files + `12` TwoTower 
 | **Interactive Session & Branching** | `twotower-session.test.ts` | 4-step block diffusion lifecycle, `AR`/`Mock-AR` switching, non-destructive scrubbing, auto-forking, active-branch-safe deletion, bounded retention, and digest provenance. |
 | **Context & Sampler Contracts** | `twotower-context-sampler-contracts.test.ts` | Strict Context ownership invariants, non-retroactive config scope separation (`record.configAtStep` vs. `session.pendingConfig`), independent `B`/`K` budget floors, calibration metadata, and zero-`Infinity` sampler presentations. |
 | **Spatial Macro Scene** | `twotower-spatial-macro.test.ts` | Dual-tower `52×2` macro geometry, `29` aligned transfer linkers vs. `23` stateless MoE bays, linker channel filters, instructional Macro Flow Replay, and 10-axis bay picking. |
-| **Spatial Paired GQA & Mamba-2 Cutaways** | `twotower-spatial-gqa-mamba.test.ts` | Asymmetric 35/65 Paired GQA (`128×128` `RG32F` atlas, bidirectional `[B × (P+B)]`) and Paired Mamba-2 (`256×128` atlas, 4-tap Conv1D `3→2→1→0` boundary replacement, `4×4` analytical SSM decomposition, partial-accumulation non-exposure). |
+| **Spatial Paired GQA & Mamba-2 Cutaways** | `twotower-spatial-gqa-mamba.test.ts` (`12` tests) | Asymmetric 35/65 Paired GQA (`128×128` `RG32F` atlas, bidirectional `[B × (P+B)]`) and Paired Mamba-2 (`256×128` atlas, 4-tap Conv1D `3→2→1→0` boundary replacement, `4×4` analytical SSM decomposition, plus Mamba partial-accumulation non-exposure test). |
 | **Spatial Timestep, MoE & Bookend Cutaways** | `twotower-spatial-timestep-moe-bookends.test.ts` | Dedicated Timestep Conditioning cutaway (`Mod→Norm` vs. `Norm→Mod`, unmodulated `norm_f`), Granular MoE `128+1` FP64 6th-vs-7th margin & non-spoiling `Σσ` denominator, and `V = 34` Embedding/Output cutaways with zero-`Infinity` MDLM output. |
 | **Presentation Correctness & Provenance** | `twotower-wave1-correctness.test.ts` | Canonical `t = nMasked / B` (never `r / K`), 5-way `conditioningMode`, historical Context boundary provenance (`P_cond` vs. current `P` across all 6 spatial scene builders + `pruned_unavailable` & `historicalConfig` invariants), and logical miniature inventory vs. selected atlas slice separation. |
 | **Production Architectural Readouts & Scaling** | `twotower-arch-readouts.test.ts` | Dual SI (`GB`/`MB`) & IEC (`GiB`/`MiB`) checkpoint inventory, FP32 `e_score_correction_bias` (`+11,776 B`), 3-regime context-length scaling (`≤ 128K` operational · `128K–256K` configured limit · `> 256K` extrapolated), 4-way memory separation with explicit peak runtime workspace exclusion, persistent nested timeline, and advanced sampler view-models. |
 | **Guided 4-Act / 28-Beat Walkthrough** | `twotower-tour.test.ts` | All 4 Acts / 28 Beats navigation, dynamic trajectory-derived live metrics (zero fabricated values, zero `Infinity`/`NaN`), strict Tour vs. Free Explore session isolation, and exact state restoration on exit. |
+| **Reciprocal Navigation & Release Metadata Contract** | `twotower-navigation-contract.test.ts` (`3` tests) | Base-path-safe Nano → TwoTower link (`index.html` `%BASE_URL%twotower/`, `.top-nav-link` focus styling, `0` forbidden Nano markers), clean release metadata (`twotower/index.html`, `diagnosticUi.ts` `role="region"`, zero internal stage tags), and TwoTower → Nano link ordering in `spatialApp.ts`. |
 
 ### Independent PyTorch `2.15.0` Parity Tolerances
 
@@ -119,12 +120,12 @@ Enforced hard gates (non-zero exit on any failure):
 3. TypeScript ECMAScript AST walks every transitive static `import`/`export ... from` and literal dynamic `import(...)` edge.
 4. Zero `.map` sources in Nano's transitive graph match `src/twotower/` or `twotower/`.
 5. Zero forbidden TwoTower markers (`NemotronHTwoTowerForCausalLM`, `twotower-denoiser-v1`, `twotower-context-v1`, `TwoTowerSession`, `diffusion_block_commit`, `TWOTOWER_SPEC`) appear in Nano's transitive JS/CSS assets.
-6. TwoTower's transitive JS sourcemaps positively contain `src/twotower/` sources.
-7. Nano's transitive JS+CSS level-9 gzip total stays `<= 215.00 KiB` (`220,160 B`; current baseline `207.53 KiB` / `212,508 B` with `127.27 KiB` shared across `31` Nano primitives and `~311 KiB` TwoTower gzip).
+6. TwoTower's transitive JS sourcemaps positively contain `src/twotower/` sources (`22` confirmed `src/twotower/*` modules; `0` runtime dependencies).
+7. Nano's transitive JS+CSS level-9 gzip total stays `<= 215.00 KiB` (`220,160 B`), verified identically on both `/` and `/llm-viz/`: Nano **`207.60 KiB`** (`212,585 B`, `7.40 KiB` headroom; `+77 B` gzip CSS for quiet `TwoTower ↗` link, `0 B` Nano JS, `0` leaks, `0` markers), shared `assets/overlay-*.js` **`127.27 KiB`** (`130,321 B` gzip / `442,996 B` raw, `0` TwoTower sources), and TwoTower **`317.76 KiB`** (`325,382 B` / `~318 KiB` gzip).
 
 ---
 
-## 4. Playwright / Chromium WebGL2 E2E Smoke Suite (`20+` Tests)
+## 4. Playwright / Chromium WebGL2 E2E Smoke Suite (`21` Tests)
 
 `playwright.config.ts` starts two isolated preview servers (`127.0.0.1:4173` for root `/` and `127.0.0.1:4174/llm-viz/` for GitHub Pages subpath) and runs both E2E suites:
 
@@ -171,20 +172,20 @@ npx vite preview --outDir dist --base / --port 4173 --strictPort --host 127.0.0.
 > **Application-Side JS Callback Time vs. Full GPU Execution Latency**
 > Measurements captured with `performance.now()` around `drawFrame()` (`lastFrameMs` / `JS cb` in the TwoTower footer) quantify **application-side main-thread CPU processing and WebGL command submission time** — they do **NOT** measure full asynchronous GPU rasterization, fragment shading, or display compositor latency. Observed smoothness during active camera flies or replay is tracked separately via continuous **observed RAF interval cadence (`RAF Δ`)**, measured strictly between consecutive animating frames (excluding idle-sleep pauses).
 
-### Covered E2E Scenarios (`20+` Tests Across 2 Files)
+### Covered E2E Scenarios (`21` Tests Across 2 Files)
 
-#### Nano E2E Suite (`tests/e2e/smoke.spec.ts` — `9` Tests)
+#### Nano E2E Suite (`tests/e2e/smoke.spec.ts` — `9` Tests, hardened with observable `waitForProjectedOverlaySettled`)
 1. **52-Layer Tower Boot** — Clean initial WebGL2 frame, zero console/page errors, `#webgl-fallback` hidden.
-2. **All 5 Exploded Cutaways** — Switching across Embedding, Mamba-2, MoE `128+1`, GQA, and Output/LM Head with camera-fly settlement and live landmarks.
+2. **All 5 Exploded Cutaways** — Switching across Embedding, Mamba-2, MoE `128+1`, GQA, and Output/LM Head with observable `waitForProjectedOverlaySettled` camera-fly settlement and live landmarks.
 3. **`LinesPass` Guide-Line Geometry** — Rendered guide lines verified across Embedding, Mamba, MoE, and GQA cutaways.
 4. **Guided Tour & AR Session Isolation** — Beats `7.1–7.3` continuity, AR branching, and Tour vs. Free Explore isolation.
 5. **Native Keyboard & WAI-ARIA Compliance** — Native `Space`/`Enter` control activation, roving `tabindex`, and modal focus capture/restore (`?` and `M`).
 6. **Reduced-Motion Emulation** — Emulating and toggling `prefers-reduced-motion: reduce`.
-7. **Output Top-5, MoE Running `Σσ` & Popover Containment** — Camera-fly-settled `#1..#5` non-overlapping Output pills, MoE Step 3 running `Σσ` masking, and popover viewport containment.
+7. **Output Top-5, MoE Running `Σσ` & Popover Containment** — Observable `waitForProjectedOverlaySettled` `#1..#5` non-overlapping Output pills, MoE Step 3 running `Σσ` masking, and popover viewport containment.
 8. **Responsive Viewports** — `1440×900`, `1024×800`, and mobile `390×844` layout containment.
 9. **GitHub Pages `/llm-viz/` Subpath Build** — HTTP `200` assets, zero `404`s, functional cutaways.
 
-#### TwoTower E2E Suite (`tests/e2e/twotower-smoke.spec.ts` — `11+` Tests)
+#### TwoTower E2E Suite (`tests/e2e/twotower-smoke.spec.ts` — `12` Tests)
 1. **Root `/twotower/` Dual-Tower Macro Boot** — Non-blank WebGL2 render, epistemic pill, linker channels, 10-axis bay picking, and quiet reciprocal navigation.
 2. **Full Diffusion Lifecycle & All 7 Spatial Views** — `Init` → `Refine` → `Commit Conf` → `Commit → Context`, `128×128` GQA, Mamba Conv1D replacement, MoE partial-denom guard, Output zero-`Infinity`.
 3. **AR, Mock-AR (`BYPASSED`), Rewind, Branch Fork & Synced Workbench Drawer (`W`)**.
@@ -195,7 +196,8 @@ npx vite preview --outDir dist --base / --port 4173 --strictPort --host 127.0.0.
 8. **Advanced Sampler Inspector (`0.22`/`0.80`/`0.90` Presets, Decoupled `B`/`K`, Zero-`Infinity`, Non-Retroactive Scope)**.
 9. **Production Architecture & 3-Regime Context-Length Scaling Tab (`63.19B` / `126.37 GB` / `117.69 GiB`, 4-Way Caches, Ledger, SVG Chart)**.
 10. **Keyboard Navigation (`T`/Arrows/`Esc`/`W`/`Tab`), Reduced-Motion Instant Transitions, Zero Geometry Rebuilds on Orbit & Idle RAF Sleep**.
-11. **GitHub Pages `/llm-viz/twotower/` Parity (Tour, Timeline, Sampler, Architecture & Reciprocal `/llm-viz/` Navigation)**.
+11. **GitHub Pages `/llm-viz/twotower/` Subpath Parity (Tour, Timeline, Sampler & Architecture)**.
+12. **Reciprocal Cross-App Navigation (`Nano ↔ TwoTower` via Click & `Enter`) at Both Root `/` and Subpath `/llm-viz/`**.
 
 ---
 
