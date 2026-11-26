@@ -12,6 +12,7 @@ interface WebGL2Telemetry {
   linesPassLastTotalLineCount: number;
   linesPassLastGuideCount: number;
   rafCount: number;
+  pendingRafCount: number;
 }
 
 declare global {
@@ -66,15 +67,29 @@ async function installWebGL2Telemetry(page: Page): Promise<void> {
       linesPassLastTotalLineCount: 0,
       linesPassLastGuideCount: 0,
       rafCount: 0,
+      pendingRafCount: 0,
     };
     window.__webgl2Telemetry = telemetry;
 
+    const pendingRafIds = new Set<number>();
     const origRaf = window.requestAnimationFrame.bind(window);
+    const origCancelRaf = window.cancelAnimationFrame.bind(window);
     window.requestAnimationFrame = (cb: FrameRequestCallback): number => {
-      return origRaf((ts) => {
+      let id = 0;
+      id = origRaf((ts) => {
+        pendingRafIds.delete(id);
+        telemetry.pendingRafCount = pendingRafIds.size;
         telemetry.rafCount += 1;
         cb(ts);
       });
+      pendingRafIds.add(id);
+      telemetry.pendingRafCount = pendingRafIds.size;
+      return id;
+    };
+    window.cancelAnimationFrame = (handle: number): void => {
+      pendingRafIds.delete(handle);
+      telemetry.pendingRafCount = pendingRafIds.size;
+      origCancelRaf(handle);
     };
 
     const LINE_INSTANCE_FLOATS = 18;
@@ -408,20 +423,43 @@ async function setRangeInputValue(locator: Locator, value: number): Promise<void
   }, value);
 }
 
-async function getVisibleOverlayLabelRects(page: Page): Promise<
-  Array<{ text: string; className: string; left: number; top: number; right: number; bottom: number }>
-> {
+interface OverlayLabelRect {
+  text: string;
+  className: string;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+interface OverlayBoxRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+interface OverlaySettleSnapshot {
+  rafCount: number;
+  pendingRafCount: number;
+  labels: OverlayLabelRect[];
+  popover: OverlayBoxRect | null;
+}
+
+interface WaitForProjectedOverlaySettledOptions {
+  timeoutMs?: number;
+  quietMs?: number;
+  minLabels?: number;
+  includePopover?: boolean;
+  predicate?: (labels: OverlayLabelRect[]) => boolean;
+  description?: string;
+}
+
+async function getVisibleOverlayLabelRects(page: Page): Promise<OverlayLabelRect[]> {
   return page.evaluate(() => {
     const host = document.getElementById('overlay-labels');
     if (!host) return [];
-    const out: Array<{
-      text: string;
-      className: string;
-      left: number;
-      top: number;
-      right: number;
-      bottom: number;
-    }> = [];
+    const out: OverlayLabelRect[] = [];
     for (const child of Array.from(host.children)) {
       const el = child as HTMLElement;
       if (el.classList.contains('ov-cell-popover')) continue;
@@ -444,6 +482,173 @@ async function getVisibleOverlayLabelRects(page: Page): Promise<
     }
     return out;
   });
+}
+
+async function captureOverlaySettleSnapshot(
+  page: Page,
+  includePopover: boolean,
+): Promise<OverlaySettleSnapshot> {
+  return page.evaluate((checkPopover) => {
+    const telemetry = window.__webgl2Telemetry;
+    const host = document.getElementById('overlay-labels');
+    const labels: OverlayLabelRect[] = [];
+    let popover: OverlayBoxRect | null = null;
+
+    if (host) {
+      for (const child of Array.from(host.children)) {
+        const el = child as HTMLElement;
+        const style = window.getComputedStyle(el);
+        const hidden =
+          style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0;
+        if (el.classList.contains('ov-cell-popover')) {
+          if (checkPopover && !hidden) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+              popover = {
+                left: rect.left,
+                top: rect.top,
+                right: rect.right,
+                bottom: rect.bottom,
+              };
+            }
+          }
+          continue;
+        }
+        if (hidden) continue;
+        const text = (el.textContent ?? '').trim();
+        if (!text) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        labels.push({
+          text,
+          className: el.className,
+          left: rect.left,
+          top: rect.top,
+          right: rect.right,
+          bottom: rect.bottom,
+        });
+      }
+    }
+
+    return {
+      rafCount: telemetry?.rafCount ?? 0,
+      pendingRafCount: telemetry?.pendingRafCount ?? 0,
+      labels,
+      popover,
+    };
+  }, includePopover);
+}
+
+function maxOverlayBoxDeltaPx(a: OverlayBoxRect, b: OverlayBoxRect): number {
+  return Math.max(
+    Math.abs(a.left - b.left),
+    Math.abs(a.top - b.top),
+    Math.abs(a.right - b.right),
+    Math.abs(a.bottom - b.bottom),
+  );
+}
+
+/**
+ * Waits for Nano's smooth camera fly (`CAMERA_FLY_DURATION_MS = 650 ms`) and projected DOM overlays
+ * (`#overlay-labels` + optional `.ov-cell-popover`) to settle deterministically across fast GPU and
+ * variable-rate SwiftShader runners:
+ *  1. Observable RAF quiescence: zero pending RAFs and `rafCount` delta === 0 across `quietMs`
+ *     (using a pure timer window with no test RAFs inside the window).
+ *  2. Projected overlay stability: identical visible `#overlay-labels` texts/classes with
+ *     `max(|deltaPx|) < 0.5` across the quiet window, plus optional popover stability and predicate.
+ */
+async function waitForProjectedOverlaySettled(
+  page: Page,
+  opts: WaitForProjectedOverlaySettledOptions = {},
+): Promise<OverlayLabelRect[]> {
+  const {
+    timeoutMs = 6000,
+    quietMs = 120,
+    minLabels = 1,
+    includePopover = false,
+    predicate,
+    description = 'projected overlay',
+  } = opts;
+
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  // Let the post-interaction click/key/resize handler render at least one frame first.
+  await waitFrames(page, 1);
+
+  const deadline = Date.now() + timeoutMs;
+  let lastDiag = 'no samples captured';
+
+  while (Date.now() < deadline) {
+    const before = await captureOverlaySettleSnapshot(page, includePopover);
+    if (before.pendingRafCount > 0) {
+      lastDiag = `pendingRafCount=${before.pendingRafCount}, labels=${before.labels.length}`;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await sleep(Math.min(50, remaining));
+      continue;
+    }
+
+    const quietWindow = Math.min(quietMs, Math.max(10, deadline - Date.now()));
+    await sleep(quietWindow);
+
+    const after = await captureOverlaySettleSnapshot(page, includePopover);
+    const rafDelta = after.rafCount - before.rafCount;
+    const rafIdle =
+      before.pendingRafCount === 0 && after.pendingRafCount === 0 && rafDelta === 0;
+
+    let maxLabelDelta = Infinity;
+    if (
+      before.labels.length === after.labels.length &&
+      before.labels.every(
+        (lbl, idx) =>
+          lbl.text === after.labels[idx].text && lbl.className === after.labels[idx].className,
+      )
+    ) {
+      maxLabelDelta = 0;
+      for (let i = 0; i < after.labels.length; i++) {
+        const delta = maxOverlayBoxDeltaPx(before.labels[i], after.labels[i]);
+        if (delta > maxLabelDelta) maxLabelDelta = delta;
+      }
+    }
+
+    const labelsStable = after.labels.length >= minLabels && maxLabelDelta < 0.5;
+
+    let popoverStable = true;
+    let popoverDelta = 0;
+    if (includePopover) {
+      if (!before.popover || !after.popover) {
+        popoverStable = false;
+        popoverDelta = Infinity;
+      } else {
+        popoverDelta = maxOverlayBoxDeltaPx(before.popover, after.popover);
+        popoverStable = popoverDelta < 0.5;
+      }
+    }
+
+    const predicateOk = predicate ? predicate(after.labels) : true;
+
+    if (rafIdle && labelsStable && popoverStable && predicateOk) {
+      return after.labels;
+    }
+
+    lastDiag =
+      `rafDelta=${rafDelta}, pendingRaf=${after.pendingRafCount}, ` +
+      `labels=${after.labels.length} (min=${minLabels}), maxLabelDeltaPx=${
+        Number.isFinite(maxLabelDelta) ? maxLabelDelta.toFixed(2) : 'mismatch'
+      }, ` +
+      `popoverOk=${popoverStable} (deltaPx=${
+        Number.isFinite(popoverDelta) ? popoverDelta.toFixed(2) : 'missing'
+      }), ` +
+      `predicateOk=${predicateOk}, visible=[${after.labels.map((l) => l.text).join(' | ')}]`;
+
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await sleep(Math.min(40, remaining));
+  }
+
+  throw new Error(
+    `Timed out after ${timeoutMs}ms waiting for ${description} to settle (${lastDiag})`,
+  );
 }
 
 test.describe('Nemotron 3 Nano v1.0 · WebGL2 & UI Hardening Smoke Suite', () => {
@@ -505,7 +710,7 @@ test.describe('Nemotron 3 Nano v1.0 · WebGL2 & UI Hardening Smoke Suite', () =>
       const tab = page.locator(`.mode-btn[data-mode="${view.mode}"]`);
       await expect(tab).toHaveAttribute('aria-selected', 'true');
       await expect(tab).toHaveClass(/is-active/);
-      await waitFrames(page, 4);
+      await waitForProjectedOverlaySettled(page, { description: `Test 2 ${view.mode}` });
 
       await assertCanvasRenderedNonBlank(canvas, `View ${view.mode}`);
 
@@ -578,7 +783,11 @@ test.describe('Nemotron 3 Nano v1.0 · WebGL2 & UI Hardening Smoke Suite', () =>
 
     // Beat 7.1 (index 18): Output T=8 prediction matches prefix
     await page.locator('[data-testid="tour-progress-rail"] button[data-tour-beat="18"]').click();
-    await waitFrames(page, 4);
+    await waitForProjectedOverlaySettled(page, {
+      description: 'Test 4 Beat 7.1 Output Top-5',
+      predicate: (labels) =>
+        labels.some((l) => !l.className.includes('ov-axis-header') && l.text.startsWith('#1 ')),
+    });
     await expect(page.locator('#editorial-panel .ed-title')).toContainText('7.1');
     await expect(page.locator('.mode-btn[data-mode="cutaway_output"]')).toHaveAttribute(
       'aria-selected',
@@ -813,7 +1022,13 @@ test.describe('Nemotron 3 Nano v1.0 · WebGL2 & UI Hardening Smoke Suite', () =>
 
     // 7a. Beat 7.1 Output cutaway: ALL FIVE #1..#5 candidate pills visible, formatted, in-bounds, non-overlapping
     await page.locator('[data-testid="tour-progress-rail"] button[data-tour-beat="18"]').click();
-    await waitFrames(page, 5);
+    await waitForProjectedOverlaySettled(page, {
+      description: 'Test 7a Beat 7.1 Output Top-5',
+      predicate: (labels) => {
+        const pills = labels.filter((l) => !l.className.includes('ov-axis-header'));
+        return [1, 2, 3, 4, 5].every((rank) => pills.some((l) => l.text.startsWith(`#${rank} `)));
+      },
+    });
 
     const stageBox = await page.locator('#stage-host').boundingBox();
     expect(stageBox).not.toBeNull();
@@ -853,7 +1068,10 @@ test.describe('Nemotron 3 Nano v1.0 · WebGL2 & UI Hardening Smoke Suite', () =>
 
     // Scrub to 4% -> slot 0, term 2/6 running Σσ denominator
     await setRangeInputValue(page.locator('#gqa-step-scrub'), 4);
-    await waitFrames(page, 4);
+    await waitForProjectedOverlaySettled(page, {
+      includePopover: true,
+      description: 'Test 7b MoE Step 3 scrub=4%',
+    });
 
     const eqRunning = (await page.locator('#gqa-formula-eq').textContent()) ?? '';
     expect(eqRunning).toContain('Σσ =');
@@ -900,7 +1118,10 @@ test.describe('Nemotron 3 Nano v1.0 · WebGL2 & UI Hardening Smoke Suite', () =>
     await page.locator('.mode-btn[data-mode="cutaway_gqa"]').click();
     await page.locator('#gqa-step-pills button[data-gqa-step="2"]').click();
     await setRangeInputValue(page.locator('#gqa-step-scrub'), 30);
-    await waitFrames(page, 4);
+    await waitForProjectedOverlaySettled(page, {
+      includePopover: true,
+      description: 'Test 7c GQA Step 3 scrub=30%',
+    });
 
     await expect(popover).toBeVisible();
     const gqaPopBox = await popover.boundingBox();
@@ -952,7 +1173,9 @@ test.describe('Nemotron 3 Nano v1.0 · WebGL2 & UI Hardening Smoke Suite', () =>
     await page.setViewportSize({ width: 390, height: 844 });
     await page.locator('.mode-btn[data-mode="tower"]').click();
     await page.locator('#fit-btn').click();
-    await waitFrames(page, 5);
+    await waitForProjectedOverlaySettled(page, {
+      description: 'Test 8c mobile 390x844 Tower fit',
+    });
 
     const stageMobile = await page.locator('#stage-host').boundingBox();
     expect(stageMobile).not.toBeNull();
@@ -1041,7 +1264,7 @@ test.describe('Nemotron 3 Nano v1.0 · WebGL2 & UI Hardening Smoke Suite', () =>
         'aria-selected',
         'true',
       );
-      await waitFrames(page, 3);
+      await waitForProjectedOverlaySettled(page, { description: `Test 9 /llm-viz/ ${mode}` });
       await assertCanvasRenderedNonBlank(canvas, `/llm-viz/ ${mode}`);
     }
 
