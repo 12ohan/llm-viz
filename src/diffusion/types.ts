@@ -600,3 +600,358 @@ export interface DiffusionForwardResult {
   readonly logits: Float32Array; // [seqLen, vocabSize]
   readonly probs: Float32Array; // [seqLen, vocabSize]
 }
+
+// ============================================================================
+// DF2 EXECUTION, KV CACHE, SAMPLER & SESSION CONTRACTS
+// ============================================================================
+
+export const DIFFUSION_KV_SLAB_FLOATS_PER_LAYER = 64 as const; // 8 KV heads * 8 headDim
+export const DIFFUSION_KV_SLAB_FLOATS_PER_TOKEN = 5_120 as const; // 40 layers * 2 * 64
+export const DIFFUSION_KV_SLAB_BYTES_PER_TOKEN = 20_480 as const; // 20.00 KiB / tok
+
+export interface KvPositionSlab {
+  readonly position: number;
+  readonly tokenId: number;
+  readonly maskProvenance: KvMaskProvenance;
+  readonly numLayers: number;
+  readonly kvProjOutDim: number;
+  /** Row-major `[numLayers * kvProjOutDim]` (`2560` floats), layer `l` at `[l*64 .. (l+1)*64)`. */
+  readonly k: Float32Array;
+  /** Row-major `[numLayers * kvProjOutDim]` (`2560` floats), layer `l` at `[l*64 .. (l+1)*64)`. */
+  readonly v: Float32Array;
+  readonly slabDigest: string;
+}
+
+export interface PersistentKvSnapshot {
+  readonly seqLen: number;
+  readonly capacity: number;
+  readonly kvMaskProvenance: KvMaskProvenance;
+  readonly committedTokenIds: readonly number[];
+  readonly slabs: readonly KvPositionSlab[];
+  readonly snapshotDigest: string;
+}
+
+/** Clarification #1 (`D19`): Tracks both clean browser post-EOS crop and upstream pre-EOS crop. */
+export interface CroppedKvProvenance extends DiffusionSpecCropProvenance {
+  readonly preCropKvLen: number;
+  readonly croppedSuffixLen: number;
+}
+
+export interface ForwardCounters {
+  readonly actualForwardPasses: number;
+  readonly decodeForwardPasses: number;
+  readonly referenceMethodNfe: number;
+}
+
+export type DraftGuardReason = 'none' | 'non_progress_mask_loop' | 'max_draft_passes';
+
+export interface BrowserGuardFlags {
+  readonly draftGuardTriggered: DraftGuardReason;
+  readonly residualMasksCommittedCount: number;
+  readonly trailingMasksAfterEosCount: number;
+  readonly capacityExhausted: boolean;
+  readonly warnings: readonly string[];
+}
+
+export interface SamplerVariateProvenance {
+  readonly mode: 'greedy_none' | 'prng_xoshiro128ss' | 'caller_explicit';
+  readonly variateDigest: string | null;
+  readonly count: number;
+}
+
+export interface CausalSampleResult {
+  readonly tokenId: number;
+  readonly probability: number;
+  readonly temperature: number;
+  readonly variateUsed: number | null;
+  readonly variateProvenance: SamplerVariateProvenance;
+}
+
+export interface SamplerAConfig {
+  readonly temperature: number;
+  /** `null` enables static front-loaded quotas (`[1,..,1,0]` or `[1,..,1]`); numeric uses `conf >= threshold`. */
+  readonly threshold: number | null;
+  readonly maskTokenId?: number;
+}
+
+export interface SamplerATransferInput {
+  readonly logits: Float32Array;
+  readonly blockTokens: Int32Array;
+  readonly seqLen: number;
+  readonly vocabSize: number;
+  readonly numTransferTokens: number;
+  readonly config: SamplerAConfig;
+  readonly prng?: Xoshiro128ssGenerator;
+  readonly explicitGumbelUniforms?: Float64Array;
+}
+
+export interface SamplerATransferResult {
+  readonly candidateTokens: Int32Array;
+  readonly confidences: Float32Array;
+  readonly transferIndex: Uint8Array;
+  readonly updatedBlock: Int32Array;
+  readonly selectedCount: number;
+  readonly remainingMaskCount: number;
+  readonly unmaskedMaskTokenCount: number;
+  readonly variateProvenance: SamplerVariateProvenance;
+}
+
+export interface SamplerBConfig {
+  readonly temperature: number;
+  /** `0.0` performs single-pass commit-all; `> 0` performs confidence-thresholded iterative drafting. */
+  readonly threshold: number;
+  readonly maxDraftPassesPerCycle?: number;
+  readonly maskTokenId?: number;
+}
+
+export interface SamplerBDraftInput {
+  readonly draftLogits: Float32Array;
+  readonly blockTokens: Int32Array;
+  readonly seqLen: number;
+  readonly vocabSize: number;
+  readonly config: SamplerBConfig;
+  readonly prng?: Xoshiro128ssGenerator;
+  readonly explicitUniforms?: Float64Array;
+}
+
+export interface SamplerBDraftResult {
+  readonly draftTokens: Int32Array;
+  readonly confidences: Float32Array;
+  readonly unmaskMask: Uint8Array;
+  readonly updatedBlock: Int32Array;
+  readonly remainingMaskCount: number;
+  readonly singlePassCommitAll: boolean;
+  readonly noProgress: boolean;
+  readonly variateProvenance: SamplerVariateProvenance;
+}
+
+export interface LinearSpecDraftPassSummary {
+  readonly passIndex: number;
+  readonly blockBefore: Int32Array;
+  readonly blockAfter: Int32Array;
+  readonly confidences: Float32Array;
+  readonly unmaskMask: Uint8Array;
+  readonly remainingMaskCount: number;
+  readonly noProgress: boolean;
+  readonly variateProvenance: SamplerVariateProvenance;
+}
+
+export interface LinearSpecCycleInput {
+  readonly kvSnapshot: PersistentKvSnapshot;
+  readonly seedToken: number;
+  readonly blockLength: number;
+  readonly loraEnabled: boolean;
+  readonly samplerBConfig: SamplerBConfig;
+  readonly verifyTemperature: number;
+  readonly eosTokenId?: number;
+  readonly prng?: Xoshiro128ssGenerator;
+  readonly explicitDraftUniforms?: readonly Float64Array[];
+  readonly explicitVerifyUniforms?: Float64Array;
+  readonly retainedTraceLayers?: ReadonlySet<number>;
+  /** Optional deterministic hook for testing `D18` `[MASK]` non-progress guard without mutating parameters. */
+  readonly overrideDraftForward?: (block: Int32Array, passIndex: number) => DiffusionForwardResult;
+}
+
+export interface LinearSpecCycleResult {
+  readonly capacityExhausted: boolean;
+  readonly lifecyclePhase: DiffusionLifecyclePhase;
+  readonly loraEnabled: boolean;
+  readonly blockLength: number;
+  readonly seedToken: number;
+  readonly draftedBlockTokens: Int32Array;
+  readonly draftPasses: readonly LinearSpecDraftPassSummary[];
+  readonly draftPassCount: number;
+  readonly verifyArTokens: Int32Array;
+  readonly matchedDraftCount: number;
+  readonly acceptedCount: number;
+  readonly emittedTokens: Int32Array;
+  readonly nextSeedToken: number | null;
+  readonly eosHit: boolean;
+  readonly firstEosOffset: number | null;
+  readonly cropProvenance: CroppedKvProvenance;
+  readonly postCropKvSnapshot: PersistentKvSnapshot;
+  readonly croppedSuffixSlabs: readonly KvPositionSlab[];
+  readonly verifyForward: DiffusionForwardResult | null;
+  readonly guardFlags: BrowserGuardFlags;
+  readonly cycleCounters: ForwardCounters;
+}
+
+export interface DlmDenoiseStepSummary {
+  readonly stepIndex: number;
+  readonly quota: number;
+  readonly blockBefore: Int32Array;
+  readonly blockAfter: Int32Array;
+  readonly candidateTokens: Int32Array;
+  readonly confidences: Float32Array;
+  readonly transferIndex: Uint8Array;
+  readonly remainingMaskCount: number;
+  readonly variateProvenance: SamplerVariateProvenance;
+}
+
+export interface DlmBlockCycleResult {
+  readonly blockIndex: number;
+  readonly causalContext: boolean;
+  readonly blockLength: number;
+  readonly initialSeedToken: number | null;
+  readonly denoiseSteps: readonly DlmDenoiseStepSummary[];
+  readonly denoisePassCount: number;
+  readonly finalBlockTokens: Int32Array;
+  readonly emittedTokens: Int32Array;
+  readonly nextSeedToken: number | null;
+  readonly eosHit: boolean;
+  readonly firstEosOffset: number | null;
+  readonly commitKvSnapshot: PersistentKvSnapshot;
+  readonly commitForward: DiffusionForwardResult;
+  readonly guardFlags: BrowserGuardFlags;
+  readonly blockCounters: ForwardCounters;
+}
+
+export interface DiffusionExplicitVariates {
+  readonly prefillUniform?: number;
+  readonly arStepUniforms?: readonly number[];
+  readonly dlmBlockGumbelUniforms?: readonly (readonly Float64Array[])[];
+  readonly dlmCommitUniforms?: readonly number[];
+  readonly specCycleDraftUniforms?: readonly (readonly Float64Array[])[];
+  readonly specCycleVerifyUniforms?: readonly Float64Array[];
+}
+
+export interface DiffusionExecutionOptions {
+  readonly mode: DiffusionExecutionMode;
+  readonly promptTokenIds: ArrayLike<number>;
+  readonly maxNewTokens: number;
+  readonly blockLength?: number;
+  readonly causalContext?: boolean;
+  readonly temperature?: number;
+  readonly samplerAThreshold?: number | null;
+  readonly samplerBThreshold?: number;
+  readonly maxDraftPassesPerCycle?: number;
+  readonly samplingSeed?: number;
+  readonly explicitVariates?: DiffusionExplicitVariates;
+  readonly retainedTraceLayers?: ReadonlySet<number>;
+  readonly kvCapacity?: number;
+}
+
+export interface DiffusionExecutionResult {
+  readonly mode: DiffusionExecutionMode;
+  readonly causalContext: boolean;
+  readonly loraEnabledOnDraft: boolean;
+  readonly promptTokenIds: Int32Array;
+  readonly generatedTokenIds: Int32Array;
+  readonly fullTokenIds: Int32Array;
+  readonly lifecyclePhase: DiffusionLifecyclePhase;
+  readonly kvMaskProvenance: KvMaskProvenance;
+  readonly finalKvSnapshot: PersistentKvSnapshot;
+  readonly counters: ForwardCounters;
+  readonly guardFlags: BrowserGuardFlags;
+  readonly arSteps: readonly DiffusionForwardResult[];
+  readonly dlmBlocks: readonly DlmBlockCycleResult[];
+  readonly specCycles: readonly LinearSpecCycleResult[];
+  readonly prefillForward: DiffusionForwardResult;
+  readonly lastCropProvenance: CroppedKvProvenance | null;
+}
+
+export type DiffusionSessionRecordKind = 'prefill' | 'ar_step' | 'dlm_block' | 'spec_cycle';
+
+export interface DiffusionSessionBounds {
+  readonly maxBranches: number;
+  readonly maxRecords: number;
+  readonly kvCapacity: number;
+  readonly maxRetainedBytes: number;
+  readonly eagerTraceLayers: readonly number[];
+}
+
+export const DEFAULT_DIFFUSION_SESSION_BOUNDS: DiffusionSessionBounds = Object.freeze({
+  maxBranches: 12,
+  maxRecords: 128,
+  kvCapacity: 32,
+  maxRetainedBytes: 12_582_912, // 12.00 MiB
+  eagerTraceLayers: Object.freeze([0, 19, 39] as const),
+});
+
+export interface DiffusionSessionConfig {
+  readonly mode: DiffusionExecutionMode;
+  readonly causalContext: boolean;
+  readonly blockLength: 4 | 8;
+  readonly maxNewTokens: number;
+  readonly temperature: number;
+  readonly samplerAThreshold: number | null;
+  readonly samplerBThreshold: number;
+  readonly maxDraftPassesPerCycle: number;
+  readonly samplingSeed: number;
+}
+
+export interface DiffusionSessionConfigPatch {
+  readonly mode?: DiffusionExecutionMode;
+  readonly causalContext?: boolean;
+  readonly blockLength?: 4 | 8;
+  readonly maxNewTokens?: number;
+  readonly temperature?: number;
+  readonly samplerAThreshold?: number | null;
+  readonly samplerBThreshold?: number;
+  readonly maxDraftPassesPerCycle?: number;
+  readonly samplingSeed?: number;
+  readonly allowExplicitRePrefill?: boolean;
+}
+
+export interface DiffusionPassCheckpointData {
+  readonly inputTokenIds: Int32Array;
+  readonly positionIds: Int32Array;
+  readonly cachePositions: Int32Array;
+  readonly maskMode: DiffusionAttentionMaskMode;
+  readonly loraEnabled: boolean;
+  readonly useCache: boolean;
+  readonly residualCheckpoints: readonly Float32Array[];
+  readonly finalNorm: Float32Array;
+  readonly logits: Float32Array;
+  readonly probs: Float32Array;
+}
+
+export interface DiffusionSessionRecord {
+  readonly recordId: string;
+  readonly parentRecordId: string | null;
+  readonly branchId: string;
+  readonly recordIndex: number;
+  readonly kind: DiffusionSessionRecordKind;
+  readonly configAtStep: DiffusionSessionConfig;
+  readonly lifecyclePhase: DiffusionLifecyclePhase;
+  readonly kvMaskProvenance: KvMaskProvenance;
+  readonly kvSnapshot: PersistentKvSnapshot;
+  readonly generatedTokenIds: Int32Array;
+  readonly stepEmittedTokenIds: Int32Array;
+  readonly pendingSeedToken: number | null;
+  readonly counters: ForwardCounters;
+  readonly guardFlags: BrowserGuardFlags;
+  readonly cropProvenance: CroppedKvProvenance | null;
+  readonly prngStateAfter: Xoshiro128ssState;
+  readonly primaryPassCheckpoint: DiffusionPassCheckpointData;
+  readonly specMeta?: {
+    readonly draftedBlockTokens: Int32Array;
+    readonly draftPassCount: number;
+    readonly verifyArTokens: Int32Array;
+    readonly matchedDraftCount: number;
+    readonly acceptedCount: number;
+    readonly loraEnabled: boolean;
+  };
+  readonly dlmMeta?: {
+    readonly denoisePassCount: number;
+    readonly finalBlockTokens: Int32Array;
+    readonly causalContext: boolean;
+  };
+  readonly eagerLayerTraces: ReadonlyMap<number, DiffusionLayerTrace>;
+  readonly activeCroppedSuffixSlabs: readonly KvPositionSlab[] | null;
+}
+
+export interface DiffusionSessionMemoryReport {
+  readonly totalRetainedBytes: number;
+  readonly maxRetainedBytes: number;
+  readonly withinBudget: boolean;
+  readonly committedKvSlabBytes: number;
+  readonly activeCroppedSuffixBytes: number;
+  readonly checkpointsAndLogitsBytes: number;
+  readonly activeEagerTracesBytes: number;
+  readonly uniqueBufferCount: number;
+  readonly uniqueSlabCount: number;
+  readonly branchCount: number;
+  readonly recordCount: number;
+  readonly activeRecordId: string | null;
+}
