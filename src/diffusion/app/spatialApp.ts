@@ -14,6 +14,11 @@
  *   - Interactive 2D Unit-Circle RoPE Phasor SVG inset for `gqa_rope` with dyadic YaRN
  *     plane selectors and `p = 16` Llama-4 query temperature scale boundary scrubber
  *   - Pooled DOM + SVG 3D-to-2D projected overlay (`DiffusionSpatialOverlay`)
+ *   - DF4 Isolated 4-Act Guided Walkthrough HUD (`createDiffusionGuidedTour`)
+ *   - DF4 Unified Tri-Mode Event Timeline Dock (`createDiffusionTimelineDock`)
+ *   - DF4 Collapsible 3-Tab Editorial Inspector Drawer (`Inspect` / `Architecture` / `Ledger D1–D24`)
+ *   - WAI-ARIA roving tabindex (`handleTablistKeydown`), global shortcuts, polite live region,
+ *     and dynamic `prefers-reduced-motion` compliance
  *
  * Pure deterministic implementation with zero sibling-visualizer dependencies.
  */
@@ -36,20 +41,17 @@ import { clientPointToRay, pickMacroBay } from '../../render/pick';
 import { FlatFlowRibbonsPass, RibbonsPass } from '../../render/ribbons';
 import { SheetsPass } from '../../render/sheets';
 import { SolidsPass } from '../../render/solids';
+import { handleTablistKeydown } from '../../ui/controls';
 import type { OverlayRect } from '../../ui/overlay';
+import {
+  buildDiffusionArchReadouts,
+  buildDiffusionNfeTpfReadout,
+  filterDiffusionDiscrepancyLedger,
+  formatDualSiIecBytes,
+} from '../archReadouts';
 import { KvProvenanceMismatchError } from '../kvCache';
 import { createDefaultDiffusionModel } from '../parameters';
 import { computeLlama4AttnScale } from '../rope';
-import { createDiffusionSession } from '../session';
-import {
-  DIFFUSION_DYADIC_YARN_INV_FREQ,
-  DIFFUSION_MINI_CONFIG,
-  DIFFUSION_MINI_VOCAB,
-  type DiffusionExecutionMode,
-  type DiffusionExplorerMaskMode,
-  type DiffusionSessionConfigPatch,
-  type YarnPlaneZone,
-} from '../types';
 import { buildDiffusionSpatialScene } from '../scene/index';
 import {
   DIFFUSION_EPISTEMIC_NOTE,
@@ -68,7 +70,35 @@ import {
   type DiffusionSpatialScene,
   type DiffusionSpatialViewMode,
 } from '../scene/types';
+import { createDiffusionSession, type DiffusionSession } from '../session';
+import type {
+  DiffusionDiscrepancyCategory,
+  DiffusionFreeExploreRestoreState,
+  DiffusionInspectorTabId,
+  DiffusionTourActId,
+  DiffusionTourBeatSnapshot,
+} from '../story/types';
+import {
+  createDiffusionGuidedTour,
+  DIFFUSION_TOUR_ACT_DEFS,
+} from '../story/walkthrough';
+import {
+  DIFFUSION_DYADIC_YARN_INV_FREQ,
+  DIFFUSION_MINI_CONFIG,
+  DIFFUSION_MINI_VOCAB,
+  type DiffusionExecutionMode,
+  type DiffusionExplorerMaskMode,
+  type DiffusionSessionConfigPatch,
+  type DiffusionSessionMemoryReport,
+  type YarnPlaneZone,
+} from '../types';
 import { DiffusionSpatialOverlay } from './spatialOverlay';
+import {
+  buildDiffusionTimelineDockState,
+  createDiffusionTimelineDock,
+  isReducedMotionPreferred,
+  resolveDiffusionGlobalKeyAction,
+} from './timelineDock';
 
 // ============================================================================
 // PUBLIC DEBUG & HANDLE CONTRACTS
@@ -90,6 +120,15 @@ export interface DiffusionSpatialDebugHandle {
   readonly mode: DiffusionExecutionMode;
   readonly loraActiveOnDraft: boolean;
   readonly rafActive: boolean;
+  readonly tourActive: boolean;
+  readonly tourBeatIndex: number | null;
+  readonly tourTotalBeats: number;
+  readonly inspectorTab: DiffusionInspectorTabId;
+  readonly inspectorOpen: boolean;
+  readonly branchCount: number;
+  readonly activeBranchId: string;
+  readonly activeRecordId: string | null;
+  readonly retainedBytes: number;
 }
 
 export interface DiffusionSpatialAppHandle {
@@ -181,6 +220,41 @@ const MASK_TABS: readonly MaskTabDef[] = Object.freeze([
   }),
 ]);
 
+interface InspectorTabDef {
+  readonly id: DiffusionInspectorTabId;
+  readonly label: string;
+  readonly title: string;
+}
+
+const INSPECTOR_TABS: readonly InspectorTabDef[] = Object.freeze([
+  Object.freeze({
+    id: 'inspect',
+    label: 'Inspect',
+    title: 'Live record provenance, 3-counter NFE/TPF, active formula, D19 crop & token stream',
+  }),
+  Object.freeze({
+    id: 'architecture',
+    label: 'Architecture',
+    title: 'Verified 0 B LFS 14B specs, 7-variant family, 4-tier KV scaling & 4-way memory boundaries',
+  }),
+  Object.freeze({
+    id: 'ledger',
+    label: 'Ledger (D1–D24)',
+    title: 'Searchable & filterable 24-entry verified discrepancy ledger (D1–D24)',
+  }),
+]);
+
+const LEDGER_CATEGORIES: readonly {
+  readonly id: DiffusionDiscrepancyCategory;
+  readonly label: string;
+}[] = Object.freeze([
+  Object.freeze({ id: 'all', label: 'All (24)' }),
+  Object.freeze({ id: 'architecture_specs', label: 'Architecture' }),
+  Object.freeze({ id: 'rope_masks', label: 'RoPE & Masks' }),
+  Object.freeze({ id: 'execution_kv', label: 'Exec & KV' }),
+  Object.freeze({ id: 'samplers_guards', label: 'Samplers & Guards' }),
+]);
+
 const ROTARY_PLANE_LABELS: readonly string[] = Object.freeze(['(0,4)', '(1,5)', '(2,6)', '(3,7)']);
 const DEFAULT_PLANE_ZONES: readonly YarnPlaneZone[] = Object.freeze([
   'original',
@@ -242,6 +316,24 @@ function samePickIdentity(
   );
 }
 
+function cloneFocusState(f: DiffusionFocusState): DiffusionFocusState {
+  return {
+    ...f,
+    hoveredCell: f.hoveredCell ? { ...f.hoveredCell } : null,
+    pinnedCell: f.pinnedCell ? { ...f.pinnedCell } : null,
+  };
+}
+
+function cloneCameraPose(pose: CameraPose): CameraPose {
+  return {
+    target: [pose.target[0], pose.target[1], pose.target[2]],
+    azimuthDeg: pose.azimuthDeg,
+    elevationDeg: pose.elevationDeg,
+    distance: pose.distance,
+    fovDeg: pose.fovDeg,
+  };
+}
+
 function formatLayerCode(layerIdx: number): string {
   return `L${String(layerIdx + 1).padStart(2, '0')}`;
 }
@@ -283,12 +375,24 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   const session = createDiffusionSession(model);
   ensureSessionHasActiveRecord(session);
 
+  // Isolated 4-Act Guided Tour (owns its own private DiffusionSession)
+  const tour = createDiffusionGuidedTour(model);
+
   let focus: DiffusionFocusState = { ...DEFAULT_DIFFUSION_FOCUS_STATE };
   let resolvedCtx: DiffusionResolvedSessionContext = resolveDiffusionSessionContext(session);
   let scene: DiffusionSpatialScene = buildDiffusionSpatialScene(resolvedCtx, focus);
 
   // Scrubber override for 2D RoPE phasor position (`null` = follow live record queryPosition)
   let ropeScrubPosition: number | null = null;
+
+  // Collapsible 3-tab Editorial Inspector state
+  let inspectorOpen = false;
+  let inspectorTab: DiffusionInspectorTabId = 'inspect';
+  let ledgerQuery = '';
+  let ledgerCategory: DiffusionDiscrepancyCategory = 'all';
+
+  // Cached memory report for currently displayed session (refreshed on session/tour updates)
+  let cachedMemoryReport: DiffusionSessionMemoryReport = session.measureMemory();
 
   // Pending mode switch awaiting explicit re-prefill confirmation after KvProvenanceMismatchError
   let pendingRePrefill: {
@@ -310,11 +414,6 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   let dirty = true;
   let sceneUploadPending = true;
   let disposed = false;
-
-  const prefersReducedMotion =
-    typeof window !== 'undefined' &&
-    typeof window.matchMedia === 'function' &&
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   // Camera state
   let cameraPose: CameraPose = {
@@ -342,12 +441,34 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   let pointerLastX = 0;
   let pointerLastY = 0;
 
+  function getDisplayedSession(): DiffusionSession {
+    return tour.isActive() ? tour.getTourSession() : session;
+  }
+
+  function refreshMemoryReport(): DiffusionSessionMemoryReport {
+    cachedMemoryReport = getDisplayedSession().measureMemory();
+    return cachedMemoryReport;
+  }
+
   // ==========================================================================
   // BUILD EDITORIAL DRAFTING-TABLE SHELL DOM
   // ==========================================================================
 
   const shell = el('div', 'df-shell');
   root.appendChild(shell);
+
+  // Visually hidden polite ARIA live region for screen-reader announcements
+  const liveRegion = el('div', 'df-sr-only');
+  liveRegion.dataset.testid = 'diffusion-live-region';
+  liveRegion.setAttribute('role', 'status');
+  liveRegion.setAttribute('aria-live', 'polite');
+  liveRegion.setAttribute('aria-atomic', 'true');
+  shell.appendChild(liveRegion);
+
+  function announce(message: string): void {
+    liveRegion.textContent = '';
+    liveRegion.textContent = message;
+  }
 
   // 1. Top Navigation & View Bar
   const topbar = el('header', 'df-topbar');
@@ -362,6 +483,7 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   viewNav.setAttribute('role', 'tablist');
   viewNav.setAttribute('aria-label', 'Spatial views');
   const viewButtons = new Map<DiffusionSpatialViewMode, HTMLButtonElement>();
+  const viewButtonList: HTMLButtonElement[] = [];
   for (const desc of DIFFUSION_SPATIAL_VIEW_MODES) {
     const btn = el('button', 'df-view-tab', desc.shortLabel);
     btn.type = 'button';
@@ -371,16 +493,47 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
     btn.addEventListener('click', () => setViewMode(desc.id));
     viewNav.appendChild(btn);
     viewButtons.set(desc.id, btn);
+    viewButtonList.push(btn);
   }
+  viewNav.addEventListener('keydown', (ev) => {
+    handleTablistKeydown(viewButtonList, ev, (_tab, idx) => {
+      const desc = DIFFUSION_SPATIAL_VIEW_MODES[idx];
+      if (desc) setViewMode(desc.id);
+    });
+  });
 
   const topActions = el('div', 'df-top-actions');
+
+  const tourToggleBtn = el('button', 'df-top-btn df-top-btn--tour', 'Guided Tour');
+  tourToggleBtn.type = 'button';
+  tourToggleBtn.dataset.testid = 'diffusion-tour-toggle';
+  tourToggleBtn.setAttribute('aria-pressed', 'false');
+  tourToggleBtn.title = 'Enter or exit the isolated 4-Act Guided Walkthrough (Free-Explore preserved)';
+  tourToggleBtn.addEventListener('click', () => {
+    if (tour.isActive()) {
+      exitGuidedTour();
+    } else {
+      enterGuidedTour();
+    }
+  });
+
+  const inspectorToggleBtn = el('button', 'df-top-btn df-top-btn--inspector', 'Inspector');
+  inspectorToggleBtn.type = 'button';
+  inspectorToggleBtn.dataset.testid = 'diffusion-inspector-toggle';
+  inspectorToggleBtn.setAttribute('aria-expanded', 'false');
+  inspectorToggleBtn.setAttribute('aria-controls', 'diffusion-inspector-drawer');
+  inspectorToggleBtn.title = 'Toggle the 3-Tab Editorial Inspector (Inspect, Architecture, Ledger D1–D24)';
+  inspectorToggleBtn.addEventListener('click', () => {
+    setInspectorOpen(!inspectorOpen);
+  });
+
   const resetCamBtn = el('button', 'df-top-btn', 'Fit View');
   resetCamBtn.type = 'button';
   resetCamBtn.title = 'Re-fit perspective camera to the active view bounds';
   resetCamBtn.dataset.testid = 'diffusion-camera-reset-btn';
   resetCamBtn.addEventListener('click', () => fitCameraToScene(true));
-  topActions.append(resetCamBtn);
 
+  topActions.append(tourToggleBtn, inspectorToggleBtn, resetCamBtn);
   topbar.append(brand, viewNav, topActions);
   shell.appendChild(topbar);
 
@@ -411,11 +564,13 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   stepBackBtn.title = 'Step backward to previous session record';
   stepBackBtn.dataset.testid = 'diffusion-step-back-btn';
   stepBackBtn.addEventListener('click', () => {
+    if (tour.isActive()) return;
     const prev = session.stepBack();
     if (prev) {
       pendingRePrefill = null;
       ropeScrubPosition = null;
       rebuildFromSession(false);
+      announce(`Stepped back to record #${prev.recordIndex}`);
     }
   });
 
@@ -424,11 +579,13 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   stepFwdBtn.title = 'Step forward along active branch';
   stepFwdBtn.dataset.testid = 'diffusion-step-forward-btn';
   stepFwdBtn.addEventListener('click', () => {
+    if (tour.isActive()) return;
     const next = session.stepForward();
     if (next) {
       pendingRePrefill = null;
       ropeScrubPosition = null;
       rebuildFromSession(false);
+      announce(`Stepped forward to record #${next.recordIndex}`);
     }
   });
 
@@ -437,10 +594,12 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   stepBtn.title = 'Execute one generation step / block / speculative cycle';
   stepBtn.dataset.testid = 'diffusion-step-btn';
   stepBtn.addEventListener('click', () => {
+    if (tour.isActive()) return;
     pendingRePrefill = null;
     ropeScrubPosition = null;
-    session.step();
+    const rec = session.step();
     rebuildFromSession(false);
+    announce(`Executed ${rec.kind}, KV length ${rec.kvSnapshot.seqLen}`);
   });
 
   const runBtn = el('button', 'df-btn df-btn--accent', 'Run');
@@ -448,10 +607,12 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   runBtn.title = 'Run session deterministically to completion / EOS / capacity';
   runBtn.dataset.testid = 'diffusion-run-btn';
   runBtn.addEventListener('click', () => {
+    if (tour.isActive()) return;
     pendingRePrefill = null;
     ropeScrubPosition = null;
     session.runToCompletion();
     rebuildFromSession(false);
+    announce(`Run complete: ${resolvedCtx.record.lifecyclePhase}, KV length ${resolvedCtx.kvSnapshot.seqLen}`);
   });
 
   const resetBtn = el('button', 'df-btn', 'Reset');
@@ -459,11 +620,13 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   resetBtn.title = 'Reset session back to initial prompt prefill';
   resetBtn.dataset.testid = 'diffusion-reset-btn';
   resetBtn.addEventListener('click', () => {
+    if (tour.isActive()) return;
     pendingRePrefill = null;
     ropeScrubPosition = null;
     session.reset();
     ensureSessionHasActiveRecord(session);
     rebuildFromSession(false);
+    announce('Session reset to initial prompt prefill');
   });
 
   execGroup.append(stepBackBtn, stepFwdBtn, stepBtn, runBtn, resetBtn);
@@ -546,25 +709,36 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   });
   kvHeadWrap.appendChild(kvHeadSelect);
 
-  // Mask Explorer 5-tab bar
+  // Mask Explorer 5-tab bar (WAI-ARIA roving tabindex + handleTablistKeydown)
   const maskTabWrap = el('div', 'df-segmented df-mask-tabs');
   maskTabWrap.setAttribute('role', 'tablist');
   maskTabWrap.setAttribute('aria-label', 'Attention mask explorer modes');
   const maskTabButtons = new Map<DiffusionExplorerMaskMode, HTMLButtonElement>();
+  const maskTabButtonList: HTMLButtonElement[] = [];
+  function selectMaskTab(tabId: DiffusionExplorerMaskMode): void {
+    if (focus.selectedMaskTab === tabId) return;
+    focus = { ...focus, selectedMaskTab: tabId, pinnedCell: null, selectedPartId: null };
+    rebuildSceneOnly(false);
+    const tabDef = MASK_TABS.find((t) => t.id === tabId);
+    announce(`Mask Explorer: ${tabDef?.label ?? tabId}`);
+  }
   for (const tab of MASK_TABS) {
     const btn = el('button', 'df-seg-btn', tab.label);
     btn.type = 'button';
     btn.setAttribute('role', 'tab');
     btn.title = tab.title;
     btn.dataset.testid = `diffusion-mask-tab-${tab.id}`;
-    btn.addEventListener('click', () => {
-      if (focus.selectedMaskTab === tab.id) return;
-      focus = { ...focus, selectedMaskTab: tab.id, pinnedCell: null, selectedPartId: null };
-      rebuildSceneOnly(false);
-    });
+    btn.addEventListener('click', () => selectMaskTab(tab.id));
     maskTabWrap.appendChild(btn);
     maskTabButtons.set(tab.id, btn);
+    maskTabButtonList.push(btn);
   }
+  maskTabWrap.addEventListener('keydown', (ev) => {
+    handleTablistKeydown(maskTabButtonList, ev, (_tab, idx) => {
+      const def = MASK_TABS[idx];
+      if (def) selectMaskTab(def.id);
+    });
+  });
 
   // SwiGLU accumulation reveal slider
   const swigluWrap = el('label', 'df-field df-slider-field');
@@ -621,12 +795,14 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   rePrefillConfirmBtn.type = 'button';
   rePrefillConfirmBtn.dataset.testid = 'diffusion-reprefill-confirm-btn';
   rePrefillConfirmBtn.addEventListener('click', () => {
-    if (!pendingRePrefill) return;
+    if (tour.isActive() || !pendingRePrefill) return;
     const targetPatch = pendingRePrefill.preset.patch;
+    const targetLabel = pendingRePrefill.preset.label;
     pendingRePrefill = null;
     ropeScrubPosition = null;
     session.updateConfig({ ...targetPatch, allowExplicitRePrefill: true });
     rebuildFromSession(false);
+    announce(`Explicit re-prefill completed for ${targetLabel}`);
   });
   const rePrefillCancelBtn = el('button', 'df-btn', 'Cancel');
   rePrefillCancelBtn.type = 'button';
@@ -644,7 +820,7 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   warningStrip.hidden = true;
   shell.appendChild(warningStrip);
 
-  // 4. Main WebGL2 Viewport Stage + Projected Overlay + 2D Unit-Circle RoPE Phasor SVG Inset
+  // 4. Main WebGL2 Viewport Stage + Projected Overlay + RoPE Phasor + Tour HUD + Inspector Drawer
   const stage = el('main', 'df-stage');
   const canvas = el('canvas', 'df-canvas');
   canvas.id = 'diffusion-canvas';
@@ -661,7 +837,164 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   const viewDisclosureEl = el('div', 'df-view-disclosure', DIFFUSION_PROJECTION_REVERSAL_BADGE);
   viewCaption.append(viewTitleEl, viewSubtitleEl, viewDisclosureEl);
 
-  // Interactive 2D Unit-Circle RoPE Phasor SVG Inset (visible in `gqa_rope`)
+  // 4a. Guided Tour HUD Overlay inside stage
+  const tourHud = el('section', 'df-tour-hud');
+  tourHud.dataset.testid = 'diffusion-tour-hud';
+  tourHud.setAttribute('aria-label', 'Guided 4-Act Walkthrough');
+  tourHud.hidden = true;
+
+  const tourActsRow = el('div', 'df-tour-acts');
+  const tourActButtons = new Map<DiffusionTourActId, HTMLButtonElement>();
+  for (const actDef of DIFFUSION_TOUR_ACT_DEFS) {
+    const actNum = actDef.actIndex + 1;
+    const btn = el('button', 'df-tour-act-btn', actDef.shortTitle);
+    btn.type = 'button';
+    btn.dataset.testid = `diffusion-tour-act-${actNum}`;
+    btn.title = actDef.title;
+    btn.addEventListener('click', () => {
+      const beat = tour.goToAct(actDef.id);
+      if (beat) applyTourBeat(beat);
+    });
+    tourActsRow.appendChild(btn);
+    tourActButtons.set(actDef.id, btn);
+  }
+
+  const tourMetaRow = el('div', 'df-tour-meta-row');
+  const tourCounterEl = el('span', 'df-tour-counter', 'Beat 1 / 26');
+  const tourProvenanceEl = el('span', 'df-tour-provenance', '');
+  tourMetaRow.append(tourCounterEl, tourProvenanceEl);
+
+  const tourTitleEl = el('h2', 'df-tour-title', '');
+  const tourSubtitleEl = el('div', 'df-tour-subtitle', '');
+  const tourNarrativeEl = el('p', 'df-tour-narrative', '');
+  const tourTakeawayEl = el('div', 'df-tour-takeaway', '');
+
+  const tourMetricsEl = el('div', 'df-tour-metrics');
+  tourMetricsEl.dataset.testid = 'diffusion-tour-metrics';
+
+  const tourFooter = el('div', 'df-tour-footer');
+  const tourNavBtns = el('div', 'df-tour-nav-btns');
+  const tourPrevBtn = el('button', 'df-btn', '← Prev');
+  tourPrevBtn.type = 'button';
+  tourPrevBtn.dataset.testid = 'diffusion-tour-prev';
+  tourPrevBtn.addEventListener('click', () => {
+    const beat = tour.prev();
+    if (beat) applyTourBeat(beat);
+  });
+
+  const tourNextBtn = el('button', 'df-btn df-btn--primary', 'Next →');
+  tourNextBtn.type = 'button';
+  tourNextBtn.dataset.testid = 'diffusion-tour-next';
+  tourNextBtn.addEventListener('click', () => {
+    const beat = tour.next();
+    if (beat) applyTourBeat(beat);
+  });
+
+  const tourExitBtn = el('button', 'df-btn df-btn--subtle', 'Exit Tour');
+  tourExitBtn.type = 'button';
+  tourExitBtn.dataset.testid = 'diffusion-tour-exit';
+  tourExitBtn.addEventListener('click', () => exitGuidedTour());
+
+  tourNavBtns.append(tourPrevBtn, tourNextBtn);
+  tourFooter.append(tourNavBtns, tourExitBtn);
+
+  tourHud.append(
+    tourActsRow,
+    tourMetaRow,
+    tourTitleEl,
+    tourSubtitleEl,
+    tourNarrativeEl,
+    tourTakeawayEl,
+    tourMetricsEl,
+    tourFooter,
+  );
+
+  // 4b. Collapsible 3-Tab Editorial Inspector Drawer
+  const inspectorDrawer = el('aside', 'df-inspector-drawer');
+  inspectorDrawer.id = 'diffusion-inspector-drawer';
+  inspectorDrawer.dataset.testid = 'diffusion-inspector-drawer';
+  inspectorDrawer.setAttribute('aria-label', 'Diffusion editorial inspector');
+  inspectorDrawer.hidden = true;
+
+  const inspectorHeader = el('div', 'df-inspector-header');
+  const inspectorTitle = el('span', 'df-inspector-title', 'Editorial Inspector');
+  const inspectorCloseBtn = el('button', 'df-inspector-close', '×');
+  inspectorCloseBtn.type = 'button';
+  inspectorCloseBtn.setAttribute('aria-label', 'Close inspector drawer');
+  inspectorCloseBtn.title = 'Close inspector (Escape)';
+  inspectorCloseBtn.addEventListener('click', () => setInspectorOpen(false));
+  inspectorHeader.append(inspectorTitle, inspectorCloseBtn);
+
+  const inspectorTablist = el('div', 'df-inspector-tabs');
+  inspectorTablist.setAttribute('role', 'tablist');
+  inspectorTablist.setAttribute('aria-label', 'Diffusion inspector sections');
+  const inspectorTabButtons = new Map<DiffusionInspectorTabId, HTMLButtonElement>();
+  const inspectorTabButtonList: HTMLButtonElement[] = [];
+  for (const tabDef of INSPECTOR_TABS) {
+    const btn = el('button', 'df-inspector-tab', tabDef.label);
+    btn.type = 'button';
+    btn.id = `diffusion-inspector-tab-${tabDef.id}`;
+    btn.dataset.testid = `diffusion-inspector-tab-${tabDef.id}`;
+    btn.setAttribute('role', 'tab');
+    btn.setAttribute('aria-controls', 'diffusion-inspector-panel');
+    btn.title = tabDef.title;
+    btn.addEventListener('click', () => setInspectorTab(tabDef.id));
+    inspectorTablist.appendChild(btn);
+    inspectorTabButtons.set(tabDef.id, btn);
+    inspectorTabButtonList.push(btn);
+  }
+  inspectorTablist.addEventListener('keydown', (ev) => {
+    handleTablistKeydown(inspectorTabButtonList, ev, (_tab, idx) => {
+      const def = INSPECTOR_TABS[idx];
+      if (def) setInspectorTab(def.id);
+    });
+  });
+
+  const inspectorPanel = el('div', 'df-inspector-panel');
+  inspectorPanel.id = 'diffusion-inspector-panel';
+  inspectorPanel.dataset.testid = 'diffusion-inspector-panel';
+  inspectorPanel.setAttribute('role', 'tabpanel');
+  inspectorPanel.setAttribute('aria-labelledby', 'diffusion-inspector-tab-inspect');
+
+  // Persistent sub-containers inside inspectorPanel so typing in Ledger search never loses focus
+  const inspectBody = el('div', 'df-inspector-body');
+  const archBody = el('div', 'df-inspector-body');
+  const ledgerBody = el('div', 'df-inspector-body');
+
+  const ledgerControls = el('div', 'df-ledger-controls');
+  const ledgerSearchInput = el('input', 'df-ledger-search');
+  ledgerSearchInput.type = 'search';
+  ledgerSearchInput.placeholder = 'Filter D1–D24 by ID, topic, or ground truth…';
+  ledgerSearchInput.dataset.testid = 'diffusion-ledger-search';
+  ledgerSearchInput.setAttribute('aria-label', 'Search discrepancy ledger D1 to D24');
+  ledgerSearchInput.addEventListener('input', () => {
+    ledgerQuery = ledgerSearchInput.value;
+    renderLedgerList();
+  });
+
+  const ledgerCatBar = el('div', 'df-ledger-cats');
+  const ledgerCatButtons = new Map<DiffusionDiscrepancyCategory, HTMLButtonElement>();
+  for (const cat of LEDGER_CATEGORIES) {
+    const btn = el('button', 'df-ledger-cat-btn', cat.label);
+    btn.type = 'button';
+    btn.dataset.testid = `diffusion-ledger-cat-${cat.id}`;
+    btn.addEventListener('click', () => {
+      ledgerCategory = cat.id;
+      renderLedgerList();
+    });
+    ledgerCatBar.appendChild(btn);
+    ledgerCatButtons.set(cat.id, btn);
+  }
+  const ledgerMatchCountEl = el('div', 'df-ledger-count', '24 / 24 discrepancies');
+  ledgerControls.append(ledgerSearchInput, ledgerCatBar, ledgerMatchCountEl);
+
+  const ledgerListWrap = el('div', 'df-ledger-list');
+  ledgerBody.append(ledgerControls, ledgerListWrap);
+
+  inspectorPanel.append(inspectBody, archBody, ledgerBody);
+  inspectorDrawer.append(inspectorHeader, inspectorTablist, inspectorPanel);
+
+  // 4c. Interactive 2D Unit-Circle RoPE Phasor SVG Inset (visible in `gqa_rope`)
   const phasorCard = el('aside', 'df-rope-phasor');
   phasorCard.dataset.testid = 'diffusion-rope-phasor';
   phasorCard.hidden = true;
@@ -689,10 +1022,8 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
     planeButtons.push(btn);
   }
 
-  // Crisp SVG unit circle (`r = 1.0`) + outer `r = 1.069` dashed Llama-4 ring
-  // Coordinate system: viewBox -140 -140 280 280; unit circle radius R = 96 px
   const UNIT_R = 96;
-  const LLAMA4_R = UNIT_R * (1 + 0.1 * Math.log(2)); // ~102.65 px (r = 1.0693)
+  const LLAMA4_R = UNIT_R * (1 + 0.1 * Math.log(2));
 
   const phasorSvg = svgEl('svg', {
     class: 'df-phasor-svg',
@@ -701,7 +1032,6 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
     'aria-label': '2D RoPE Unit Circle and Llama-4 Query Scale Phasor Diagram',
   });
 
-  // Grid & axes
   phasorSvg.append(
     svgEl('line', { x1: -122, y1: 0, x2: 122, y2: 0, class: 'df-ph-axis' }),
     svgEl('line', { x1: 0, y1: -122, x2: 0, y2: 122, class: 'df-ph-axis' }),
@@ -713,7 +1043,6 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
     svgEl('text', { x: 5, y: -116, class: 'df-ph-axis-label' }, '+x₂'),
   );
 
-  // Dynamic vector elements
   const phAngleArc = svgEl('path', { class: 'df-ph-arc', d: '' });
   const phQPreLine = svgEl('line', { class: 'df-ph-vec df-ph-vec--pre', x1: 0, y1: 0, x2: UNIT_R, y2: 0 });
   const phKPreLine = svgEl('line', { class: 'df-ph-vec df-ph-vec--kpre', x1: 0, y1: 0, x2: UNIT_R, y2: 0 });
@@ -738,7 +1067,6 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
     phQLabel,
   );
 
-  // Position scrubber 0..31 with visible `p = 16 · Llama-4 scale boundary` tick
   const scrubberWrap = el('div', 'df-phasor-scrubber');
   const scrubberTop = el('div', 'df-phasor-scrubber-top');
   const scrubberPosLabel = el('span', 'df-phasor-pos-label', 'p = 0');
@@ -798,10 +1126,42 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   const webglFallbackEl = el('div', 'df-webgl-fallback');
   webglFallbackEl.hidden = true;
 
-  stage.append(canvas, overlaySvg, overlayLabels, viewCaption, phasorCard, webglFallbackEl);
+  stage.append(
+    canvas,
+    overlaySvg,
+    overlayLabels,
+    viewCaption,
+    tourHud,
+    phasorCard,
+    inspectorDrawer,
+    webglFallbackEl,
+  );
   shell.appendChild(stage);
 
-  // 5. Docked Formula Inspector Bar (`activeFormula` + selected part + token stream)
+  // 5. Unified Tri-Mode Event Timeline Dock (mounted between stage and formulaDock)
+  const timelineDock = createDiffusionTimelineDock(shell, {
+    onSeekRecord(recordId: string) {
+      if (tour.isActive()) return;
+      try {
+        const rec = session.seekRecord(recordId);
+        pendingRePrefill = null;
+        ropeScrubPosition = null;
+        rebuildFromSession(false);
+        announce(`Timeline seek: record #${rec.recordIndex} on ${rec.branchId}`);
+      } catch {
+        // Ignore stale record clicks
+      }
+    },
+    onDeleteBranch(branchId: string) {
+      if (tour.isActive()) return;
+      if (session.deleteBranch(branchId)) {
+        rebuildFromSession(false);
+        announce(`Deleted inactive branch ${branchId}`);
+      }
+    },
+  });
+
+  // 6. Docked Formula Inspector Bar (`activeFormula` + selected part + token stream)
   const formulaDock = el('footer', 'df-formula-dock');
   formulaDock.dataset.testid = 'diffusion-formula-dock';
   const formulaLeft = el('div', 'df-formula-left');
@@ -902,19 +1262,13 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
       DEFAULT_FOV_DEG,
       0.84,
     );
-    if (!cameraInitialized || !animate || prefersReducedMotion) {
+    if (!cameraInitialized || !animate || isReducedMotionPreferred()) {
       cameraPose = targetPose;
       cameraAnim = null;
       cameraInitialized = true;
     } else {
       cameraAnim = {
-        from: {
-          target: [cameraPose.target[0], cameraPose.target[1], cameraPose.target[2]],
-          azimuthDeg: cameraPose.azimuthDeg,
-          elevationDeg: cameraPose.elevationDeg,
-          distance: cameraPose.distance,
-          fovDeg: cameraPose.fovDeg,
-        },
+        from: cloneCameraPose(cameraPose),
         to: targetPose,
         startMs: performance.now(),
         durationMs: CAMERA_FLY_DURATION_MS,
@@ -987,33 +1341,28 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   function computeFloatingAvoidRects(): OverlayRect[] {
     const rects: OverlayRect[] = [];
     const stageRect = stage.getBoundingClientRect();
-    if (!phasorCard.hidden) {
-      const r = phasorCard.getBoundingClientRect();
+    const pushIfVisible = (node: HTMLElement, pad: number) => {
+      if (node.hidden) return;
+      const r = node.getBoundingClientRect();
       if (r.width > 0 && r.height > 0) {
         rects.push({
-          x0: r.left - stageRect.left - 6,
-          y0: r.top - stageRect.top - 6,
-          x1: r.right - stageRect.left + 6,
-          y1: r.bottom - stageRect.top + 6,
+          x0: r.left - stageRect.left - pad,
+          y0: r.top - stageRect.top - pad,
+          x1: r.right - stageRect.left + pad,
+          y1: r.bottom - stageRect.top + pad,
         });
       }
-    }
-    const capRect = viewCaption.getBoundingClientRect();
-    if (capRect.width > 0 && capRect.height > 0) {
-      rects.push({
-        x0: capRect.left - stageRect.left - 4,
-        y0: capRect.top - stageRect.top - 4,
-        x1: capRect.right - stageRect.left + 4,
-        y1: capRect.bottom - stageRect.top + 4,
-      });
-    }
+    };
+    pushIfVisible(phasorCard, 6);
+    pushIfVisible(viewCaption, 4);
+    pushIfVisible(tourHud, 6);
+    pushIfVisible(inspectorDrawer, 6);
     return rects;
   }
 
   function renderFrame(nowMs: number): void {
     if (disposed) return;
 
-    // Advance camera animation if active
     let keepAnimating = false;
     if (cameraAnim) {
       const elapsed = nowMs - cameraAnim.startMs;
@@ -1045,7 +1394,6 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
       pollGlErrors();
     }
 
-    // Synchronous pooled DOM + SVG overlay projection inside render pass
     overlay.update({
       scene,
       snapshot,
@@ -1082,6 +1430,520 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   }
 
   // ==========================================================================
+  // 3-TAB EDITORIAL INSPECTOR RENDERING
+  // ==========================================================================
+
+  function makeCard(title: string, badge?: string): HTMLElement {
+    const card = el('section', 'df-ins-card');
+    const head = el('div', 'df-ins-card-head');
+    head.appendChild(el('h3', 'df-ins-card-title', title));
+    if (badge) head.appendChild(el('span', 'df-ins-card-badge', badge));
+    card.appendChild(head);
+    return card;
+  }
+
+  function renderInspectTab(): void {
+    inspectBody.innerHTML = '';
+    const rec = resolvedCtx.record;
+    const nfe = buildDiffusionNfeTpfReadout(
+      resolvedCtx.modeAtRecord,
+      rec.counters,
+      rec.generatedTokenIds.length,
+      resolvedCtx.causalContextAtRecord,
+    );
+
+    // 1. Provenance & Record Summary
+    const provCard = makeCard(
+      'Active Record Provenance',
+      tour.isActive() ? 'Tour (Isolated)' : `${resolvedCtx.branchId} · #${rec.recordIndex}`,
+    );
+    const provBadges = el('div', 'df-ins-badge-wrap');
+    for (const b of scene.provenanceBadges) {
+      provBadges.appendChild(el('span', `df-badge df-badge--${b.tone}`, b.label));
+    }
+    const provMeta = el('div', 'df-ins-kv-grid');
+    const kvItems: [string, string][] = [
+      ['Record', `${rec.recordId} (${rec.kind})`],
+      ['Lifecycle', rec.lifecyclePhase],
+      ['KV Cache', `${resolvedCtx.kvSnapshot.seqLen} / ${resolvedCtx.kvSnapshot.capacity} tok (${rec.kvMaskProvenance})`],
+      ['Session RAM', formatDualSiIecBytes(cachedMemoryReport.totalRetainedBytes).dualLabel],
+    ];
+    for (const [k, v] of kvItems) {
+      const row = el('div', 'df-ins-kv-row');
+      row.append(el('span', 'df-ins-k', k), el('span', 'df-ins-v', v));
+      provMeta.appendChild(row);
+    }
+    provCard.append(provBadges, provMeta);
+    inspectBody.appendChild(provCard);
+
+    // 2. Live 3-Counter NFE & TPF Readout (D12 Honest Accounting)
+    const nfeCard = makeCard('Live 3-Counter NFE & TPF (D12)', nfe.modeLabel);
+    const nfeGrid = el('div', 'df-ins-nfe-grid');
+    const nfeCells: [string, string, string][] = [
+      ['Actual Fwd', String(nfe.actualForwardPasses), `TPF ${nfe.tpfActualLabel}`],
+      ['Decode Fwd', String(nfe.decodeForwardPasses), `TPF ${nfe.tpfDecodeLabel}`],
+      ['Ref NFE (D12)', String(nfe.referenceMethodNfe), `TPF ${nfe.tpfRefLabel}`],
+      ['Generated', `${nfe.generatedTokens} tok`, 'Live'],
+    ];
+    for (const [label, big, sub] of nfeCells) {
+      const cell = el('div', 'df-ins-stat-box');
+      cell.append(
+        el('span', 'df-ins-stat-label', label),
+        el('strong', 'df-ins-stat-val', big),
+        el('span', 'df-ins-stat-sub', sub),
+      );
+      nfeGrid.appendChild(cell);
+    }
+    nfeCard.append(
+      nfeGrid,
+      el('p', 'df-ins-note', nfe.methodNote),
+      el('p', 'df-ins-note df-ins-note--muted', nfe.d12ComparisonNote),
+    );
+    inspectBody.appendChild(nfeCard);
+
+    // 3. Active Formula / Selected Part Details
+    const formulaCard = makeCard('Active Formula / Part');
+    if (scene.activeFormula) {
+      const f = scene.activeFormula;
+      formulaCard.append(
+        el('div', 'df-ins-mono-strong', `${f.tensorLabel} · ${f.coordLabel} = ${f.valueText}`),
+        el('div', 'df-ins-code', f.equation),
+        el('div', 'df-ins-note df-ins-note--muted', f.subEquation),
+      );
+    } else if (focus.selectedPartId && scene.partCatalog[focus.selectedPartId]) {
+      const p = scene.partCatalog[focus.selectedPartId]!;
+      formulaCard.append(
+        el('div', 'df-ins-mono-strong', `${p.title} (${p.badge})`),
+        el('p', 'df-ins-note', p.summary),
+      );
+      if (p.specs.length > 0) {
+        const ul = el('ul', 'df-ins-list');
+        for (const s of p.specs) ul.appendChild(el('li', undefined, s));
+        formulaCard.appendChild(ul);
+      }
+    } else {
+      formulaCard.append(
+        el('div', 'df-ins-mono-strong', scene.title),
+        el('p', 'df-ins-note df-ins-note--muted', 'Click any 3D sheet cell or part to pin its live equation here.'),
+      );
+    }
+    inspectBody.appendChild(formulaCard);
+
+    // 4. Guards & D19 Dual-Crop Provenance
+    if (rec.cropProvenance || rec.guardFlags.warnings.length > 0 || rec.guardFlags.draftGuardTriggered !== 'none') {
+      const guardCard = makeCard('Guards & D19 Dual-Crop Provenance');
+      if (rec.cropProvenance) {
+        const cp = rec.cropProvenance;
+        const cpGrid = el('div', 'df-ins-kv-grid');
+        const cpRows: [string, string][] = [
+          ['Before Verify KV', `${cp.cacheLenBeforeVerify} tok`],
+          ['Pre-Crop KV', `${cp.preCropKvLen} tok`],
+          ['Browser Post-EOS Crop', `${cp.browserPostEosCropLen} tok`],
+          ['Upstream Pre-EOS Crop (D19)', `${cp.upstreamPreEosCropLen} tok`],
+          ['Cropped Suffix', `${cp.croppedSuffixLen} slots`],
+        ];
+        for (const [k, v] of cpRows) {
+          const row = el('div', 'df-ins-kv-row');
+          row.append(el('span', 'df-ins-k', k), el('span', 'df-ins-v', v));
+          cpGrid.appendChild(row);
+        }
+        guardCard.appendChild(cpGrid);
+      }
+      if (rec.guardFlags.warnings.length > 0) {
+        const ul = el('ul', 'df-ins-list df-ins-list--warn');
+        for (const w of rec.guardFlags.warnings) ul.appendChild(el('li', undefined, w));
+        guardCard.appendChild(ul);
+      }
+      inspectBody.appendChild(guardCard);
+    }
+
+    // 5. Decoded V=36 Token Stream
+    const tokCard = makeCard(
+      'Committed V=36 Token Stream',
+      `${resolvedCtx.kvSnapshot.committedTokenIds.length} tok`,
+    );
+    const tokWrap = el('div', 'df-ins-tokens');
+    const committed = resolvedCtx.kvSnapshot.committedTokenIds;
+    for (let i = 0; i < committed.length; i++) {
+      const id = committed[i]!;
+      const label = DIFFUSION_MINI_VOCAB[id] ?? `#${id}`;
+      const chip = el('span', 'df-ins-tok-chip', `${i}:${label}`);
+      if (id >= 32) chip.classList.add('is-special');
+      if (i >= DIFFUSION_MINI_CONFIG.defaultPromptLen) chip.classList.add('is-gen');
+      tokWrap.appendChild(chip);
+    }
+    tokCard.appendChild(tokWrap);
+    inspectBody.appendChild(tokCard);
+  }
+
+  function renderArchitectureTab(): void {
+    archBody.innerHTML = '';
+    const rec = resolvedCtx.record;
+    const bundle = buildDiffusionArchReadouts({
+      mode: resolvedCtx.modeAtRecord,
+      causalContext: resolvedCtx.causalContextAtRecord,
+      counters: rec.counters,
+      generatedTokens: rec.generatedTokenIds.length,
+      memoryReport: cachedMemoryReport,
+      activeAtlasBytes: scene.valueAtlas ? scene.valueAtlas.width * scene.valueAtlas.height * 8 : undefined,
+      activeAtlasWidth: scene.valueAtlas?.width,
+      activeAtlasHeight: scene.valueAtlas?.height,
+      activeAtlasName: scene.viewMode,
+    });
+
+    // 1. Canonical 14B Instruct Summary
+    const c14 = bundle.canonical14B;
+    const summaryCard = makeCard(
+      'Canonical 14B Instruct (Verified 0 B LFS)',
+      c14.lfsAllZeroDiff ? `${c14.lfsFileCount} files · 0 B diff` : 'Verify',
+    );
+    const summaryGrid = el('div', 'df-ins-kv-grid');
+    const sumRows: [string, string][] = [
+      ['HF Repo', `${c14.repoId} @ ${c14.shortRevision}`],
+      ['Paper / GitHub', `${c14.paperArxivId} · ${c14.githubRepo}`],
+      ['Backbone', `${c14.backboneParamsFormatted} (${c14.backboneTensors} BF16) · ${c14.backbonePayload.dualLabel}`],
+      ['o_proj LoRA', `${c14.loraParamsFormatted} (${c14.loraTensors} F32, ${c14.loraShareOfBackbonePct}) · ${c14.loraPayload.dualLabel}`],
+    ];
+    for (const [k, v] of sumRows) {
+      const row = el('div', 'df-ins-kv-row');
+      row.append(el('span', 'df-ins-k', k), el('span', 'df-ins-v', v));
+      summaryGrid.appendChild(row);
+    }
+    summaryCard.append(
+      summaryGrid,
+      el('div', 'df-ins-callout df-ins-callout--amber', c14.projectionReversalNote),
+      el('p', 'df-ins-note', c14.epistemicNote),
+      el('p', 'df-ins-note df-ins-note--muted', c14.outOfScopeNote),
+    );
+    archBody.appendChild(summaryCard);
+
+    // 2. 14B Component Breakdown Table
+    const compCard = makeCard('14B Component Breakdown', `${bundle.components14B.length} groups`);
+    const compTable = el('table', 'df-ins-table');
+    compTable.innerHTML =
+      '<thead><tr><th>Component</th><th>Shape</th><th>Params</th><th>Share</th><th>Payload</th></tr></thead>';
+    const compTbody = el('tbody');
+    for (const row of bundle.components14B) {
+      const tr = el('tr');
+      tr.append(
+        el('td', undefined, row.component),
+        el('td', 'df-mono-cell', row.shape),
+        el('td', 'df-mono-cell', row.parametersFormatted),
+        el('td', 'df-mono-cell', row.shareOfBackbonePct),
+        el('td', 'df-mono-cell', row.payload.dualLabel),
+      );
+      compTbody.appendChild(tr);
+    }
+    compTable.appendChild(compTbody);
+    const compScroll = el('div', 'df-ins-table-scroll');
+    compScroll.appendChild(compTable);
+    compCard.appendChild(compScroll);
+    archBody.appendChild(compCard);
+
+    // 3. 7-Variant Family Matrix
+    const famCard = makeCard('7-Variant Family Matrix', 'HF Collection');
+    const famTable = el('table', 'df-ins-table');
+    famTable.innerHTML =
+      '<thead><tr><th>ID</th><th>Layers</th><th>d / d_ff</th><th>YaRN / θ</th><th>Backbone</th><th>LoRA</th></tr></thead>';
+    const famTbody = el('tbody');
+    for (const v of bundle.familyVariants) {
+      const tr = el('tr', v.isCanonical ? 'is-canonical' : undefined);
+      tr.append(
+        el('td', 'df-mono-cell', v.isCanonical ? `${v.id} ★` : v.id),
+        el('td', 'df-mono-cell', v.layersLabel),
+        el('td', 'df-mono-cell', `${v.hiddenSize}/${v.intermediateSize}`),
+        el('td', 'df-mono-cell', `${v.yarnLabel} · ${v.ropeThetaLabel}`),
+        el('td', 'df-mono-cell', v.backboneParamsFormatted),
+        el('td', 'df-mono-cell', v.loraSummary),
+      );
+      famTbody.appendChild(tr);
+    }
+    famTable.appendChild(famTbody);
+    const famScroll = el('div', 'df-ins-table-scroll');
+    famScroll.appendChild(famTable);
+    famCard.appendChild(famScroll);
+    archBody.appendChild(famCard);
+
+    // 4. 4-Tier Context KV Scaling Table (with Llama-4 16,384 transition highlight)
+    const kvCard = makeCard('4-Tier Context KV Scaling & Llama-4 Boundary', '14B BF16');
+    const kvTable = el('table', 'df-ins-table');
+    kvTable.innerHTML =
+      '<thead><tr><th>Context</th><th>Tier</th><th>14B KV</th><th>+B=32 Buf</th><th>Llama-4 s_L4</th></tr></thead>';
+    const kvTbody = el('tbody');
+    for (const row of bundle.contextKvScaling) {
+      const tr = el('tr', row.crossesOrigMaxPos ? 'is-l4-cross' : undefined);
+      tr.title = `${row.tierProvenance} — ${row.transitionNote}`;
+      tr.append(
+        el('td', 'df-mono-cell', row.tokenLabel),
+        el('td', undefined, `T${row.tier} · ${row.tierBadge}`),
+        el('td', 'df-mono-cell', row.prodBf16Kv.dualLabel),
+        el('td', 'df-mono-cell', row.prodWithTempBlock32.dualLabel),
+        el('td', 'df-mono-cell', row.llama4ScaleLabel),
+      );
+      kvTbody.appendChild(tr);
+    }
+    kvTable.appendChild(kvTbody);
+    const kvScroll = el('div', 'df-ins-table-scroll');
+    kvScroll.appendChild(kvTable);
+    kvCard.appendChild(kvScroll);
+    archBody.appendChild(kvCard);
+
+    // 5. 4-Way Memory Boundary Table
+    const memCard = makeCard('4-Way Browser Memory Boundaries', bundle.memoryTotalMiniFormatted.dualLabel);
+    const memTable = el('table', 'df-ins-table');
+    memTable.innerHTML =
+      '<thead><tr><th>Boundary</th><th>Current</th><th>Cap</th><th>Status</th></tr></thead>';
+    const memTbody = el('tbody');
+    for (const row of bundle.memoryBoundaries) {
+      const tr = el('tr');
+      tr.title = `${row.ownership} — ${row.note}`;
+      const statusText = row.utilizationPct !== null
+        ? `${row.utilizationPct.toFixed(1)}% (${row.withinCap ? 'OK' : 'OVER'})`
+        : 'Fixed';
+      tr.append(
+        el('td', undefined, row.label),
+        el('td', 'df-mono-cell', row.formatted.dualLabel),
+        el('td', 'df-mono-cell', row.capFormatted ?? '—'),
+        el('td', 'df-mono-cell', statusText),
+      );
+      memTbody.appendChild(tr);
+    }
+    memTable.appendChild(memTbody);
+    const memScroll = el('div', 'df-ins-table-scroll');
+    memScroll.appendChild(memTable);
+    memCard.appendChild(memScroll);
+    archBody.appendChild(memCard);
+
+    // 6. All 13 Verified 0 B LFS Files Table
+    const lfsCard = makeCard('Verified 0 B LFS Inventory', `${bundle.lfsInventory.length} safetensors`);
+    const lfsTable = el('table', 'df-ins-table');
+    lfsTable.innerHTML =
+      '<thead><tr><th>Repo / File</th><th>Dtype</th><th>Tensors</th><th>Total</th><th>Diff</th></tr></thead>';
+    const lfsTbody = el('tbody');
+    for (const row of bundle.lfsInventory) {
+      const tr = el('tr');
+      tr.title = `${row.repoId}@${row.shortRevision} · sha256:${row.lfsSha256Prefix}`;
+      tr.append(
+        el('td', 'df-mono-cell', `${row.shortRepoLabel}/${row.file}`),
+        el('td', 'df-mono-cell', row.dtype),
+        el('td', 'df-mono-cell', String(row.tensors)),
+        el('td', 'df-mono-cell', row.total.dualLabel),
+        el('td', 'df-mono-cell', `${row.diffBytes} B`),
+      );
+      lfsTbody.appendChild(tr);
+    }
+    lfsTable.appendChild(lfsTbody);
+    const lfsScroll = el('div', 'df-ins-table-scroll');
+    lfsScroll.appendChild(lfsTable);
+    lfsCard.appendChild(lfsScroll);
+    archBody.appendChild(lfsCard);
+  }
+
+  function renderLedgerList(): void {
+    const model = filterDiffusionDiscrepancyLedger({
+      query: ledgerQuery,
+      category: ledgerCategory,
+    });
+
+    for (const [catId, btn] of ledgerCatButtons.entries()) {
+      const active = catId === ledgerCategory;
+      btn.classList.toggle('is-active', active);
+      btn.setAttribute('aria-pressed', String(active));
+    }
+    ledgerMatchCountEl.textContent = `${model.filteredCount} / ${model.totalCount} discrepancies`;
+
+    ledgerListWrap.innerHTML = '';
+    if (model.rows.length === 0) {
+      ledgerListWrap.appendChild(
+        el('p', 'df-ins-note df-ins-note--muted', 'No discrepancy entries match the current filter.'),
+      );
+      return;
+    }
+
+    for (const entry of model.rows) {
+      const item = el('article', 'df-ledger-item');
+      item.dataset.testid = `diffusion-ledger-row-${entry.id}`;
+      const head = el('div', 'df-ledger-item-head');
+      head.append(
+        el('span', 'df-ledger-id', entry.id),
+        el('span', 'df-ledger-topic', entry.topic),
+        el('span', 'df-ledger-cat-tag', entry.categoryLabel),
+      );
+      const claimed = el('div', 'df-ledger-field');
+      claimed.append(el('strong', undefined, 'Claimed: '), document.createTextNode(entry.claimedOrExpected));
+      const truth = el('div', 'df-ledger-field');
+      truth.append(el('strong', undefined, 'Verified: '), document.createTextNode(entry.verifiedGroundTruth));
+      const res = el('div', 'df-ledger-field df-ledger-res');
+      res.append(el('strong', undefined, 'Resolution: '), document.createTextNode(entry.resolution));
+      const src = el('div', 'df-ledger-src', `Source: ${entry.sourceRef}`);
+      item.append(head, claimed, truth, res, src);
+      ledgerListWrap.appendChild(item);
+    }
+  }
+
+  function syncInspectorUi(): void {
+    inspectorDrawer.hidden = !inspectorOpen;
+    stage.classList.toggle('is-inspector-open', inspectorOpen);
+    inspectorToggleBtn.setAttribute('aria-expanded', String(inspectorOpen));
+    inspectorToggleBtn.classList.toggle('is-active', inspectorOpen);
+
+    for (const [tabId, btn] of inspectorTabButtons.entries()) {
+      const selected = tabId === inspectorTab;
+      btn.classList.toggle('is-active', selected);
+      btn.setAttribute('aria-selected', String(selected));
+      btn.setAttribute('tabindex', selected ? '0' : '-1');
+    }
+    inspectorPanel.setAttribute('aria-labelledby', `diffusion-inspector-tab-${inspectorTab}`);
+
+    if (!inspectorOpen) return;
+
+    inspectBody.hidden = inspectorTab !== 'inspect';
+    archBody.hidden = inspectorTab !== 'architecture';
+    ledgerBody.hidden = inspectorTab !== 'ledger';
+
+    if (inspectorTab === 'inspect') {
+      renderInspectTab();
+    } else if (inspectorTab === 'architecture') {
+      renderArchitectureTab();
+    } else {
+      if (ledgerSearchInput.value !== ledgerQuery) {
+        ledgerSearchInput.value = ledgerQuery;
+      }
+      renderLedgerList();
+    }
+  }
+
+  function setInspectorOpen(open: boolean): void {
+    if (inspectorOpen === open) return;
+    inspectorOpen = open;
+    syncInspectorUi();
+    markDirtyAndRender();
+    announce(open ? `Inspector opened (${inspectorTab})` : 'Inspector closed');
+  }
+
+  function setInspectorTab(tab: DiffusionInspectorTabId): void {
+    if (inspectorTab === tab && inspectorOpen) return;
+    inspectorTab = tab;
+    if (!inspectorOpen) inspectorOpen = true;
+    syncInspectorUi();
+    markDirtyAndRender();
+    const label = INSPECTOR_TABS.find((t) => t.id === tab)?.label ?? tab;
+    announce(`Inspector tab: ${label}`);
+  }
+
+  // ==========================================================================
+  // GUIDED TOUR LIFECYCLE (ISOLATED SESSION + EXACT FREE-EXPLORE RESTORE)
+  // ==========================================================================
+
+  function applyTourBeat(beat: DiffusionTourBeatSnapshot): void {
+    const prevView = focus.viewMode;
+    focus = cloneFocusState(beat.focus);
+    ropeScrubPosition = beat.ropeScrubPosition;
+    resolvedCtx = tour.getTourContext();
+    refreshMemoryReport();
+    scene = buildDiffusionSpatialScene(resolvedCtx, focus);
+    sceneUploadPending = true;
+    syncChromeUi();
+    if (prevView !== focus.viewMode) {
+      fitCameraToScene(true);
+    } else {
+      markDirtyAndRender();
+    }
+    announce(`Tour Beat ${beat.beatIndex + 1} of ${beat.totalBeats}: ${beat.title}`);
+  }
+
+  function enterGuidedTour(): void {
+    if (tour.isActive()) return;
+    const feState = session.getState();
+    const snapshot: DiffusionFreeExploreRestoreState = {
+      activeRecordId: feState.activeRecordId,
+      activeBranchId: feState.activeBranchId,
+      focus: cloneFocusState(focus),
+      cameraPose: cloneCameraPose(cameraPose),
+      inspectorTab,
+      inspectorOpen,
+      ropeScrubPosition,
+    };
+    pendingRePrefill = null;
+    const firstBeat = tour.enter(snapshot);
+    applyTourBeat(firstBeat);
+  }
+
+  function exitGuidedTour(): void {
+    if (!tour.isActive()) return;
+    const restored = tour.exit();
+    pendingRePrefill = null;
+    if (restored) {
+      if (restored.activeRecordId) {
+        try {
+          session.seekRecord(restored.activeRecordId);
+        } catch {
+          ensureSessionHasActiveRecord(session);
+        }
+      }
+      focus = cloneFocusState(restored.focus);
+      inspectorTab = restored.inspectorTab;
+      inspectorOpen = restored.inspectorOpen;
+      ropeScrubPosition = restored.ropeScrubPosition;
+      cameraAnim = null;
+      cameraPose = cloneCameraPose(restored.cameraPose);
+    }
+    resolvedCtx = resolveDiffusionSessionContext(session);
+    refreshMemoryReport();
+    scene = buildDiffusionSpatialScene(resolvedCtx, focus);
+    sceneUploadPending = true;
+    syncChromeUi();
+    markDirtyAndRender();
+    announce('Exited Guided Tour and restored Free-Explore session');
+  }
+
+  function syncTourHud(): void {
+    const active = tour.isActive();
+    tourHud.hidden = !active;
+    tourToggleBtn.setAttribute('aria-pressed', String(active));
+    tourToggleBtn.classList.toggle('is-active', active);
+    tourToggleBtn.textContent = active ? 'Exit Tour' : 'Guided Tour';
+
+    if (!active) return;
+
+    const beat = tour.getCurrentBeat();
+    if (!beat) return;
+
+    const acts = tour.getActs();
+    for (const act of acts) {
+      const btn = tourActButtons.get(act.id);
+      if (btn) {
+        btn.classList.toggle('is-active', act.isCurrent);
+        if (act.isCurrent) {
+          btn.setAttribute('aria-current', 'step');
+        } else {
+          btn.removeAttribute('aria-current');
+        }
+      }
+    }
+
+    tourCounterEl.textContent = `Beat ${beat.beatIndex + 1} / ${beat.totalBeats} · ${beat.actTitle}`;
+    tourProvenanceEl.textContent = beat.provenanceSummary;
+    tourTitleEl.textContent = beat.title;
+    tourSubtitleEl.textContent = beat.subtitle;
+    tourNarrativeEl.textContent = beat.narrative;
+    tourTakeawayEl.textContent = `Key takeaway: ${beat.takeaway}`;
+
+    tourMetricsEl.innerHTML = '';
+    for (const metric of beat.liveMetrics) {
+      const chip = el('span', `df-badge df-badge--${metric.tone} df-tour-metric-chip`);
+      chip.append(
+        el('span', 'df-tour-metric-label', `${metric.label}:`),
+        el('strong', 'df-tour-metric-val', ` ${metric.value}`),
+      );
+      tourMetricsEl.appendChild(chip);
+    }
+
+    tourPrevBtn.disabled = beat.beatIndex <= 0;
+    tourNextBtn.disabled = beat.beatIndex >= beat.totalBeats - 1;
+  }
+
+  // ==========================================================================
   // 2D UNIT-CIRCLE ROPE PHASOR SVG INSET UPDATER
   // ==========================================================================
 
@@ -1107,7 +1969,6 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
         : `p = ${activePos} (live)`;
     scrubberSyncBtn.disabled = ropeScrubPosition === null;
 
-    // Update rotary plane selector buttons
     for (let i = 0; i < planeButtons.length; i++) {
       const btn = planeButtons[i]!;
       const z = zones[i] ?? DEFAULT_PLANE_ZONES[i] ?? 'original';
@@ -1121,7 +1982,6 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
     phasorZoneBadge.textContent = `YaRN: ${zone}`;
     phasorZoneBadge.className = `df-phasor-zone-badge df-zone--${zone}`;
 
-    // Compute exact normalized vectors on the unit circle + Llama-4 outer ring
     const qPreNorm = normalizePair(tel ? tel.qPrePair : [1, 0]);
     const kPreNorm = normalizePair(tel ? tel.kPrePair : [0.85, 0.52]);
 
@@ -1146,7 +2006,6 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
       kRotNorm = rotatePair(kPreNorm, angleRad);
     }
 
-    // SVG Y axis points downward, so negate Y for standard mathematical unit circle
     const qPreX = qPreNorm[0] * UNIT_R;
     const qPreY = -qPreNorm[1] * UNIT_R;
     const kPreX = kPreNorm[0] * UNIT_R;
@@ -1155,7 +2014,6 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
     const kRotX = kRotNorm[0] * UNIT_R;
     const kRotY = -kRotNorm[1] * UNIT_R;
 
-    // Scaled query visibly pops out to r = llama4Scale * UNIT_R (~1.0693 * UNIT_R for p >= 16)
     const qScaleR = UNIT_R * llama4Scale;
     const qScaledX = qRotNorm[0] * qScaleR;
     const qScaledY = -qRotNorm[1] * qScaleR;
@@ -1177,7 +2035,6 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
     phQScaledLine.classList.toggle('is-l4-boosted', llama4Scale > 1.0001);
     phQScaledDot.classList.toggle('is-l4-boosted', llama4Scale > 1.0001);
 
-    // Subtle rotation arc between q_pre and q_rot
     const arcR = 34;
     const a0 = Math.atan2(qPreNorm[1], qPreNorm[0]);
     const sweep = Math.min(Math.PI * 1.85, Math.abs(angleRad));
@@ -1188,7 +2045,7 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
       const ex = Math.cos(a1) * arcR;
       const ey = -Math.sin(a1) * arcR;
       const largeArc = sweep > Math.PI ? 1 : 0;
-      const sweepFlag = angleRad >= 0 ? 0 : 1; // CCW in math = 0 in SVG
+      const sweepFlag = angleRad >= 0 ? 0 : 1;
       phAngleArc.setAttribute(
         'd',
         `M${sx.toFixed(1)},${sy.toFixed(1)}A${arcR},${arcR} 0 ${largeArc},${sweepFlag} ${ex.toFixed(1)},${ey.toFixed(1)}`,
@@ -1197,7 +2054,6 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
       phAngleArc.setAttribute('d', '');
     }
 
-    // Position vector tip labels cleanly outward
     phKLabel.setAttribute('x', (kRotNorm[0] * (UNIT_R + 14) - 10).toFixed(1));
     phKLabel.setAttribute('y', (-kRotNorm[1] * (UNIT_R + 14) + 3).toFixed(1));
     phQLabel.setAttribute('x', (qRotNorm[0] * (qScaleR + 15) - 16).toFixed(1));
@@ -1215,36 +2071,41 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   // ==========================================================================
 
   function syncChromeUi(): void {
-    const state = session.getState();
+    const tourActive = tour.isActive();
+    const activeSession = getDisplayedSession();
+    const state = activeSession.getState();
     const rec = resolvedCtx.record;
-    const branchRecs = session.getBranchRecords(resolvedCtx.branchId);
+    const branchRecs = activeSession.getBranchRecords(resolvedCtx.branchId);
     const idxInBranch = branchRecs.findIndex((r) => r.recordId === rec.recordId);
 
-    // 1. View tabs
+    // 1. View tabs (with WAI-ARIA roving tabindex)
     for (const [mode, btn] of viewButtons.entries()) {
       const isSelected = focus.viewMode === mode;
       btn.setAttribute('aria-selected', String(isSelected));
+      btn.setAttribute('tabindex', isSelected ? '0' : '-1');
       btn.classList.toggle('is-active', isSelected);
     }
 
-    // 2. Mode switcher
-    const curModeId = activeModePresetId(state.config.mode, state.config.causalContext);
+    // 2. Mode switcher (disabled during Tour so Free-Explore cannot drift)
+    const curModeId = activeModePresetId(resolvedCtx.modeAtRecord, resolvedCtx.causalContextAtRecord);
     for (const [id, btn] of modeButtons.entries()) {
       const isActive = id === curModeId;
       btn.classList.toggle('is-active', isActive);
       btn.setAttribute('aria-pressed', String(isActive));
+      btn.disabled = tourActive;
     }
 
-    // 3. Execution buttons
+    // 3. Execution buttons (disabled during Tour)
     const isTerminal =
       rec.lifecyclePhase === 'completed_eos' ||
       rec.lifecyclePhase === 'capacity_exhausted' ||
       (rec.lifecyclePhase === 'completed_max_tokens' &&
         rec.generatedTokenIds.length >= state.config.maxNewTokens);
-    stepBackBtn.disabled = idxInBranch <= 0;
-    stepFwdBtn.disabled = idxInBranch < 0 || idxInBranch >= branchRecs.length - 1;
-    stepBtn.disabled = isTerminal;
-    runBtn.disabled = isTerminal;
+    stepBackBtn.disabled = tourActive || idxInBranch <= 0;
+    stepFwdBtn.disabled = tourActive || idxInBranch < 0 || idxInBranch >= branchRecs.length - 1;
+    stepBtn.disabled = tourActive || isTerminal;
+    runBtn.disabled = tourActive || isTerminal;
+    resetBtn.disabled = tourActive;
 
     // 4. Context-sensitive view controls
     const showLayer =
@@ -1265,11 +2126,13 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
     qHeadSelect.value = String(focus.selectedQHead);
     kvHeadSelect.value = String(focus.selectedKvHead);
 
+    // Mask Explorer tabs (with WAI-ARIA roving tabindex)
     maskTabWrap.hidden = !showMasks;
     for (const [tabId, btn] of maskTabButtons.entries()) {
       const isActive = focus.selectedMaskTab === tabId;
       btn.classList.toggle('is-active', isActive);
       btn.setAttribute('aria-selected', String(isActive));
+      btn.setAttribute('tabindex', isActive ? '0' : '-1');
     }
 
     swigluWrap.hidden = !showSwiglu;
@@ -1298,6 +2161,11 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
 
     // 5. Provenance badges & session stats
     badgeContainer.innerHTML = '';
+    if (tourActive) {
+      badgeContainer.appendChild(
+        el('span', 'df-badge df-badge--gold', 'Guided Tour (Isolated Session)'),
+      );
+    }
     for (const badge of scene.provenanceBadges) {
       const pill = el('span', `df-badge df-badge--${badge.tone}`, badge.label);
       badgeContainer.appendChild(pill);
@@ -1309,7 +2177,7 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
       `Gen ${rec.generatedTokenIds.length} tok · ${rec.lifecyclePhase}`;
 
     // 6. Re-prefill confirmation banner & warning banner
-    if (pendingRePrefill) {
+    if (pendingRePrefill && !tourActive) {
       rePrefillBanner.hidden = false;
       rePrefillText.textContent =
         `KV provenance guard (${pendingRePrefill.preset.label}): ${pendingRePrefill.errorMessage}`;
@@ -1329,8 +2197,13 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
     viewSubtitleEl.textContent = scene.subtitle;
     viewDisclosureEl.hidden = focus.viewMode !== 'gqa_rope' && focus.viewMode !== 'macro';
 
-    // 8. 2D RoPE Phasor SVG inset
+    // 8. Tour HUD, RoPE Phasor inset, Inspector drawer & Unified Timeline Dock
+    syncTourHud();
     updateRopePhasorInset();
+    syncInspectorUi();
+    timelineDock.update(
+      buildDiffusionTimelineDockState(activeSession, { isReadOnly: tourActive }),
+    );
 
     // 9. Docked Formula Inspector bar
     const f = scene.activeFormula;
@@ -1360,12 +2233,12 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
       formulaBadgeEl.textContent = resolvedCtx.loraActiveOnDraft ? 'LoRA Draft ON' : 'Base Backbone';
       formulaBadgeEl.hidden = false;
       formulaEqEl.textContent = scene.subtitle;
-      formulaSubEl.textContent = 'Drag to orbit · Shift+drag or right-drag to pan · Scroll to zoom · Click sheets to inspect';
+      formulaSubEl.textContent =
+        'Drag to orbit · Shift+drag or right-drag to pan · Scroll to zoom · Click sheets to inspect';
       formulaValEl.textContent = '';
       formulaValEl.classList.remove('is-masked');
     }
 
-    // Token stream preview
     const toks = resolvedCtx.kvSnapshot.committedTokenIds;
     const previewCount = Math.min(toks.length, 10);
     const tail = toks.slice(toks.length - previewCount).map((id) => DIFFUSION_MINI_VOCAB[id] ?? `#${id}`);
@@ -1379,7 +2252,10 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   // ==========================================================================
 
   function rebuildFromSession(refitCamera: boolean): void {
-    resolvedCtx = resolveDiffusionSessionContext(session);
+    resolvedCtx = tour.isActive()
+      ? tour.getTourContext()
+      : resolveDiffusionSessionContext(session);
+    refreshMemoryReport();
     scene = buildDiffusionSpatialScene(resolvedCtx, focus);
     sceneUploadPending = true;
     syncChromeUi();
@@ -1416,14 +2292,18 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
       activeStepperStep: 0,
     };
     rebuildSceneOnly(true);
+    const desc = DIFFUSION_SPATIAL_VIEW_MODES.find((d) => d.id === mode);
+    announce(`Spatial view: ${desc?.label ?? mode}`);
   }
 
   function handleModeSwitch(preset: ModePreset): void {
+    if (tour.isActive()) return;
     pendingRePrefill = null;
     try {
       session.updateConfig(preset.patch);
       ropeScrubPosition = null;
       rebuildFromSession(false);
+      announce(`Execution mode switched to ${preset.label}`);
     } catch (err) {
       if (err instanceof KvProvenanceMismatchError) {
         pendingRePrefill = {
@@ -1440,6 +2320,54 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
       }
     }
   }
+
+  // ==========================================================================
+  // GLOBAL KEYBOARD HANDLER (WAI-ARIA + TOUR + ESCAPE)
+  // ==========================================================================
+
+  const onWindowKeydown = (ev: KeyboardEvent) => {
+    if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+    const action = resolveDiffusionGlobalKeyAction(ev.key, {
+      target: ev.target,
+      tourActive: tour.isActive(),
+      inspectorOpen,
+      hasPinnedCell: focus.pinnedCell !== null,
+    });
+    switch (action) {
+      case 'tour_next': {
+        ev.preventDefault();
+        const beat = tour.next();
+        if (beat) applyTourBeat(beat);
+        break;
+      }
+      case 'tour_prev': {
+        ev.preventDefault();
+        const beat = tour.prev();
+        if (beat) applyTourBeat(beat);
+        break;
+      }
+      case 'close_inspector': {
+        ev.preventDefault();
+        setInspectorOpen(false);
+        break;
+      }
+      case 'clear_pin': {
+        ev.preventDefault();
+        focus = { ...focus, selectedPartId: null, pinnedCell: null };
+        rebuildSceneOnly(false);
+        announce('Cleared pinned inspection cell');
+        break;
+      }
+      case 'exit_tour': {
+        ev.preventDefault();
+        exitGuidedTour();
+        break;
+      }
+      case 'none':
+        break;
+    }
+  };
+  window.addEventListener('keydown', onWindowKeydown);
 
   // ==========================================================================
   // POINTER INTERACTIONS (ORBIT / PAN / ZOOM / HOVER / CLICK / DBLCLICK PICKING)
@@ -1487,7 +2415,6 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
       return;
     }
 
-    // Hover ray picking with strict identity deduplication
     const picked = pickAtClient(ev.clientX, ev.clientY);
     const nextHoverPart = picked?.partId ?? null;
     if (nextHoverPart === focus.hoveredPartId && samePickIdentity(picked, focus.hoveredCell)) {
@@ -1589,7 +2516,6 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   canvas.addEventListener('wheel', onWheel, { passive: false });
   canvas.addEventListener('contextmenu', onContextMenu);
 
-  // Resize observer (only re-renders on actual container size change)
   let resizeObserver: ResizeObserver | null = null;
   if (typeof ResizeObserver !== 'undefined') {
     resizeObserver = new ResizeObserver(() => {
@@ -1605,7 +2531,9 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   // ==========================================================================
 
   function getDebugSnapshot(): DiffusionSpatialDebugHandle {
-    const state = session.getState();
+    const activeSession = getDisplayedSession();
+    const state = activeSession.getState();
+    const tourActive = tour.isActive();
     return {
       viewMode: focus.viewMode,
       maskTab: focus.selectedMaskTab,
@@ -1622,6 +2550,15 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
       mode: resolvedCtx.modeAtRecord,
       loraActiveOnDraft: resolvedCtx.loraActiveOnDraft,
       rafActive,
+      tourActive,
+      tourBeatIndex: tourActive ? tour.getCurrentBeatIndex() : null,
+      tourTotalBeats: tour.getBeatCount(),
+      inspectorTab,
+      inspectorOpen,
+      branchCount: state.branches.length,
+      activeBranchId: state.activeBranchId,
+      activeRecordId: state.activeRecordId,
+      retainedBytes: cachedMemoryReport.totalRetainedBytes,
     };
   }
 
@@ -1657,7 +2594,7 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
       return scene.atlasKey ?? null;
     },
     get recordCount() {
-      return session.getState().records.size;
+      return getDisplayedSession().getState().records.size;
     },
     get kvSeqLen() {
       return resolvedCtx.kvSnapshot.seqLen;
@@ -1670,6 +2607,33 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
     },
     get rafActive() {
       return rafActive;
+    },
+    get tourActive() {
+      return tour.isActive();
+    },
+    get tourBeatIndex() {
+      return tour.isActive() ? tour.getCurrentBeatIndex() : null;
+    },
+    get tourTotalBeats() {
+      return tour.getBeatCount();
+    },
+    get inspectorTab() {
+      return inspectorTab;
+    },
+    get inspectorOpen() {
+      return inspectorOpen;
+    },
+    get branchCount() {
+      return getDisplayedSession().getState().branches.length;
+    },
+    get activeBranchId() {
+      return getDisplayedSession().getState().activeBranchId;
+    },
+    get activeRecordId() {
+      return getDisplayedSession().getState().activeRecordId;
+    },
+    get retainedBytes() {
+      return cachedMemoryReport.totalRetainedBytes;
     },
   };
 
@@ -1694,6 +2658,7 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
       }
       resizeObserver?.disconnect();
       window.removeEventListener('resize', onWindowResize);
+      window.removeEventListener('keydown', onWindowKeydown);
       canvas.removeEventListener('webglcontextlost', onContextLost);
       canvas.removeEventListener('webglcontextrestored', onContextRestored);
       canvas.removeEventListener('pointerdown', onPointerDown);
@@ -1704,6 +2669,7 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
       canvas.removeEventListener('dblclick', onDoubleClick);
       canvas.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('contextmenu', onContextMenu);
+      timelineDock.dispose();
       solidsPass?.dispose();
       linesPass?.dispose();
       ribbonsPass?.dispose();
