@@ -1,0 +1,1363 @@
+/* Nemotron-Labs-Diffusion-14B — Editorial Drafting-Table Spatial Theme (#F7F8FA) */
+
+:root {
+  color-scheme: light;
+  --df-bg: #F7F8FA;
+  --df-canvas-bg: #F8F9FB;
+  --df-surface: #FFFFFF;
+  --df-surface-muted: #F1F5F9;
+  --df-ink: #0F172A;
+  --df-ink-secondary: #475569;
+  --df-ink-muted: #64748B;
+  --df-rule: #CBD5E1;
+  --df-rule-subtle: #E2E8F0;
+
+  /* Editorial semantic accents */
+  --df-oxide: #DC4C34;
+  --df-oxide-soft: #FEF2F0;
+  --df-oxide-border: #F5B8AE;
+  --df-indigo: #3861BD;
+  --df-indigo-soft: #EEF2FF;
+  --df-indigo-border: #C7D2FE;
+  --df-teal: #1A8A7A;
+  --df-teal-soft: #ECFDF5;
+  --df-teal-border: #A7F3D0;
+  --df-amber: #B45309;
+  --df-amber-soft: #FFFBEB;
+  --df-amber-border: #FDE68A;
+  --df-warn: #B91C1C;
+  --df-warn-soft: #FEF2F2;
+  --df-warn-border: #FECACA;
+  --df-emerald: #15803D;
+
+  --df-font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --df-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--df-bg);
+  color: var(--df-ink);
+  font-family: var(--df-font-sans);
+  font-size: 12.5px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+}
+
+#diffusion-app {
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.df-shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--df-bg);
+}
+
+/* ============================================================================
+ * 1. Top Header & 7-View Navigation Bar
+ * ============================================================================ */
+
+.df-topbar {
+  flex: 0 0 auto;
+  min-height: 46px;
+  background: #0F172A;
+  color: #F8FAFC;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding: 6px 12px;
+  border-bottom: 1px solid #1E293B;
+  z-index: 30;
+  min-width: 0;
+}
+
+.df-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.df-title {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: #FFFFFF;
+  white-space: nowrap;
+}
+
+.df-epistemic-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(180, 83, 9, 0.24);
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  color: #FEF3C7;
+  font-family: var(--df-font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  max-width: 340px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.df-view-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  flex-shrink: 0;
+}
+
+.df-view-tab {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #CBD5E1;
+  font-family: var(--df-font-sans);
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 4px 9px;
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 110ms ease, color 110ms ease;
+}
+
+.df-view-tab:hover {
+  color: #FFFFFF;
+  background: rgba(255, 255, 255, 0.11);
+}
+
+.df-view-tab.is-active,
+.df-view-tab[aria-selected="true"] {
+  background: #FFFFFF;
+  color: #0F172A;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.28);
+}
+
+.df-view-tab:focus-visible,
+.df-top-btn:focus-visible,
+.df-btn:focus-visible,
+.df-seg-btn:focus-visible,
+.df-select:focus-visible {
+  outline: 2px solid var(--df-oxide);
+  outline-offset: 1px;
+}
+
+.df-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.df-top-btn {
+  appearance: none;
+  height: 27px;
+  padding: 0 9px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.08);
+  color: #F1F5F9;
+  font-family: var(--df-font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.df-top-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+/* ============================================================================
+ * 2. Session Mode, Execution & Context Controls Strip
+ * ============================================================================ */
+
+.df-control-strip {
+  flex: 0 0 auto;
+  min-height: 39px;
+  background: var(--df-surface);
+  border-bottom: 1px solid var(--df-rule);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  padding: 5px 12px;
+  z-index: 25;
+}
+
+.df-strip-group {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.df-strip-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--df-ink-muted);
+}
+
+.df-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--df-rule);
+  flex-shrink: 0;
+}
+
+.df-segmented {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  gap: 2px;
+  border-radius: 6px;
+  background: var(--df-surface-muted);
+  border: 1px solid var(--df-rule);
+}
+
+.df-seg-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--df-ink-secondary);
+  font-family: var(--df-font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  height: 23px;
+  padding: 0 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.df-seg-btn:hover {
+  color: var(--df-ink);
+  background: rgba(15, 23, 42, 0.05);
+}
+
+.df-seg-btn.is-active {
+  background: var(--df-surface);
+  color: var(--df-oxide);
+  border-color: var(--df-oxide-border);
+  box-shadow: 0 1px 1px rgba(15, 23, 42, 0.06);
+}
+
+.df-btn {
+  appearance: none;
+  height: 27px;
+  padding: 0 9px;
+  border-radius: 5px;
+  border: 1px solid var(--df-rule);
+  background: var(--df-surface);
+  color: var(--df-ink);
+  font-family: var(--df-font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.df-btn:hover:not(:disabled) {
+  background: var(--df-surface-muted);
+  border-color: #94A3B8;
+}
+
+.df-btn:disabled {
+  opacity: 0.44;
+  cursor: not-allowed;
+}
+
+.df-btn--primary {
+  background: var(--df-indigo);
+  border-color: var(--df-indigo);
+  color: #FFFFFF;
+}
+
+.df-btn--primary:hover:not(:disabled) {
+  background: #2C50A0;
+  border-color: #2C50A0;
+}
+
+.df-btn--accent {
+  background: var(--df-oxide);
+  border-color: var(--df-oxide);
+  color: #FFFFFF;
+}
+
+.df-btn--accent:hover:not(:disabled) {
+  background: #BF3E28;
+  border-color: #BF3E28;
+}
+
+.df-btn--subtle {
+  background: var(--df-indigo-soft);
+  border-color: var(--df-indigo-border);
+  color: var(--df-indigo);
+}
+
+.df-btn--warn {
+  background: var(--df-amber);
+  border-color: var(--df-amber);
+  color: #FFFFFF;
+}
+
+.df-btn--warn:hover:not(:disabled) {
+  background: #92400E;
+}
+
+.df-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.df-field-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--df-ink-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.df-select {
+  height: 27px;
+  padding: 0 7px;
+  border-radius: 5px;
+  border: 1px solid var(--df-rule);
+  background: var(--df-surface);
+  color: var(--df-ink);
+  font-family: var(--df-font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.df-range {
+  width: 104px;
+  accent-color: var(--df-oxide);
+  cursor: pointer;
+}
+
+.df-mono-val {
+  font-family: var(--df-font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--df-ink);
+  min-width: 34px;
+}
+
+/* ============================================================================
+ * 3. Provenance Badge Strip & Banners
+ * ============================================================================ */
+
+.df-provenance-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 12px;
+  background: var(--df-bg);
+  border-bottom: 1px solid var(--df-rule-subtle);
+  z-index: 20;
+  min-height: 28px;
+}
+
+.df-badge-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.df-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-family: var(--df-font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  border: 1px solid var(--df-rule);
+  background: var(--df-surface);
+  color: var(--df-ink-secondary);
+}
+
+.df-badge--causal {
+  background: var(--df-indigo-soft);
+  border-color: var(--df-indigo-border);
+  color: var(--df-indigo);
+}
+
+.df-badge--bidir {
+  background: var(--df-teal-soft);
+  border-color: var(--df-teal-border);
+  color: var(--df-teal);
+}
+
+.df-badge--lora,
+.df-badge--gold {
+  background: var(--df-amber-soft);
+  border-color: var(--df-amber-border);
+  color: var(--df-amber);
+}
+
+.df-badge--warn {
+  background: var(--df-warn-soft);
+  border-color: var(--df-warn-border);
+  color: var(--df-warn);
+}
+
+.df-badge--emerald {
+  background: #F0FDF4;
+  border-color: #BBF7D0;
+  color: var(--df-emerald);
+}
+
+.df-badge--muted {
+  background: var(--df-surface-muted);
+  border-color: var(--df-rule);
+  color: var(--df-ink-muted);
+}
+
+.df-session-stats {
+  font-family: var(--df-font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--df-ink-secondary);
+  white-space: nowrap;
+}
+
+.df-reprefill-banner {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 12px;
+  background: var(--df-amber-soft);
+  border-bottom: 1px solid var(--df-amber-border);
+  color: #78350F;
+  font-size: 11.5px;
+  font-weight: 600;
+  z-index: 22;
+}
+
+.df-reprefill-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.df-warning-strip {
+  flex: 0 0 auto;
+  padding: 4px 12px;
+  background: var(--df-warn-soft);
+  border-bottom: 1px solid var(--df-warn-border);
+  color: var(--df-warn);
+  font-family: var(--df-font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  z-index: 21;
+}
+
+/* ============================================================================
+ * 4. WebGL2 Viewport Stage & Pooled Projected Overlay
+ * ============================================================================ */
+
+.df-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 220px;
+  width: 100%;
+  overflow: hidden;
+  background: var(--df-canvas-bg);
+}
+
+.df-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  touch-action: none;
+}
+
+.df-canvas.is-dragging {
+  cursor: grabbing;
+}
+
+.df-overlay-svg,
+.df-overlay-labels {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.df-overlay-svg {
+  z-index: 4;
+}
+
+.df-overlay-labels {
+  z-index: 5;
+}
+
+/* SVG Overlay Paths */
+.df-ov-caliper-line {
+  fill: none;
+  stroke: #64748B;
+  stroke-width: 1;
+  stroke-opacity: 0.72;
+}
+
+.df-ov-leader-line {
+  fill: none;
+  stroke: #64748B;
+  stroke-width: 1;
+  stroke-opacity: 0.58;
+}
+
+.df-ov-pop-leader {
+  fill: none;
+  stroke: #0F172A;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+.df-ov-pop-dot {
+  fill: var(--df-oxide);
+  stroke: #FFFFFF;
+  stroke-width: 1.4;
+}
+
+.df-ov-pop-source {
+  fill: none;
+  stroke-width: 1.25;
+  stroke-dasharray: 3 2.5;
+  stroke-linecap: round;
+  stroke-opacity: 0.72;
+}
+
+.df-ov-pop-source--indigo {
+  stroke: var(--df-indigo);
+}
+
+.df-ov-pop-source--teal {
+  stroke: var(--df-teal);
+}
+
+/* Projected DOM Overlay Nodes */
+.df-ov-pill,
+.df-ov-sheet-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: 4px;
+  font-weight: 600;
+  transition: opacity 110ms ease;
+}
+
+.df-ov-pill {
+  padding: 2px 7px;
+  font-size: 10.5px;
+  line-height: 15px;
+  background: rgba(15, 23, 42, 0.90);
+  color: #F8FAFC;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.14);
+}
+
+.df-ov-sheet-label {
+  padding: 1px 6px;
+  font-size: 10px;
+  line-height: 15px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--df-ink);
+  border: 1px solid var(--df-rule);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+}
+
+.df-ov-sheet-detail {
+  font-family: var(--df-font-mono);
+  font-size: 9.5px;
+  color: var(--df-ink-secondary);
+}
+
+.df-ov-pill.is-active,
+.df-ov-sheet-label.is-active {
+  background: var(--df-oxide);
+  border-color: #B91C1C;
+  color: #FFFFFF;
+}
+
+.df-ov-pill.is-gold,
+.df-ov-sheet-label.is-gold {
+  background: var(--df-amber-soft);
+  border-color: var(--df-amber-border);
+  color: var(--df-amber);
+}
+
+.df-ov-pill.is-cyan,
+.df-ov-sheet-label.is-cyan {
+  background: var(--df-teal-soft);
+  border-color: var(--df-teal-border);
+  color: var(--df-teal);
+}
+
+.df-ov-pill.is-muted,
+.df-ov-sheet-label.is-muted {
+  color: var(--df-ink-muted);
+}
+
+.df-ov-caliper-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 5px;
+  height: 16px;
+  border-radius: 3px;
+  background: rgba(247, 248, 250, 0.94);
+  border: 1px solid var(--df-rule);
+  font-family: var(--df-font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--df-ink-secondary);
+  white-space: nowrap;
+}
+
+.df-ov-kv-tick {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 4px;
+  height: 15px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid var(--df-rule);
+  font-family: var(--df-font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--df-ink-secondary);
+}
+
+.df-ov-kv-tick.is-current {
+  background: var(--df-oxide);
+  border-color: var(--df-oxide);
+  color: #FFFFFF;
+}
+
+.df-ov-kv-tick.is-boundary {
+  background: var(--df-amber-soft);
+  border-color: var(--df-amber-border);
+  color: var(--df-amber);
+}
+
+.df-ov-cell-num {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 3px;
+  height: 13px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.84);
+  color: var(--df-ink);
+  font-family: var(--df-font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.df-ov-cell-num.is-active {
+  background: var(--df-oxide);
+  color: #FFFFFF;
+}
+
+.df-ov-cell-num.is-accumulating {
+  background: var(--df-amber);
+  color: #FFFFFF;
+}
+
+.df-ov-cell-num.is-masked {
+  color: var(--df-ink-muted);
+  background: rgba(241, 245, 249, 0.86);
+}
+
+.df-ov-axis-header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 4px;
+  height: 15px;
+  border-radius: 3px;
+  background: rgba(247, 248, 250, 0.92);
+  border: 1px solid var(--df-rule-subtle);
+  font-family: var(--df-font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--df-ink-secondary);
+  white-space: nowrap;
+}
+
+.df-ov-axis-header.is-active {
+  background: var(--df-indigo-soft);
+  border-color: var(--df-indigo-border);
+  color: var(--df-indigo);
+}
+
+.df-ov-axis-header.is-dim {
+  color: var(--df-ink-muted);
+}
+
+/* Floating Contextual Cell Formula Popover */
+.df-ov-popover {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #F8FAFC;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.24);
+  pointer-events: none;
+}
+
+.df-ov-popover.is-accumulating {
+  border-color: rgba(251, 191, 36, 0.65);
+}
+
+.df-ov-popover-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.df-ov-popover-tensor {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #FFFFFF;
+}
+
+.df-ov-popover-coord {
+  font-family: var(--df-font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: #93C5FD;
+}
+
+.df-ov-popover-badge {
+  display: inline-flex;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  font-family: var(--df-font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  color: #FDE68A;
+}
+
+.df-ov-popover-body {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.df-ov-popover-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.df-ov-operand-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+}
+
+.df-ov-popover-eq {
+  font-family: var(--df-font-mono);
+  font-size: 10.5px;
+  color: #CBD5E1;
+}
+
+.df-ov-popover-val {
+  font-family: var(--df-font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #86EFAC;
+}
+
+.df-ov-popover-val.is-masked {
+  color: #FCA5A5;
+}
+
+/* Corner View Title Card */
+.df-view-caption {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  z-index: 10;
+  max-width: 390px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.90);
+  backdrop-filter: blur(4px);
+  border: 1px solid var(--df-rule);
+  pointer-events: none;
+}
+
+.df-view-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--df-ink);
+}
+
+.df-view-subtitle {
+  font-size: 10.5px;
+  color: var(--df-ink-secondary);
+}
+
+.df-view-disclosure {
+  margin-top: 3px;
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--df-amber-soft);
+  border: 1px solid var(--df-amber-border);
+  color: var(--df-amber);
+  font-family: var(--df-font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+}
+
+/* ============================================================================
+ * 5. Interactive 2D Unit-Circle RoPE Phasor SVG Inset
+ * ============================================================================ */
+
+.df-rope-phasor {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 14;
+  width: 286px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--df-rule);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.df-phasor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.df-phasor-title {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--df-ink);
+}
+
+.df-phasor-zone-badge {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-family: var(--df-font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  border: 1px solid var(--df-rule);
+}
+
+.df-zone--original {
+  background: var(--df-indigo-soft);
+  border-color: var(--df-indigo-border);
+  color: var(--df-indigo);
+}
+
+.df-zone--blended {
+  background: var(--df-amber-soft);
+  border-color: var(--df-amber-border);
+  color: var(--df-amber);
+}
+
+.df-zone--interpolated {
+  background: var(--df-teal-soft);
+  border-color: var(--df-teal-border);
+  color: var(--df-teal);
+}
+
+.df-phasor-planes {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+}
+
+.df-plane-btn {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 3px 2px;
+  border-radius: 5px;
+  border: 1px solid var(--df-rule);
+  background: var(--df-bg);
+  color: var(--df-ink-secondary);
+  cursor: pointer;
+}
+
+.df-plane-btn:hover {
+  border-color: #94A3B8;
+  color: var(--df-ink);
+}
+
+.df-plane-btn.is-active {
+  background: var(--df-oxide-soft);
+  border-color: var(--df-oxide);
+  color: var(--df-oxide);
+}
+
+.df-plane-pair {
+  font-family: var(--df-font-mono);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.df-plane-freq {
+  font-family: var(--df-font-mono);
+  font-size: 9px;
+  opacity: 0.88;
+}
+
+.df-phasor-svg {
+  width: 100%;
+  height: 176px;
+  display: block;
+  background: var(--df-bg);
+  border: 1px solid var(--df-rule-subtle);
+  border-radius: 6px;
+}
+
+.df-ph-axis {
+  stroke: #CBD5E1;
+  stroke-width: 1;
+}
+
+.df-ph-unit-ring {
+  fill: #FFFFFF;
+  fill-opacity: 0.65;
+  stroke: #64748B;
+  stroke-width: 1.3;
+}
+
+.df-ph-l4-ring {
+  fill: none;
+  stroke: var(--df-amber);
+  stroke-width: 1.25;
+  stroke-dasharray: 4 3;
+}
+
+.df-ph-ring-label {
+  font-family: var(--df-font-mono);
+  font-size: 8.5px;
+  fill: #64748B;
+  font-weight: 600;
+}
+
+.df-ph-ring-label--l4 {
+  fill: var(--df-amber);
+}
+
+.df-ph-axis-label {
+  font-family: var(--df-font-mono);
+  font-size: 9px;
+  fill: #94A3B8;
+  font-weight: 600;
+}
+
+.df-ph-arc {
+  fill: none;
+  stroke: var(--df-indigo);
+  stroke-width: 1.5;
+  stroke-opacity: 0.6;
+}
+
+.df-ph-vec {
+  stroke-linecap: round;
+}
+
+.df-ph-vec--pre {
+  stroke: var(--df-indigo);
+  stroke-width: 1.4;
+  stroke-dasharray: 4 3;
+  stroke-opacity: 0.68;
+}
+
+.df-ph-vec--kpre {
+  stroke: var(--df-teal);
+  stroke-width: 1.25;
+  stroke-dasharray: 3 3;
+  stroke-opacity: 0.5;
+}
+
+.df-ph-vec--krot {
+  stroke: var(--df-teal);
+  stroke-width: 2.2;
+}
+
+.df-ph-vec--qscaled {
+  stroke: var(--df-indigo);
+  stroke-width: 2.4;
+}
+
+.df-ph-vec--qscaled.is-l4-boosted {
+  stroke: var(--df-oxide);
+  stroke-width: 2.8;
+}
+
+.df-ph-dot--krot {
+  fill: var(--df-teal);
+  stroke: #FFFFFF;
+  stroke-width: 1.2;
+}
+
+.df-ph-dot--qscaled {
+  fill: var(--df-indigo);
+  stroke: #FFFFFF;
+  stroke-width: 1.2;
+}
+
+.df-ph-dot--qscaled.is-l4-boosted {
+  fill: var(--df-oxide);
+}
+
+.df-ph-origin {
+  fill: var(--df-ink);
+}
+
+.df-ph-vec-label {
+  font-family: var(--df-font-mono);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.df-ph-vec-label--krot {
+  fill: var(--df-teal);
+}
+
+.df-ph-vec-label--qscaled {
+  fill: var(--df-oxide);
+}
+
+.df-phasor-scrubber {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.df-phasor-scrubber-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.df-phasor-pos-label {
+  font-family: var(--df-font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--df-ink);
+}
+
+.df-mini-btn {
+  appearance: none;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--df-rule);
+  background: var(--df-surface);
+  color: var(--df-ink-secondary);
+  font-size: 9.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.df-mini-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.df-scrubber-track {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 18px;
+}
+
+.df-rope-slider {
+  width: 100%;
+  margin: 0;
+  z-index: 2;
+}
+
+.df-scrubber-boundary {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  width: 2px;
+  background: var(--df-amber);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.df-scrubber-ticks {
+  font-family: var(--df-font-mono);
+  font-size: 8.5px;
+  color: var(--df-amber);
+  text-align: center;
+  font-weight: 600;
+}
+
+.df-phasor-legend {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--df-font-mono);
+  font-size: 9.5px;
+  color: var(--df-ink-secondary);
+}
+
+.df-leg-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.df-leg-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 2.5px;
+  border-radius: 2px;
+}
+
+.df-leg-swatch--pre {
+  background: repeating-linear-gradient(90deg, var(--df-indigo) 0 3px, transparent 3px 5px);
+}
+
+.df-leg-swatch--k {
+  background: var(--df-teal);
+}
+
+.df-leg-swatch--q {
+  background: var(--df-oxide);
+}
+
+.df-phasor-telemetry {
+  font-family: var(--df-font-mono);
+  font-size: 9.5px;
+  line-height: 1.35;
+  color: var(--df-ink-secondary);
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--df-surface-muted);
+  border: 1px solid var(--df-rule-subtle);
+}
+
+.df-webgl-fallback {
+  position: absolute;
+  inset: 0;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(247, 248, 250, 0.94);
+  color: var(--df-warn);
+  font-weight: 700;
+  padding: 20px;
+}
+
+/* ============================================================================
+ * 6. Docked Formula Inspector Bar
+ * ============================================================================ */
+
+.df-formula-dock {
+  flex: 0 0 auto;
+  min-height: 46px;
+  background: var(--df-surface);
+  border-top: 1px solid var(--df-rule);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 12px;
+  z-index: 24;
+}
+
+.df-formula-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.df-formula-tensor {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--df-ink);
+}
+
+.df-formula-coord {
+  font-family: var(--df-font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--df-indigo);
+}
+
+.df-formula-badge {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--df-amber-soft);
+  border: 1px solid var(--df-amber-border);
+  color: var(--df-amber);
+  font-family: var(--df-font-mono);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.df-formula-center {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.df-formula-eq {
+  font-family: var(--df-font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--df-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.df-formula-sub {
+  font-size: 10.5px;
+  color: var(--df-ink-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.df-formula-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.df-formula-val {
+  font-family: var(--df-font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--df-emerald);
+}
+
+.df-formula-val.is-masked {
+  color: var(--df-warn);
+}
+
+.df-token-preview {
+  max-width: 240px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--df-surface-muted);
+  border: 1px solid var(--df-rule-subtle);
+  font-family: var(--df-font-mono);
+  font-size: 10px;
+  color: var(--df-ink-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 1080px) {
+  .df-epistemic-pill {
+    max-width: 190px;
+  }
+  .df-token-preview {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .df-ov-pill,
+  .df-ov-sheet-label,
+  .df-view-tab {
+    transition: none !important;
+  }
+}
