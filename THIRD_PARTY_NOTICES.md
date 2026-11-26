@@ -4,7 +4,7 @@ This document records the verified provenance, licenses, and applicable obligati
 
 - **Nemotron 3 Nano 30B-A3B** (`/` · `v1.0.0`)
 - **Nemotron-Labs-TwoTower 30B-A3B** (`/twotower/` · `twotower-v1.0.0`)
-- **Nemotron-Labs-Diffusion-14B** (`/diffusion/` · `feat/diffusion`)
+- **Nemotron-Labs-Diffusion-14B** (`/diffusion/` · `diffusion-v1.0.0`)
 
 ---
 
@@ -18,14 +18,14 @@ This document records the verified provenance, licenses, and applicable obligati
   `Copyright (c) 2023-2026 Brendan Bycroft`
 - **Fork Contributions:**
   `Copyright (c) 2026 Rohan Master`
-- **Scope & Distinction:** This repository descends from `bbycroft/llm-viz` and adapts its interactive architectural walkthrough idiom and adaptive screen-space (`fwidth()`) cell-grid LOD principle (credited in `src/render/sheets.ts`). All Nemotron 3 Nano and Nemotron-Labs-TwoTower browser application modules (`src/`), unit/parity/E2E test suites (`tests/`), isolation gates (`scripts/verify_bundle_isolation.mjs`), and reference verification scripts (`scripts/reference/`) were newly authored; legacy `bbycroft/llm-viz` source files and `public/` assets were removed prior to `v1.0.0`.
+- **Scope & Distinction:** This repository descends from `bbycroft/llm-viz` and adapts its interactive architectural walkthrough idiom and adaptive screen-space (`fwidth()`) cell-grid LOD principle (credited in `src/render/sheets.ts`). All Nemotron 3 Nano, Nemotron-Labs-TwoTower, and Nemotron-Labs-Diffusion-14B browser application modules (`src/`), unit/parity/E2E test suites (`tests/`), isolation gates (`scripts/verify_bundle_isolation.mjs`), and reference verification scripts (`scripts/reference/`) were newly authored; legacy `bbycroft/llm-viz` source files and `public/` assets were removed prior to `v1.0.0`.
 - **Applicable Obligation:** Retain the upstream MIT copyright notice and permission notice in [`LICENSE`](LICENSE) and in copies or substantial portions of the Software.
 
 ---
 
 ## 2. Referenced Architectural Equations & Pinned Public Metadata (Not Redistributed Artifacts)
 
-Both interactive explainers ground their layer topologies, tensor dimensions, memory formulas, and precision policies in publicly published research papers and Hugging Face model metadata. All mathematical forward passes are **clean-room first-principles implementations** — zero proprietary, AGPL, or upstream model source files are copied into this repository.
+All three interactive explainers ground their layer topologies, tensor dimensions, memory formulas, and precision policies in publicly published research papers and Hugging Face model metadata. All mathematical forward passes are **clean-room first-principles implementations** — zero proprietary, AGPL, or upstream model source files are copied into this repository.
 
 ### A. Nemotron 3 Nano 30B-A3B (`/` Entry)
 
