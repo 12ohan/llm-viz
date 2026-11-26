@@ -120,25 +120,27 @@ Every cached AR decode snapshot enforces strict ownership and provenance contrac
 
 ---
 
-## 4. Deferred Technical Debt & Future TwoTower Extension Points
+## 4. Intentional Nano v1.0 Boundaries & Shipped Topology A TwoTower Extension
 
 ### Intentionally Kept Simple for Nano v1.0
 
-The following trade-offs are deliberate v1.0 scope boundaries rather than accidental omissions:
+The following trade-offs are deliberate Nano `v1.0.0` scope boundaries rather than accidental omissions:
 
-- **Single Composition Root (`src/main.ts`)**: `src/main.ts` (~4.2k LOC) directly coordinates state, GPU passes, camera choreography, and DOM bindings without a client framework or event-bus abstraction. Decomposition into feature controllers is deferred until a second model family requires multi-architecture routing.
-- **Miniature CPU Simulation Scale**: `src/math/` intentionally targets fixed miniature dimensions (`d = 8`, `V_mini = 32`, `maxTokens = 16`) with deterministic synthetic Float32 weights for instant sub-millisecond interactive inspection and bit-exact incremental equivalence, without WebGPU compute shaders, WASM tokenizers, or real checkpoint streaming.
+- **Single Composition Root (`src/main.ts`)**: `src/main.ts` (~4.2k LOC) directly coordinates state, GPU passes, camera choreography, and DOM bindings without a client framework or event-bus abstraction. Rather than refactoring Nano's locked entry point into a multi-architecture router, the TwoTower visualizer ships as an isolated Topology A MPA entry (`twotower/index.html` → `src/twotower/app/main.ts`).
+- **Miniature CPU Simulation Scale**: `src/math/` intentionally targets fixed miniature dimensions (`d = 8`, `V_mini = 32`, `maxTokens = 16` for Nano; extended to `V_mini = 34`, `kvCapacity = 24` by TwoTower) with deterministic synthetic Float32/Float64 weights for instant sub-millisecond interactive inspection and bit-exact incremental equivalence, without WebGPU compute shaders, WASM tokenizers, or real checkpoint streaming.
 - **Metadata-Only FP8 Selective Mode**: `[ BF16 | FP8 Selective ]` drives exact production memory accounting (`src/model/memory.ts`) and 3D visual boundary highlights (`src/model/spec.ts`) without simulating hardware FP8 E4M3 quantization noise inside the miniature Float32 forward pass.
 - **Nano-Specific Cutaway Builders**: The 5 cutaway builders encode Nemotron 3 Nano's specific `M`/`E`/`*` + NoPE bookend topologies rather than a generic graph-layout DSL.
 
-### Ready Seams for Future TwoTower Capabilities
+### How the Nano v1.0 Seams Power the Shipped TwoTower Entry (`/twotower/`)
 
-The v1.0 math and cache contracts were specifically designed so future **TwoTower** (e.g., hybrid encoder-decoder, cross-tower memory transfer, or diffusion-assisted hybrid) visualizations can extend the engine cleanly without rewriting core primitives:
+The v1.0 math, cache, and WebGL2 rendering seams now directly power the shipped **Nemotron-Labs-TwoTower 30B-A3B** Topology A entry (`twotower/index.html` → `/twotower/` and `/llm-viz/twotower/`), reusing `31` shared Nano primitives (`src/render/`, `src/math/`, `src/model/`, `src/scene/`) while `scripts/verify_bundle_isolation.mjs` enforces zero TwoTower leakage back into Nano's `/` bundle:
 
-| Future TwoTower Capability | Existing v1.0 Seam | How It Plugs In |
+| Shipped TwoTower Capability | Reused Nano v1.0 Seam | How It Connects |
 | --- | --- | --- |
-| **Layer-Aligned KV Transfer** | `GqaLayerKvCache` (`cacheContracts.ts`) & `createExternalDecodeCacheState()` (`incrementalDecode.ts`) | Already accepts externally supplied per-layer `K`/`V` `Float32Array` caches keyed by `bayId`, with defensive cloning, explicit `maxTokens >= seqLen` capacity validation, unambiguous stride checking, and `stateDigest` binding — ready for encoder-to-decoder or tower-to-tower KV projection transfer. |
-| **Externally Seeded Mamba States** | `MambaLayerBoundaryState` & `ExternalDecodeCacheSeed` (`cacheContracts.ts`, `mambaSim.ts`) | Both TypeScript `runMambaSim` and PyTorch `mamba2_forward_ref` already support arbitrary non-zero `(convState, ssmState)` boundary seeds validated end-to-end across all 23 Mamba bays, enabling cross-tower recurrent state handoff or prefix compression injection. |
-| **Bidirectional Block Attention** | `gqaSim.ts` causal mask stage & `SheetsPass` `RG32F` `G`-channel mask bit | Causal masking is isolated to the score mask predicate (`k > q_pos` → `-Infinity`) and signaled to GPU shaders solely through the `G` channel of the `RG32F` atlas. Replacing the scalar predicate with a block-bidirectional / prefix-LM mask extends both math kernels and `Scores`/`Softmax` rendering with zero shader changes. |
-| **Timestep Conditioning** | `HybridModelConfig`, `parameterFingerprint`, & `applyRmsNorm` (`hybridFlow.ts`) | Because model configuration and fingerprinting are centralized and decoupled from execution inputs, adding timestep embeddings and AdaLN `(scale, shift)` conditioning hooks cleanly onto pre-norm stages while preserving `src/math/` purity and PyTorch parity testing. |
-| **Diffusion Refinement Loops** | `HybridDecodeSession` lineage (`IncrementalStepProvenance`, `stepExecutionId`, `branchId`, `DualDecodeSessionStore`) | The immutable copy-on-step lineage graph (`initialStateDigest → parentStepExecutionId → stepExecutionId`, bounded branch history, and lazy per-layer trace reconstruction) generalizes naturally from autoregressive token appends (`S = 1`) to iterative denoising refinement passes (`k = 0..K`) over fixed or block-wise token windows. |
+| **Layer-Aligned Read-Only KV Transfer (`6` GQA bays)** | `GqaLayerKvCache` (`cacheContracts.ts`) & `createExternalDecodeCacheState()` (`incrementalDecode.ts`) | Transfers defensively cloned, non-aliased Context prefix `KV[0..P-1]` (diffusion) or `KV[:-1]` (Mock-AR) keyed by `bayId`, with explicit `maxTokens >= seqLen` capacity validation and `conditioningDigest` binding. |
+| **Externally Seeded Mamba-2 States (`23` Mamba bays)** | `MambaLayerBoundaryState` & `ExternalDecodeCacheSeed` (`cacheContracts.ts`, `mambaSim.ts`) | Seeds Denoiser Mamba-2 bays from immutable Context `(convState, ssmState)` snapshots (`S-1` for diffusion, `mamba_s2` for Mock-AR) validated across TypeScript and PyTorch `2.15.0` fixtures. |
+| **Bidirectional Block Attention `[B × (P+B)]`** | `gqaSim.ts` mask stage & `SheetsPass` `RG32F` `G`-channel mask bit | Extends `gqaSim.ts` with rectangular block-bidirectional attention over inherited prefix KV + active `B`-token block while reusing Nano's `SheetsPass` shader unchanged. |
+| **Split PixArt-α `adaLN-single` Conditioning** | `HybridModelConfig`, `parameterFingerprint`, & `applyRmsNorm` (`hybridFlow.ts`) | Hooks Denoiser-only `t = nMasked / B` modulation (`modulate → RMSNorm` on `M`/`*` vs. `RMSNorm → modulate` on `E`, unmodulated `norm_f`) cleanly into `src/twotower/` while keeping `src/math/` pure. |
+| **Iterative Diffusion Refinement & Branching** | Immutable copy-on-step lineage (`HybridDecodeSession`, `stateDigest`, lazy trace reconstruction) | Generalized in `src/twotower/session.ts` into the 4-step block diffusion lifecycle (`Init` → `Refine` → `Commit Conf` → `Commit → Context`), Persistent Nested Timeline, and isolated 4-Act / 28-Beat Guided Tour. |
+
+For the full TwoTower dual-tower architecture, 3-tier epistemic sourcing matrix, dual `GB`/`GiB` checkpoint reconciliation, 3-regime context-length scaling contract, 4-way memory accounting boundary, and Topology A isolation contract, see [**`docs/TWOTOWER_ARCHITECTURE.md`**](TWOTOWER_ARCHITECTURE.md) and [**`docs/TWOTOWER_USER_GUIDE.md`**](TWOTOWER_USER_GUIDE.md).

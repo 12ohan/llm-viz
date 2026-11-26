@@ -49,6 +49,13 @@ jobs:
       - name: Verify Nano / TwoTower bundle isolation
         run: npm run verify:isolation
 
+      - name: Build GitHub Pages subpath bundle (/llm-viz/) & verify isolation
+        env:
+          VITE_BASE_PATH: /llm-viz/
+        run: |
+          npx vite build --outDir test-results/dist-pages
+          node scripts/verify_bundle_isolation.mjs --dir test-results/dist-pages
+
       - name: Install Playwright Chromium & system dependencies
         run: npx playwright install --with-deps chromium
 
