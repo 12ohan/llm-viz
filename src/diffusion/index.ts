@@ -15,3 +15,8 @@ export * from './attention';
 export * from './swiglu';
 export * from './parameters';
 export * from './forward';
+export * from './kvCache';
+export * from './sampler';
+export * from './speculative';
+export * from './execution';
+export * from './session';
