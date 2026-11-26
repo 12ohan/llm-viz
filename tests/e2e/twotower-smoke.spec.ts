@@ -90,6 +90,15 @@ async function waitFrames(page: Page, count = 4): Promise<void> {
   );
 }
 
+async function waitForTwoTowerSettled(page: Page): Promise<void> {
+  await expect
+    .poll(() => page.evaluate(() => window.__TWOTOWER_TELEMETRY__?.rafActive), {
+      timeout: 5000,
+    })
+    .toBe(false);
+  await waitFrames(page, 1);
+}
+
 /** Pure-Node PNG RGBA pixel variance inspector (zero external image deps). */
 function analyzePngColorVariety(png: Buffer): {
   width: number;
@@ -236,8 +245,10 @@ test.describe('Nemotron-Labs-TwoTower Stage TT3 · Interactive WebGL2 Spatial Sm
     await page.goto(`${ROOT_BASE_URL}/twotower/`, { waitUntil: 'networkidle' });
     await waitFrames(page, 5);
 
-    // Must NOT expose any cross-app navigation link back to Nano (deferred to TT5)
-    await expect(page.locator('a[href="../"]')).toHaveCount(0);
+    // Quiet reciprocal navigation link back to Nano with base-path-safe root href `/`
+    const navToNano = page.getByTestId('nav-to-nano');
+    await expect(navToNano).toBeVisible();
+    await expect(navToNano).toHaveAttribute('href', '/');
 
     // WebGL2 canvas mounted, fallback hidden, non-blank rendered pixels
     const canvas = page.getByTestId('twotower-canvas');
@@ -254,14 +265,23 @@ test.describe('Nemotron-Labs-TwoTower Stage TT3 · Interactive WebGL2 Spatial Sm
     expect(tel.lineCount).toBeGreaterThan(0);
     expect(tel.flowTriangleCount).toBeGreaterThan(0);
     expect(tel.glErrorCount).toBe(0);
+    expect(tel.rafIntervalSampleCount).toBeGreaterThanOrEqual(0);
 
-    // Epistemic miniature disclosure contract
+    // Epistemic miniature disclosure contract, explicit JS cb + RAF Δ telemetry & attribution
     const pill = page.getByTestId('epistemic-pill');
     await expect(pill).toContainText('d=8');
     await expect(pill).toContainText('V=34');
     await expect(pill).toContainText('2×52L');
     await expect(pill).toContainText('Synthetic Mini');
-    await expect(page.getByTestId('inspector-telemetry-footer')).toContainText('35b64985');
+    const footer = page.getByTestId('inspector-telemetry-footer');
+    await expect(footer).toContainText('35b64985');
+    const timingReadout = page.getByTestId('telemetry-timing-readout');
+    await expect(timingReadout).toContainText('JS cb:');
+    await expect(timingReadout).toContainText('RAF Δ:');
+    await expect(timingReadout).toHaveAttribute('title', /performance\.now\(\)/);
+    await expect(timingReadout).toHaveAttribute('title', /NOT full asynchronous GPU execution/);
+    await expect(page.getByTestId('twotower-attribution')).toContainText('bbycroft/llm-viz');
+    await expect(page.getByTestId('twotower-attribution')).toContainText('arXiv:2606.26493v2');
 
     // Toggle all linker channel filters cleanly
     for (const ch of ['gqa_kv', 'mamba_conv', 'mamba_ssm', 'timestep', 'all'] as const) {
@@ -471,12 +491,24 @@ test.describe('Nemotron-Labs-TwoTower Stage TT3 · Interactive WebGL2 Spatial Sm
     await expect(spBranch.locator('option')).toHaveCount(2);
     await expect(spBranch).toHaveValue('branch-1');
 
-    // Open collapsible Developer Workbench drawer & verify bidirectional sync!
+    // Open collapsible Developer Workbench drawer & verify modal semantics + bidirectional sync!
     await page.getByTestId('btn-toggle-workbench').click();
     const drawer = page.getByTestId('workbench-drawer');
     await expect(drawer).toBeVisible();
+    await expect(drawer).toHaveAttribute('aria-modal', 'true');
     await expect(drawer.getByTestId('capacity-meter')).toHaveText('Context 9 / 24 (15 free)');
     await expect(drawer.getByTestId('branch-select')).toHaveValue('branch-1');
+
+    // Background shortcuts (e.g. 't' for Tour) must be suppressed while modal Workbench drawer is open,
+    // and Shift+Tab from the close button wraps inside the modal focus trap!
+    await page.keyboard.press('t');
+    expect((await getTelemetry(page)).tourActive).toBe(false);
+    await page.keyboard.press('Shift+Tab');
+    const focusInsideDrawer = await page.evaluate(() => {
+      const d = document.querySelector('[data-testid="workbench-drawer"]');
+      return Boolean(d && document.activeElement && d.contains(document.activeElement));
+    });
+    expect(focusInsideDrawer).toBe(true);
 
     // Step AR INSIDE the workbench drawer -> spatial app strip updates immediately!
     await drawer.getByTestId('btn-step-ar').click();
@@ -553,6 +585,21 @@ test.describe('Nemotron-Labs-TwoTower Stage TT3 · Interactive WebGL2 Spatial Sm
     await page.keyboard.press('Enter');
     await expect(page.getByTestId('sp-phase-badge')).toHaveText('refinement_denoised');
 
+    // Mobile 430×932 layout hygiene + inspector drawer focus entry & Escape focus restoration
+    await page.setViewportSize({ width: 430, height: 932 });
+    await waitFrames(page, 3);
+    const mobileOverflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - window.innerWidth,
+    );
+    expect(mobileOverflow, 'Zero horizontal overflow at 430×932').toBeLessThanOrEqual(1);
+    const mobileInspectorBtn = page.getByTestId('btn-toggle-inspector');
+    await expect(mobileInspectorBtn).toBeVisible();
+    await expect(mobileInspectorBtn).toHaveAttribute('aria-controls', 'sp-inspector-drawer');
+    await mobileInspectorBtn.click();
+    await expect(page.getByTestId('btn-close-mobile-inspector')).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(mobileInspectorBtn).toBeFocused();
+
     guards.assertClean();
   });
 
@@ -564,11 +611,12 @@ test.describe('Nemotron-Labs-TwoTower Stage TT3 · Interactive WebGL2 Spatial Sm
     await page.goto(`${PAGES_BASE_URL}twotower/`, { waitUntil: 'networkidle' });
     await waitFrames(page, 5);
 
-    // Subpath-prefixed JS and CSS assets loaded HTTP 200 with zero 404s
+    // Subpath-prefixed JS and CSS assets loaded HTTP 200 with zero 404s, and Nano link points to /llm-viz/
     const subpathJs = guards.loadedJsAssets.filter((u) => u.includes('/llm-viz/assets/'));
     const subpathCss = guards.loadedCssAssets.filter((u) => u.includes('/llm-viz/assets/'));
     expect(subpathJs.length, 'Expected /llm-viz/assets/*.js HTTP 200').toBeGreaterThan(0);
     expect(subpathCss.length, 'Expected /llm-viz/assets/*.css HTTP 200').toBeGreaterThan(0);
+    await expect(page.getByTestId('nav-to-nano')).toHaveAttribute('href', '/llm-viz/');
 
     const canvas = page.getByTestId('twotower-canvas');
     await expect(canvas).toBeVisible();
@@ -634,12 +682,16 @@ test.describe('Nemotron-Labs-TwoTower Stage TT4 · Walkthrough, Timeline, Sample
     // Launch Guided Tour via topbar toggle button
     const tourToggle = page.getByTestId('tt-tour-toggle');
     await tourToggle.click();
-    await waitFrames(page, 4);
+    await waitForTwoTowerSettled(page);
 
     const tourCard = page.getByTestId('tt-tour-card');
     await expect(tourCard).toBeVisible();
     await expect(tourToggle).toHaveAttribute('aria-pressed', 'true');
     await expect(tourToggle).toHaveText('Exit Tour');
+    // Tour isolation: Workbench drawer toggle must be disabled & 'w' ignored while tour is active
+    await expect(page.getByTestId('btn-toggle-workbench')).toBeDisabled();
+    await page.keyboard.press('w');
+    await expect(page.getByTestId('workbench-drawer')).toBeHidden();
 
     // Verify Act I–IV chapter buttons, Beat 1 / 28, live metrics, provenance, and epistemic tag
     for (const [idx, label] of [
@@ -670,29 +722,29 @@ test.describe('Nemotron-Labs-TwoTower Stage TT4 · Walkthrough, Timeline, Sample
 
     // Step forward with Next button
     await page.getByTestId('tour-btn-next').click();
-    await waitFrames(page, 3);
+    await waitForTwoTowerSettled(page);
     await expect(page.getByTestId('tour-beat-counter')).toContainText('Beat 2 / 28');
     await expect(page.getByTestId('tour-btn-prev')).toBeEnabled();
     await checkTourBeatClean('Beat 2 (Act I)');
 
     const canvas = page.getByTestId('twotower-canvas');
 
-    // Jump across Act II, Act III, and Act IV
+    // Jump across Act II, Act III, and Act IV (wait until fly animation settles: rafActive === false!)
     await page.getByTestId('tour-act-1').click();
-    await waitFrames(page, 4);
+    await waitForTwoTowerSettled(page);
     expect((await getTelemetry(page)).tourActIndex).toBe(1);
     await expect(page.getByTestId('tour-act-1')).toHaveAttribute('aria-pressed', 'true');
     await checkTourBeatClean('Act II entry');
 
     await page.getByTestId('tour-act-2').click();
-    await waitFrames(page, 4);
+    await waitForTwoTowerSettled(page);
     expect((await getTelemetry(page)).tourActIndex).toBe(2);
     await expect(page.getByTestId('tour-act-2')).toHaveAttribute('aria-pressed', 'true');
     await checkTourBeatClean('Act III entry');
 
     // Advance one beat into Act III Sampler view (Beat 3.2 opens Sampler panel)
     await page.getByTestId('tour-btn-next').click();
-    await waitFrames(page, 4);
+    await waitForTwoTowerSettled(page);
     await expect(page.getByTestId('sidebar-panel-sampler')).toBeVisible();
     assertNoInfinityOrNaNText(
       await page.getByTestId('sidebar-panel-sampler').textContent(),
@@ -702,7 +754,7 @@ test.describe('Nemotron-Labs-TwoTower Stage TT4 · Walkthrough, Timeline, Sample
     await assertCanvasNonBlank(canvas, 'Tour Act III Output WebGL2 frame');
 
     await page.getByTestId('tour-act-3').click();
-    await waitFrames(page, 4);
+    await waitForTwoTowerSettled(page);
     expect((await getTelemetry(page)).tourActIndex).toBe(3);
     await expect(page.getByTestId('tour-act-3')).toHaveAttribute('aria-pressed', 'true');
     await checkTourBeatClean('Act IV entry');
@@ -710,7 +762,7 @@ test.describe('Nemotron-Labs-TwoTower Stage TT4 · Walkthrough, Timeline, Sample
 
     // Exit Tour -> verify EXACT pre-tour exploration session, cursor, branch, bay & view restored untouched!
     await page.getByTestId('tour-btn-exit').click();
-    await waitFrames(page, 4);
+    await waitForTwoTowerSettled(page);
 
     await expect(tourCard).toBeHidden();
     await expect(tourToggle).toHaveAttribute('aria-pressed', 'false');
@@ -965,30 +1017,88 @@ test.describe('Nemotron-Labs-TwoTower Stage TT4 · Walkthrough, Timeline, Sample
     const archPanel = page.getByTestId('sidebar-panel-architecture');
     await expect(archPanel).toBeVisible();
 
-    // 1. 63.19B / 126.37 GB Dual-Tower Parameter Inventory
+    // 1. 63.19B / Dual GB/GiB Dual-Tower Parameter Inventory + FP32 Bias Extra + Unit Convention
     const invCard = page.getByTestId('arch-inventory-card');
     await expect(invCard).toContainText('63.19B');
-    await expect(invCard).toContainText('126.37 GB');
+    await expect(invCard).toContainText('63.16 GB / 58.82 GiB');
+    await expect(invCard).toContainText('63.22 GB / 58.87 GiB');
+    await expect(invCard).toContainText('60.04 MB / 57.26 MiB');
+    await expect(invCard).toContainText('126.37 GB / 117.69 GiB');
     await expect(invCard).toContainText('0 B audit diff');
     await expect(invCard).toContainText('24 Shards');
+    const fp32Cell = page.getByTestId('arch-fp32-bias-cell');
+    await expect(fp32Cell).toContainText('46 tensors');
+    await expect(fp32Cell).toContainText('5,888 params');
+    await expect(fp32Cell).toContainText('23,552 B (+11,776 B vs BF16)');
+    await expect(page.getByTestId('arch-unit-convention-note')).toContainText('Decimal SI');
+    await expect(page.getByTestId('arch-unit-convention-note')).toContainText('Binary IEC');
 
-    // 2. "Two Resident Weight Sets ≠ Two Persistent Caches" persistent-vs-transient cache distinction
+    // 2. "Two Resident Weight Sets ≠ Two Persistent Caches" + 4-Way Memory Separation & Peak Exclusion
     const wvcCard = page.getByTestId('arch-weights-vs-caches');
     await expect(wvcCard).toContainText('Two Resident Weight Sets ≠ Two Persistent Caches');
     await expect(wvcCard).toContainText('1 Persistent Cache');
-    await expect(wvcCard).toContainText('Persistent Context Cache');
-    await expect(wvcCard).toContainText('Ephemeral Denoiser Scratchpad');
+    await expect(page.getByTestId('arch-bars-schematic-note')).toContainText(
+      'Schematic (not linear to scale)',
+    );
+    await expect(page.getByTestId('arch-mem-persistent-cache')).toContainText(
+      'Persistent Context Cache',
+    );
+    await expect(page.getByTestId('arch-mem-optional-mirrors')).toContainText('mamba_s2');
+    await expect(page.getByTestId('arch-mem-optional-mirrors')).toContainText(
+      'Cross-GPU Read-Only Mirror',
+    );
+    await expect(page.getByTestId('arch-mem-transient-kv')).toContainText(
+      'Transient Denoiser Block KV',
+    );
+    const peakExcl = page.getByTestId('arch-peak-exclusion-banner');
+    await expect(peakExcl).toContainText(
+      'Accounted Weight & Cache Buffers ≠ Peak Inference Memory',
+    );
+    await expect(peakExcl).toContainText('Intermediate Layer Activations');
+    await expect(peakExcl).toContainText('[B × 131,072]');
+    await expect(peakExcl).toContainText('Allocator Fragmentation');
 
-    // 3. Inline SVG Context-Length Scaling Chart with 262,144 max_pos boundary & 8,035 crossover
+    // 3. Inline 3-Regime SVG Context-Length Scaling Chart (128K operational + 256K max_pos limit + 8,035 crossover + binary MiB/GiB)
     const scalingCard = page.getByTestId('arch-scaling-chart');
     await expect(scalingCard.locator('svg.sp-scaling-svg')).toBeVisible();
+    await expect(scalingCard.getByTestId('scaling-operational-128k-boundary')).toBeAttached();
     await expect(scalingCard.getByTestId('scaling-max-pos-boundary')).toBeAttached();
     await expect(scalingCard.getByTestId('scaling-crossover-marker')).toBeAttached();
-    await expect(scalingCard).toContainText('262,144 max_pos');
-    await expect(scalingCard).toContainText('Supported (≤256K)');
-    await expect(scalingCard).toContainText('Extrapolated');
+    await expect(scalingCard).toContainText('128K operational');
+    await expect(scalingCard).toContainText('256K max_pos limit');
+    await expect(scalingCard).toContainText('1 MiB');
+    await expect(scalingCard).toContainText('100 GiB');
+    await expect(scalingCard).toContainText('binary MiB/GiB');
+    await expect(scalingCard).toContainText('Operational (≤128K)');
+    await expect(scalingCard).toContainText('Configured Limit (≤256K)');
+    await expect(scalingCard).toContainText('Extrapolated (>256K)');
+    await expect(scalingCard).not.toContainText('Supported (≤256K)');
     await expect(scalingCard).toContainText('8,035 crossover');
     await expect(scalingCard).toContainText('Crossover: 8,035 tok');
+    await expect(page.getByTestId('scaling-regime-disclaimer')).toContainText(
+      'NOT empirically validated production runtime support',
+    );
+
+    // Zero mid-word clipping on scaling table headers & regime cells (e.g. PERSISTENT / Extrapolated (>256K))
+    const scalingCellMetrics = await page.evaluate(() => {
+      const cells = Array.from(
+        document.querySelectorAll<HTMLElement>(
+          '[data-testid="arch-scaling-table"] th, [data-testid="arch-scaling-table"] td',
+        ),
+      );
+      return cells.map((cell) => ({
+        text: (cell.textContent ?? '').trim(),
+        whiteSpace: window.getComputedStyle(cell).whiteSpace,
+        height: cell.getBoundingClientRect().height,
+      }));
+    });
+    expect(scalingCellMetrics.length).toBeGreaterThan(10);
+    for (const m of scalingCellMetrics) {
+      expect(m.whiteSpace, `Scaling cell "${m.text}" must stay nowrap`).toBe('nowrap');
+      expect(m.height, `Scaling cell "${m.text}" must render on 1 line without mid-word wrap`).toBeLessThan(
+        26,
+      );
+    }
 
     // 4. Precision vs Miniature matrix
     await expect(page.getByTestId('arch-precision-table')).toContainText('BF16');
@@ -1158,6 +1268,87 @@ test.describe('Nemotron-Labs-TwoTower Stage TT4 · Walkthrough, Timeline, Sample
       page.getByTestId('twotower-canvas'),
       'Subpath /llm-viz/twotower/ post-tour WebGL2 frame',
     );
+    guards.assertClean();
+  });
+
+  test('12. Reciprocal Cross-App Navigation (Nano <-> TwoTower via Click & Enter at Root / and Subpath /llm-viz/)', async ({
+    page,
+  }) => {
+    const guards = attachRuntimeGuards(page);
+
+    // 1. Root `/` -> `/twotower/` -> `/` via pointer click
+    await page.goto(`${ROOT_BASE_URL}/`, { waitUntil: 'networkidle' });
+    await waitFrames(page, 4);
+    await expect(page.getByTestId('gl-canvas')).toBeVisible();
+
+    const rootToTwoTower = page.getByTestId('nav-to-twotower');
+    await expect(rootToTwoTower).toBeVisible();
+    await expect(rootToTwoTower).toHaveAttribute('href', '/twotower/');
+    await Promise.all([
+      page.waitForURL(`${ROOT_BASE_URL}/twotower/`),
+      rootToTwoTower.click(),
+    ]);
+    await waitForTwoTowerSettled(page);
+    await expect(page.getByTestId('twotower-canvas')).toBeVisible();
+    await assertCanvasNonBlank(
+      page.getByTestId('twotower-canvas'),
+      'Root Nano -> TwoTower click navigation',
+    );
+    expect((await getTelemetry(page)).glErrorCount).toBe(0);
+
+    const rootToNano = page.getByTestId('nav-to-nano');
+    await expect(rootToNano).toBeVisible();
+    await expect(rootToNano).toHaveAttribute('href', '/');
+    await Promise.all([page.waitForURL(`${ROOT_BASE_URL}/`), rootToNano.click()]);
+    await waitFrames(page, 4);
+    await expect(page.getByTestId('gl-canvas')).toBeVisible();
+
+    // 2. Root `/` -> `/twotower/` -> `/` via native keyboard Enter
+    await rootToTwoTower.focus();
+    await expect(rootToTwoTower).toBeFocused();
+    await Promise.all([
+      page.waitForURL(`${ROOT_BASE_URL}/twotower/`),
+      page.keyboard.press('Enter'),
+    ]);
+    await waitForTwoTowerSettled(page);
+    await expect(page.getByTestId('twotower-canvas')).toBeVisible();
+    expect((await getTelemetry(page)).glErrorCount).toBe(0);
+
+    const rootToNanoKey = page.getByTestId('nav-to-nano');
+    await rootToNanoKey.focus();
+    await expect(rootToNanoKey).toBeFocused();
+    await Promise.all([page.waitForURL(`${ROOT_BASE_URL}/`), page.keyboard.press('Enter')]);
+    await waitFrames(page, 4);
+    await expect(page.getByTestId('gl-canvas')).toBeVisible();
+
+    // 3. GitHub Pages Subpath `/llm-viz/` -> `/llm-viz/twotower/` -> `/llm-viz/` via Enter & click
+    await page.goto(PAGES_BASE_URL, { waitUntil: 'networkidle' });
+    await waitFrames(page, 4);
+    await expect(page.getByTestId('gl-canvas')).toBeVisible();
+
+    const pagesToTwoTower = page.getByTestId('nav-to-twotower');
+    await expect(pagesToTwoTower).toBeVisible();
+    await expect(pagesToTwoTower).toHaveAttribute('href', '/llm-viz/twotower/');
+    await pagesToTwoTower.focus();
+    await Promise.all([
+      page.waitForURL(`${PAGES_BASE_URL}twotower/`),
+      page.keyboard.press('Enter'),
+    ]);
+    await waitForTwoTowerSettled(page);
+    await expect(page.getByTestId('twotower-canvas')).toBeVisible();
+    await assertCanvasNonBlank(
+      page.getByTestId('twotower-canvas'),
+      'Subpath /llm-viz/ -> /llm-viz/twotower/ Enter navigation',
+    );
+    expect((await getTelemetry(page)).glErrorCount).toBe(0);
+
+    const pagesToNano = page.getByTestId('nav-to-nano');
+    await expect(pagesToNano).toBeVisible();
+    await expect(pagesToNano).toHaveAttribute('href', '/llm-viz/');
+    await Promise.all([page.waitForURL(PAGES_BASE_URL), pagesToNano.click()]);
+    await waitFrames(page, 4);
+    await expect(page.getByTestId('gl-canvas')).toBeVisible();
+
     guards.assertClean();
   });
 });

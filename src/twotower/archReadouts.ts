@@ -510,12 +510,10 @@ export interface ContextLengthScalingPoint {
   readonly isCustomPoint: boolean;
   readonly isSelectedPrefix: boolean;
   /**
-   * Runtime value is strictly one of `ContextLengthScalingRegime`
+   * Explicit 3-tier context-length scaling regime
    * (`'model_card_operational' | 'configured_positional_limit' | 'extrapolated_beyond_max_pos'`).
-   * The transitional `| 'supported'` type compatibility member is NEVER emitted at runtime
-   * and exists solely so un-updated `spatialApp.ts:3594` compiles prior to Phase B2.
    */
-  readonly regime: ContextLengthScalingRegime | 'supported';
+  readonly regime: ContextLengthScalingRegime;
   /** Strictly narrowed 3-tier regime (identical runtime value to `regime`). */
   readonly scalingRegime: ContextLengthScalingRegime;
   readonly regimeLabel: string;

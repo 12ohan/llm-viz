@@ -1,9 +1,9 @@
 /**
- * Stage TT2 Minimal Functional Diagnostic Session Workbench (`src/twotower/app/diagnosticUi.ts`)
+ * Diagnostic Session Workbench (`src/twotower/app/diagnosticUi.ts`)
  *
  * Pure TypeScript + DOM engineering diagnostic UI wired strictly to the headless
  * `TwoTowerSession` APIs (zero runtime dependencies, zero Nano UI/scene/render imports,
- * zero 3D WebGL, zero cross-app links back to Nano).
+ * zero 3D WebGL).
  */
 
 import {
@@ -338,18 +338,18 @@ export function mountTwoTowerDiagnosticWorkbench(
   root.textContent = '';
 
   const workbench = el('div', 'tt-workbench');
-  workbench.setAttribute('role', 'application');
-  workbench.setAttribute('aria-label', 'Nemotron-Labs-TwoTower Stage TT2 Diagnostic Workbench');
+  workbench.setAttribute('role', 'region');
+  workbench.setAttribute('aria-label', 'Nemotron-Labs-TwoTower Diagnostic Session Workbench');
 
   // ---------------------------------------------------------------------------
-  // 1. Header & Epistemic Disclosure Banner (NO cross-app Nano link!)
+  // 1. Header & Epistemic Disclosure Banner
   // ---------------------------------------------------------------------------
   const header = el('header', 'tt-header');
   const titleGroup = el('div', 'tt-header-title-group');
   const h1 = el(
     'h1',
     'tt-title',
-    'Nemotron-Labs-TwoTower — Diagnostic Session Workbench (Stage TT2)',
+    'Nemotron-Labs-TwoTower — Diagnostic Session Workbench',
   );
   const shortRev = TWOTOWER_SPEC.provenance.hfRevision.slice(0, 8);
   const subtitle = el(

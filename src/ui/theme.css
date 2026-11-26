@@ -90,6 +90,35 @@ body {
   font-weight: 600;
 }
 
+.top-nav-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1.5px 7px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background-color: rgba(255, 255, 255, 0.06);
+  color: #E2E8F0;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color 110ms ease, border-color 110ms ease, color 110ms ease;
+}
+
+.top-nav-link:hover {
+  background-color: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.38);
+  color: #FFFFFF;
+}
+
+.top-nav-link:focus-visible {
+  outline: 2px solid #7DD3FC;
+  outline-offset: 2px;
+}
+
 /* Split Workspace */
 .workspace-split {
   flex: 1 1 auto;

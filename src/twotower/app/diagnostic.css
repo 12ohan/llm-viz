@@ -801,3 +801,9 @@
     grid-template-columns: 32px 1fr 56px;
   }
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .tt-btn {
+    transition: none !important;
+  }
+}
