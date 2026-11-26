@@ -637,6 +637,201 @@ describe('Asymmetric Paired 35/65 Mamba Cutaway', () => {
     expect(fitPairedMambaCamera(bay1Scene.fitBounds, VIEWPORT).distance).toBeGreaterThan(2);
   });
 
+  it('enforces strict partial-accumulation non-exposure in activeFormula & h_curr grid across Mamba Stepper steps 2, 3, and 4', () => {
+    const s = makeActiveDiffusionSession();
+    const view = resolveTwoTowerSessionViewState(s);
+    const denMamba = view.resolveDenoiserBayTrace(1);
+    expect(denMamba?.kind).toBe('M');
+    if (denMamba?.kind !== 'M') throw new Error('expected Mamba trace');
+    const sim = denMamba.sim;
+
+    // 1. Step 2 (Causal Conv1D, `conv_buf` and `x`): partial term 1/4 MUST NOT leak final SiLU or Conv1D output
+    const convBufFinal = buildTwoTowerPairedMambaScene(s, {
+      bayId: 1,
+      activeHead: 2,
+      localTokenIndex: 1,
+      selectedCell: {
+        tower: 'denoiser',
+        cell: { tensor: 'conv_buf', row: 3, col: 9, tapIndex: 3, tokenIndex: 1 },
+      },
+      stepperStep: 2,
+      termProgress: 1.0,
+    });
+    const convBufPartial = buildTwoTowerPairedMambaScene(s, {
+      bayId: 1,
+      activeHead: 2,
+      localTokenIndex: 1,
+      selectedCell: {
+        tower: 'denoiser',
+        cell: { tensor: 'conv_buf', row: 3, col: 9, tapIndex: 3, tokenIndex: 1 },
+      },
+      stepperStep: 2,
+      termProgress: 0.1,
+    });
+    const finalConvSilu = sim.xBC[9 * sim.tokens + 1];
+    const finalConvRaw = sim.conv_out[9 * sim.tokens + 1];
+    const fmt3 = (v: number) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(3)}`;
+
+    expect(convBufPartial.focusedAccumulation?.active).toBe(true);
+    expect(convBufPartial.focusedAccumulation?.isFinal).toBe(false);
+    expect(convBufPartial.focusedAccumulation?.totalTerms).toBe(4);
+    expect(convBufPartial.activeFormula).not.toBeNull();
+    expect(convBufPartial.activeFormula!.value).toBe(convBufPartial.focusedAccumulation!.partialSum);
+    expect(convBufPartial.activeFormula!.value).not.toBeCloseTo(finalConvSilu, 3);
+    expect(convBufPartial.activeFormula!.valueText).toBe(
+      convBufPartial.focusedAccumulation!.valueBadgeText,
+    );
+    expect(convBufPartial.activeFormula!.equation).toBe(
+      convBufPartial.focusedAccumulation!.partialEquation,
+    );
+    expect(convBufPartial.activeFormula!.headBadge).toBe(
+      convBufPartial.focusedAccumulation!.badgeText,
+    );
+    expect(convBufPartial.activeFormula!.subEquation).toContain(
+      convBufPartial.focusedAccumulation!.partialSubEquation,
+    );
+    // Must NEVER leak final completed Conv1D or SiLU output into equation/valueText/subEquation
+    expect(convBufPartial.activeFormula!.equation).not.toContain(fmt3(finalConvSilu));
+    expect(convBufPartial.activeFormula!.valueText).not.toContain(fmt3(finalConvSilu));
+    expect(convBufPartial.activeFormula!.subEquation).not.toContain(fmt3(finalConvSilu));
+    expect(convBufPartial.activeFormula!.subEquation).not.toContain(fmt3(finalConvRaw));
+    expect(convBufFinal.focusedAccumulation).toBeNull();
+
+    const xFinal = buildTwoTowerPairedMambaScene(s, {
+      bayId: 1,
+      activeHead: 2,
+      localTokenIndex: 1,
+      selectedCell: {
+        tower: 'denoiser',
+        cell: { tensor: 'x', headIndex: 2, row: 1, col: 1 },
+      },
+      stepperStep: 2,
+      termProgress: 1.0,
+    });
+    const xPartial = buildTwoTowerPairedMambaScene(s, {
+      bayId: 1,
+      activeHead: 2,
+      localTokenIndex: 1,
+      selectedCell: {
+        tower: 'denoiser',
+        cell: { tensor: 'x', headIndex: 2, row: 1, col: 1 },
+      },
+      stepperStep: 2,
+      termProgress: 0.1,
+    });
+    expect(xPartial.focusedAccumulation?.active).toBe(true);
+    expect(xPartial.focusedAccumulation?.isFinal).toBe(false);
+    expect(xPartial.activeFormula!.value).toBe(xPartial.focusedAccumulation!.partialSum);
+    expect(xPartial.activeFormula!.value).not.toBeCloseTo(xFinal.activeFormula!.value, 3);
+    expect(xPartial.activeFormula!.equation).toBe(xPartial.focusedAccumulation!.partialEquation);
+    expect(xPartial.activeFormula!.valueText).toBe(xPartial.focusedAccumulation!.valueBadgeText);
+    expect(xPartial.activeFormula!.equation).not.toContain(xFinal.activeFormula!.valueText);
+    expect(xPartial.activeFormula!.valueText).not.toContain(xFinal.activeFormula!.valueText);
+    expect(xPartial.activeFormula!.subEquation).not.toContain(xFinal.activeFormula!.valueText);
+
+    // 2. Step 3 (SSM Update, `h_curr`): partial term 1/2 (decay retention only) MUST NOT leak completed H_curr
+    const hFinal = buildTwoTowerPairedMambaScene(s, {
+      bayId: 1,
+      activeHead: 2,
+      localTokenIndex: 1,
+      selectedCell: {
+        tower: 'denoiser',
+        cell: { tensor: 'h_curr', headIndex: 2, row: 1, col: 2, tokenIndex: 1 },
+      },
+      stepperStep: 3,
+      termProgress: 1.0,
+    });
+    const hPartial = buildTwoTowerPairedMambaScene(s, {
+      bayId: 1,
+      activeHead: 2,
+      localTokenIndex: 1,
+      selectedCell: {
+        tower: 'denoiser',
+        cell: { tensor: 'h_curr', headIndex: 2, row: 1, col: 2, tokenIndex: 1 },
+      },
+      stepperStep: 3,
+      termProgress: 0.25,
+    });
+    const hConverged = buildTwoTowerPairedMambaScene(s, {
+      bayId: 1,
+      activeHead: 2,
+      localTokenIndex: 1,
+      selectedCell: {
+        tower: 'denoiser',
+        cell: { tensor: 'h_curr', headIndex: 2, row: 1, col: 2, tokenIndex: 1 },
+      },
+      stepperStep: 3,
+      termProgress: 0.75,
+    });
+    expect(hPartial.focusedAccumulation?.active).toBe(true);
+    expect(hPartial.focusedAccumulation?.isFinal).toBe(false);
+    expect(hPartial.focusedAccumulation?.totalTerms).toBe(2);
+    expect(hPartial.activeFormula!.value).toBe(hPartial.focusedAccumulation!.partialSum);
+    expect(hPartial.activeFormula!.value).not.toBeCloseTo(hFinal.activeFormula!.value, 3);
+    expect(hPartial.activeFormula!.valueText).toBe(hPartial.focusedAccumulation!.valueBadgeText);
+    expect(hPartial.activeFormula!.equation).toBe(hPartial.focusedAccumulation!.partialEquation);
+    expect(hPartial.activeFormula!.headBadge).toBe(hPartial.focusedAccumulation!.badgeText);
+    expect(hPartial.activeFormula!.equation).not.toContain(hFinal.activeFormula!.valueText);
+    expect(hPartial.activeFormula!.valueText).not.toContain(hFinal.activeFormula!.valueText);
+    expect(hPartial.activeFormula!.subEquation).not.toContain(hFinal.activeFormula!.valueText);
+    // Also verify `den:h_curr` grid masks both override and raw cell buffer at focused (row=1, col=2)
+    const hCurrGrid = hPartial.activeCellGrids!.find((g) => g.colDimLabel?.startsWith('H_curr'));
+    expect(hCurrGrid).toBeDefined();
+    expect(hCurrGrid!.activeValueOverride).toBe(hPartial.focusedAccumulation!.partialSum);
+    expect(hCurrGrid!.values[1 * 4 + 2]).toBe(hPartial.focusedAccumulation!.partialSum);
+    // Final term 2/2 converges cleanly to completed H_curr
+    expect(hConverged.focusedAccumulation?.active).toBe(true);
+    expect(hConverged.focusedAccumulation?.isFinal).toBe(true);
+    expect(hConverged.activeFormula!.value).toBeCloseTo(hFinal.activeFormula!.value, 5);
+
+    // 3. Step 4 (SSM Readout + D, `y`): partial term 1/5 MUST NOT leak completed readout y
+    const yFinal = buildTwoTowerPairedMambaScene(s, {
+      bayId: 1,
+      activeHead: 2,
+      localTokenIndex: 1,
+      selectedCell: {
+        tower: 'denoiser',
+        cell: { tensor: 'y', headIndex: 2, row: 1, col: 2 * 4 + 1 },
+      },
+      stepperStep: 4,
+      termProgress: 1.0,
+    });
+    const yPartial = buildTwoTowerPairedMambaScene(s, {
+      bayId: 1,
+      activeHead: 2,
+      localTokenIndex: 1,
+      selectedCell: {
+        tower: 'denoiser',
+        cell: { tensor: 'y', headIndex: 2, row: 1, col: 2 * 4 + 1 },
+      },
+      stepperStep: 4,
+      termProgress: 0.1,
+    });
+    const yConverged = buildTwoTowerPairedMambaScene(s, {
+      bayId: 1,
+      activeHead: 2,
+      localTokenIndex: 1,
+      selectedCell: {
+        tower: 'denoiser',
+        cell: { tensor: 'y', headIndex: 2, row: 1, col: 2 * 4 + 1 },
+      },
+      stepperStep: 4,
+      termProgress: 0.9,
+    });
+    expect(yPartial.focusedAccumulation?.active).toBe(true);
+    expect(yPartial.focusedAccumulation?.isFinal).toBe(false);
+    expect(yPartial.focusedAccumulation?.totalTerms).toBe(5);
+    expect(yPartial.activeFormula!.value).toBe(yPartial.focusedAccumulation!.partialSum);
+    expect(yPartial.activeFormula!.value).not.toBeCloseTo(yFinal.activeFormula!.value, 3);
+    expect(yPartial.activeFormula!.valueText).toBe(yPartial.focusedAccumulation!.valueBadgeText);
+    expect(yPartial.activeFormula!.equation).toBe(yPartial.focusedAccumulation!.partialEquation);
+    expect(yPartial.activeFormula!.equation).not.toContain(yFinal.activeFormula!.valueText);
+    expect(yPartial.activeFormula!.valueText).not.toContain(yFinal.activeFormula!.valueText);
+    expect(yPartial.activeFormula!.subEquation).not.toContain(yFinal.activeFormula!.valueText);
+    expect(yConverged.focusedAccumulation?.isFinal).toBe(true);
+    expect(yConverged.activeFormula!.value).toBeCloseTo(yFinal.activeFormula!.value, 5);
+  });
+
   it('proves refinement r=0 and r=1 seed from the IDENTICAL committed Context boundary digest & H_init', () => {
     const sR0 = makeActiveDiffusionSession({ refinementCount: 1 });
     const sR1 = runTwoTowerDiffusionRefinement(commitTwoTowerRefinementConfidence(sR0));

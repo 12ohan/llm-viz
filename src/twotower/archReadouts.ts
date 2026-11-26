@@ -87,17 +87,94 @@ export const TWOTOWER_STANDARD_CONTEXT_LENGTHS: readonly number[] = Object.freez
 /** Model card operational context note (128K) distinct from config.json `max_position_embeddings` (256K). */
 export const TWOTOWER_MODEL_CARD_OPERATIONAL_CONTEXT_TOKENS = 131_072 as const;
 
+/** Explicit explanation of Decimal SI (`GB`/`MB`/`KB`, base-10) vs Binary IEC (`GiB`/`MiB`/`KiB`, base-2) units. */
+export const TWOTOWER_UNIT_CONVENTION_NOTE =
+  'Unit convention: Decimal SI uses base-10 powers (1 GB = 10⁹ B, 1 MB = 10⁶ B, 1 KB = 10³ B); Binary IEC uses base-2 powers (1 GiB = 2³⁰ B, 1 MiB = 2²⁰ B, 1 KiB = 2¹⁰ B). Example: 126,371,817,472 B = 126.37 GB (decimal SI) = 117.69 GiB (binary IEC).' as const;
+
+/** Explicit 3-tier context-length regime disclaimer (128K card vs 256K config positional ceiling vs >256K extrapolation). */
+export const TWOTOWER_CONTEXT_REGIME_DISCLAIMER =
+  'Three explicit context-length scaling regimes: (1) Operational (≤128K / 131,072 tokens) reflects the model card operational context range; (2) Configured Limit (128K–256K / 131,073–262,144 tokens) reaches config.json max_position_embeddings = 262,144, which is a configured positional limit and NOT empirically validated production runtime support; (3) Extrapolated (>256K: 512K, 1M) is analytical extrapolation beyond max_position_embeddings under NoPE KV-cache arithmetic. Accounted logical cache buffers exclude peak inference runtime workspace (activations, [B × 131,072] logits, CUDA/framework scratchpad, and allocator fragmentation).' as const;
+
 /** Mandatory sampler calibration disclaimer stating confidence is a relative heuristic, not semantic truth. */
 export const TWOTOWER_SAMPLER_CALIBRATION_DISCLAIMER =
   'Unscaled MDLM softmax probability (x_theta) is a relative confidence heuristic used solely to rank masked block slots for unmasking order — NOT a calibrated probability of semantic correctness or factual accuracy. Browser execution runs deterministic synthetic miniature weights (d = 8, V = 34), not 63.19B checkpoint probabilities.' as const;
 
 const PRESET_MATCH_EPS = 1e-6;
+const DECIMAL_KB = 1_000;
+const DECIMAL_MB = 1_000_000;
+const DECIMAL_GB = 1_000_000_000;
+
+/** Format bytes in decimal SI gigabytes (`1 GB = 10^9 B`). */
+export function formatDecimalGB(bytes: number, decimals = 2): string {
+  return `${(bytes / DECIMAL_GB).toFixed(decimals)} GB`;
+}
+
+/** Format bytes in decimal SI megabytes (`1 MB = 10^6 B`). */
+export function formatDecimalMB(bytes: number, decimals = 2): string {
+  return `${(bytes / DECIMAL_MB).toFixed(decimals)} MB`;
+}
+
+/** Format bytes in decimal SI kilobytes (`1 KB = 10^3 B`). */
+export function formatDecimalKB(bytes: number, decimals = 2): string {
+  return `${(bytes / DECIMAL_KB).toFixed(decimals)} KB`;
+}
+
+/** Format any byte quantity adaptively in decimal SI units (`B`, `KB`, `MB`, or `GB`). */
+export function formatBytesDecimalAdaptive(bytes: number): string {
+  if (bytes >= DECIMAL_GB) {
+    return formatDecimalGB(bytes, 2);
+  }
+  if (bytes >= DECIMAL_MB) {
+    return formatDecimalMB(bytes, 2);
+  }
+  if (bytes >= DECIMAL_KB) {
+    return formatDecimalKB(bytes, 2);
+  }
+  return `${bytes} B`;
+}
+
+/** Format bytes in dual decimal SI GB / binary IEC GiB (e.g. `126.37 GB / 117.69 GiB`). */
+export function formatDualUnitGBGiB(bytes: number, decimals = 2): string {
+  return `${formatDecimalGB(bytes, decimals)} / ${formatGiB(bytes, decimals)}`;
+}
+
+/** Format bytes in dual decimal SI MB / binary IEC MiB (e.g. `60.04 MB / 57.26 MiB`). */
+export function formatDualUnitMBMiB(bytes: number, decimals = 2): string {
+  return `${formatDecimalMB(bytes, decimals)} / ${formatMiB(bytes, decimals)}`;
+}
+
+/** Format any byte quantity adaptively in dual decimal SI / binary IEC units. */
+export function formatDualUnitBytesAdaptive(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  if (bytes >= DECIMAL_GB) {
+    return formatDualUnitGBGiB(bytes, 2);
+  }
+  if (bytes >= DECIMAL_MB) {
+    return formatDualUnitMBMiB(bytes, 2);
+  }
+  if (bytes >= DECIMAL_KB) {
+    return `${formatDecimalKB(bytes, 1)} / ${formatKiB(bytes)}`;
+  }
+  return `${bytes} B`;
+}
 
 // ============================================================================
 // 1. PRODUCTION ARCHITECTURAL READOUTS & CONTEXT-LENGTH MEMORY SCALING TYPES
 // ============================================================================
 
-export type ContextLengthScalingRegime = 'supported' | 'extrapolated_beyond_max_pos';
+export type ContextLengthScalingRegime =
+  | 'model_card_operational'
+  | 'configured_positional_limit'
+  | 'extrapolated_beyond_max_pos';
+
+export interface ContextLengthScalingRegimeDescriptor {
+  readonly regime: ContextLengthScalingRegime;
+  readonly regimeLabel: string;
+  readonly regimeShortLabel: string;
+  readonly minTokensInclusive: number;
+  readonly maxTokensInclusive: number | null;
+  readonly note: string;
+}
 
 export interface TwoTowerTimeConditioningComponentEntry {
   readonly id: 't_embedder_mlp' | 't_block' | 'scale_shift_tables';
@@ -105,14 +182,21 @@ export interface TwoTowerTimeConditioningComponentEntry {
   readonly params: number;
   readonly tensorCount: number;
   readonly payloadBytes: number;
+  readonly payloadDecimalDisplay: string;
+  readonly payloadBinaryDisplay: string;
+  readonly payloadDualDisplay: string;
 }
 
 export interface TwoTowerTowerInventorySection {
+  readonly unitConventionNote: string;
   readonly contextTower: {
     readonly label: string;
     readonly params: number;
     readonly payloadBytes: number;
     readonly payloadDisplay: string;
+    readonly payloadDecimalDisplay: string;
+    readonly payloadBinaryDisplay: string;
+    readonly payloadDualDisplay: string;
     readonly tensorCount: number;
     readonly fp32BiasTensorCount: number;
     readonly fp32BiasParams: number;
@@ -125,6 +209,9 @@ export interface TwoTowerTowerInventorySection {
     readonly params: number;
     readonly payloadBytes: number;
     readonly payloadDisplay: string;
+    readonly payloadDecimalDisplay: string;
+    readonly payloadBinaryDisplay: string;
+    readonly payloadDualDisplay: string;
     readonly tensorCount: number;
     readonly fp32BiasTensorCount: number;
     readonly fp32BiasParams: number;
@@ -134,6 +221,9 @@ export interface TwoTowerTowerInventorySection {
     readonly params: number;
     readonly payloadBytes: number;
     readonly payloadDisplay: string;
+    readonly payloadDecimalDisplay: string;
+    readonly payloadBinaryDisplay: string;
+    readonly payloadDualDisplay: string;
     readonly tensorCount: number;
     readonly components: readonly TwoTowerTimeConditioningComponentEntry[];
   };
@@ -142,14 +232,24 @@ export interface TwoTowerTowerInventorySection {
     readonly params: number;
     readonly payloadBytes: number;
     readonly payloadDisplay: string;
+    readonly payloadDecimalDisplay: string;
+    readonly payloadBinaryDisplay: string;
+    readonly payloadDualDisplay: string;
     readonly tensorCount: number;
   };
   readonly grandTotal: {
     readonly params: number;
     readonly payloadBytes: number;
     readonly payloadDisplay: string;
+    readonly payloadDecimalDisplay: string;
+    readonly payloadBinaryDisplay: string;
+    readonly payloadDualDisplay: string;
     readonly diskBytes: number;
+    readonly diskDualDisplay: string;
     readonly headerBytes: number;
+    readonly headerDecimalDisplay: string;
+    readonly headerBinaryDisplay: string;
+    readonly headerDualDisplay: string;
     readonly tensorCount: number;
     readonly shardCount: number;
     readonly payloadByteDiscrepancy: number;
@@ -159,7 +259,10 @@ export interface TwoTowerTowerInventorySection {
     readonly fp32BiasTensorCount: number;
     readonly fp32BiasParams: number;
     readonly fp32BiasPayloadBytes: number;
+    readonly fp32BiasPayloadDisplay: string;
     readonly fp32BiasExtraBytesOverBf16: number;
+    readonly fp32BiasExtraOverBf16Display: string;
+    readonly fp32BiasSummary: string;
     readonly auditSummary: string;
   };
   readonly layerMix: {
@@ -184,59 +287,156 @@ export interface TwoTowerDiscrepancyDisplayEntry extends TwoTowerDiscrepancyEntr
   readonly shortSummary: string;
 }
 
+export interface TwoTowerRuntimeWorkspaceExcludedComponent {
+  readonly id:
+    | 'intermediate_activations'
+    | 'output_logits_buffer'
+    | 'framework_cuda_scratchpad'
+    | 'allocator_fragmentation';
+  readonly label: string;
+  readonly detail: string;
+}
+
+export interface TwoTowerOptionalImplementationSnapshotsAndMirrors {
+  readonly category: 'optional_implementation_snapshots_and_mirrors';
+  readonly categoryLabel: string;
+  readonly mockArMambaS2SnapshotOwner: 'context_tower';
+  readonly mockArMambaS2Active: boolean;
+  readonly mockArMambaS2SnapshotBytes: number;
+  readonly mockArMambaS2SnapshotDisplay: string;
+  readonly mockArMambaS2SnapshotDualDisplay: string;
+  readonly mockArMambaS2Note: string;
+  readonly crossGpuMirrorOwner: 'deployment_read_only_mirror';
+  readonly denoiserReadOnlyMirrorBytes: number;
+  readonly denoiserReadOnlyMirrorDisplay: string;
+  readonly denoiserReadOnlyMirrorDualDisplay: string;
+  readonly singleDeviceLogicalSharingExtraBytes: 0;
+  readonly crossGpuMirrorConditionNote: string;
+  readonly singleDeviceAccountedBytes: number;
+  readonly singleDeviceAccountedDisplay: string;
+  readonly crossGpuAdditionalMirrorBytes: number;
+  readonly crossGpuAdditionalMirrorDisplay: string;
+  readonly note: string;
+}
+
+export interface TwoTowerTransientDenoiserBlockKv {
+  readonly category: 'transient_denoiser_block_kv';
+  readonly categoryLabel: string;
+  readonly owner: 'denoiser_tower';
+  readonly persistence: 'ephemeral_per_step';
+  readonly blockSize: number;
+  readonly kvBytesPerToken: number;
+  readonly ephemeralDenoiserBlockKvBytes: number;
+  readonly ephemeralDenoiserBlockKvDisplay: string;
+  readonly ephemeralDenoiserBlockKvDualDisplay: string;
+  readonly discardedBetweenSteps: boolean;
+  readonly note: string;
+}
+
+export interface TwoTowerTotalRuntimeWorkspaceExclusion {
+  readonly category: 'total_runtime_workspace_exclusion';
+  readonly categoryLabel: string;
+  readonly headline: 'Accounted Weight & Cache Buffers ≠ Peak Inference Memory';
+  readonly excludedFromAccountedCacheBytes: true;
+  readonly excludedFromAccountedWeightBytes: true;
+  readonly accountedBuffersEqualPeakInferenceMemory: false;
+  readonly excludedComponents: readonly TwoTowerRuntimeWorkspaceExcludedComponent[];
+  readonly summary: string;
+}
+
+export interface TwoTowerFourWayMemoryComparison {
+  readonly headline: 'Two Resident Weight Sets ≠ Two Persistent Caches';
+  readonly mode: TwoTowerExecutionMode;
+  readonly prefixTokens: number;
+  readonly blockSize: number;
+  readonly unitConventionNote: string;
+  readonly residentWeights: TwoTowerWeightsVsCachesBreakdown['residentWeights'];
+  readonly persistentContextCache: TwoTowerWeightsVsCachesBreakdown['persistentContextCache'];
+  readonly optionalImplementationSnapshotsAndMirrors: TwoTowerOptionalImplementationSnapshotsAndMirrors;
+  readonly transientDenoiserBlockKv: TwoTowerTransientDenoiserBlockKv;
+  readonly totalRuntimeWorkspaceExclusion: TwoTowerTotalRuntimeWorkspaceExclusion;
+}
+
 export interface TwoTowerWeightsVsCachesBreakdown {
   readonly headline: 'Two Resident Weight Sets ≠ Two Persistent Caches';
   readonly mode: TwoTowerExecutionMode;
   readonly prefixTokens: number;
   readonly blockSize: number;
+  readonly unitConventionNote: string;
   readonly memoryReadout: TwoTowerMemoryReadout;
   readonly residentWeights: {
     readonly activeTowerCount: 1 | 2;
     readonly totalCheckpointBytes: number;
     readonly totalCheckpointDisplay: string;
+    readonly totalCheckpointDecimalDisplay: string;
+    readonly totalCheckpointDualDisplay: string;
     readonly activeWeightBytes: number;
     readonly activeWeightDisplay: string;
+    readonly activeWeightDecimalDisplay: string;
+    readonly activeWeightDualDisplay: string;
     readonly contextTowerBytes: number;
     readonly contextTowerDisplay: string;
+    readonly contextTowerDecimalDisplay: string;
+    readonly contextTowerDualDisplay: string;
     readonly denoiserTowerBytes: number;
     readonly denoiserTowerDisplay: string;
+    readonly denoiserTowerDecimalDisplay: string;
+    readonly denoiserTowerDualDisplay: string;
     readonly note: string;
   };
+  /** Category 1: Context tower persistent hybrid state (`47.08 MiB` fixed Mamba-2 + `prefixTokens × 6 KiB` GQA KV). */
   readonly persistentContextCache: {
+    readonly category: 'persistent_context_cache';
+    readonly categoryLabel: string;
     readonly owner: 'context_tower';
     readonly isUniquePersistentSequenceCache: true;
     readonly fixedMambaBytes: number;
     readonly fixedMambaDisplay: string;
+    readonly fixedMambaDecimalDisplay: string;
+    readonly fixedMambaDualDisplay: string;
     readonly gqaKvBytes: number;
     readonly gqaKvDisplay: string;
     readonly kvBytesPerToken: number;
     readonly kvPerTokenDisplay: string;
     readonly totalBytes: number;
     readonly totalDisplay: string;
+    readonly totalDecimalDisplay: string;
+    readonly totalDualDisplay: string;
     readonly note: string;
   };
+  /** Category 2: Optional implementation snapshots (`mock_ar` Context `mamba_s2`) & cross-GPU read-only mirrors. */
+  readonly optionalImplementationSnapshotsAndMirrors: TwoTowerOptionalImplementationSnapshotsAndMirrors;
+  /** Category 3: Ephemeral Denoiser block KV tensors (`B × 6 KiB` in `mask_diffusion`, `0 B` otherwise; NEVER includes `mamba_s2`). */
+  readonly transientDenoiserBlockKv: TwoTowerTransientDenoiserBlockKv;
+  /** Category 4: Explicit peak inference / total runtime workspace exclusion disclosure. */
+  readonly totalRuntimeWorkspaceExclusion: TwoTowerTotalRuntimeWorkspaceExclusion;
+  /**
+   * Backward-compatible Denoiser scratchpad view (strictly Denoiser block KV only — NEVER conflates
+   * Context's optional Mock-AR `mamba_s2` snapshot into Denoiser scratchpad bytes!).
+   */
   readonly transientDenoiserWorkspace: {
     readonly owner: 'denoiser_tower';
     readonly persistence: 'ephemeral_scratch';
-    readonly workspaceKind: 'ephemeral_block_kv' | 'mock_ar_mamba_s2_snapshot' | 'none';
+    readonly workspaceKind: 'ephemeral_block_kv' | 'none';
     readonly ephemeralBlockKvBytes: number;
     readonly ephemeralBlockKvDisplay: string;
-    readonly mockArMambaS2SnapshotBytes: number;
-    readonly mockArMambaS2SnapshotDisplay: string;
     readonly totalTransientBytes: number;
     readonly totalTransientDisplay: string;
     readonly discardedAfterStep: boolean;
     readonly note: string;
   };
+  /** Backward-compatible cross-GPU mirror vs logical sharing summary. */
   readonly crossGpuMirrorVsLogicalSharing: {
     readonly logicalPersistentCacheCount: 1;
     readonly logicalSharingNote: string;
     readonly crossGpuMirrorBytes: number;
     readonly crossGpuMirrorDisplay: string;
+    readonly crossGpuMirrorDualDisplay: string;
     readonly crossGpuMirrorNote: string;
   };
   readonly totalActiveLogicalCacheBytes: number;
   readonly totalActiveLogicalCacheDisplay: string;
+  readonly totalActiveLogicalCacheDualDisplay: string;
 }
 
 export interface TwoTowerPrecisionComparisonRow {
@@ -309,19 +509,38 @@ export interface ContextLengthScalingPoint {
   readonly tokenLabel: string;
   readonly isCustomPoint: boolean;
   readonly isSelectedPrefix: boolean;
-  readonly regime: ContextLengthScalingRegime;
+  /**
+   * Runtime value is strictly one of `ContextLengthScalingRegime`
+   * (`'model_card_operational' | 'configured_positional_limit' | 'extrapolated_beyond_max_pos'`).
+   * The transitional `| 'supported'` type compatibility member is NEVER emitted at runtime
+   * and exists solely so un-updated `spatialApp.ts:3594` compiles prior to Phase B2.
+   */
+  readonly regime: ContextLengthScalingRegime | 'supported';
+  /** Strictly narrowed 3-tier regime (identical runtime value to `regime`). */
+  readonly scalingRegime: ContextLengthScalingRegime;
+  readonly regimeLabel: string;
+  readonly regimeShortLabel: string;
   readonly exceedsModelCardOperational128k: boolean;
+  readonly exceedsConfiguredPositionalLimit256k: boolean;
+  readonly isExtrapolated: boolean;
   readonly readout: TwoTowerMemoryReadout;
   readonly persistentMambaBytes: number;
   readonly persistentKvBytes: number;
   readonly persistentTotalBytes: number;
   readonly persistentTotalDisplay: string;
+  readonly persistentTotalDecimalDisplay: string;
+  readonly persistentTotalDualDisplay: string;
+  /** Strictly transient Denoiser block KV (`B × 6 KiB` in `mask_diffusion`, `0 B` otherwise; NEVER includes Mock-AR `mamba_s2`). */
   readonly ephemeralWorkspaceBytes: number;
   readonly ephemeralWorkspaceDisplay: string;
   readonly ephemeralDenoiserBlockKvBytes: number;
+  readonly ephemeralDenoiserBlockKvDisplay: string;
+  /** Optional Context-tower `mamba_s2` boundary snapshot (`47.08 MiB` in `mock_ar`, `0 B` otherwise). */
   readonly mockArMambaS2SnapshotBytes: number;
+  readonly mockArMambaS2SnapshotDisplay: string;
   readonly totalActiveCacheBytes: number;
   readonly denoiserReadOnlyMirrorBytes: number;
+  readonly denoiserReadOnlyMirrorDisplay: string;
   readonly mambaSharePct: number;
   readonly kvSharePct: number;
   readonly reference52LayerGqaKvBytes: number;
@@ -332,6 +551,7 @@ export interface TwoTowerContextLengthScalingSeries {
   readonly blockSize: number;
   readonly mode: TwoTowerExecutionMode;
   readonly maxPositionEmbeddings: number;
+  readonly modelCardOperationalMaxTokens: number;
   readonly modelCardOperationalContextTokens: number;
   readonly fixedMambaBytes: number;
   readonly fixedMambaDisplay: string;
@@ -343,7 +563,9 @@ export interface TwoTowerContextLengthScalingSeries {
   readonly crossoverTokensExact: number;
   /** Exact token count where hybrid total equals 52-layer GQA reference (`1,048` tokens in BF16). */
   readonly beatsFull52LayerGqaTokens: number;
+  readonly regimes: readonly ContextLengthScalingRegimeDescriptor[];
   readonly points: readonly ContextLengthScalingPoint[];
+  readonly regimeDisclaimer: string;
   readonly extrapolationDisclaimer: string;
 }
 
@@ -351,6 +573,7 @@ export interface TwoTowerArchitecturalReadout {
   readonly prefixTokens: number;
   readonly blockSize: number;
   readonly mode: TwoTowerExecutionMode;
+  readonly unitConventionNote: string;
   readonly provenance: {
     readonly hfRepo: string;
     readonly hfRevision: string;
@@ -363,11 +586,13 @@ export interface TwoTowerArchitecturalReadout {
     readonly crossTowerWeightSharing: false;
     readonly tieWordEmbeddings: false;
     readonly positionalEncoding: 'NoPE';
+    readonly modelCardOperationalMaxTokens: number;
     readonly maxPositionEmbeddings: number;
   };
   readonly inventory: TwoTowerTowerInventorySection;
   readonly discrepancyLedger: readonly TwoTowerDiscrepancyDisplayEntry[];
   readonly weightsVsCaches: TwoTowerWeightsVsCachesBreakdown;
+  readonly memoryComparison: TwoTowerFourWayMemoryComparison;
   readonly precisionVsMiniature: TwoTowerPrecisionVsMiniatureMatrix;
   readonly scaling: TwoTowerContextLengthScalingSeries;
 }
@@ -780,13 +1005,51 @@ function shortDigest(digest: string): string {
 // ============================================================================
 
 /**
+ * Classify a context length into the 3 explicit scaling regimes:
+ *   1. `'model_card_operational'` (`tokens <= 131,072` — 128K model-card operational context range)
+ *   2. `'configured_positional_limit'` (`131,072 < tokens <= 262,144` — 256K `config.json max_position_embeddings` positional ceiling; NOT empirically validated production runtime support)
+ *   3. `'extrapolated_beyond_max_pos'` (`tokens > 262,144` — 512K, 1M analytical extrapolation beyond configured positional limit)
+ */
+export function classifyContextLengthScalingRegime(
+  tokens: number,
+  modelCardOperationalMaxTokens: number = TWOTOWER_MODEL_CARD_OPERATIONAL_CONTEXT_TOKENS,
+  maxPositionEmbeddings: number = TWOTOWER_SPEC.directlyInspectedMetadata.maxPositionEmbeddings,
+): {
+  readonly regime: ContextLengthScalingRegime;
+  readonly regimeLabel: string;
+  readonly regimeShortLabel: string;
+} {
+  if (tokens <= modelCardOperationalMaxTokens) {
+    return Object.freeze({
+      regime: 'model_card_operational' as const,
+      regimeLabel: 'Model-Card Operational (≤128K)',
+      regimeShortLabel: 'Operational (≤128K)',
+    });
+  }
+  if (tokens <= maxPositionEmbeddings) {
+    return Object.freeze({
+      regime: 'configured_positional_limit' as const,
+      regimeLabel: 'Configured Positional Limit (128K–256K; unvalidated runtime)',
+      regimeShortLabel: 'Configured Limit (≤256K)',
+    });
+  }
+  return Object.freeze({
+    regime: 'extrapolated_beyond_max_pos' as const,
+    regimeLabel: 'Analytical Extrapolation (>256K)',
+    regimeShortLabel: 'Extrapolated (>256K)',
+  });
+}
+
+/**
  * Compute the context-length memory scaling curve across standard lengths
  * `[1024, 4096, 16384, 65536, 131072, 262144, 524288, 1048576]` (plus an optional custom
  * `prefixTokens` point inserted in ascending order without duplication).
  *
- * Strictly separates `supported` (`L <= 262,144`) from `extrapolated_beyond_max_pos`
- * (`L > 262,144`) relative to `config.json`'s `max_position_embeddings`, and computes the
- * exact GQA-KV-vs-fixed-Mamba-2 crossover (`8,035` tokens; continuous `~8,034.67`).
+ * Strictly separates 3 explicit regimes:
+ *   - `'model_card_operational'` (`L <= 131,072` / `128K`)
+ *   - `'configured_positional_limit'` (`131,072 < L <= 262,144` / `256K` `config.json` positional ceiling, NOT empirically validated production runtime support)
+ *   - `'extrapolated_beyond_max_pos'` (`L > 262,144`: `512K`, `1M`)
+ * and computes the exact GQA-KV-vs-fixed-Mamba-2 crossover (`8,035` tokens; continuous `~8,034.67`).
  */
 export function buildContextLengthScalingSeries(
   blockSize: number = TWOTOWER_SPEC.productionDefaults.blockSize,
@@ -802,6 +1065,7 @@ export function buildContextLengthScalingSeries(
   }
 
   const maxPositionEmbeddings = TWOTOWER_SPEC.directlyInspectedMetadata.maxPositionEmbeddings;
+  const modelCardOperationalMaxTokens = TWOTOWER_MODEL_CARD_OPERATIONAL_CONTEXT_TOKENS;
   const standardSet = new Set<number>(TWOTOWER_STANDARD_CONTEXT_LENGTHS);
   const lengths = [...TWOTOWER_STANDARD_CONTEXT_LENGTHS];
   if (customPrefixTokens !== undefined && !standardSet.has(customPrefixTokens)) {
@@ -815,6 +1079,33 @@ export function buildContextLengthScalingSeries(
   const kvBytesPerToken = probe.kvBytesPerToken;
   const crossoverTokensExact = fixedMambaBytes / kvBytesPerToken;
 
+  const regimes: readonly ContextLengthScalingRegimeDescriptor[] = Object.freeze([
+    Object.freeze({
+      regime: 'model_card_operational' as const,
+      regimeLabel: 'Model-Card Operational (≤128K)',
+      regimeShortLabel: 'Operational (≤128K)',
+      minTokensInclusive: 0,
+      maxTokensInclusive: modelCardOperationalMaxTokens,
+      note: 'Model card operational context range (≤131,072 tokens).',
+    }),
+    Object.freeze({
+      regime: 'configured_positional_limit' as const,
+      regimeLabel: 'Configured Positional Limit (128K–256K; unvalidated runtime)',
+      regimeShortLabel: 'Configured Limit (≤256K)',
+      minTokensInclusive: modelCardOperationalMaxTokens + 1,
+      maxTokensInclusive: maxPositionEmbeddings,
+      note: 'Within config.json max_position_embeddings = 262,144 (256K), which is a configured positional ceiling — NOT empirically validated production runtime support.',
+    }),
+    Object.freeze({
+      regime: 'extrapolated_beyond_max_pos' as const,
+      regimeLabel: 'Analytical Extrapolation (>256K)',
+      regimeShortLabel: 'Extrapolated (>256K)',
+      minTokensInclusive: maxPositionEmbeddings + 1,
+      maxTokensInclusive: null,
+      note: 'Analytical extrapolation beyond config.json max_position_embeddings = 262,144 under NoPE KV-cache arithmetic (512K, 1M).',
+    }),
+  ]);
+
   const points: ContextLengthScalingPoint[] = [];
   for (let i = 0; i < lengths.length; i++) {
     const tokens = lengths[i];
@@ -822,8 +1113,8 @@ export function buildContextLengthScalingSeries(
     const persistentMambaBytes = readout.persistentContextMambaBytes;
     const persistentKvBytes = readout.persistentContextKvBytes;
     const persistentTotalBytes = readout.persistentContextTotalBytes;
-    const ephemeralWorkspaceBytes =
-      readout.ephemeralDenoiserBlockKvBytes + readout.mockArMambaS2SnapshotBytes;
+    // Strictly transient Denoiser block KV only (NEVER conflate Mock-AR Context mamba_s2 snapshot!)
+    const ephemeralWorkspaceBytes = readout.ephemeralDenoiserBlockKvBytes;
     const mambaSharePct =
       persistentTotalBytes > 0 ? (persistentMambaBytes / persistentTotalBytes) * 100 : 0;
     const kvSharePct =
@@ -831,8 +1122,13 @@ export function buildContextLengthScalingSeries(
     const reference52LayerGqaKvBytes = readout.contextPrefixCache.referenceBytes;
     const hybridVsFullGqaSavingsRatio =
       persistentTotalBytes > 0 ? reference52LayerGqaKvBytes / persistentTotalBytes : 0;
-    const regime: ContextLengthScalingRegime =
-      tokens <= maxPositionEmbeddings ? 'supported' : 'extrapolated_beyond_max_pos';
+    const regimeInfo = classifyContextLengthScalingRegime(
+      tokens,
+      modelCardOperationalMaxTokens,
+      maxPositionEmbeddings,
+    );
+    const exceedsModelCardOperational128k = tokens > modelCardOperationalMaxTokens;
+    const exceedsConfiguredPositionalLimit256k = tokens > maxPositionEmbeddings;
 
     points.push(
       Object.freeze({
@@ -840,20 +1136,29 @@ export function buildContextLengthScalingSeries(
         tokenLabel: formatTokenCount(tokens),
         isCustomPoint: !standardSet.has(tokens),
         isSelectedPrefix: customPrefixTokens !== undefined && tokens === customPrefixTokens,
-        regime,
-        exceedsModelCardOperational128k:
-          tokens > TWOTOWER_MODEL_CARD_OPERATIONAL_CONTEXT_TOKENS,
+        regime: regimeInfo.regime,
+        scalingRegime: regimeInfo.regime,
+        regimeLabel: regimeInfo.regimeLabel,
+        regimeShortLabel: regimeInfo.regimeShortLabel,
+        exceedsModelCardOperational128k,
+        exceedsConfiguredPositionalLimit256k,
+        isExtrapolated: exceedsConfiguredPositionalLimit256k,
         readout,
         persistentMambaBytes,
         persistentKvBytes,
         persistentTotalBytes,
         persistentTotalDisplay: formatBytesAdaptive(persistentTotalBytes),
+        persistentTotalDecimalDisplay: formatBytesDecimalAdaptive(persistentTotalBytes),
+        persistentTotalDualDisplay: formatDualUnitBytesAdaptive(persistentTotalBytes),
         ephemeralWorkspaceBytes,
         ephemeralWorkspaceDisplay: formatBytesAdaptive(ephemeralWorkspaceBytes),
         ephemeralDenoiserBlockKvBytes: readout.ephemeralDenoiserBlockKvBytes,
+        ephemeralDenoiserBlockKvDisplay: formatBytesAdaptive(readout.ephemeralDenoiserBlockKvBytes),
         mockArMambaS2SnapshotBytes: readout.mockArMambaS2SnapshotBytes,
+        mockArMambaS2SnapshotDisplay: formatBytesAdaptive(readout.mockArMambaS2SnapshotBytes),
         totalActiveCacheBytes: readout.totalActiveCacheBytes,
         denoiserReadOnlyMirrorBytes: readout.denoiserReadOnlyMirrorBytes,
+        denoiserReadOnlyMirrorDisplay: formatBytesAdaptive(readout.denoiserReadOnlyMirrorBytes),
         mambaSharePct,
         kvSharePct,
         reference52LayerGqaKvBytes,
@@ -866,7 +1171,8 @@ export function buildContextLengthScalingSeries(
     blockSize,
     mode,
     maxPositionEmbeddings,
-    modelCardOperationalContextTokens: TWOTOWER_MODEL_CARD_OPERATIONAL_CONTEXT_TOKENS,
+    modelCardOperationalMaxTokens,
+    modelCardOperationalContextTokens: modelCardOperationalMaxTokens,
     fixedMambaBytes,
     fixedMambaDisplay: formatMiB(fixedMambaBytes, 2),
     kvBytesPerToken,
@@ -874,9 +1180,10 @@ export function buildContextLengthScalingSeries(
     crossoverTokens: crossovers.kvExceedsMambaTokens,
     crossoverTokensExact,
     beatsFull52LayerGqaTokens: crossovers.beatsGqaTokens,
+    regimes,
     points: Object.freeze(points),
-    extrapolationDisclaimer:
-      'Points at 512K (524,288) and 1M (1,048,576) tokens extrapolate analytically beyond config.json max_position_embeddings = 262,144 (256K) under NoPE KV-cache arithmetic; the model card separately notes 128K operational context.',
+    regimeDisclaimer: TWOTOWER_CONTEXT_REGIME_DISCLAIMER,
+    extrapolationDisclaimer: TWOTOWER_CONTEXT_REGIME_DISCLAIMER,
   });
 
   assertPresentationSafeNoInfinity(series, 'contextLengthScalingSeries');
@@ -914,6 +1221,9 @@ export function buildTwoTowerArchitecturalReadout(
       params: inv.timeEmbedderMlpParams,
       tensorCount: 4,
       payloadBytes: inv.timeEmbedderMlpParams * 2,
+      payloadDecimalDisplay: formatDecimalMB(inv.timeEmbedderMlpParams * 2, 2),
+      payloadBinaryDisplay: formatMiB(inv.timeEmbedderMlpParams * 2, 2),
+      payloadDualDisplay: formatDualUnitMBMiB(inv.timeEmbedderMlpParams * 2, 2),
     }),
     Object.freeze({
       id: 't_block' as const,
@@ -921,6 +1231,9 @@ export function buildTwoTowerArchitecturalReadout(
       params: inv.timeBlockParams,
       tensorCount: 2,
       payloadBytes: inv.timeBlockParams * 2,
+      payloadDecimalDisplay: formatDecimalMB(inv.timeBlockParams * 2, 2),
+      payloadBinaryDisplay: formatMiB(inv.timeBlockParams * 2, 2),
+      payloadDualDisplay: formatDualUnitMBMiB(inv.timeBlockParams * 2, 2),
     }),
     Object.freeze({
       id: 'scale_shift_tables' as const,
@@ -928,15 +1241,26 @@ export function buildTwoTowerArchitecturalReadout(
       params: inv.scaleShiftTablesParams,
       tensorCount: 52,
       payloadBytes: inv.scaleShiftTablesParams * 2,
+      payloadDecimalDisplay: formatBytesDecimalAdaptive(inv.scaleShiftTablesParams * 2),
+      payloadBinaryDisplay: formatBytesAdaptive(inv.scaleShiftTablesParams * 2),
+      payloadDualDisplay: formatDualUnitBytesAdaptive(inv.scaleShiftTablesParams * 2),
     }),
   ]);
 
+  const fp32BiasPayloadDisplay = `${audit.fp32PayloadBytes.toLocaleString('en-US')} B (${formatKiB(audit.fp32PayloadBytes)})`;
+  const fp32BiasExtraOverBf16Display = `+${inv.fp32ScoreCorrectionBiasExtraBytes.toLocaleString('en-US')} B (+${formatKiB(inv.fp32ScoreCorrectionBiasExtraBytes)})`;
+  const fp32BiasSummary = `${meta.fp32ScoreCorrectionBiasTensorCount} FP32 e_score_correction_bias tensors (${meta.fp32ScoreCorrectionBiasParams.toLocaleString('en-US')} params · ${audit.fp32PayloadBytes.toLocaleString('en-US')} B = +${inv.fp32ScoreCorrectionBiasExtraBytes.toLocaleString('en-US')} B extra over BF16)`;
+
   const inventory: TwoTowerTowerInventorySection = Object.freeze({
+    unitConventionNote: TWOTOWER_UNIT_CONVENTION_NOTE,
     contextTower: Object.freeze({
       label: 'Context Tower (Causal AR Backbone)',
       params: inv.singleTowerParams,
       payloadBytes: inv.contextTowerPayloadBytes,
       payloadDisplay: formatGiB(inv.contextTowerPayloadBytes, 2),
+      payloadDecimalDisplay: formatDecimalGB(inv.contextTowerPayloadBytes, 2),
+      payloadBinaryDisplay: formatGiB(inv.contextTowerPayloadBytes, 2),
+      payloadDualDisplay: formatDualUnitGBGiB(inv.contextTowerPayloadBytes, 2),
       tensorCount: meta.contextTowerTensorCount,
       fp32BiasTensorCount: fp32BiasPerTowerTensors,
       fp32BiasParams: fp32BiasPerTowerParams,
@@ -949,6 +1273,9 @@ export function buildTwoTowerArchitecturalReadout(
       params: inv.singleTowerParams,
       payloadBytes: inv.denoiserTowerBackbonePayloadBytes,
       payloadDisplay: formatGiB(inv.denoiserTowerBackbonePayloadBytes, 2),
+      payloadDecimalDisplay: formatDecimalGB(inv.denoiserTowerBackbonePayloadBytes, 2),
+      payloadBinaryDisplay: formatGiB(inv.denoiserTowerBackbonePayloadBytes, 2),
+      payloadDualDisplay: formatDualUnitGBGiB(inv.denoiserTowerBackbonePayloadBytes, 2),
       tensorCount: meta.denoiserTowerTensorCount,
       fp32BiasTensorCount: fp32BiasPerTowerTensors,
       fp32BiasParams: fp32BiasPerTowerParams,
@@ -958,6 +1285,9 @@ export function buildTwoTowerArchitecturalReadout(
       params: inv.timeConditioningTotalParams,
       payloadBytes: inv.timeConditioningPayloadBytes,
       payloadDisplay: formatMiB(inv.timeConditioningPayloadBytes, 2),
+      payloadDecimalDisplay: formatDecimalMB(inv.timeConditioningPayloadBytes, 2),
+      payloadBinaryDisplay: formatMiB(inv.timeConditioningPayloadBytes, 2),
+      payloadDualDisplay: formatDualUnitMBMiB(inv.timeConditioningPayloadBytes, 2),
       tensorCount: meta.timeConditioningTensorCount,
       components: timeCondComponents,
     }),
@@ -966,14 +1296,24 @@ export function buildTwoTowerArchitecturalReadout(
       params: inv.singleTowerParams + inv.timeConditioningTotalParams,
       payloadBytes: inv.denoiserTowerTotalPayloadBytes,
       payloadDisplay: formatGiB(inv.denoiserTowerTotalPayloadBytes, 2),
+      payloadDecimalDisplay: formatDecimalGB(inv.denoiserTowerTotalPayloadBytes, 2),
+      payloadBinaryDisplay: formatGiB(inv.denoiserTowerTotalPayloadBytes, 2),
+      payloadDualDisplay: formatDualUnitGBGiB(inv.denoiserTowerTotalPayloadBytes, 2),
       tensorCount: meta.denoiserTowerTensorCount + meta.timeConditioningTensorCount,
     }),
     grandTotal: Object.freeze({
       params: inv.grandTotalParams,
       payloadBytes: inv.derivedPayloadBytes,
       payloadDisplay: formatGiB(inv.derivedPayloadBytes, 2),
+      payloadDecimalDisplay: formatDecimalGB(inv.derivedPayloadBytes, 2),
+      payloadBinaryDisplay: formatGiB(inv.derivedPayloadBytes, 2),
+      payloadDualDisplay: formatDualUnitGBGiB(inv.derivedPayloadBytes, 2),
       diskBytes: meta.safetensorsDiskBytes,
+      diskDualDisplay: formatDualUnitGBGiB(meta.safetensorsDiskBytes, 2),
       headerBytes: audit.verifiedHeaderBytes,
+      headerDecimalDisplay: formatDecimalMB(audit.verifiedHeaderBytes, 2),
+      headerBinaryDisplay: formatMiB(audit.verifiedHeaderBytes, 2),
+      headerDualDisplay: formatDualUnitMBMiB(audit.verifiedHeaderBytes, 2),
       tensorCount: meta.safetensorsTensorCount,
       shardCount: meta.safetensorsShardCount,
       payloadByteDiscrepancy: inv.payloadByteDiscrepancy,
@@ -983,9 +1323,12 @@ export function buildTwoTowerArchitecturalReadout(
       fp32BiasTensorCount: meta.fp32ScoreCorrectionBiasTensorCount,
       fp32BiasParams: meta.fp32ScoreCorrectionBiasParams,
       fp32BiasPayloadBytes: audit.fp32PayloadBytes,
+      fp32BiasPayloadDisplay,
       fp32BiasExtraBytesOverBf16: inv.fp32ScoreCorrectionBiasExtraBytes,
+      fp32BiasExtraOverBf16Display,
+      fp32BiasSummary,
       auditSummary:
-        '0-byte discrepancy vs 24-shard safetensors header audit (12,498 BF16 tensors + 46 FP32 e_score_correction_bias tensors = 12,544 tensors; 63,185,902,848 params; 126,371,817,472 B payload).',
+        '0-byte discrepancy vs 24-shard safetensors header audit (12,498 BF16 tensors + 46 FP32 e_score_correction_bias tensors [5,888 params, 23,552 B = +11,776 B extra over BF16] = 12,544 tensors; 63,185,902,848 params; 126,371,817,472 B = 126.37 GB / 117.69 GiB payload).',
     }),
     layerMix: Object.freeze({
       totalLayersPerTower: 52 as const,
@@ -1014,92 +1357,204 @@ export function buildTwoTowerArchitecturalReadout(
     ),
   );
 
-  const totalTransientBytes = mem.ephemeralDenoiserBlockKvBytes + mem.mockArMambaS2SnapshotBytes;
-  const workspaceKind =
+  // Explicit 4-way memory separation (NEVER conflate Context's optional Mock-AR `mamba_s2` snapshot
+  // with Denoiser's ephemeral block KV scratchpad, and NEVER equate accounted buffers with peak RAM!)
+  const transientDenoiserBlockKvNote =
     mode === 'mask_diffusion'
-      ? ('ephemeral_block_kv' as const)
+      ? `Ephemeral Denoiser block KV cache tensors (${blockSize} × 6 KiB = ${formatBytesAdaptive(mem.ephemeralDenoiserBlockKvBytes)}) concatenated read-only with Context prefix KV during a denoising step and discarded immediately afterward — 0 B persistent Denoiser sequence cache.`
       : mode === 'mock_ar'
-        ? ('mock_ar_mamba_s2_snapshot' as const)
-        : ('none' as const);
+        ? 'Mock-AR evaluates 1 token over Context KV[:-1] + mamba_s2 with 0 B ephemeral Denoiser block KV (the +47.08 MiB mamba_s2 boundary snapshot is accounted separately under Optional Implementation Snapshots & Mirrors, owned by Context Tower).'
+        : 'AR mode executes strictly on Context Tower; Denoiser Tower is bypassed with 0 B ephemeral block KV.';
 
-  const transientNote =
-    mode === 'mask_diffusion'
-      ? `Ephemeral Denoiser block KV scratchpad (${blockSize} × 6 KiB = ${formatBytesAdaptive(mem.ephemeralDenoiserBlockKvBytes)}) concatenated read-only with Context prefix KV during a denoising step and discarded immediately afterward — 0 B persistent Denoiser sequence cache.`
-      : mode === 'mock_ar'
-        ? `Transient Mock-AR mamba_s2 boundary snapshot (${formatMiB(mem.mockArMambaS2SnapshotBytes, 2)}) holds Context's Mamba-2 state prior to the last token so Denoiser can re-run last_token; 0 B ephemeral block KV.`
-        : 'AR mode executes strictly on Context Tower; Denoiser Tower is bypassed with 0 B scratch workspace.';
+  const mockArMambaS2Note =
+    mode === 'mock_ar'
+      ? `Optional implementation-specific Context-tower boundary snapshot (${formatMiB(mem.mockArMambaS2SnapshotBytes, 2)}) retained prior to the final token so Mock-AR can replay last_token through Denoiser; NOT transient Denoiser block KV.`
+      : '0 B outside Mock-AR mode (the Context-tower mamba_s2 boundary snapshot is allocated solely in Mock-AR mode).';
 
-  const crossGpuMirrorNote =
+  const crossGpuMirrorConditionNote =
     mode === 'mask_diffusion'
-      ? `In a 2-GPU tower-split deployment, mirroring Context's read-only boundary (47.08 MiB S-1 Mamba-2 + ${prefixTokens.toLocaleString('en-US')} × 6 KiB prefix KV = ${formatBytesAdaptive(mem.denoiserReadOnlyMirrorBytes)}) to the Denoiser GPU is a read-only transport mirror — NOT a second independent writable persistent cache.`
+      ? `Incurred ONLY when Context & Denoiser reside on separate GPUs without shared logical memory (${formatMiB(mem.persistentContextMambaBytes, 2)} S-1 Mamba-2 + ${prefixTokens.toLocaleString('en-US')} × 6 KiB prefix KV = ${formatBytesAdaptive(mem.denoiserReadOnlyMirrorBytes)} read-only transport mirror); 0 B extra cache on single-device logical sharing.`
       : mode === 'mock_ar'
-        ? `In a 2-GPU tower-split deployment, Mock-AR mirrors mamba_s2 + KV[:-1] (${Math.max(0, prefixTokens - 1).toLocaleString('en-US')} prefix tokens = ${formatBytesAdaptive(mem.denoiserReadOnlyMirrorBytes)}) read-only to the Denoiser GPU.`
-        : 'In AR mode, Denoiser is inactive so 0 B cross-GPU read-only mirror is transferred.';
+        ? `Incurred ONLY when Context & Denoiser reside on separate GPUs without shared logical memory (Mock-AR mirrors mamba_s2 + KV[:-1] for ${Math.max(0, prefixTokens - 1).toLocaleString('en-US')} prefix tokens = ${formatBytesAdaptive(mem.denoiserReadOnlyMirrorBytes)} read-only); 0 B extra cache on single-device logical sharing.`
+        : '0 B cross-GPU read-only mirror in AR mode because Denoiser Tower is inactive.';
+
+  const residentWeights = Object.freeze({
+    activeTowerCount: mode === 'ar' ? (1 as const) : (2 as const),
+    totalCheckpointBytes: mem.dualTowerBf16WeightBytes,
+    totalCheckpointDisplay: formatGiB(mem.dualTowerBf16WeightBytes, 2),
+    totalCheckpointDecimalDisplay: formatDecimalGB(mem.dualTowerBf16WeightBytes, 2),
+    totalCheckpointDualDisplay: formatDualUnitGBGiB(mem.dualTowerBf16WeightBytes, 2),
+    activeWeightBytes: mem.activeModelWeightBytes,
+    activeWeightDisplay: formatGiB(mem.activeModelWeightBytes, 2),
+    activeWeightDecimalDisplay: formatDecimalGB(mem.activeModelWeightBytes, 2),
+    activeWeightDualDisplay: formatDualUnitGBGiB(mem.activeModelWeightBytes, 2),
+    contextTowerBytes: mem.contextTowerBf16WeightBytes,
+    contextTowerDisplay: formatGiB(mem.contextTowerBf16WeightBytes, 2),
+    contextTowerDecimalDisplay: formatDecimalGB(mem.contextTowerBf16WeightBytes, 2),
+    contextTowerDualDisplay: formatDualUnitGBGiB(mem.contextTowerBf16WeightBytes, 2),
+    denoiserTowerBytes: mem.denoiserTowerBf16WeightBytes,
+    denoiserTowerDisplay: formatGiB(mem.denoiserTowerBf16WeightBytes, 2),
+    denoiserTowerDecimalDisplay: formatDecimalGB(mem.denoiserTowerBf16WeightBytes, 2),
+    denoiserTowerDualDisplay: formatDualUnitGBGiB(mem.denoiserTowerBf16WeightBytes, 2),
+    note:
+      mode === 'ar'
+        ? `AR mode keeps only the Context Tower weights active (${formatDualUnitGBGiB(mem.contextTowerBf16WeightBytes, 2)}); the full dual-tower checkpoint remains ${formatDualUnitGBGiB(mem.dualTowerBf16WeightBytes, 2)} across 2 untied towers.`
+        : `Both independent towers reside in memory (${formatDualUnitGBGiB(mem.contextTowerBf16WeightBytes, 2)} Context + ${formatDualUnitGBGiB(mem.denoiserTowerBf16WeightBytes, 2)} Denoiser incl. ${formatDualUnitMBMiB(mem.timeConditioningBf16WeightBytes, 2)} adaLN = ${formatDualUnitGBGiB(mem.dualTowerBf16WeightBytes, 2)}), yet only ONE persistent sequence cache exists.`,
+  });
+
+  const persistentContextCache = Object.freeze({
+    category: 'persistent_context_cache' as const,
+    categoryLabel: '1. Persistent Context Cache (Unique Sequence Cache)',
+    owner: 'context_tower' as const,
+    isUniquePersistentSequenceCache: true as const,
+    fixedMambaBytes: mem.persistentContextMambaBytes,
+    fixedMambaDisplay: formatMiB(mem.persistentContextMambaBytes, 2),
+    fixedMambaDecimalDisplay: formatDecimalMB(mem.persistentContextMambaBytes, 2),
+    fixedMambaDualDisplay: formatDualUnitMBMiB(mem.persistentContextMambaBytes, 2),
+    gqaKvBytes: mem.persistentContextKvBytes,
+    gqaKvDisplay: formatBytesAdaptive(mem.persistentContextKvBytes),
+    kvBytesPerToken: mem.kvBytesPerToken,
+    kvPerTokenDisplay: formatKiB(mem.kvBytesPerToken),
+    totalBytes: mem.persistentContextTotalBytes,
+    totalDisplay: formatBytesAdaptive(mem.persistentContextTotalBytes),
+    totalDecimalDisplay: formatBytesDecimalAdaptive(mem.persistentContextTotalBytes),
+    totalDualDisplay: formatDualUnitBytesAdaptive(mem.persistentContextTotalBytes),
+    note: `Single persistent sequence cache owned exclusively by Context Tower: ${formatMiB(mem.persistentContextMambaBytes, 2)} fixed Mamba-2 state (23 layers) + ${prefixTokens.toLocaleString('en-US')} × ${formatKiB(mem.kvBytesPerToken)} BF16 GQA KV (6 layers) = ${formatBytesAdaptive(mem.persistentContextTotalBytes)}.`,
+  });
+
+  const optionalImplementationSnapshotsAndMirrors: TwoTowerOptionalImplementationSnapshotsAndMirrors =
+    Object.freeze({
+      category: 'optional_implementation_snapshots_and_mirrors' as const,
+      categoryLabel: '2. Optional Implementation Snapshots & Cross-GPU Mirrors',
+      mockArMambaS2SnapshotOwner: 'context_tower' as const,
+      mockArMambaS2Active: mode === 'mock_ar',
+      mockArMambaS2SnapshotBytes: mem.mockArMambaS2SnapshotBytes,
+      mockArMambaS2SnapshotDisplay: formatBytesAdaptive(mem.mockArMambaS2SnapshotBytes),
+      mockArMambaS2SnapshotDualDisplay: formatDualUnitBytesAdaptive(mem.mockArMambaS2SnapshotBytes),
+      mockArMambaS2Note,
+      crossGpuMirrorOwner: 'deployment_read_only_mirror' as const,
+      denoiserReadOnlyMirrorBytes: mem.denoiserReadOnlyMirrorBytes,
+      denoiserReadOnlyMirrorDisplay: formatBytesAdaptive(mem.denoiserReadOnlyMirrorBytes),
+      denoiserReadOnlyMirrorDualDisplay: formatDualUnitBytesAdaptive(
+        mem.denoiserReadOnlyMirrorBytes,
+      ),
+      singleDeviceLogicalSharingExtraBytes: 0 as const,
+      crossGpuMirrorConditionNote,
+      singleDeviceAccountedBytes: mem.mockArMambaS2SnapshotBytes,
+      singleDeviceAccountedDisplay: formatBytesAdaptive(mem.mockArMambaS2SnapshotBytes),
+      crossGpuAdditionalMirrorBytes: mem.denoiserReadOnlyMirrorBytes,
+      crossGpuAdditionalMirrorDisplay: formatBytesAdaptive(mem.denoiserReadOnlyMirrorBytes),
+      note: `${mockArMambaS2Note} ${crossGpuMirrorConditionNote}`,
+    });
+
+  const transientDenoiserBlockKv: TwoTowerTransientDenoiserBlockKv = Object.freeze({
+    category: 'transient_denoiser_block_kv' as const,
+    categoryLabel: '3. Transient Denoiser Block KV (Ephemeral Scratchpad)',
+    owner: 'denoiser_tower' as const,
+    persistence: 'ephemeral_per_step' as const,
+    blockSize,
+    kvBytesPerToken: mem.kvBytesPerToken,
+    ephemeralDenoiserBlockKvBytes: mem.ephemeralDenoiserBlockKvBytes,
+    ephemeralDenoiserBlockKvDisplay: formatBytesAdaptive(mem.ephemeralDenoiserBlockKvBytes),
+    ephemeralDenoiserBlockKvDualDisplay: formatDualUnitBytesAdaptive(
+      mem.ephemeralDenoiserBlockKvBytes,
+    ),
+    discardedBetweenSteps: mode === 'mask_diffusion',
+    note: transientDenoiserBlockKvNote,
+  });
+
+  const totalRuntimeWorkspaceExclusion: TwoTowerTotalRuntimeWorkspaceExclusion = Object.freeze({
+    category: 'total_runtime_workspace_exclusion' as const,
+    categoryLabel: '4. Total Runtime Workspace & Peak Inference Memory (Excluded)',
+    headline: 'Accounted Weight & Cache Buffers ≠ Peak Inference Memory' as const,
+    excludedFromAccountedCacheBytes: true as const,
+    excludedFromAccountedWeightBytes: true as const,
+    accountedBuffersEqualPeakInferenceMemory: false as const,
+    excludedComponents: Object.freeze([
+      Object.freeze({
+        id: 'intermediate_activations' as const,
+        label: 'Intermediate Layer Activations',
+        detail:
+          'Per-layer hidden states, RMSNorm/adaLN-modulated streams, MoE routed/shared MLP activations, and Mamba-2 FP32 chunk-scan intermediate buffers.',
+      }),
+      Object.freeze({
+        id: 'output_logits_buffer' as const,
+        label: '[B × 131,072] FP32/BF16 Output Logits',
+        detail:
+          'Full-vocabulary LM-head logits of shape [B × 131,072] (e.g., at production B=16: 8.00 MiB FP32 / 4.00 MiB BF16 per sequence before softmax/sampling copies).',
+      }),
+      Object.freeze({
+        id: 'framework_cuda_scratchpad' as const,
+        label: 'Framework & CUDA Kernel Scratchpad',
+        detail:
+          'cuBLAS/cuDNN/FlashAttention/Mamba-2 SSM kernel scratch workspaces, CUDA runtime context, and multi-GPU communication buffers.',
+      }),
+      Object.freeze({
+        id: 'allocator_fragmentation' as const,
+        label: 'Allocator Fragmentation & Pool Slack',
+        detail:
+          'Caching-allocator reserved blocks, tensor alignment padding, and peak memory fragmentation beyond logical tensor byte sums.',
+      }),
+    ]),
+    summary:
+      'Accounted weight and cache buffers MUST NOT be equated with complete peak inference memory: they strictly exclude intermediate activations, [B × 131,072] FP32/BF16 output logits, framework/CUDA kernel scratchpad, and allocator fragmentation.',
+  });
 
   const weightsVsCaches: TwoTowerWeightsVsCachesBreakdown = Object.freeze({
     headline: 'Two Resident Weight Sets ≠ Two Persistent Caches' as const,
     mode,
     prefixTokens,
     blockSize,
+    unitConventionNote: TWOTOWER_UNIT_CONVENTION_NOTE,
     memoryReadout: mem,
-    residentWeights: Object.freeze({
-      activeTowerCount: mode === 'ar' ? (1 as const) : (2 as const),
-      totalCheckpointBytes: mem.dualTowerBf16WeightBytes,
-      totalCheckpointDisplay: formatGiB(mem.dualTowerBf16WeightBytes, 2),
-      activeWeightBytes: mem.activeModelWeightBytes,
-      activeWeightDisplay: formatGiB(mem.activeModelWeightBytes, 2),
-      contextTowerBytes: mem.contextTowerBf16WeightBytes,
-      contextTowerDisplay: formatGiB(mem.contextTowerBf16WeightBytes, 2),
-      denoiserTowerBytes: mem.denoiserTowerBf16WeightBytes,
-      denoiserTowerDisplay: formatGiB(mem.denoiserTowerBf16WeightBytes, 2),
-      note:
-        mode === 'ar'
-          ? `AR mode keeps only the Context Tower weights active (${formatGiB(mem.contextTowerBf16WeightBytes, 2)}); the full dual-tower checkpoint remains ${formatGiB(mem.dualTowerBf16WeightBytes, 2)} across 2 untied towers.`
-          : `Both independent towers reside in memory (${formatGiB(mem.contextTowerBf16WeightBytes, 2)} Context + ${formatGiB(mem.denoiserTowerBf16WeightBytes, 2)} Denoiser incl. 57.26 MiB adaLN = ${formatGiB(mem.dualTowerBf16WeightBytes, 2)}), yet only ONE persistent sequence cache exists.`,
-    }),
-    persistentContextCache: Object.freeze({
-      owner: 'context_tower' as const,
-      isUniquePersistentSequenceCache: true as const,
-      fixedMambaBytes: mem.persistentContextMambaBytes,
-      fixedMambaDisplay: formatMiB(mem.persistentContextMambaBytes, 2),
-      gqaKvBytes: mem.persistentContextKvBytes,
-      gqaKvDisplay: formatBytesAdaptive(mem.persistentContextKvBytes),
-      kvBytesPerToken: mem.kvBytesPerToken,
-      kvPerTokenDisplay: formatKiB(mem.kvBytesPerToken),
-      totalBytes: mem.persistentContextTotalBytes,
-      totalDisplay: formatBytesAdaptive(mem.persistentContextTotalBytes),
-      note: `Single persistent sequence cache owned exclusively by Context Tower: ${formatMiB(mem.persistentContextMambaBytes, 2)} fixed Mamba-2 state (23 layers) + ${prefixTokens.toLocaleString('en-US')} × ${formatKiB(mem.kvBytesPerToken)} BF16 GQA KV (6 layers) = ${formatBytesAdaptive(mem.persistentContextTotalBytes)}.`,
-    }),
+    residentWeights,
+    persistentContextCache,
+    optionalImplementationSnapshotsAndMirrors,
+    transientDenoiserBlockKv,
+    totalRuntimeWorkspaceExclusion,
     transientDenoiserWorkspace: Object.freeze({
       owner: 'denoiser_tower' as const,
       persistence: 'ephemeral_scratch' as const,
-      workspaceKind,
+      workspaceKind: mode === 'mask_diffusion' ? ('ephemeral_block_kv' as const) : ('none' as const),
       ephemeralBlockKvBytes: mem.ephemeralDenoiserBlockKvBytes,
       ephemeralBlockKvDisplay: formatBytesAdaptive(mem.ephemeralDenoiserBlockKvBytes),
-      mockArMambaS2SnapshotBytes: mem.mockArMambaS2SnapshotBytes,
-      mockArMambaS2SnapshotDisplay: formatBytesAdaptive(mem.mockArMambaS2SnapshotBytes),
-      totalTransientBytes,
-      totalTransientDisplay: formatBytesAdaptive(totalTransientBytes),
-      discardedAfterStep: mode !== 'ar',
-      note: transientNote,
+      totalTransientBytes: mem.ephemeralDenoiserBlockKvBytes,
+      totalTransientDisplay: formatBytesAdaptive(mem.ephemeralDenoiserBlockKvBytes),
+      discardedAfterStep: mode === 'mask_diffusion',
+      note: transientDenoiserBlockKvNote,
     }),
     crossGpuMirrorVsLogicalSharing: Object.freeze({
       logicalPersistentCacheCount: 1 as const,
       logicalSharingNote:
-        'Logical single-cache architecture: Denoiser consumes Context prefix KV[0..P-1] and S-1 Mamba-2 boundary strictly read-only without maintaining a second growing sequence cache.',
+        'Logical single-cache architecture: Denoiser consumes Context prefix KV[0..P-1] and S-1 Mamba-2 boundary strictly read-only without maintaining a second growing sequence cache (0 B extra cache on single-device logical sharing).',
       crossGpuMirrorBytes: mem.denoiserReadOnlyMirrorBytes,
       crossGpuMirrorDisplay: formatBytesAdaptive(mem.denoiserReadOnlyMirrorBytes),
-      crossGpuMirrorNote,
+      crossGpuMirrorDualDisplay: formatDualUnitBytesAdaptive(mem.denoiserReadOnlyMirrorBytes),
+      crossGpuMirrorNote: crossGpuMirrorConditionNote,
     }),
     totalActiveLogicalCacheBytes: mem.totalActiveCacheBytes,
     totalActiveLogicalCacheDisplay: formatBytesAdaptive(mem.totalActiveCacheBytes),
+    totalActiveLogicalCacheDualDisplay: formatDualUnitBytesAdaptive(mem.totalActiveCacheBytes),
+  });
+
+  const memoryComparison: TwoTowerFourWayMemoryComparison = Object.freeze({
+    headline: 'Two Resident Weight Sets ≠ Two Persistent Caches' as const,
+    mode,
+    prefixTokens,
+    blockSize,
+    unitConventionNote: TWOTOWER_UNIT_CONVENTION_NOTE,
+    residentWeights,
+    persistentContextCache,
+    optionalImplementationSnapshotsAndMirrors,
+    transientDenoiserBlockKv,
+    totalRuntimeWorkspaceExclusion,
   });
 
   const precisionRows: readonly TwoTowerPrecisionComparisonRow[] = Object.freeze([
     Object.freeze({
       id: 'primary_weights_activations',
       dimension: 'Primary Weights & Activations',
-      productionValue: 'BF16 (12,498 weight tensors, 117.69 GiB dual-tower payload)',
+      productionValue: 'BF16 (12,498 weight tensors, 126.37 GB / 117.69 GiB dual-tower payload)',
       miniatureValue: 'Float32 deterministic synthetic weights (zero checkpoint weights)',
       structuralFidelity: 'scaled_miniature' as const,
       note: 'Educational browser simulator runs deterministic IEEE-754 Float32 arithmetic instead of BF16 checkpoint weights.',
@@ -1107,7 +1562,8 @@ export function buildTwoTowerArchitecturalReadout(
     Object.freeze({
       id: 'ssm_scan_and_moe_bias',
       dimension: 'Mamba-2 SSM Scan & MoE Bias',
-      productionValue: 'FP32 SSM scan + 46 FP32 e_score_correction_bias tensors (5,888 params)',
+      productionValue:
+        'FP32 SSM scan + 46 FP32 e_score_correction_bias tensors (5,888 params · 23,552 B = +11,776 B extra over BF16)',
       miniatureValue: 'Float32 SSM recurrence & Float32 e_score_correction_bias',
       structuralFidelity: 'exact_preserved' as const,
       note: 'Maintains FP32 stability for recurrent SSM state accumulation and MoE expert load-balancing bias.',
@@ -1155,7 +1611,7 @@ export function buildTwoTowerArchitecturalReadout(
     Object.freeze({
       id: 'context_and_block',
       dimension: 'Context Window & Block Diffusion',
-      productionValue: `max_position_embeddings = ${meta.maxPositionEmbeddings.toLocaleString('en-US')} (256K config; 128K card), B=${prod.blockSize}, K=${prod.stepsPerBlock}, freq_dim=${meta.timeEmbedderFreqDim}`,
+      productionValue: `128K operational (card) · 256K max_position_embeddings (${meta.maxPositionEmbeddings.toLocaleString('en-US')} config limit, unvalidated runtime) · >256K extrapolated; B=${prod.blockSize}, K=${prod.stepsPerBlock}, freq_dim=${meta.timeEmbedderFreqDim}`,
       miniatureValue: `kvCapacity = ${TWOTOWER_MINI_CONFIG.kvCapacity}, B ∈ {${TWOTOWER_MINI_CONFIG.supportedBlockSizes.join(', ')}}, independent K, freq_dim = ${TWOTOWER_MINI_CONFIG.freqDim}`,
       structuralFidelity: 'scaled_miniature' as const,
       note: 'Miniature kvCapacity=24 keeps interactive browser sessions fast while enforcing exact capacity boundaries and independent K vs B.',
@@ -1224,6 +1680,7 @@ export function buildTwoTowerArchitecturalReadout(
     prefixTokens,
     blockSize,
     mode,
+    unitConventionNote: TWOTOWER_UNIT_CONVENTION_NOTE,
     provenance: Object.freeze({
       hfRepo: TWOTOWER_SPEC.provenance.hfRepo,
       hfRevision: TWOTOWER_SPEC.provenance.hfRevision,
@@ -1236,11 +1693,13 @@ export function buildTwoTowerArchitecturalReadout(
       crossTowerWeightSharing: meta.crossTowerWeightSharing,
       tieWordEmbeddings: meta.tieWordEmbeddings,
       positionalEncoding: meta.positionalEncoding,
+      modelCardOperationalMaxTokens: TWOTOWER_MODEL_CARD_OPERATIONAL_CONTEXT_TOKENS,
       maxPositionEmbeddings: meta.maxPositionEmbeddings,
     }),
     inventory,
     discrepancyLedger,
     weightsVsCaches,
+    memoryComparison,
     precisionVsMiniature,
     scaling,
   });

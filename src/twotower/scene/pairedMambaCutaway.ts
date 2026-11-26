@@ -2178,10 +2178,25 @@ export function buildTwoTowerPairedMambaScene(
     const tokLbl = `t${decomposition.absoluteTokenPosition} ${decomposition.tokenLabel}`;
     const isHCurrTarget = activeFormula?.targetSpan.tensor === 'h_curr';
     const activeValOverride = focusedAccumulation?.active ? focusedAccumulation.partialSum : null;
+    const hCurrGridValues =
+      isHCurrTarget &&
+      focusedAccumulation?.active &&
+      !focusedAccumulation.isFinal &&
+      activeFormula !== null
+        ? (() => {
+            const masked = new Float32Array(decomposition.H_curr);
+            const r = activeFormula.targetSpan.rowStart;
+            const c = activeFormula.targetSpan.colStart;
+            if (r >= 0 && r < 4 && c >= 0 && c < 4) {
+              masked[r * 4 + c] = focusedAccumulation.partialSum;
+            }
+            return masked;
+          })()
+        : decomposition.H_curr;
 
     const gCurr = gridFromSheet4x4(
       b.sheetRegistry.get('den:h_curr'),
-      decomposition.H_curr,
+      hCurrGridValues,
       `H_curr ${hTag}`,
       tokLbl,
       isHCurrTarget ? activeFormula?.targetSpan.colStart : undefined,
@@ -2464,6 +2479,32 @@ export function buildTwoTowerPairedMambaScene(
   const valueAtlas: Rg32fValueAtlas | undefined = mambaAtlas ?? fallbackBoundaryAtlas ?? undefined;
   const atlasKey = `tt-mamba:${view.identity.recordId}:${ctxExecId}:${denExecId}:b${bayId}:f${towerFocus}:h${activeHead}:p${localPos}`;
 
+  // Strict partial-accumulation non-exposure (mirrors pairedGqaCutaway.ts & twoTowerMoeCutaway.ts):
+  // NEVER leak the completed final cell value into `activeFormula` while `focusedAccumulation.active`
+  // is running (Mamba Stepper steps 2 Conv1D, 3 SSM Update, 4 Readout + D).
+  const displayFormula: MambaCellFormula | null =
+    activeFormula && focusedAccumulation?.active
+      ? (() => {
+          const towerPrefix =
+            activeTower === 'denoiser'
+              ? `Denoiser Tower (Bay ${String(bayId).padStart(2, '0')})`
+              : `Context Tower (Bay ${String(bayId).padStart(2, '0')})`;
+          const decompTag =
+            decomposition && activeTower === 'denoiser'
+              ? ` · Π dA=${decomposition.cumulativeDecay.toFixed(4)} · ` +
+                `Conv1D(${decomposition.convWindow.inheritedHistoryColumnCount} ctx + ${decomposition.convWindow.blockColumnCount} blk)`
+              : '';
+          return {
+            ...activeFormula,
+            value: focusedAccumulation.partialSum,
+            valueText: focusedAccumulation.valueBadgeText,
+            equation: focusedAccumulation.partialEquation,
+            subEquation: `${towerPrefix} · ${focusedAccumulation.partialSubEquation}${decompTag}`,
+            headBadge: focusedAccumulation.badgeText,
+          };
+        })()
+      : activeFormula;
+
   return {
     viewMode: 'paired_mamba',
     title: `Paired Mamba-2 Cutaway · Bay ${String(bayId).padStart(2, '0')} (Layer ${layerIndex})`,
@@ -2486,7 +2527,7 @@ export function buildTwoTowerPairedMambaScene(
     ...(b.activeOpPartIds.size > 0 ? { activeOpPartIds: b.activeOpPartIds } : {}),
     activeCellGrids,
     cellPopover,
-    activeFormula,
+    activeFormula: displayFormula,
     focusedAccumulation,
     activeSelection,
     stepperSteps: MAMBA_STEPPER_STEPS,

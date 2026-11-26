@@ -529,6 +529,49 @@ describe('Stage TT4 Wave 3: Headless 4-Act Guided TwoTower Walkthrough Engine', 
       expect(() => assertPresentationSafeNoInfinity(snap, `altBeat[${i}]`)).not.toThrow();
       expect(snap.liveMetrics.length).toBeGreaterThanOrEqual(4);
     }
+
+    // Beat 3.5 (idx 20) & Beat 3.7 (idx 22) subtitle/badge dynamically track the computed trajectory
+    for (const ctrl of [c1, altCtrl]) {
+      const b35 = ctrl.goToBeat(20);
+      const rec35 = getActiveRecord(ctrl.getSession());
+      const refIdx35 = rec35.kind === 'diffusion_refinement' ? rec35.refinementIndex : 1;
+      const B35 = rec35.activeBlock!.blockConfig.blockSize;
+      const nM35 = rec35.activeBlock!.nMasked;
+      const t35 = rec35.kind === 'diffusion_refinement' ? rec35.tModel : nM35 / B35;
+      expect(b35.subtitle).toContain(`${B35 - nM35} `);
+      expect(b35.subtitle).toContain(`t = ${nM35}/${B35} = ${t35.toFixed(3)}`);
+      expect(b35.subtitle).toContain(`P=${rec35.committedPrefixLen}`);
+      expect(b35.badge).toContain(`r = ${refIdx35}`);
+      expect(b35.badge).toContain(`t = ${t35.toFixed(3)}`);
+
+      const b37 = ctrl.goToBeat(22);
+      const rec37 = getActiveRecord(ctrl.getSession());
+      const blk37 = rec37.activeBlock!;
+      const expectedNfeStr = `${blk37.nfe}/${blk37.blockConfig.stepsPerBlock} ${blk37.nfe === 1 ? 'NFE' : 'NFEs'}`;
+      expect(b37.subtitle).toContain(expectedNfeStr);
+      expect(b37.subtitle).toContain(`P = ${rec37.committedPrefixLen}`);
+      expect(b37.badge).toContain(rec37.lifecyclePhase);
+      expect(b37.badge).toContain(expectedNfeStr);
+    }
+
+    // Act IV Beats 4.3 (idx 25) & 4.4 (idx 26): 3-tier scaling, dual GB/GiB units & peak inference exclusion
+    const b43 = c1.goToBeat(25);
+    const b43Text = [b43.subtitle, ...b43.paragraphs, ...b43.takeaways].join(' ');
+    expect(b43Text).toContain('126.37 GB / 117.69 GiB');
+    expect(b43Text).toContain('60.04 MB / 57.26 MiB');
+    expect(b43Text).toContain('NOT complete peak inference memory');
+    expect(b43Text).toContain('131,072');
+    expect(b43Text.toLowerCase()).toContain('allocator fragmentation');
+
+    const b44 = c1.goToBeat(26);
+    const b44Text = [b44.subtitle, ...b44.paragraphs, ...b44.takeaways].join(' ');
+    expect(b44Text).toContain('126.37 GB / 117.69 GiB');
+    expect(b44Text).toContain('≤128K');
+    expect(b44Text).toContain('262,144');
+    expect(b44Text).toContain('NOT empirically validated production runtime support');
+    expect(b44Text).toContain('>256K');
+    expect(b44Text).toContain('NOT complete peak inference memory');
+    expect(b44Text).toContain('+11,776 B');
   });
 
   it('strictly isolates external user exploration sessions (verifyTourIsolation positive & negative tests)', () => {

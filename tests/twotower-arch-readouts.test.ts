@@ -7,14 +7,18 @@ import { MOE_SIM_CONFIG } from '../src/math/moeSim';
 import { memoryCrossovers } from '../src/model/memory';
 import { NEMOTRON_SPEC } from '../src/model/spec';
 import {
+  TWOTOWER_CONTEXT_REGIME_DISCLAIMER,
   TWOTOWER_MODEL_CARD_OPERATIONAL_CONTEXT_TOKENS,
   TWOTOWER_SAMPLER_CALIBRATION_DISCLAIMER,
   TWOTOWER_STANDARD_CONTEXT_LENGTHS,
+  TWOTOWER_UNIT_CONVENTION_NOTE,
   buildAdvancedSamplerInspectorModel,
   buildContextLengthScalingSeries,
   buildTwoTowerArchitecturalReadout,
   buildTwoTowerConfigScopeModel,
   buildTwoTowerTimelineModel,
+  classifyContextLengthScalingRegime,
+  type ContextLengthScalingRegime,
 } from '../src/twotower/archReadouts';
 import {
   TWOTOWER_CONFIDENCE_PRESETS,
@@ -110,9 +114,38 @@ describe('1. Production Architectural Readouts & Context-Length Scaling (Wave 4)
     expect(inv.grandTotal.fp32BiasTensorCount).toBe(46);
     expect(inv.grandTotal.fp32BiasParams).toBe(5_888);
     expect(inv.grandTotal.fp32BiasPayloadBytes).toBe(23_552);
+    expect(inv.grandTotal.fp32BiasExtraBytesOverBf16).toBe(11_776);
     expect(inv.grandTotal.bf16TensorCount + inv.grandTotal.fp32BiasTensorCount).toBe(
       specMeta.safetensorsTensorCount,
     );
+
+    // Dual decimal SI (GB/MB) vs binary IEC (GiB/MiB) unit clarity
+    expect(readout.unitConventionNote).toBe(TWOTOWER_UNIT_CONVENTION_NOTE);
+    expect(inv.unitConventionNote).toBe(TWOTOWER_UNIT_CONVENTION_NOTE);
+    expect(inv.unitConventionNote).toContain('Decimal SI');
+    expect(inv.unitConventionNote).toContain('Binary IEC');
+    expect(inv.contextTower.payloadDecimalDisplay).toBe('63.16 GB');
+    expect(inv.contextTower.payloadBinaryDisplay).toBe('58.82 GiB');
+    expect(inv.contextTower.payloadDualDisplay).toBe('63.16 GB / 58.82 GiB');
+    expect(inv.denoiserBackbone.payloadDecimalDisplay).toBe('63.16 GB');
+    expect(inv.denoiserBackbone.payloadBinaryDisplay).toBe('58.82 GiB');
+    expect(inv.denoiserBackbone.payloadDualDisplay).toBe('63.16 GB / 58.82 GiB');
+    expect(inv.denoiserTimeConditioning.payloadDecimalDisplay).toBe('60.04 MB');
+    expect(inv.denoiserTimeConditioning.payloadBinaryDisplay).toBe('57.26 MiB');
+    expect(inv.denoiserTimeConditioning.payloadDualDisplay).toBe('60.04 MB / 57.26 MiB');
+    expect(inv.denoiserTotal.payloadDecimalDisplay).toBe('63.22 GB');
+    expect(inv.denoiserTotal.payloadBinaryDisplay).toBe('58.87 GiB');
+    expect(inv.denoiserTotal.payloadDualDisplay).toBe('63.22 GB / 58.87 GiB');
+    expect(inv.grandTotal.payloadDecimalDisplay).toBe('126.37 GB');
+    expect(inv.grandTotal.payloadBinaryDisplay).toBe('117.69 GiB');
+    expect(inv.grandTotal.payloadDualDisplay).toBe('126.37 GB / 117.69 GiB');
+    expect(inv.grandTotal.headerDualDisplay).toBe('1.68 MB / 1.60 MiB');
+    expect(inv.grandTotal.fp32BiasPayloadDisplay).toContain('23,552 B');
+    expect(inv.grandTotal.fp32BiasExtraOverBf16Display).toContain('+11,776 B');
+    expect(inv.grandTotal.fp32BiasSummary).toContain('46 FP32');
+    expect(inv.grandTotal.fp32BiasSummary).toContain('5,888 params');
+    expect(inv.grandTotal.fp32BiasSummary).toContain('23,552 B');
+    expect(inv.grandTotal.fp32BiasSummary).toContain('+11,776 B');
 
     // Preserves entire paper-vs-checkpoint discrepancy ledger cleanly
     expect(readout.discrepancyLedger).toHaveLength(TWOTOWER_DISCREPANCY_LEDGER.length);
@@ -127,20 +160,34 @@ describe('1. Production Architectural Readouts & Context-Length Scaling (Wave 4)
     expect(readout.discrepancyLedger.some((e) => e.id === 'max_context_length')).toBe(true);
   });
 
-  it('distinguishes Two Resident Weight Sets != Two Persistent Caches across all 3 execution modes', () => {
+  it('enforces explicit 4-way memory separation, never conflates Mock-AR mamba_s2 with Denoiser block KV, and discloses peak inference exclusion', () => {
     const P = 16_384;
     const B = 16;
 
-    const diff = buildTwoTowerArchitecturalReadout(P, B, 'mask_diffusion').weightsVsCaches;
-    const mockAr = buildTwoTowerArchitecturalReadout(P, B, 'mock_ar').weightsVsCaches;
-    const ar = buildTwoTowerArchitecturalReadout(P, B, 'ar').weightsVsCaches;
+    const diffReadout = buildTwoTowerArchitecturalReadout(P, B, 'mask_diffusion');
+    const mockArReadout = buildTwoTowerArchitecturalReadout(P, B, 'mock_ar');
+    const arReadout = buildTwoTowerArchitecturalReadout(P, B, 'ar');
+
+    const diff = diffReadout.weightsVsCaches;
+    const mockAr = mockArReadout.weightsVsCaches;
+    const ar = arReadout.weightsVsCaches;
 
     expect(diff.headline).toBe('Two Resident Weight Sets ≠ Two Persistent Caches');
 
-    // Persistent Context cache is IDENTICAL across all 3 modes (single persistent cache!)
+    // Category 1: Persistent Context Cache is IDENTICAL across all 3 modes (single persistent cache!)
     const expectedMamba = 49_364_992; // 47.08 MiB
     const expectedKv = P * 6_144; // P * 6 KiB
-    for (const wvc of [diff, mockAr, ar]) {
+    for (const r of [diffReadout, mockArReadout, arReadout]) {
+      const wvc = r.weightsVsCaches;
+      const mc = r.memoryComparison;
+      expect(mc.persistentContextCache).toBe(wvc.persistentContextCache);
+      expect(mc.optionalImplementationSnapshotsAndMirrors).toBe(
+        wvc.optionalImplementationSnapshotsAndMirrors,
+      );
+      expect(mc.transientDenoiserBlockKv).toBe(wvc.transientDenoiserBlockKv);
+      expect(mc.totalRuntimeWorkspaceExclusion).toBe(wvc.totalRuntimeWorkspaceExclusion);
+
+      expect(wvc.persistentContextCache.category).toBe('persistent_context_cache');
       expect(wvc.persistentContextCache.owner).toBe('context_tower');
       expect(wvc.persistentContextCache.isUniquePersistentSequenceCache).toBe(true);
       expect(wvc.persistentContextCache.fixedMambaBytes).toBe(expectedMamba);
@@ -149,32 +196,85 @@ describe('1. Production Architectural Readouts & Context-Length Scaling (Wave 4)
       expect(wvc.persistentContextCache.kvBytesPerToken).toBe(6_144);
       expect(wvc.persistentContextCache.totalBytes).toBe(expectedMamba + expectedKv);
       expect(wvc.crossGpuMirrorVsLogicalSharing.logicalPersistentCacheCount).toBe(1);
+
+      // Category 4: Total Runtime Workspace & Peak Inference Memory Exclusion (strictly disclosed!)
+      const excl = wvc.totalRuntimeWorkspaceExclusion;
+      expect(excl.category).toBe('total_runtime_workspace_exclusion');
+      expect(excl.excludedFromAccountedCacheBytes).toBe(true);
+      expect(excl.excludedFromAccountedWeightBytes).toBe(true);
+      expect(excl.accountedBuffersEqualPeakInferenceMemory).toBe(false);
+      expect(excl.excludedComponents.map((c) => c.id)).toEqual([
+        'intermediate_activations',
+        'output_logits_buffer',
+        'framework_cuda_scratchpad',
+        'allocator_fragmentation',
+      ]);
+      expect(excl.summary).toContain('131,072');
+      expect(excl.summary.toLowerCase()).toContain('intermediate activations');
+      expect(excl.summary.toLowerCase()).toContain('cuda');
+      expect(excl.summary.toLowerCase()).toContain('allocator fragmentation');
+      expect(excl.summary.toLowerCase()).toContain('peak inference memory');
     }
 
-    // Transient Denoiser workspace differs strictly by mode
+    // Mask-Diffusion mode: transient Denoiser block KV = B * 6 KiB; Mock-AR snapshot = 0 B; cross-GPU mirror = P-prefix + Mamba
     expect(diff.residentWeights.activeTowerCount).toBe(2);
+    expect(diff.residentWeights.totalCheckpointDualDisplay).toBe('126.37 GB / 117.69 GiB');
+    expect(diff.transientDenoiserBlockKv.owner).toBe('denoiser_tower');
+    expect(diff.transientDenoiserBlockKv.ephemeralDenoiserBlockKvBytes).toBe(B * 6_144);
+    expect(diff.transientDenoiserBlockKv.discardedBetweenSteps).toBe(true);
     expect(diff.transientDenoiserWorkspace.workspaceKind).toBe('ephemeral_block_kv');
     expect(diff.transientDenoiserWorkspace.ephemeralBlockKvBytes).toBe(B * 6_144);
-    expect(diff.transientDenoiserWorkspace.mockArMambaS2SnapshotBytes).toBe(0);
     expect(diff.transientDenoiserWorkspace.totalTransientBytes).toBe(B * 6_144);
     expect(diff.transientDenoiserWorkspace.discardedAfterStep).toBe(true);
+    expect(diff.optionalImplementationSnapshotsAndMirrors.mockArMambaS2SnapshotOwner).toBe(
+      'context_tower',
+    );
+    expect(diff.optionalImplementationSnapshotsAndMirrors.mockArMambaS2Active).toBe(false);
+    expect(diff.optionalImplementationSnapshotsAndMirrors.mockArMambaS2SnapshotBytes).toBe(0);
+    expect(diff.optionalImplementationSnapshotsAndMirrors.denoiserReadOnlyMirrorBytes).toBe(
+      expectedMamba + expectedKv,
+    );
+    expect(
+      diff.optionalImplementationSnapshotsAndMirrors.singleDeviceLogicalSharingExtraBytes,
+    ).toBe(0);
+    expect(
+      diff.optionalImplementationSnapshotsAndMirrors.crossGpuMirrorConditionNote.toLowerCase(),
+    ).toContain('separate gpus');
     expect(diff.crossGpuMirrorVsLogicalSharing.crossGpuMirrorBytes).toBe(
       expectedMamba + expectedKv,
     );
 
+    // Mock-AR mode: mamba_s2 (+47.08 MiB) is in Category 2 (Context-tower snapshot), NEVER conflated into Denoiser block KV (0 B)!
     expect(mockAr.residentWeights.activeTowerCount).toBe(2);
-    expect(mockAr.transientDenoiserWorkspace.workspaceKind).toBe('mock_ar_mamba_s2_snapshot');
+    expect(mockAr.transientDenoiserBlockKv.ephemeralDenoiserBlockKvBytes).toBe(0);
+    expect(mockAr.transientDenoiserBlockKv.discardedBetweenSteps).toBe(false);
+    expect(mockAr.transientDenoiserWorkspace.workspaceKind).toBe('none');
     expect(mockAr.transientDenoiserWorkspace.ephemeralBlockKvBytes).toBe(0);
-    expect(mockAr.transientDenoiserWorkspace.mockArMambaS2SnapshotBytes).toBe(expectedMamba);
-    expect(mockAr.transientDenoiserWorkspace.totalTransientBytes).toBe(expectedMamba);
+    expect(mockAr.transientDenoiserWorkspace.totalTransientBytes).toBe(0);
+    expect(mockAr.transientDenoiserWorkspace.discardedAfterStep).toBe(false);
+    expect(mockAr.optionalImplementationSnapshotsAndMirrors.mockArMambaS2SnapshotOwner).toBe(
+      'context_tower',
+    );
+    expect(mockAr.optionalImplementationSnapshotsAndMirrors.mockArMambaS2Active).toBe(true);
+    expect(mockAr.optionalImplementationSnapshotsAndMirrors.mockArMambaS2SnapshotBytes).toBe(
+      expectedMamba,
+    );
+    expect(mockAr.optionalImplementationSnapshotsAndMirrors.denoiserReadOnlyMirrorBytes).toBe(
+      expectedMamba + (P - 1) * 6_144,
+    );
     expect(mockAr.crossGpuMirrorVsLogicalSharing.crossGpuMirrorBytes).toBe(
       expectedMamba + (P - 1) * 6_144,
     );
 
+    // AR mode: Context-only, 0 B Denoiser block KV, 0 B Mock-AR snapshot, 0 B cross-GPU mirror
     expect(ar.residentWeights.activeTowerCount).toBe(1);
+    expect(ar.transientDenoiserBlockKv.ephemeralDenoiserBlockKvBytes).toBe(0);
+    expect(ar.transientDenoiserBlockKv.discardedBetweenSteps).toBe(false);
     expect(ar.transientDenoiserWorkspace.workspaceKind).toBe('none');
     expect(ar.transientDenoiserWorkspace.totalTransientBytes).toBe(0);
     expect(ar.transientDenoiserWorkspace.discardedAfterStep).toBe(false);
+    expect(ar.optionalImplementationSnapshotsAndMirrors.mockArMambaS2SnapshotBytes).toBe(0);
+    expect(ar.optionalImplementationSnapshotsAndMirrors.denoiserReadOnlyMirrorBytes).toBe(0);
     expect(ar.crossGpuMirrorVsLogicalSharing.crossGpuMirrorBytes).toBe(0);
   });
 
@@ -222,11 +322,12 @@ describe('1. Production Architectural Readouts & Context-Length Scaling (Wave 4)
     expect(matrix.rows.length).toBeGreaterThanOrEqual(8);
   });
 
-  it('builds exact context-length scaling series, marks supported vs extrapolated regimes, and handles custom prefixTokens', () => {
+  it('builds exact context-length scaling series across 3 explicit regimes (128K operational / 256K configured limit / >256K extrapolated) and handles custom prefixTokens', () => {
     const standard = buildContextLengthScalingSeries(16, 'mask_diffusion');
     const expectedCross = memoryCrossovers(NEMOTRON_SPEC, 'bf16');
 
     expect(standard.points.map((p) => p.tokens)).toEqual([...TWOTOWER_STANDARD_CONTEXT_LENGTHS]);
+    expect(standard.modelCardOperationalMaxTokens).toBe(131_072);
     expect(standard.maxPositionEmbeddings).toBe(262_144);
     expect(standard.modelCardOperationalContextTokens).toBe(
       TWOTOWER_MODEL_CARD_OPERATIONAL_CONTEXT_TOKENS,
@@ -235,18 +336,59 @@ describe('1. Production Architectural Readouts & Context-Length Scaling (Wave 4)
     expect(standard.crossoverTokens).toBe(8_035);
     expect(standard.crossoverTokensExact).toBeCloseTo(49_364_992 / 6_144, 10);
     expect(standard.beatsFull52LayerGqaTokens).toBe(1_048);
+    expect(standard.regimes.map((r) => r.regime)).toEqual([
+      'model_card_operational',
+      'configured_positional_limit',
+      'extrapolated_beyond_max_pos',
+    ]);
+    expect(standard.regimeDisclaimer).toBe(TWOTOWER_CONTEXT_REGIME_DISCLAIMER);
+    expect(standard.regimeDisclaimer).toContain('262,144');
+    expect(standard.regimeDisclaimer).toContain('NOT empirically validated production runtime support');
 
     for (const pt of standard.points) {
       const direct = twoTowerMemoryFor(pt.tokens, 16, 'mask_diffusion');
       expect(pt.persistentTotalBytes).toBe(direct.persistentContextTotalBytes);
       expect(pt.ephemeralWorkspaceBytes).toBe(direct.ephemeralDenoiserBlockKvBytes);
       expect(pt.mambaSharePct + pt.kvSharePct).toBeCloseTo(100, 10);
-      if (pt.tokens <= 262_144) {
-        expect(pt.regime).toBe('supported');
+      expect(pt.regime).not.toBe('supported');
+      const strictRegime: ContextLengthScalingRegime = pt.scalingRegime;
+      expect(pt.regime).toBe(strictRegime);
+
+      if (pt.tokens <= 131_072) {
+        expect(pt.regime).toBe('model_card_operational');
+        expect(pt.regimeShortLabel).toBe('Operational (≤128K)');
+        expect(pt.exceedsModelCardOperational128k).toBe(false);
+        expect(pt.isExtrapolated).toBe(false);
+      } else if (pt.tokens <= 262_144) {
+        expect(pt.regime).toBe('configured_positional_limit');
+        expect(pt.regimeShortLabel).toBe('Configured Limit (≤256K)');
+        expect(pt.exceedsModelCardOperational128k).toBe(true);
+        expect(pt.isExtrapolated).toBe(false);
       } else {
         expect(pt.regime).toBe('extrapolated_beyond_max_pos');
+        expect(pt.regimeShortLabel).toBe('Extrapolated (>256K)');
+        expect(pt.exceedsModelCardOperational128k).toBe(true);
+        expect(pt.isExtrapolated).toBe(true);
       }
       expect(pt.isCustomPoint).toBe(false);
+    }
+
+    // Exact boundary classification checks (131,072 vs 131,073 vs 262,144 vs 262,145)
+    expect(classifyContextLengthScalingRegime(131_072).regime).toBe('model_card_operational');
+    expect(classifyContextLengthScalingRegime(131_073).regime).toBe(
+      'configured_positional_limit',
+    );
+    expect(classifyContextLengthScalingRegime(262_144).regime).toBe(
+      'configured_positional_limit',
+    );
+    expect(classifyContextLengthScalingRegime(262_145).regime).toBe('extrapolated_beyond_max_pos');
+
+    // Mock-AR scaling series NEVER conflates mamba_s2 (+47.08 MiB) into ephemeral Denoiser block KV (0 B)
+    const mockArSeries = buildContextLengthScalingSeries(16, 'mock_ar');
+    for (const pt of mockArSeries.points) {
+      expect(pt.ephemeralDenoiserBlockKvBytes).toBe(0);
+      expect(pt.ephemeralWorkspaceBytes).toBe(0);
+      expect(pt.mockArMambaS2SnapshotBytes).toBe(49_364_992);
     }
 
     // Verify crossover flip between 4K (< 8,035) and 16K (> 8,035)
@@ -261,18 +403,20 @@ describe('1. Production Architectural Readouts & Context-Length Scaling (Wave 4)
     const customPt = withCustom.points.find((p) => p.tokens === 12_345)!;
     expect(customPt.isCustomPoint).toBe(true);
     expect(customPt.isSelectedPrefix).toBe(true);
-    expect(customPt.regime).toBe('supported');
+    expect(customPt.regime).toBe('model_card_operational');
     for (let i = 1; i < withCustom.points.length; i++) {
       expect(withCustom.points[i].tokens).toBeGreaterThan(withCustom.points[i - 1].tokens);
     }
 
-    // Standard prefixTokens marks selected without duplicating
+    // Standard prefixTokens 262,144 (256K) classifies as configured_positional_limit (NOT 'supported')
     const withStd = buildContextLengthScalingSeries(16, 'mask_diffusion', 262_144);
     expect(withStd.points).toHaveLength(TWOTOWER_STANDARD_CONTEXT_LENGTHS.length);
     const pt256k = withStd.points.find((p) => p.tokens === 262_144)!;
     expect(pt256k.isCustomPoint).toBe(false);
     expect(pt256k.isSelectedPrefix).toBe(true);
-    expect(pt256k.regime).toBe('supported');
+    expect(pt256k.regime).toBe('configured_positional_limit');
+    expect(pt256k.exceedsModelCardOperational128k).toBe(true);
+    expect(pt256k.isExtrapolated).toBe(false);
 
     // Edge cases: L = 0 and invalid inputs
     const zeroReadout = buildTwoTowerArchitecturalReadout(0, 0, 'ar');

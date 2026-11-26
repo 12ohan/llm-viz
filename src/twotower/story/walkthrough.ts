@@ -19,6 +19,7 @@
 
 import { formatExpertId } from '../../math/moeSim';
 import { formatBytesAdaptive, formatKiB, formatMiB } from '../../model/memory';
+import { formatDualUnitGBGiB, formatDualUnitMBMiB } from '../archReadouts';
 import { validateContextSnapshot } from '../contracts';
 import { modulationOrderForBayKind } from '../modulation';
 import { createDefaultTwoTowerModel, type TwoTowerModelParameters } from '../parameters';
@@ -92,7 +93,7 @@ export const EPISTEMIC_SAMPLER_CALIBRATION =
   'Canonical MDLM / SUBS sampler mechanics on miniature logits (γ=0.22 educational default vs 0.80 paper / 0.90 code) — unscaled softmax confidence is NOT calibrated semantic correctness.' as const;
 
 export const EPISTEMIC_PRODUCTION_VS_MINIATURE =
-  'Canonical production precision & scaling spec (BF16 weights, FP32 Mamba SSM & MoE bias, FP64 MoE router; 128K card / 256K config) contrasted against synthetic miniature browser arithmetic.' as const;
+  'Canonical production precision & 3-regime context scaling spec (BF16 weights, FP32 Mamba SSM & MoE bias, FP64 MoE router; ≤128K operational card / 256K configured positional limit [not empirically validated runtime support] / >256K extrapolated) contrasted against synthetic miniature browser arithmetic.' as const;
 
 // ============================================================================
 // PUBLIC TYPES
@@ -551,6 +552,8 @@ interface TourBeatDefinition {
     readonly record: TwoTowerSessionRecord;
     readonly landmarks: TourTrajectoryLandmarks;
   }) => {
+    readonly subtitle?: string;
+    readonly badge?: string;
     readonly paragraphs: readonly string[];
     readonly takeaways: readonly string[];
     readonly liveMetrics: readonly TwoTowerTourLiveMetric[];
@@ -1496,8 +1499,8 @@ const BEAT_DEFINITIONS: readonly TourBeatDefinition[] = Object.freeze([
     beatId: '3.5',
     actIndex: 2,
     title: 'Successive Refinement r = 1: Live t = nMasked / B Jumps Directly',
-    subtitle: '2 slots unmasked at r=0 → t = 2/4 = 0.500 (proving t ≠ r/K) · Same P=8 Context seed',
-    badge: 'r = 1 · t = 0.500 ≠ r/K',
+    subtitle: 'Live remaining masks drive t = nMasked / B directly · Same Context seed',
+    badge: 'r = 1 · t = nMasked / B',
     viewMode: 'timestep',
     bayId: 6,
     towerFocus: 'denoiser_solo',
@@ -1516,18 +1519,30 @@ const BEAT_DEFINITIONS: readonly TourBeatDefinition[] = Object.freeze([
       const rIdx = ref1?.refinementIndex ?? 1;
       const B = ref1?.blockConfig.blockSize ?? 4;
       const K = ref1?.blockConfig.stepsPerBlock ?? 4;
-      const nM = record.activeBlock?.nMasked ?? 2;
+      const nM = record.activeBlock?.nMasked ?? 0;
+      const unmaskedBefore = Math.max(0, B - nM);
       const tActual = ref1?.tModel ?? nM / B;
       const rOverK = rIdx / K;
+      const tDiffersFromROverK = Math.abs(tActual - rOverK) > 1e-6;
       const sameDigest = record.identity.sourceCacheDigest === ref0.identity.sourceCacheDigest;
       const tEmbL2 = ref1?.denoiserPass.tEmb ? l2Norm(ref1.denoiserPass.tEmb) : 0;
+      const dynamicSubtitle =
+        `${unmaskedBefore} ${unmaskedBefore === 1 ? 'slot' : 'slots'} unmasked before r=${rIdx} → ` +
+        `t = ${nM}/${B} = ${fmtFixed(tActual, 3)} ` +
+        `(${tDiffersFromROverK ? 'proving t ≠ r/K' : `live nMasked/B, r/K=${fmtFixed(rOverK, 3)}`}) · ` +
+        `Same P=${record.committedPrefixLen} Context seed`;
+      const dynamicBadge = tDiffersFromROverK
+        ? `r = ${rIdx} · t = ${fmtFixed(tActual, 3)} ≠ r/K`
+        : `r = ${rIdx} · t = ${fmtFixed(tActual, 3)} (${nM}/${B})`;
       return {
+        subtitle: dynamicSubtitle,
+        badge: dynamicBadge,
         paragraphs: [
-          `Entering refinement r = ${rIdx}, the active block input is [${ref1?.xtInputLabels.join(', ') ?? ''}] — ${nM} masked slots remain out of B = ${B}. Consequently, Denoiser executes with t = nMasked / B = ${nM} / ${B} = ${fmtFixed(tActual, 3)}, directly proving that t tracks remaining masks rather than step progress (r / K = ${fmtFixed(rOverK, 3)}, 1 − r / K = ${fmtFixed(1 - rOverK, 3)}).`,
+          `Entering refinement r = ${rIdx}, the active block input is [${ref1?.xtInputLabels.join(', ') ?? ''}] — ${nM} masked slots remain out of B = ${B}. Consequently, Denoiser executes with t = nMasked / B = ${nM} / ${B} = ${fmtFixed(tActual, 3)}, directly tracking remaining masks rather than step progress (r / K = ${fmtFixed(rOverK, 3)}, 1 − r / K = ${fmtFixed(1 - rOverK, 3)}).`,
           `Notice the cache provenance: sourceCacheDigest (${fmtShortDigest(record.identity.sourceCacheDigest)}) is 100% IDENTICAL to r = 0 (sameDigest = ${String(sameDigest)}). Denoiser discards r = 0's ephemeral scratchpad and freshly conditions on Context's immutable P = ${record.committedPrefixLen} boundary with updated block tokens and new tEmb (L2 = ${fmtFixed(tEmbL2, 3)}).`,
         ],
         takeaways: [
-          `Live proof: executed t = ${fmtFixed(tActual, 3)} (${nM}/${B}) ≠ r/K (${fmtFixed(rOverK, 3)}) and ≠ 1−r/K (${fmtFixed(1 - rOverK, 3)})`,
+          `Live trajectory: executed t = ${fmtFixed(tActual, 3)} (${nM}/${B}) vs step index r/K = ${fmtFixed(rOverK, 3)} and 1−r/K = ${fmtFixed(1 - rOverK, 3)}`,
           `Every refinement re-seeds from the exact SAME P = ${record.committedPrefixLen} Context digest (${fmtShortDigest(record.identity.sourceCacheDigest)})`,
         ],
         liveMetrics: [
@@ -1589,7 +1604,7 @@ const BEAT_DEFINITIONS: readonly TourBeatDefinition[] = Object.freeze([
     beatId: '3.7',
     actIndex: 2,
     title: 'Completed-But-Uncommitted Block State (nMasked = 0, Context Still P = 8)',
-    subtitle: 'Early completion in 3 NFEs · Block ready on Denoiser · Context NOT yet updated',
+    subtitle: 'Block ready on Denoiser · Context NOT yet updated',
     badge: 'completed_uncommitted · P = 8',
     viewMode: 'macro',
     bayId: 53,
@@ -1610,19 +1625,28 @@ const BEAT_DEFINITIONS: readonly TourBeatDefinition[] = Object.freeze([
       const blk = record.activeBlock!;
       const confRec = record.kind === 'diffusion_confidence_commit' ? record : null;
       const lastT = confRec?.unmaskStep.tModel ?? 0.25;
+      const nfeText = `${blk.nfe}/${blk.blockConfig.stepsPerBlock} ${blk.nfe === 1 ? 'NFE' : 'NFEs'}`;
+      const dynamicSubtitle =
+        `${blk.earlyCompleted ? `Early completion in ${nfeText}` : `Completed in ${nfeText}`} · ` +
+        `Block ready on Denoiser · Context NOT yet updated (P = ${record.committedPrefixLen})`;
+      const dynamicBadge = `${record.lifecyclePhase} · ${nfeText} · P = ${record.committedPrefixLen}`;
       return {
+        subtitle: dynamicSubtitle,
+        badge: dynamicBadge,
         paragraphs: [
           `After the final refinement (r = ${confRec?.refinementIndex ?? 2}, executed t = ${fmtFixed(lastT, 3)}), all B = ${blk.blockConfig.blockSize} tokens in Block ${blk.blockId} are fully unmasked: [${blk.currentTokenLabels.join(', ')}] (nMasked = ${blk.nMasked}, NFE = ${blk.nfe}/${blk.blockConfig.stepsPerBlock}${blk.earlyCompleted ? ', early-completed!' : ''}).`,
           `Notice the explicit architectural separation: lifecyclePhase is "${record.lifecyclePhase}" and contextCommitted is ${String(blk.contextCommitted)}. Context Tower STILL holds only the original P = ${record.committedPrefixLen} prompt prefix ([0..${record.committedPrefixLen - 1}]), and the emerald Block Commit pathway is staged until Context explicitly ingests the finished block.`,
         ],
         takeaways: [
           `Distinct state: nMasked = ${blk.nMasked} AND contextCommitted = false — Context prefix stays at P = ${record.committedPrefixLen} until explicit commit`,
-          `Early completion saved ${blk.blockConfig.stepsPerBlock - blk.nfe} NFE (${blk.nfe} passes used of K = ${blk.blockConfig.stepsPerBlock} budget)`,
+          blk.earlyCompleted
+            ? `Early completion saved ${blk.blockConfig.stepsPerBlock - blk.nfe} NFE (${blk.nfe} passes used of K = ${blk.blockConfig.stepsPerBlock} budget)`
+            : `Completed across the full K = ${blk.blockConfig.stepsPerBlock} budget (${blk.nfe} passes used)`,
         ],
         liveMetrics: [
           metric('Lifecycle Phase', record.lifecyclePhase, 'gold'),
           metric('Unresolved / Committed', `nMasked=${blk.nMasked} · contextCommitted=${String(blk.contextCommitted)}`, 'warn'),
-          metric('Context Prefix P', `${record.committedPrefixLen} (NOT yet 12)`, 'context'),
+          metric('Context Prefix P', `${record.committedPrefixLen} (NOT yet ${record.committedPrefixLen + blk.blockConfig.blockSize})`, 'context'),
           metric('Block 0 NFE', `${blk.nfe} / ${blk.blockConfig.stepsPerBlock}${blk.earlyCompleted ? ' (early)' : ''}`, 'denoiser'),
           metric('Completed Block Tokens', blk.currentTokenLabels.join(' · '), 'shared'),
         ],
@@ -1724,8 +1748,8 @@ const BEAT_DEFINITIONS: readonly TourBeatDefinition[] = Object.freeze([
     beatId: '4.3',
     actIndex: 3,
     title: 'Persistent Context Cache Growth vs. Transient Denoiser Scratchpad',
-    subtitle: 'Two resident weight sets (117.69 GiB) ≠ Two persistent generation caches',
-    badge: '1 Persistent Cache · 2 Weight Sets',
+    subtitle: 'Two resident weight sets (126.37 GB / 117.69 GiB) ≠ Two persistent caches (nor peak inference RAM)',
+    badge: '4-Way Memory · 1 Persistent Cache',
     viewMode: 'macro',
     bayId: 6,
     towerFocus: 'paired',
@@ -1736,7 +1760,7 @@ const BEAT_DEFINITIONS: readonly TourBeatDefinition[] = Object.freeze([
     showArchPanel: true,
     highlightPartId: 'ctx-moe-body-02',
     epistemicTag: EPISTEMIC_CANONICAL_AND_MINIATURE,
-    interactivePrompt: 'Compare solid Context cache growth vs dashed ephemeral Denoiser scratchpad',
+    interactivePrompt: 'Compare 4 memory categories: Context cache, optional snapshots/mirrors, Denoiser block KV, and excluded peak runtime workspace',
     resolveTarget: (lm) => ({ branchId: lm.mainBranchId, recordIndex: lm.block1Ref0Idx }),
     buildNarrativeAndMetrics: ({ session, record }) => {
       const prodP12B4 = twoTowerMemoryFor(record.committedPrefixLen, 4, 'mask_diffusion');
@@ -1744,17 +1768,18 @@ const BEAT_DEFINITIONS: readonly TourBeatDefinition[] = Object.freeze([
       const miniMem = measureTwoTowerSessionRetainedBytes(session);
       return {
         paragraphs: [
-          `A core architectural principle of Nemotron-Labs-TwoTower: hosting TWO independent resident parameter sets (${formatGiB(prodP12B16.dualTowerBf16WeightBytes)} BF16 = ${formatGiB(prodP12B16.contextTowerBf16WeightBytes)} Context + ${formatGiB(prodP12B16.denoiserTowerBf16WeightBytes)} Denoiser) does NOT create two persistent generation caches.`,
-          `Only Context Tower maintains a growing persistent sequence cache (at P = ${record.committedPrefixLen}: ${formatMiB(prodP12B4.persistentContextMambaBytes)} fixed Mamba + ${formatKiB(prodP12B4.persistentContextKvBytes)} GQA KV). Denoiser Tower's dashed/frosted workspace holds strictly ephemeral per-step scratch (${formatKiB(prodP12B4.ephemeralDenoiserBlockKvBytes)} at B = 4 / ${formatKiB(prodP12B16.ephemeralDenoiserBlockKvBytes)} at prod B = 16) that is discarded immediately after each pass.`,
+          `A core architectural principle of Nemotron-Labs-TwoTower: hosting TWO independent resident parameter sets (${formatDualUnitGBGiB(prodP12B16.dualTowerBf16WeightBytes)} = ${formatDualUnitGBGiB(prodP12B16.contextTowerBf16WeightBytes)} Context + ${formatDualUnitGBGiB(prodP12B16.denoiserTowerBf16WeightBytes)} Denoiser, incl. ${formatDualUnitMBMiB(prodP12B16.timeConditioningBf16WeightBytes)} adaLN-single; decimal SI GB/MB vs binary IEC GiB/MiB) does NOT create two persistent generation caches.`,
+          `Four memory categories stay strictly separated: (1) Context Tower's unique persistent sequence cache (at P = ${record.committedPrefixLen}: ${formatMiB(prodP12B4.persistentContextMambaBytes, 2)} fixed Mamba + ${formatKiB(prodP12B4.persistentContextKvBytes)} GQA KV); (2) optional implementation snapshots/mirrors (Mock-AR's +47.08 MiB Context mamba_s2 snapshot, or cross-GPU read-only mirrors ONLY when towers run on separate GPUs without shared logical memory); (3) Denoiser's transient block KV scratchpad (${formatKiB(prodP12B4.ephemeralDenoiserBlockKvBytes)} @ B = 4 / ${formatKiB(prodP12B16.ephemeralDenoiserBlockKvBytes)} @ prod B = 16, discarded post-step); and (4) EXCLUDED runtime workspace — accounted weight and cache buffers are NOT complete peak inference memory (they exclude intermediate activations, [B × 131,072] FP32/BF16 logits, framework/CUDA kernel scratchpad, and allocator fragmentation).`,
         ],
         takeaways: [
-          `Two resident weight sets (${formatGiB(prodP12B16.dualTowerBf16WeightBytes)}) pair with ONE persistent prefix cache + tiny ephemeral block scratchpad`,
-          `Tour session deduplicated retained memory (all ${miniMem.uniqueRecordCount} records across ${miniMem.branchCount} branches): ${formatBytesAdaptive(miniMem.totalRetainedBytes)}`,
+          `Two resident weight sets (${formatDualUnitGBGiB(prodP12B16.dualTowerBf16WeightBytes)} decimal SI / binary IEC) pair with ONE persistent prefix cache + tiny ephemeral Denoiser block KV`,
+          `Accounted cache buffers are NOT complete peak inference memory (exclude activations, [B × 131,072] logits, CUDA scratchpad & allocator fragmentation); tour retained RAM: ${formatBytesAdaptive(miniMem.totalRetainedBytes)}`,
         ],
         liveMetrics: [
-          metric('Prod Resident Weights', `${formatGiB(prodP12B16.dualTowerBf16WeightBytes)} (2 towers)`, 'gold'),
-          metric(`Prod Context Cache (P=${record.committedPrefixLen})`, `${formatMiB(prodP12B4.persistentContextMambaBytes)} + ${formatKiB(prodP12B4.persistentContextKvBytes)} KV`, 'context'),
-          metric('Prod Denoiser Scratch', `${formatKiB(prodP12B16.ephemeralDenoiserBlockKvBytes)} @ B=16 (discarded)`, 'denoiser'),
+          metric('Prod Resident Weights', `${formatDualUnitGBGiB(prodP12B16.dualTowerBf16WeightBytes)} (2 towers)`, 'gold'),
+          metric(`Prod Context Cache (P=${record.committedPrefixLen})`, `${formatMiB(prodP12B4.persistentContextMambaBytes, 2)} + ${formatKiB(prodP12B4.persistentContextKvBytes)} KV`, 'context'),
+          metric('Prod Denoiser Block KV', `${formatKiB(prodP12B16.ephemeralDenoiserBlockKvBytes)} @ B=16 (discarded)`, 'denoiser'),
+          metric('Peak Inference Memory', 'Excluded (acts, logits, CUDA, alloc)', 'warn'),
           metric('Mini Tour Session RAM', `${formatBytesAdaptive(miniMem.totalRetainedBytes)} (${miniMem.uniqueRecordCount} recs)`, 'muted'),
         ],
       };
@@ -1764,9 +1789,9 @@ const BEAT_DEFINITIONS: readonly TourBeatDefinition[] = Object.freeze([
     beatIndex: 26,
     beatId: '4.4',
     actIndex: 3,
-    title: 'Production Precision (BF16 / FP32 / FP64), Scaling & Miniature Disclosure',
-    subtitle: 'Official HF rev 35b64985 precision & 128K/256K scaling vs browser miniature math',
-    badge: 'BF16 · FP32 · FP64 · 256K',
+    title: 'Production Precision (BF16 / FP32 / FP64), 3-Regime Scaling & Miniature Disclosure',
+    subtitle: 'HF rev 35b64985 precision, 128K / 256K / >256K scaling regimes & decimal GB vs binary GiB',
+    badge: 'BF16 · FP32 · FP64 · 3 Regimes',
     viewMode: 'macro',
     bayId: 42,
     towerFocus: 'paired',
@@ -1777,28 +1802,32 @@ const BEAT_DEFINITIONS: readonly TourBeatDefinition[] = Object.freeze([
     showArchPanel: true,
     highlightPartId: 'timestep-hub',
     epistemicTag: EPISTEMIC_PRODUCTION_VS_MINIATURE,
-    interactivePrompt: 'Review production precision boundaries and 128K / 256K Context scaling readouts',
+    interactivePrompt: 'Review 3-tier scaling (128K card / 256K config limit / >256K extrapolated), dual GB/GiB units, and peak RAM exclusion',
     resolveTarget: (lm) => ({ branchId: lm.mainBranchId, recordIndex: lm.block1Ref0Idx }),
     buildNarrativeAndMetrics: () => {
       const meta = TWOTOWER_SPEC.directlyInspectedMetadata;
+      const inv = TWOTOWER_SPEC.derivedInventoryCalculations;
       const mem128k = twoTowerMemoryFor(131_072, 16, 'mask_diffusion');
       const mem256k = twoTowerMemoryFor(meta.maxPositionEmbeddings, 16, 'mask_diffusion');
+      const mem512k = twoTowerMemoryFor(524_288, 16, 'mask_diffusion');
+      const mem1m = twoTowerMemoryFor(1_048_576, 16, 'mask_diffusion');
       const nvfp4 = TWOTOWER_SPEC.communityNvfp4Reference;
       return {
         paragraphs: [
-          `The released Nemotron-Labs-TwoTower-30B-A3B-Base-BF16 checkpoint (HF rev ${TWOTOWER_SPEC.provenance.hfRevision.slice(0, 8)}, ${meta.safetensorsTensorCount.toLocaleString()} tensors across ${meta.safetensorsShardCount} shards) executes primary weights/activations in BF16, Mamba-2 SSM scans (chunk_size = ${meta.mambaChunkSize}) and all ${meta.fp32ScoreCorrectionBiasTensorCount} MoE e_score_correction_bias tensors (${meta.fp32ScoreCorrectionBiasParams.toLocaleString()} params) in FP32, and MoE router matmul + sigmoid in FP64. Because only 6 of 52 bays store KV caches, persistent Context cache stays ${formatBytesAdaptive(mem128k.persistentContextTotalBytes)} at 128K tokens (model card) and ${formatBytesAdaptive(mem256k.persistentContextTotalBytes)} at 256K tokens (config max_position_embeddings).`,
-          `Full disclosure: every live tensor, softmax probability, and unmasked word shown in this browser runs deterministic synthetic miniature Float32/Float64 arithmetic (d = ${TWOTOWER_MINI_CONFIG.d}, V = ${TWOTOWER_MINI_CONFIG.vocabSize}, L = 52) to illuminate exact architectural mechanics — NEVER 63.19B checkpoint weights. Non-official community expert-only NVFP4 (~${nvfp4.approxTotalWeightGiB} GiB) compresses routed experts while keeping Mamba, GQA, routers, shared experts, bookends, and adaLN in BF16/FP32.`,
+          `The released Nemotron-Labs-TwoTower-30B-A3B-Base-BF16 checkpoint (HF rev ${TWOTOWER_SPEC.provenance.hfRevision.slice(0, 8)}, ${meta.safetensorsTensorCount.toLocaleString()} tensors across ${meta.safetensorsShardCount} shards, ${formatDualUnitGBGiB(inv.derivedPayloadBytes)} payload in decimal SI / binary IEC) executes primary weights/activations in BF16, Mamba-2 SSM scans (chunk_size = ${meta.mambaChunkSize}) and all ${meta.fp32ScoreCorrectionBiasTensorCount} MoE e_score_correction_bias tensors (${meta.fp32ScoreCorrectionBiasParams.toLocaleString()} params, 23,552 B = +${inv.fp32ScoreCorrectionBiasExtraBytes.toLocaleString()} B extra over BF16) in FP32, and MoE router matmul + sigmoid in FP64. Context cache scaling separates THREE explicit regimes: (1) Operational (≤128K / 131,072 tokens, model card: ${formatBytesAdaptive(mem128k.persistentContextTotalBytes)}), (2) Configured Positional Limit (128K–256K / config.json max_position_embeddings = 262,144: ${formatBytesAdaptive(mem256k.persistentContextTotalBytes)} — a configured positional ceiling and NOT empirically validated production runtime support), and (3) Analytical Extrapolation (>256K under NoPE KV arithmetic: ${formatBytesAdaptive(mem512k.persistentContextTotalBytes)} @ 512K, ${formatBytesAdaptive(mem1m.persistentContextTotalBytes)} @ 1M).`,
+          `Full disclosure: accounted weight and cache buffers above are logical tensor sizes ONLY and are NOT complete peak inference memory (they exclude intermediate activations, [B × 131,072] FP32/BF16 logits, framework/CUDA kernel scratchpads, and allocator fragmentation). Every live tensor, softmax probability, and unmasked word shown in this browser runs deterministic synthetic miniature Float32/Float64 arithmetic (d = ${TWOTOWER_MINI_CONFIG.d}, V = ${TWOTOWER_MINI_CONFIG.vocabSize}, L = 52) — NEVER 63.19B checkpoint weights. Non-official community expert-only NVFP4 (~${nvfp4.approxTotalWeightGiB} GiB) compresses routed experts while keeping Mamba, GQA, routers, shared experts, bookends, and adaLN in BF16/FP32.`,
         ],
         takeaways: [
-          `Official precision split: BF16 primary · FP32 Mamba SSM + 46 MoE biases · FP64 MoE router compute`,
-          `Context cache scaling: ${formatBytesAdaptive(mem128k.persistentContextTotalBytes)} @ 128K · ${formatBytesAdaptive(mem256k.persistentContextTotalBytes)} @ 256K (+${formatKiB(mem256k.ephemeralDenoiserBlockKvBytes)} ephemeral B=16 KV)`,
+          `3-tier scaling: ≤128K operational (${formatBytesAdaptive(mem128k.persistentContextTotalBytes)}) · 256K configured positional limit [not empirically validated runtime support] (${formatBytesAdaptive(mem256k.persistentContextTotalBytes)}) · >256K extrapolated (${formatBytesAdaptive(mem1m.persistentContextTotalBytes)} @ 1M)`,
+          `Dual-unit checkpoint payload: ${formatDualUnitGBGiB(inv.derivedPayloadBytes)} (+${inv.fp32ScoreCorrectionBiasExtraBytes.toLocaleString()} B from 46 FP32 biases); accounted cache buffers exclude peak inference runtime workspace`,
         ],
         liveMetrics: [
-          metric('Official Precision Split', 'BF16 / FP32 SSM+bias / FP64 router', 'gold'),
-          metric('Prod Cache @ 128K (Card)', formatBytesAdaptive(mem128k.persistentContextTotalBytes), 'context'),
-          metric('Prod Cache @ 256K (Config)', formatBytesAdaptive(mem256k.persistentContextTotalBytes), 'context'),
-          metric('Community NVFP4 (Non-Off.)', `~${nvfp4.approxTotalWeightGiB} GiB (routed MoE only)`, 'muted'),
-          metric('Browser Miniature Scale', `d=${TWOTOWER_MINI_CONFIG.d} · V=${TWOTOWER_MINI_CONFIG.vocabSize} · synthetic weights`, 'warn'),
+          metric('Official Payload (SI / IEC)', formatDualUnitGBGiB(inv.derivedPayloadBytes), 'gold'),
+          metric('≤128K Operational (Card)', formatBytesAdaptive(mem128k.persistentContextTotalBytes), 'context'),
+          metric('256K Config Limit (Unval.)', formatBytesAdaptive(mem256k.persistentContextTotalBytes), 'warn'),
+          metric('>256K Extrapolated (1M)', formatBytesAdaptive(mem1m.persistentContextTotalBytes), 'denoiser'),
+          metric('Peak Inference Memory', 'Excluded (acts, logits, CUDA)', 'warn'),
+          metric('Browser Miniature Scale', `d=${TWOTOWER_MINI_CONFIG.d} · V=${TWOTOWER_MINI_CONFIG.vocabSize} · synthetic weights`, 'muted'),
         ],
       };
     },
@@ -1830,8 +1859,8 @@ const BEAT_DEFINITIONS: readonly TourBeatDefinition[] = Object.freeze([
         : `Blk ${record.identity.blockId ?? 1} active`;
       return {
         paragraphs: [
-          `Nemotron-Labs-TwoTower trades doubled resident weights (63.19B BF16 across two 52-layer hybrid towers + 30.02M adaLN-single) to eliminate the core caching dilemma of hybrid diffusion LMs: Context Tower maintains ONE lossless, exact causal hybrid prefix cache (6 GQA KV + 23 fixed Mamba-2 + 23 stateless MoE), while Denoiser Tower performs bidirectional block refinement in ephemeral scratchpad memory over t = nMasked / B.`,
-          `Across our continuous tour trajectory, Block 0 early-completed in ${landmarks.block0Nfe}/${TWOTOWER_TOUR_CONFIG.stepsPerBlock} NFEs before committing P = 8 → 12, and Block 1 demonstrates guaranteed floor commitment in action (${recapEvent}). Exit the walkthrough at any time to return to your completely untouched free-exploration session!`,
+          `Nemotron-Labs-TwoTower trades doubled resident weights (63.19B BF16 = 126.37 GB / 117.69 GiB across two 52-layer hybrid towers + 30.02M / 60.04 MB / 57.26 MiB adaLN-single) to eliminate the core caching dilemma of hybrid diffusion LMs: Context Tower maintains ONE lossless, exact causal hybrid prefix cache (6 GQA KV + 23 fixed Mamba-2 + 23 stateless MoE), while Denoiser Tower performs bidirectional block refinement in ephemeral scratchpad memory over t = nMasked / B.`,
+          `Across our continuous tour trajectory, Block 0 ${landmarks.block0EarlyCompleted ? 'early-completed' : 'completed'} in ${landmarks.block0Nfe}/${TWOTOWER_TOUR_CONFIG.stepsPerBlock} NFEs before committing P = 8 → 12, and Block 1 demonstrates guaranteed floor commitment in action (${recapEvent}). Exit the walkthrough at any time to return to your completely untouched free-exploration session!`,
         ],
         takeaways: [
           `Key trade-off: 2× resident weights vs 1 persistent hybrid cache, 29 clean read-only transfer bays, and multi-token unmasking per NFE`,
@@ -1841,7 +1870,7 @@ const BEAT_DEFINITIONS: readonly TourBeatDefinition[] = Object.freeze([
           metric('Block 0 Efficiency', `${landmarks.block0Nfe}/${TWOTOWER_TOUR_CONFIG.stepsPerBlock} NFEs${landmarks.block0EarlyCompleted ? ' (early complete)' : ''}`, 'denoiser'),
           metric('Block 1 Live Decision', recapEvent, 'gold'),
           metric('Cross-Tower Contract', '29 stateful linkers · 23 stateless MoE', 'shared'),
-          metric('Cache vs Weights', '1 persistent cache · 2 weight sets (117.69 GiB)', 'context'),
+          metric('Cache vs Weights', '1 persistent cache · 2 weight sets (126.37 GB / 117.69 GiB)', 'context'),
         ],
       };
     },
@@ -1898,11 +1927,12 @@ function buildBeatSnapshot(params: {
   const target = def.resolveTarget(landmarks);
   const record = getBranchRecord(session, target.branchId, target.recordIndex);
 
-  const { paragraphs, takeaways, liveMetrics } = def.buildNarrativeAndMetrics({
-    session,
-    record,
-    landmarks,
-  });
+  const { subtitle: dynamicSubtitle, badge: dynamicBadge, paragraphs, takeaways, liveMetrics } =
+    def.buildNarrativeAndMetrics({
+      session,
+      record,
+      landmarks,
+    });
 
   const provenance = resolveRecordProvenance(record);
 
@@ -1915,8 +1945,8 @@ function buildBeatSnapshot(params: {
     actBeatIndex: def.beatIndex - act.startBeatIndex,
     actBeatCount: act.beatCount,
     title: def.title,
-    subtitle: def.subtitle,
-    badge: def.badge,
+    subtitle: dynamicSubtitle ?? def.subtitle,
+    badge: dynamicBadge ?? def.badge,
     paragraphs: Object.freeze([...paragraphs]),
     takeaways: Object.freeze([...takeaways]),
     interactivePrompt: def.interactivePrompt,
