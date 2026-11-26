@@ -30,6 +30,7 @@
     "src/ui/**/*.ts",
     "src/story/**/*.ts",
     "src/twotower/**/*.ts",
+    "src/diffusion/**/*.ts",
     "tests/**/*.ts",
     "vite.config.ts"
   ],
