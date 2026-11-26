@@ -5,10 +5,12 @@ on:
     branches:
       - main
       - feat/twotower
+      - feat/diffusion
   push:
     branches:
       - main
       - feat/twotower
+      - feat/diffusion
   workflow_dispatch:
 
 permissions:
@@ -46,10 +48,10 @@ jobs:
       - name: Build production bundle
         run: npm run build
 
-      - name: Verify Nano / TwoTower bundle isolation
+      - name: Verify 3-way Nano / TwoTower / Diffusion bundle isolation
         run: npm run verify:isolation
 
-      - name: Build GitHub Pages subpath bundle (/llm-viz/) & verify isolation
+      - name: Build GitHub Pages subpath bundle (/llm-viz/) & verify 3-way isolation
         env:
           VITE_BASE_PATH: /llm-viz/
         run: |
