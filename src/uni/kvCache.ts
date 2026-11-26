@@ -221,33 +221,58 @@ export function appendBatchKvsToCache(
     );
   }
 
-  // Validate layer nullability consistency and buffer sizes across all CFG rows
-  const layerAllocated = new Uint8Array(numLayers);
-  for (let l = 0; l < numLayers; l++) {
-    const firstNull = perRowNewKvs[0][l] === null;
-    for (let b = 0; b < batchSize; b++) {
-      const slice = perRowNewKvs[b][l];
-      const isNull = slice === null;
-      if (isNull !== firstNull) {
-        throw new RangeError(
-          `Inconsistent nullability across CFG rows at layer ${l}: row 0 is ${firstNull ? 'null' : 'non-null'}, row ${b} is ${isNull ? 'null' : 'non-null'}`,
-        );
-      }
-      if (slice !== null) {
-        if (slice.seqLen !== appendLen) {
-          throw new RangeError(
-            `perRowNewKvs[${b}][${l}].seqLen (${slice.seqLen}) does not match appendLen (${appendLen})`,
-          );
-        }
-        const reqFloats = appendLen * kvDim;
-        if (slice.k.length < reqFloats || slice.v.length < reqFloats) {
-          throw new RangeError(
-            `perRowNewKvs[${b}][${l}] buffer too small for appendLen=${appendLen} * kvDim=${kvDim}`,
-          );
-        }
+  // Track whether each CFG row contains any G token in the appended window.
+  // Under `elastic_pruned` 3-branch Editing (B_cfg = 3), rows 0 & 1 (`uncond`, `vq_dropped`)
+  // are U-only (`newKvs[18..33] === null`) while row 2 (`full`) is mixed (`newKvs[18..33] !== null`).
+  const dualTowerLayers = UNI_MINI_CONFIG.dualTowerLayers;
+  const rowHasGen = new Uint8Array(batchSize);
+  for (let b = 0; b < batchSize; b++) {
+    for (let t = 0; t < appendLen; t++) {
+      if (perRowRouting[b][t] === UNI_ROUTE_G) {
+        rowHasGen[b] = 1;
+        break;
       }
     }
-    layerAllocated[l] = firstNull ? 0 : 1;
+  }
+
+  // Validate per-layer nullability rules and buffer sizes across all CFG rows:
+  //   - Joint layers (l < 18): null is strictly forbidden on every row.
+  //   - Split layers (l >= 18): null is permitted iff that row has zero G tokens;
+  //     if all rows are null, store `layers[l] = null`; if some rows are non-null,
+  //     allocate `layers[l]` leaving null U-only rows zero-filled (skipped at 0 ULP).
+  const layerAllocated = new Uint8Array(numLayers);
+  for (let l = 0; l < numLayers; l++) {
+    const isSplit = l >= dualTowerLayers;
+    let anyNonNull = false;
+    for (let b = 0; b < batchSize; b++) {
+      const slice = perRowNewKvs[b][l];
+      if (slice === null) {
+        if (!isSplit) {
+          throw new RangeError(
+            `Null KV slice is forbidden on joint layer ${l} (CFG row ${b})`,
+          );
+        }
+        if (rowHasGen[b] !== 0) {
+          throw new RangeError(
+            `Null KV slice on split layer ${l} is forbidden for CFG row ${b} containing G tokens`,
+          );
+        }
+        continue;
+      }
+      anyNonNull = true;
+      if (slice.seqLen !== appendLen) {
+        throw new RangeError(
+          `perRowNewKvs[${b}][${l}].seqLen (${slice.seqLen}) does not match appendLen (${appendLen})`,
+        );
+      }
+      const reqFloats = appendLen * kvDim;
+      if (slice.k.length < reqFloats || slice.v.length < reqFloats) {
+        throw new RangeError(
+          `perRowNewKvs[${b}][${l}] buffer too small for appendLen=${appendLen} * kvDim=${kvDim}`,
+        );
+      }
+    }
+    layerAllocated[l] = anyNonNull ? 1 : 0;
   }
 
   const newSlabs: UniKvPositionSlab[] = new Array<UniKvPositionSlab>(appendLen);
@@ -280,7 +305,8 @@ export function appendBatchKvsToCache(
       const srcOffset = t * kvDim;
 
       for (let b = 0; b < batchSize; b++) {
-        const slice = perRowNewKvs[b][l]!;
+        const slice = perRowNewKvs[b][l];
+        if (slice === null) continue; // Null U-only split row remains zero-filled (0-ULP skipped)
         const dstOffset = b * kvDim;
         for (let c = 0; c < kvDim; c++) {
           k[dstOffset + c] = slice.k[srcOffset + c];

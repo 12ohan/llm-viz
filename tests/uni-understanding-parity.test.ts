@@ -806,6 +806,134 @@ describe('UniKvCacheState — Immutability, CFG Batching (1/2/3), D5 Waste Telem
     expect(emptyTel.wastedSplitULayerCount).toBe(0);
   });
 
+  it('supports B_cfg=3 elastic_pruned mixed-nullability split layers with 0-ULP Stage-2 equivalence and rejects illegal nulls', () => {
+    const d = model.config.hiddenSize;
+    // Construct equal-length 6-token prefixes for 3-branch Editing:
+    //   row 0 (uncond):     all U -> elastic_pruned returns null on L18..33
+    //   row 1 (vq_dropped): all U -> elastic_pruned returns null on L18..33
+    //   row 2 (full):       4 U + 2 G -> elastic_pruned returns non-null on L18..33
+    const row0Ids = [1, 10, 26, 27, 28, 11];
+    const row1Ids = [1, 10, 29, 30, 31, 11];
+    const row2U = embedUniTextTokens([1, 10, 29, 30], model);
+    const row2G = embedUniGenTokens([12, 45], model);
+    const row2Emb = new Float32Array(6 * d);
+    row2Emb.set(row2U, 0);
+    row2Emb.set(row2G, 4 * d);
+    const row2Route = new Uint8Array([0, 0, 0, 0, 1, 1]);
+
+    const hf0 = runUniForwardPass(model, {
+      tokenIds: row0Ids,
+      maskMode: 'causal',
+      useCache: true,
+      prefillMode: 'hf_faithful',
+      downstreamTarget: 'g',
+    });
+    const hf1 = runUniForwardPass(model, {
+      tokenIds: row1Ids,
+      maskMode: 'causal',
+      useCache: true,
+      prefillMode: 'hf_faithful',
+      downstreamTarget: 'g',
+    });
+    const hf2 = runUniForwardPass(model, {
+      inputsEmbeds: row2Emb,
+      routing: row2Route,
+      maskMode: 'causal',
+      useCache: true,
+      prefillMode: 'hf_faithful',
+      downstreamTarget: 'g',
+    });
+
+    const pr0 = runUniForwardPass(model, {
+      tokenIds: row0Ids,
+      maskMode: 'causal',
+      useCache: true,
+      prefillMode: 'elastic_pruned',
+      downstreamTarget: 'g',
+    });
+    const pr1 = runUniForwardPass(model, {
+      tokenIds: row1Ids,
+      maskMode: 'causal',
+      useCache: true,
+      prefillMode: 'elastic_pruned',
+      downstreamTarget: 'g',
+    });
+    const pr2 = runUniForwardPass(model, {
+      inputsEmbeds: row2Emb,
+      routing: row2Route,
+      maskMode: 'causal',
+      useCache: true,
+      prefillMode: 'elastic_pruned',
+      downstreamTarget: 'g',
+    });
+
+    expect(pr0.newKvs[18]).toBeNull();
+    expect(pr1.newKvs[18]).toBeNull();
+    expect(pr2.newKvs[18]).not.toBeNull();
+
+    const hfCache = appendBatchKvsToCache(
+      createEmptyUniKvCache({ batchSize: 3, prefillMode: 'hf_faithful', downstreamTarget: 'g' }),
+      [hf0.newKvs, hf1.newKvs, hf2.newKvs],
+      [hf0.routing, hf1.routing, hf2.routing],
+    );
+    const prCache = appendBatchKvsToCache(
+      createEmptyUniKvCache({ batchSize: 3, prefillMode: 'elastic_pruned', downstreamTarget: 'g' }),
+      [pr0.newKvs, pr1.newKvs, pr2.newKvs],
+      [pr0.routing, pr1.routing, pr2.routing],
+    );
+
+    expect(prCache.dualTowerHasGeneration).toBe(true);
+    expect(prCache.wasteTelemetry.wastedSplitUBytes).toBe(0);
+    expect(prCache.wasteTelemetry.wastedSplitULayerCount).toBe(0);
+    expect(prCache.wasteTelemetry.wastedFraction).toBe(0);
+    expect(hfCache.wasteTelemetry.wastedSplitUBytes).toBeGreaterThan(0);
+
+    // Stage-2 G-only denoising on all 3 CFG rows MUST match hf_faithful to 0 ULP!
+    const targetGenIds = [259, 260, 261, 262, 5, 19];
+    for (let row = 0; row < 3; row++) {
+      const extHf = extractRowPastKvs(hfCache, row);
+      const extPr = extractRowPastKvs(prCache, row);
+      const s2Hf = runUniForwardPass(model, {
+        genTokenIds: targetGenIds,
+        maskMode: 'bidirectional',
+        useCache: false,
+        pastKvs: extHf.pastKvs,
+        pastRouting: extHf.pastRouting,
+      });
+      const s2Pr = runUniForwardPass(model, {
+        genTokenIds: targetGenIds,
+        maskMode: 'bidirectional',
+        useCache: false,
+        pastKvs: extPr.pastKvs,
+        pastRouting: extPr.pastRouting,
+      });
+      assertBitExactFiniteArray(s2Pr.finalNorm!, s2Hf.finalNorm!, `b3_pruned_s2.row${row}.finalNorm`);
+      assertBitExactFiniteArray(s2Pr.genLogits!, s2Hf.genLogits!, `b3_pruned_s2.row${row}.genLogits`);
+    }
+
+    // Illegal null on joint layer (L17) MUST throw
+    const badJoint = pr0.newKvs.slice();
+    badJoint[17] = null;
+    expect(() =>
+      appendBatchKvsToCache(
+        createEmptyUniKvCache({ batchSize: 3, prefillMode: 'elastic_pruned', downstreamTarget: 'g' }),
+        [badJoint, pr1.newKvs, pr2.newKvs],
+        [pr0.routing, pr1.routing, pr2.routing],
+      ),
+    ).toThrow(RangeError);
+
+    // Illegal null on split layer (L18) for a row containing G tokens MUST throw
+    const badSplitG = pr2.newKvs.slice();
+    badSplitG[18] = null;
+    expect(() =>
+      appendBatchKvsToCache(
+        createEmptyUniKvCache({ batchSize: 3, prefillMode: 'elastic_pruned', downstreamTarget: 'g' }),
+        [pr0.newKvs, pr1.newKvs, badSplitG],
+        [pr0.routing, pr1.routing, pr2.routing],
+      ),
+    ).toThrow(RangeError);
+  });
+
   it('throws RangeError on append beyond capacity and halts block-diffusion cleanly with capacity_exhausted', () => {
     const fwd = runUniForwardPass(model, {
       tokenIds: [1, 10, 26, 27],

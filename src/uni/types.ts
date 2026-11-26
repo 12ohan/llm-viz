@@ -1471,3 +1471,457 @@ export interface UniGroundingResult {
   readonly skipSpecialTokensHazardNote: string;
   readonly totalGuardInterventions: number;
 }
+
+
+// ============================================================================
+// UNI3: BALANCED SEMANTIC TREE, SELF-REFINING DIFFUSION, OPD & SESSION
+// ============================================================================
+
+export const UNI_SEMANTIC_TREE_ALGORITHM = 'recursive_centered_pca_rank_median_v1' as const;
+export const UNI_SEMANTIC_TREE_METRIC = 'normalized_squared_l2_tree_ultrametric' as const;
+export const UNI_STRATIFIED_DEFAULT_SEED = 42 as const;
+
+export const UNI_SESSION_MAX_BRANCHES = 12 as const;
+export const UNI_SESSION_MAX_RECORDS = 128 as const;
+export const UNI_SESSION_EAGER_TRACE_LAYERS: readonly [0, 17, 18, 33] = Object.freeze([
+  0, 17, 18, 33,
+] as const);
+
+// ----------------------------------------------------------------------------
+// Slice 3A: BalancedSemanticTree & Progressive Refinement (`src/uni/tree.ts`)
+// ----------------------------------------------------------------------------
+
+export interface UniBalancedSemanticTree {
+  readonly algorithm: typeof UNI_SEMANTIC_TREE_ALGORITHM;
+  readonly metric: typeof UNI_SEMANTIC_TREE_METRIC;
+  readonly vocabSize: number; // 256
+  readonly depth: number; // 8
+  readonly latentDim: number; // 8
+  /** `[vocabSize]` permutation mapping binary-tree leaf index `0..255` -> VQ token ID `0..255` (`1,024 B`). */
+  readonly leafToToken: Int32Array;
+  /** `[vocabSize]` inverse permutation mapping VQ token ID `0..255` -> leaf index `0..255` (`1,024 B`). */
+  readonly tokenToLeaf: Int32Array;
+  /**
+   * `[vocabSize - 1]` (`255`, `1,020 B`) internal-node bounding radii stored in a 0-indexed
+   * complete binary heap (node `i` has children `2*i+1`, `2*i+2`; root at `0`).
+   * Monotone non-increasing along every root-to-leaf path.
+   */
+  readonly heapRadii: Float32Array;
+  /** Exact core typed-array footprint (`1,024 + 1,024 + 1,020 = 3,068 B` for `V = 256`). */
+  readonly byteLength: number;
+}
+
+export interface UniTreeBallMembership {
+  readonly tokenId: number;
+  readonly leafIndex: number;
+  readonly level: number;
+  readonly shift: number;
+  readonly ballStartLeaf: number;
+  readonly ballSize: number;
+  readonly heapNodeIndex: number | null;
+  readonly radius: number;
+  readonly memberTokenIds: Int32Array;
+}
+
+export interface UniSemanticTreeSchedule {
+  readonly contentCount: number;
+  readonly activationSteps: number;
+  readonly refinementSteps: number;
+  readonly refinementGap: number;
+  readonly shift: number;
+  readonly flushRounds: number;
+  readonly totalRounds: number;
+  /** `[totalRounds]` number of newly activated content cells per decode round. */
+  readonly activationCounts: Int32Array;
+  /** `[totalRounds]` cumulative activated content cells after each round. */
+  readonly cumulativeActivations: Int32Array;
+}
+
+export interface UniSemanticTreeState {
+  /** `[gridLen]` code stage: `-1` unactivated, `0..N` active/committed (`N` = clean/finalized). */
+  readonly stages: Int32Array;
+  /** `[gridLen]` live visual embedding IDs (`0..255` VQ codes or `256`/`258` markers). */
+  readonly representatives: Int32Array;
+  /** `[gridLen]` split depth level `0..depth` (`depth` for committed & markers). */
+  readonly levels: Int32Array;
+  /** `[gridLen]` additive mask-noise weight `η = 1 - max(stage, 0) / N` in `[0, 1]`. */
+  readonly noiseWeights: Float32Array;
+  /** `[gridLen]` binary indicator (`1` = structural row/end marker, `0` = content cell). */
+  readonly isMarker: Uint8Array;
+  readonly refinementSteps: number;
+}
+
+/** U9: Dual polarity readout mapping inference code stage `{-1, 0..N}` <-> paper age `{0..N}`. */
+export interface UniStagePolarityPair {
+  readonly codeStage: number;
+  readonly paperAge: number;
+  readonly level: number;
+  readonly ballSize: number;
+  readonly noiseWeight: number;
+  readonly isCommitted: boolean;
+}
+
+/** U26: Prime-depth `D = 17` train-vs-inference integer floor-rounding mismatch row. */
+export interface UniPrimeDepthFloorMismatchRow {
+  readonly stageIndex: number; // a_inf in 1..K-1
+  readonly trainAge: number; // a_trn = K - stageIndex
+  readonly trainLevel: number; // D - floor(a_trn * D / K)
+  readonly inferLevel: number; // floor(stageIndex * D / K)
+  readonly levelDelta: number; // trainLevel - inferLevel
+  readonly trainBallSize: number; // 2^(D - trainLevel)
+  readonly inferBallSize: number; // 2^(D - inferLevel)
+  readonly ballSizeRatio: number; // inferBallSize / trainBallSize
+}
+
+export interface UniPrimeDepthFloorMismatchReport {
+  readonly treeDepth: number;
+  readonly refinementSteps: number;
+  readonly hasMismatch: boolean;
+  readonly mismatchedStageCount: number;
+  readonly totalInternalStages: number;
+  readonly rows: readonly UniPrimeDepthFloorMismatchRow[];
+}
+
+// ----------------------------------------------------------------------------
+// Slice 3B-opd: Read-Only Cross-Paradigm OPD Reference (`src/uni/opdRef.ts`)
+// ----------------------------------------------------------------------------
+
+export interface UniTailKlResult {
+  readonly unionIndices: Int32Array;
+  readonly bucketCount: number; // unionIndices.length + 1 (e.g. 129 in prod)
+  readonly pTargetBuckets: Float32Array;
+  readonly pStudentBuckets: Float32Array;
+  readonly pTargetTailMass: number;
+  readonly pStudentTailMass: number;
+  readonly reverseKl: number; // D_KL(p_s || p_t)
+  readonly forwardKl: number; // D_KL(p_t || p_s)
+}
+
+export interface UniUnderstandingOpdResult {
+  readonly readOnly: true;
+  readonly hasGradients: false;
+  readonly arOpdWeight: number; // 4.0
+  readonly noiseEpsilon: number; // 0.001
+  readonly responseLen: number;
+  readonly expectedMaskDenominator: number; // 0.5005 * responseLen
+  readonly arTailKl: UniTailKlResult;
+  readonly consistencyTailKl: UniTailKlResult;
+  readonly arOpdLoss: number;
+  readonly selfConsistencyLoss: number;
+  readonly totalUnderstandingOpdLoss: number;
+}
+
+export interface UniMatchedSigmasResult {
+  readonly r: number; // 0.9
+  readonly seqLen: number;
+  readonly steps: number; // 40
+  readonly mu: number;
+  readonly sigmaStart: number; // 0.9
+  readonly sigmaEnd: number; // 0.02
+  readonly sigmas: Float32Array;
+}
+
+export interface UniFlowEditingOpdResult {
+  readonly readOnly: true;
+  readonly hasGradients: false;
+  readonly r: number;
+  readonly matchedSigmas: UniMatchedSigmasResult;
+  readonly x0: Float32Array;
+  readonly noiseDelta: Float32Array;
+  readonly xNoisyR: Float32Array;
+  readonly exactCe: number;
+  readonly groupedCe: number;
+  readonly groupedCeWeight: number; // 0.2
+  readonly totalEditingOpdLoss: number;
+}
+
+export interface UniTrainerBugDiagnosticU28 {
+  readonly readOnly: true;
+  readonly sftDoubleNorm: {
+    readonly tMin: number;
+    readonly tMax: number;
+    readonly expectedInflationFactor: number;
+    readonly peakSpikeAtTMin: number;
+    readonly formulaNote: string;
+  };
+  readonly accidentalImEndSupervision: {
+    readonly eosTokenId: number;
+    readonly ignoredLabel: number;
+    readonly affectedTurns: string;
+    readonly description: string;
+  };
+  readonly opdLocTailLeak: {
+    readonly fullVocabSize: number;
+    readonly teacherVocabSize: number;
+    readonly locExtensionTokens: number;
+    readonly topK: number;
+    readonly leakedTailDenom: number;
+    readonly trueTeacherTailDenom: number;
+    readonly leakedMassFractionOfTail: number;
+  };
+}
+
+// ----------------------------------------------------------------------------
+// Slice 3B: T2I & Dual-CFG Image Editing Sampler (`src/uni/imageSampler.ts`)
+// ----------------------------------------------------------------------------
+
+export type UniEditGuidanceMode = 'legacy' | 'independent' | 'ip2p';
+
+export interface UniImageSamplingVariates {
+  /** Optional `[contentCount]` explicit initial root draws `u^(0) in [0..255]` (`U23`). */
+  readonly initialRootCodes?: ArrayLike<number>;
+  /** Optional per-round `[contentCount * V_vq]` open-unit uniforms `(0, 1)` for log-domain Gumbel. */
+  readonly roundProposalUniforms?: readonly ArrayLike<number>[];
+  /** Optional per-round `[contentCount]` explicit unsigned bit draws for `sampleRepresentatives`. */
+  readonly roundRepRandBits?: readonly ArrayLike<number>[];
+}
+
+export interface UniT2iSamplerOptions {
+  readonly promptTokenIds: ArrayLike<number>;
+  readonly uncondPromptTokenIds?: ArrayLike<number>;
+  readonly activationSteps?: 4 | 8 | 16;
+  readonly refinementSteps?: 1 | 2 | 4 | 8;
+  readonly shift?: number;
+  /** Text CFG weight (default `3.0`; `0` short-circuits to `B_cfg = 1` per `U30`). */
+  readonly guidanceScale?: number;
+  /** Proposal sampling temperature (`0.8` default; `0` = greedy argmax). */
+  readonly temperature?: number;
+  readonly topK?: number;
+  readonly topP?: number;
+  readonly gainPresetId?: UniGainPresetId;
+  readonly prefillMode?: UniElasticPrefillMode;
+  readonly seed?: number;
+  readonly stratifiedSeed?: number;
+  readonly explicitVariates?: UniImageSamplingVariates;
+  readonly retainFullLogitsOnSteps?: boolean;
+}
+
+export interface UniImageEditSamplerOptions {
+  readonly sourceImage: UniRgbImage;
+  readonly promptTokenIds: ArrayLike<number>;
+  readonly uncondPromptTokenIds?: ArrayLike<number>;
+  /** Editing Dual-CFG formula (`'legacy'` default `edit_mode=1` per `U16`). */
+  readonly guidanceMode?: UniEditGuidanceMode;
+  readonly guidanceScaleText?: number; // default 1.6
+  readonly guidanceScaleImage?: number; // default 2.0
+  readonly lockSourcePaddingVq?: boolean; // default true (U18)
+  readonly cropToSource?: boolean; // default true (U18)
+  readonly activationSteps?: 4 | 8 | 16;
+  readonly refinementSteps?: 1 | 2 | 4 | 8;
+  readonly shift?: number;
+  readonly temperature?: number;
+  readonly topK?: number;
+  readonly topP?: number;
+  readonly gainPresetId?: UniGainPresetId;
+  readonly prefillMode?: UniElasticPrefillMode;
+  readonly seed?: number;
+  readonly stratifiedSeed?: number;
+  readonly explicitVariates?: UniImageSamplingVariates;
+  readonly retainFullLogitsOnSteps?: boolean;
+}
+
+export interface UniCompactCandidateTop4 {
+  /** `[gridLen * 4]` top-4 VQ token IDs per marked child cell. */
+  readonly tokenIds: Int32Array;
+  /** `[gridLen * 4]` top-4 probabilities per marked child cell. */
+  readonly probs: Float32Array;
+}
+
+export interface UniImageDenoiseStepRecord {
+  readonly roundIndex: number;
+  readonly isFlushRound: boolean;
+  readonly activatedContentIndices: Int32Array;
+  readonly stagesBefore: Int32Array;
+  readonly stagesAfter: Int32Array;
+  readonly representativesBefore: Int32Array;
+  readonly representativesAfter: Int32Array;
+  readonly proposals: Int32Array;
+  readonly levelsAfter: Int32Array;
+  readonly noiseWeightsAfter: Float32Array;
+  readonly lockedCellCount: number;
+  readonly committedContentCount: number;
+  readonly top4Guided: UniCompactCandidateTop4;
+  /** `[B_cfg][35]` layer residual checkpoints (`[10, 8]` each) for 0-ULP lazy reconstruction. */
+  readonly perBranchResiduals: readonly (readonly (Float32Array | null)[])[];
+  /** `[B_cfg]` final norm outputs (`[10, 8]` each). */
+  readonly perBranchFinalNorm: readonly Float32Array[];
+  /** Optional `[B_cfg]` full `[24 * 256]` branch logits (omitted on non-active session records). */
+  readonly perBranchFullLogits?: readonly Float32Array[];
+  /** Optional `[24 * 256]` guided logits (omitted on non-active session records). */
+  readonly guidedLogits?: Float32Array;
+  /** `[10]` 1D RoPE / Llama-4 positions for the 4 fixed-prefix + 6 packed parent tokens. */
+  readonly parentPositionIds: Int32Array;
+}
+
+export interface UniImageTrajectoryResult {
+  readonly taskKind: 'text_to_image' | 'image_edit';
+  readonly cfgBatchSize: UniCfgBatchSize;
+  readonly cfgShortCircuitApplied: boolean;
+  readonly hfGuidanceZeroDriftNote?: string;
+  readonly guidanceMode?: UniEditGuidanceMode;
+  readonly guidanceScaleText: number;
+  readonly guidanceScaleImage: number;
+  readonly prefillMode: UniElasticPrefillMode;
+  readonly gainPresetId: UniGainPresetId;
+  readonly schedule: UniSemanticTreeSchedule;
+  readonly unmaskOrder: Int32Array;
+  readonly prefixCache: UniKvCacheState;
+  readonly sourceLetterbox?: UniLetterboxResult;
+  readonly sourcePaddingMask?: UniSourcePaddingVqMask;
+  readonly sourceVqCodes?: Int32Array;
+  readonly steps: readonly UniImageDenoiseStepRecord[];
+  readonly finalMarkedCodes: Int32Array;
+  readonly finalContentCodes: Int32Array;
+  readonly decodedPaddedImage: UniRgbImage;
+  readonly outputImage: UniRgbImage;
+  /** Logical step passes (`1` prefill + `totalRounds` denoise). */
+  readonly passCount: number;
+  /** Total single-row transformer forward evaluations (`cfgBatchSize * passCount`). */
+  readonly branchForwardCount: number;
+}
+
+// ----------------------------------------------------------------------------
+// Slice 3C: Bounded Session & Architectural Readouts (`session.ts`, `archReadouts.ts`)
+// ----------------------------------------------------------------------------
+
+export type UniSessionTaskMode =
+  | 'text_understanding'
+  | 'visual_understanding'
+  | 'object_grounding'
+  | 'text_to_image'
+  | 'image_edit';
+
+export type UniSessionRecordKind =
+  | 'prefill'
+  | 'image_denoise'
+  | 'text_block_step'
+  | 'grounding_step';
+
+export interface UniSessionBranch {
+  readonly branchId: string;
+  readonly parentBranchId: string | null;
+  readonly forkRecordId: string | null;
+  readonly label: string;
+  readonly taskMode: UniSessionTaskMode;
+  readonly prefillMode: UniElasticPrefillMode;
+  readonly gainPresetId: UniGainPresetId;
+  readonly cfgBatchSize: UniCfgBatchSize;
+  readonly guidanceMode?: UniEditGuidanceMode;
+  readonly guidanceScaleText: number;
+  readonly guidanceScaleImage: number;
+  readonly refinementSteps: 1 | 2 | 4 | 8;
+  readonly activationSteps: 4 | 8 | 16;
+  readonly scenePresetId?: UniScenePresetId;
+  readonly prefixCache: UniKvCacheState;
+  readonly sourcePaddingMask?: UniSourcePaddingVqMask;
+  readonly sourceVqCodes?: Int32Array;
+  readonly unmaskOrder?: Int32Array;
+  readonly schedule?: UniSemanticTreeSchedule;
+  readonly recordIds: readonly string[];
+  readonly createdAtIndex: number;
+}
+
+/**
+ * Compact history record retained across up to `128` records (`<= 12.00 MiB` cap, §8.3B):
+ * stores ONLY compact `[B_cfg][35]` layer residual checkpoints + compact step state
+ * (NEVER full `[B_cfg, 24, 256]` logits or full per-layer traces!).
+ */
+export interface UniSessionRecord {
+  readonly recordId: string;
+  readonly branchId: string;
+  readonly parentRecordId: string | null;
+  readonly stepIndex: number;
+  readonly kind: UniSessionRecordKind;
+  readonly taskMode: UniSessionTaskMode;
+  readonly prefillMode: UniElasticPrefillMode;
+  readonly cfgBatchSize: UniCfgBatchSize;
+  readonly maskMode: UniAttentionMaskMode;
+  readonly routing: Uint8Array;
+  readonly positionIds: Int32Array;
+  /** `[B_cfg][35]` residual checkpoints (`[seqLen, 8]` each). */
+  readonly perBranchResiduals: readonly (readonly (Float32Array | null)[])[];
+  /** Compact image refinement state (for `image_denoise` records). */
+  readonly imageState?: {
+    readonly roundIndex: number;
+    readonly isFlushRound: boolean;
+    readonly stages: Int32Array;
+    readonly representatives: Int32Array;
+    readonly proposals: Int32Array;
+    readonly levels: Int32Array;
+    readonly noiseWeights: Float32Array;
+    readonly top4Guided: UniCompactCandidateTop4;
+    readonly lockedCellCount: number;
+    readonly committedContentCount: number;
+  };
+  /** Compact text/grounding state (for text/grounding records). */
+  readonly textState?: {
+    readonly tokenIds: Int32Array;
+    readonly unmaskedOffsets: readonly number[];
+    readonly guardInterventions: number;
+  };
+}
+
+/** Active-record-only full logits + eager traces (`[0, 17, 18, 33]`), evicted on record switch. */
+export interface UniSessionActiveInspection {
+  readonly recordId: string;
+  readonly eagerTracesByBranch: readonly ReadonlyMap<number, UniLayerTrace>[];
+  readonly perBranchFinalNorm: readonly (Float32Array | null)[];
+  readonly perBranchTextLogits: readonly (Float32Array | null)[];
+  readonly perBranchGenLogits: readonly (Float32Array | null)[];
+  readonly guidedGenLogits: Float32Array | null;
+}
+
+export interface UniSessionMemoryAudit {
+  readonly uniqueBufferCount: number;
+  readonly totalRetainedBytes: number;
+  readonly maxAllowedBytes: number; // 12_582_912 (12.00 MiB)
+  readonly withinBudget: boolean;
+  readonly branchCount: number;
+  readonly maxBranches: number;
+  readonly recordCount: number;
+  readonly maxRecords: number;
+  readonly activeRecordId: string | null;
+  readonly nonActiveRecordsWithFullLogits: number; // MUST always be 0
+}
+
+export interface UniSessionSnapshot {
+  readonly activeBranchId: string | null;
+  readonly activeRecordId: string | null;
+  readonly branches: readonly UniSessionBranch[];
+  readonly activeInspection: UniSessionActiveInspection | null;
+  readonly memoryAudit: UniSessionMemoryAudit;
+}
+
+export interface UniViewArchReadout {
+  readonly viewId: UniExecutionViewId;
+  readonly label: string;
+  readonly paperShorthand: string;
+  readonly prodActiveParams: number;
+  readonly prodEagerHfParams: number;
+  readonly prodWastedSplitUParams: number;
+  readonly prodResidentHfBytes: number;
+  readonly prodResidentSglangBytes: number | null;
+  readonly prodKvBytesPerTokenBf16: number;
+  readonly prodKvAt16kBytes: number;
+  readonly miniActiveFloats: number;
+  readonly miniKvBytesPerTokenF32: number;
+  readonly cfgBranches: UniCfgBatchSize;
+  readonly releasedEndToEndLoop: boolean;
+  readonly badge?: string;
+}
+
+export interface UniElasticD5ComparisonReadout {
+  readonly viewId: UniExecutionViewId;
+  readonly prefixTokens: number;
+  readonly cfgBranches: UniCfgBatchSize;
+  readonly hfFaithfulLayersExecuted: number;
+  readonly elasticPrunedLayersExecuted: number;
+  readonly prodHfFaithfulPrefixKvBytes: number;
+  readonly prodElasticPrunedPrefixKvBytes: number;
+  readonly prodSavedPrefixKvBytes: number;
+  readonly miniHfFaithfulPrefixKvBytes: number;
+  readonly miniElasticPrunedPrefixKvBytes: number;
+  readonly miniSavedPrefixKvBytes: number;
+  readonly wastedPrefixKvFraction: number;
+  readonly stage2UlpDiff: 0;
+}
