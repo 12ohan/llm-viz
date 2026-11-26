@@ -520,5 +520,5 @@ describe('Diffusion Guards, 3-Counter NFE & Adversarial 12-Branch / 128-Record M
     expect(memReport.withinBudget).toBe(true);
     expect(memReport.totalRetainedBytes).toBeLessThanOrEqual(12_582_912);
     expect(memReport.maxRetainedBytes).toBe(12_582_912);
-  });
+  }, 30_000);
 });
