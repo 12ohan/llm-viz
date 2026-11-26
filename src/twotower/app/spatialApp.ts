@@ -3338,7 +3338,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
         trimmedVal.length === 0 ||
         trimmedEq.endsWith(`= ${trimmedVal}`) ||
         trimmedEq.endsWith(`=${trimmedVal}`) ||
-        (accum?.active === true && /=\s*[^\s=]+$/.test(trimmedEq));
+        accum?.active === true;
       const eqDisplay = eqAlreadyHasResult ? f.equation : `${f.equation} = ${f.valueText}`;
       formulaCard.append(
         metaRow,
