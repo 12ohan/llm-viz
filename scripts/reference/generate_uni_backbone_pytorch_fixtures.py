@@ -170,11 +170,13 @@ def compute_yarn_inv_freq(rope_cfg: dict[str, Any]) -> dict[str, Any]:
     if truncate:
         low_raw = math.floor(low_raw)
         high_raw = math.ceil(high_raw)
+    half = dim // 2
     low = max(low_raw, 0)
-    high = min(high_raw, dim - 1)
+    # Clamp to rotary plane upper index `half - 1` matching `src/uni/rope.ts`
+    # (upstream HF clamps to `dim - 1`, which is identical here since high_raw == 2 <= 3).
+    high = min(high_raw, half - 1)
     denom = float(high - low) if high != low else 0.001
 
-    half = dim // 2
     idx = torch.arange(0, half, dtype=torch.float32)
     pos_freqs = base ** (torch.arange(0, dim, 2, dtype=torch.float32) / float(dim))
     inv_freq_extrap = 1.0 / pos_freqs
@@ -665,9 +667,9 @@ def run_forward_pass(
             weights["encoder.norm.weight"],
             weights["encoder.norm_gen.weight"],
             eps,
-            skip_u=False,
+            skip_u=prune_u_split,
         )
-        if has_u:
+        if has_u and not prune_u_split:
             text_logits = F.linear(final_norm, weights["diffusion_head.weight"])
             text_probs = torch.softmax(text_logits, dim=-1)
         if has_g:

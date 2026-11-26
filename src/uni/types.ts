@@ -828,6 +828,11 @@ export interface UniForwardOptions {
   readonly useCache: boolean;
   /** Optional D5 prefill mode (default `'hf_faithful'`). */
   readonly prefillMode?: UniElasticPrefillMode;
+  /**
+   * Optional task-aware downstream consumer hint (`'u'` for Understanding/Grounding where
+   * `L18..33` `U` KVs are read; `'g'` for T2I/Editing where split-tower `G` drops `L18..33` `U` KVs).
+   */
+  readonly downstreamTarget?: 'u' | 'g';
   /** Read-only per-layer past KV slices (`length === 34`; `L18..33` may be `null` under pruned T2I). */
   readonly pastKvs?: readonly (UniLayerKvSlice | null)[] | null;
   /** Read-only cached token routing (`length === pastLen`) paired with `pastKvs`. */
@@ -872,4 +877,597 @@ export interface UniForwardResult {
   /** `[seqLen, 256]` softmax visual VQ probabilities (when computed). */
   readonly genProbs: Float32Array | null;
   readonly telemetry: UniElasticExecutionTelemetry;
+}
+
+
+// ============================================================================
+// UNI2 MULTIMODAL CONSTANTS, EXACT TENSOR COUNTS & SEEDS (D2, D3, U8, U13–U18)
+// ============================================================================
+
+export const UNI_MULTIMODAL_SEED = 0x4e4c5532 as const; // "NLU2"
+
+export const UNI_CLIP_MEAN: readonly [number, number, number] = Object.freeze([
+  0.48145466,
+  0.4578275,
+  0.40821073,
+] as const);
+
+export const UNI_CLIP_STD: readonly [number, number, number] = Object.freeze([
+  0.26862954,
+  0.26130258,
+  0.27577711,
+] as const);
+
+// Miniature RADIO-H ViT-2L + RadioHProjector dimensions
+export const UNI_MINI_VIT_EMBED_DIM = 16 as const;
+export const UNI_MINI_VIT_NUM_HEADS = 4 as const;
+export const UNI_MINI_VIT_HEAD_DIM = 4 as const;
+export const UNI_MINI_VIT_MLP_DIM = 64 as const;
+export const UNI_MINI_VIT_NUM_LAYERS = 2 as const;
+export const UNI_MINI_VIT_CLS_TOKENS = 2 as const;
+export const UNI_MINI_VIT_REG_TOKENS = 2 as const;
+export const UNI_MINI_VIT_PREFIX_TOKENS = 4 as const;
+export const UNI_MINI_VIT_PATCH_SIZE = 4 as const;
+export const UNI_MINI_VIT_PATCH_DIM = 48 as const; // 3 * 4 * 4
+export const UNI_MINI_VIT_BASE_GRID = 4 as const; // 4x4 = 16 base patches for 16x16
+export const UNI_MINI_VIT_LAYER_NORM_EPS = 1e-6 as const;
+export const UNI_MINI_PROJECTOR_IN_DIM = 64 as const; // 2x2 * 16
+export const UNI_MINI_PROJECTOR_NORM_EPS = 1e-5 as const;
+
+// Miniature Emu3VQ dimensions (2 down/up stages: 16x16 <-> 8x8 <-> 4x4)
+export const UNI_MINI_VQ_BASE_CH = 8 as const;
+export const UNI_MINI_VQ_MID_CH = 16 as const;
+export const UNI_MINI_VQ_Z_CH = 8 as const;
+export const UNI_MINI_VQ_NUM_GROUPS = 4 as const;
+export const UNI_MINI_VQ_GROUP_NORM_EPS = 1e-6 as const;
+
+// Exact UNI2 tensor & float counts reconciling UNI1 (618 / 139,024) + UNI2 (148 / 52,211) = 766 / 191,235
+export const UNI_MINI_VISION_TOWER_TENSOR_COUNT = 27 as const;
+export const UNI_MINI_VISION_TOWER_FLOAT_COUNT = 7_648 as const;
+export const UNI_MINI_PROJECTOR_TENSOR_COUNT = 3 as const;
+export const UNI_MINI_PROJECTOR_FLOAT_COUNT = 640 as const;
+export const UNI_MINI_IMAGE_NEWLINE_TENSOR_COUNT = 1 as const;
+export const UNI_MINI_IMAGE_NEWLINE_FLOAT_COUNT = 8 as const;
+export const UNI_MINI_VISION_SUBSYSTEM_TENSOR_COUNT = 31 as const;
+export const UNI_MINI_VISION_SUBSYSTEM_FLOAT_COUNT = 8_296 as const;
+
+export const UNI_MINI_CODEC_TENSOR_COUNT = 4 as const;
+export const UNI_MINI_CODEC_FLOAT_COUNT = 528 as const;
+
+export const UNI_MINI_VQVAE_CODEBOOK_TENSOR_COUNT = 1 as const;
+export const UNI_MINI_VQVAE_CODEBOOK_FLOAT_COUNT = 2_048 as const;
+export const UNI_MINI_VQVAE_ENCODER_TENSOR_COUNT = 56 as const;
+export const UNI_MINI_VQVAE_ENCODER_FLOAT_COUNT = 19_800 as const;
+export const UNI_MINI_VQVAE_DECODER_TENSOR_COUNT = 56 as const;
+export const UNI_MINI_VQVAE_DECODER_FLOAT_COUNT = 21_539 as const;
+export const UNI_MINI_VQVAE_TOTAL_TENSOR_COUNT = 113 as const;
+export const UNI_MINI_VQVAE_TOTAL_FLOAT_COUNT = 43_387 as const;
+
+export const UNI_MINI_MULTIMODAL_TENSOR_COUNT = 148 as const;
+export const UNI_MINI_MULTIMODAL_FLOAT_COUNT = 52_211 as const;
+export const UNI_MINI_MULTIMODAL_WEIGHT_BYTES = 208_844 as const;
+
+export type UniMultimodalSubsystem =
+  | 'vision_tower'
+  | 'mm_projector'
+  | 'image_newline'
+  | 'packed_image_codec'
+  | 'vqvae_codebook'
+  | 'vqvae_encoder'
+  | 'vqvae_decoder';
+
+export interface UniMultimodalTensorEntry {
+  readonly name: string;
+  readonly subsystem: UniMultimodalSubsystem;
+  readonly shape: readonly number[];
+  readonly data: Float32Array;
+  readonly unusedInForward?: boolean;
+}
+
+// ============================================================================
+// SLICE 2A: PROCEDURAL RGB SCENES, MINI RADIO-H VISION & PROJECTOR (`vision.ts`)
+// ============================================================================
+
+export type UniScenePresetId =
+  | 'sunlit_cat_16x16'
+  | 'harbor_panorama_16x8'
+  | 'geometric_blocks_16x16';
+
+export interface UniSceneGroundTruthBox {
+  readonly tag: string;
+  /** `[x1, y1, x2, y2]` in source pixel coordinates. */
+  readonly pixelBox: readonly [number, number, number, number];
+}
+
+export interface UniRgbImage {
+  readonly presetId?: UniScenePresetId;
+  readonly label?: string;
+  readonly width: number;
+  readonly height: number;
+  /** Row-major CHW `[3, height, width]` Float32 pixels in `[0, 1]`. */
+  readonly data: Float32Array;
+  readonly groundTruthBoxes?: readonly UniSceneGroundTruthBox[];
+}
+
+export interface UniLetterboxInfo {
+  readonly sourceWidth: number;
+  readonly sourceHeight: number;
+  readonly targetSize: number;
+  readonly scale: number;
+  readonly resizedWidth: number;
+  readonly resizedHeight: number;
+  readonly padLeft: number;
+  readonly padTop: number;
+  readonly padRight: number;
+  readonly padBottom: number;
+  readonly exactIntegerCentered: boolean;
+}
+
+export interface UniLetterboxResult {
+  readonly image: UniRgbImage;
+  readonly info: UniLetterboxInfo;
+}
+
+export interface UniRadioVitBlockWeights {
+  readonly blockIndex: number;
+  /** `[16]` */
+  readonly norm1Weight: Float32Array;
+  /** `[16]` */
+  readonly norm1Bias: Float32Array;
+  /** `[48, 16]` */
+  readonly qkvWeight: Float32Array;
+  /** `[48]` */
+  readonly qkvBias: Float32Array;
+  /** `[16, 16]` */
+  readonly projWeight: Float32Array;
+  /** `[16]` */
+  readonly projBias: Float32Array;
+  /** `[16]` */
+  readonly norm2Weight: Float32Array;
+  /** `[16]` */
+  readonly norm2Bias: Float32Array;
+  /** `[64, 16]` */
+  readonly fc1Weight: Float32Array;
+  /** `[64]` */
+  readonly fc1Bias: Float32Array;
+  /** `[16, 64]` */
+  readonly fc2Weight: Float32Array;
+  /** `[16]` */
+  readonly fc2Bias: Float32Array;
+}
+
+export interface UniRadioVisionTowerWeights {
+  /** `encoder.vision_tower.patch_generator.embedder.weight`: `[16, 48]` (bias-free). */
+  readonly patchEmbedWeight: Float32Array;
+  /** `encoder.vision_tower.pos_embed`: `[16, 16]` (`4x4` base patch grid). */
+  readonly posEmbed: Float32Array;
+  /** `encoder.vision_tower.cls_token`: `[4, 16]` (`2` CLS + `2` register tokens). */
+  readonly clsToken: Float32Array;
+  /** `2` timm ViT blocks (`24` tensors). */
+  readonly blocks: readonly UniRadioVitBlockWeights[];
+}
+
+export interface UniRadioProjectorWeights {
+  /** `encoder.mm_projector.norm.weight`: `[64]` (`RMSNorm(64, eps=1e-5)`). */
+  readonly normWeight: Float32Array;
+  /** `encoder.mm_projector.fc1.weight`: `[8, 64]` (bias-free). */
+  readonly fc1Weight: Float32Array;
+  /** `encoder.mm_projector.fc2.weight`: `[8, 8]` (bias-free). */
+  readonly fc2Weight: Float32Array;
+}
+
+export interface UniVisionSubsystemWeights {
+  readonly seed: number;
+  readonly visionTower: UniRadioVisionTowerWeights;
+  readonly projector: UniRadioProjectorWeights;
+  /** `encoder.image_newline`: `[8]` — dead parameter (`unusedInForward: true`, `U8`). */
+  readonly imageNewline: Float32Array;
+}
+
+export interface UniRadioVitBlockTrace {
+  readonly blockIndex: number;
+  readonly seqLen: number;
+  readonly norm1: Float32Array;
+  /** `[numHeads, seqLen, seqLen]` bidirectional ViT attention weights. */
+  readonly attnProbs: Float32Array;
+  readonly postAttn: Float32Array;
+  readonly norm2: Float32Array;
+  readonly output: Float32Array;
+}
+
+export interface UniRadioVisionTrace {
+  readonly patchGridRows: number;
+  readonly patchGridCols: number;
+  readonly numPatches: number;
+  readonly numPrefixTokens: number;
+  /** `[3, H, W]` CLIP-normalized image. */
+  readonly clipNormalized: Float32Array;
+  /** `[numPatches, 48]` flattened CHW `4x4` patches. */
+  readonly rawPatches: Float32Array;
+  /** `[numPatches, 16]` interpolated/native positional embedding. */
+  readonly interpolatedPosEmbed: Float32Array;
+  /** `[numPrefixTokens + numPatches, 16]` tokens entering block 0. */
+  readonly vitInputTokens: Float32Array;
+  readonly blockTraces: readonly UniRadioVitBlockTrace[];
+  /** `[numPatches, 16]` spatial patch outputs after `[:, 4:]` prefix strip. */
+  readonly patchFeatures: Float32Array;
+}
+
+export interface UniRadioProjectorTrace {
+  readonly gainPresetId: UniGainPresetId;
+  readonly radioMultiply: number;
+  readonly tokenGridRows: number;
+  readonly tokenGridCols: number;
+  readonly numVisualTokens: number;
+  /** `[numVisualTokens, 64]` `2x2` `ps_version='v2'` gathered features. */
+  readonly gathered2x2: Float32Array;
+  /** `[numVisualTokens, 64]` FP32 `RMSNorm(64, eps=1e-5)` output. */
+  readonly normed: Float32Array;
+  /** `[numVisualTokens, 8]` after `fc1`. */
+  readonly fc1Out: Float32Array;
+  /** `[numVisualTokens, 8]` after `SquaredReLU(max(0, x)^2)`. */
+  readonly squaredReluOut: Float32Array;
+  /** `[numVisualTokens, 8]` after `fc2` (pre-gain). */
+  readonly fc2Out: Float32Array;
+  /** `[numVisualTokens, 8]` final projected embeddings (`fc2Out * radioMultiply`). */
+  readonly visualEmbeddings: Float32Array;
+}
+
+export interface UniVisionPipelineTrace {
+  readonly vision: UniRadioVisionTrace;
+  readonly projector: UniRadioProjectorTrace;
+  /** Confirms `encoder.image_newline` is never read in forward (`U8`). */
+  readonly imageNewlineUnused: true;
+}
+
+export interface UniFixedPromptResult {
+  readonly originalTokenIds: Int32Array;
+  readonly expandedTokenIds: Int32Array;
+  readonly visualSlotIndices: Int32Array;
+  readonly newlineIndices: Int32Array;
+  readonly tokenGridRows: number;
+  readonly tokenGridCols: number;
+  readonly usedDeadImageNewline: false;
+}
+
+// ============================================================================
+// SLICE 2B: MINI EMU3 VQ-VAE & PACKED LINEAR IMAGE CODEC (`vqvae.ts`, `codec.ts`)
+// ============================================================================
+
+export interface UniConv2dWeights {
+  readonly inChannels: number;
+  readonly outChannels: number;
+  readonly kernelSize: 1 | 3;
+  /** `[outChannels, inChannels, kernelSize, kernelSize]` */
+  readonly weight: Float32Array;
+  /** `[outChannels]` */
+  readonly bias: Float32Array;
+}
+
+export interface UniGroupNormWeights {
+  readonly numChannels: number;
+  readonly numGroups: number;
+  readonly weight: Float32Array;
+  readonly bias: Float32Array;
+}
+
+export interface UniEmu3ResBlockWeights {
+  readonly inChannels: number;
+  readonly outChannels: number;
+  readonly norm1: UniGroupNormWeights;
+  readonly conv1: UniConv2dWeights;
+  readonly norm2: UniGroupNormWeights;
+  readonly conv2: UniConv2dWeights;
+  /** Present iff `inChannels !== outChannels` (`1x1` conv). */
+  readonly ninShortcut: UniConv2dWeights | null;
+}
+
+export interface UniEmu3AttnBlockWeights {
+  readonly channels: number;
+  readonly norm: UniGroupNormWeights;
+  readonly q: UniConv2dWeights;
+  readonly k: UniConv2dWeights;
+  readonly v: UniConv2dWeights;
+  readonly projOut: UniConv2dWeights;
+}
+
+export interface UniEmu3EncoderWeights {
+  readonly convIn: UniConv2dWeights;       // 3 -> 8, 3x3
+  readonly down0Block: UniEmu3ResBlockWeights; // 8 -> 8
+  readonly down0Conv: UniConv2dWeights;    // 8 -> 8, 3x3 stride 2 (asym pad 0,1,0,1)
+  readonly down1Block: UniEmu3ResBlockWeights; // 8 -> 16 (with ninShortcut)
+  readonly down1Conv: UniConv2dWeights;    // 16 -> 16, 3x3 stride 2 (asym pad 0,1,0,1)
+  readonly midBlock1: UniEmu3ResBlockWeights;  // 16 -> 16
+  readonly midAttn1: UniEmu3AttnBlockWeights;  // 16
+  readonly midBlock2: UniEmu3ResBlockWeights;  // 16 -> 16
+  readonly normOut: UniGroupNormWeights;   // 16
+  readonly convOut: UniConv2dWeights;      // 16 -> 8, 3x3
+  readonly quantConv: UniConv2dWeights;    // 8 -> 8, 1x1
+}
+
+export interface UniEmu3DecoderWeights {
+  readonly postQuantConv: UniConv2dWeights;    // 8 -> 8, 1x1
+  readonly convIn: UniConv2dWeights;           // 8 -> 16, 3x3
+  readonly midBlock1: UniEmu3ResBlockWeights;  // 16 -> 16
+  readonly midAttn1: UniEmu3AttnBlockWeights;  // 16
+  readonly midBlock2: UniEmu3ResBlockWeights;  // 16 -> 16
+  readonly up1Block: UniEmu3ResBlockWeights;   // 16 -> 16
+  readonly up1Conv: UniConv2dWeights;          // 16 -> 16, 3x3 (after 2x nearest)
+  readonly up0Block: UniEmu3ResBlockWeights;   // 16 -> 8 (with ninShortcut)
+  readonly up0Conv: UniConv2dWeights;          // 8 -> 8, 3x3 (after 2x nearest)
+  readonly normOut: UniGroupNormWeights;       // 8
+  readonly convOut: UniConv2dWeights;          // 8 -> 3, 3x3
+}
+
+export interface UniEmu3VqWeights {
+  readonly seed: number;
+  /** `encoder.vqvae.quantize.embedding.weight`: `[256, 8]` IBQ codebook. */
+  readonly codebook: Float32Array;
+  readonly encoder: UniEmu3EncoderWeights;
+  readonly decoder: UniEmu3DecoderWeights;
+}
+
+export interface UniVqEncodeTrace {
+  readonly inputWidth: number;
+  readonly inputHeight: number;
+  readonly vqGridRows: number;
+  readonly vqGridCols: number;
+  /** `[3, H, W]` mapped to `[-1, 1]`. */
+  readonly normalizedInput: Float32Array;
+  /** `[8, vqGridRows, vqGridCols]` continuous encoder latents after `quant_conv`. */
+  readonly zContinuous: Float32Array;
+  /** `[vqGridRows * vqGridCols, 256]` exact IBQ dot-product scores `z @ E^T` (`U14`). */
+  readonly dotScores: Float32Array;
+  /** `[vqGridRows * vqGridCols]` quantized indices `argmax(z @ E^T)` (`U14`). */
+  readonly codes: Int32Array;
+  /** `[8, vqGridRows, vqGridCols]` looked-up codebook embeddings. */
+  readonly zQuantized: Float32Array;
+}
+
+export interface UniVqDecodeTrace {
+  readonly vqGridRows: number;
+  readonly vqGridCols: number;
+  readonly outputWidth: number;
+  readonly outputHeight: number;
+  readonly codes: Int32Array;
+  /** `[8, vqGridRows, vqGridCols]` codebook embeddings. */
+  readonly zQuantized: Float32Array;
+  /** `[3, outputHeight, outputWidth]` raw decoder output before `clamp((x + 1) * 0.5, 0, 1)`. */
+  readonly rawOutput: Float32Array;
+  /** Clamped `[0, 1]` CHW RGB image. */
+  readonly rgbImage: UniRgbImage;
+}
+
+export interface UniPackedCodecWeights {
+  readonly seed: number;
+  /** `encoder.packed_image_codec.down_norm.weight`: `[8]` (`eps=1e-6`). */
+  readonly downNorm: Float32Array;
+  /** `encoder.packed_image_codec.down_projection.weight`: `[8, 32]`. */
+  readonly downProjection: Float32Array;
+  /** `encoder.packed_image_codec.up_norm.weight`: `[8]` (`eps=1e-6`). */
+  readonly upNorm: Float32Array;
+  /** `encoder.packed_image_codec.up_projection.weight`: `[32, 8]`. */
+  readonly upProjection: Float32Array;
+}
+
+export interface UniCodecCompressTrace {
+  readonly childRows: number;
+  readonly childCols: number;
+  readonly parentRows: number;
+  readonly parentCols: number;
+  readonly isSourceEdit: boolean;
+  readonly markerColumn: boolean;
+  readonly gainPresetId: UniGainPresetId;
+  readonly combinedScale: number;
+  /** `[childRows * childCols, 8]` after per-child `down_norm` (`eps=1e-6`). */
+  readonly normedChildren: Float32Array;
+  /** `[parentRows * parentCols, 32]` `2x2` row-major concatenated children. */
+  readonly packedConcat: Float32Array;
+  /** `[parentRows * parentCols, 8]` after `down_projection`. */
+  readonly projected: Float32Array;
+  /** `[parentRows * parentCols, 8]` after `combinedScale`. */
+  readonly scaled: Float32Array;
+  readonly sinCos2d: Uni2dSinCosResult;
+  /** `[parentRows * parentCols, 8]` final `scaled + sinCos2d.embeddings`. */
+  readonly output: Float32Array;
+}
+
+export interface UniCodecExpandTrace {
+  readonly parentRows: number;
+  readonly parentCols: number;
+  readonly childRows: number;
+  readonly childCols: number;
+  /** `[parentRows * parentCols, 8]` after `up_norm` (`eps=1e-6`). */
+  readonly normedParents: Float32Array;
+  /** `[parentRows * parentCols, 32]` after `up_projection`. */
+  readonly upProjected: Float32Array;
+  /** `[childRows * childCols, 8]` `2x2` raster unpacked child states. */
+  readonly unpackedChildren: Float32Array;
+  /** Optional `[childRows * childCols, 256]` logits when `genPredictor` is provided. */
+  readonly logits: Float32Array | null;
+}
+
+export interface UniSourcePaddingVqMask {
+  readonly vqGridRows: number;
+  readonly vqGridCols: number;
+  readonly letterbox: UniLetterboxInfo;
+  /** Row-major `[vqGridRows * vqGridCols]` binary mask (`1` = locked padding, `0` = editable). */
+  readonly lockMask: Uint8Array;
+  readonly lockedCellCount: number;
+  readonly editableCellCount: number;
+}
+
+// ============================================================================
+// SLICE 2C: IMMUTABLE KV SLABS, BLOCK-DIFFUSION TEXT & GROUNDING
+// ============================================================================
+
+export type UniCfgBatchSize = 1 | 2 | 3;
+
+export interface UniLayerBatchKv {
+  readonly batchSize: UniCfgBatchSize;
+  /** `[batchSize * kvProjOutDim]` (`batchSize * 16`) post-RoPE keys at one position. */
+  readonly k: Float32Array;
+  /** `[batchSize * kvProjOutDim]` (`batchSize * 16`) values at one position. */
+  readonly v: Float32Array;
+}
+
+/** Immutable snapshot of one cached sequence position across all 34 layers (`B_cfg in {1,2,3}`). */
+export interface UniKvPositionSlab {
+  readonly positionIndex: number;
+  readonly batchSize: UniCfgBatchSize;
+  /** `[batchSize]` per-branch token routing (`0 = U`, `1 = G`) mirroring `_nlduni_dual_tower_routing`. */
+  readonly routing: Uint8Array;
+  /** True if any CFG row at this position has `G` routing. */
+  readonly hasGeneration: boolean;
+  readonly prefillMode: UniElasticPrefillMode;
+  /** `34` layer entries (`L18..33` may be `null` under `elastic_pruned` T2I). */
+  readonly layers: readonly (UniLayerBatchKv | null)[];
+  readonly allocatedLayerCount: number;
+  readonly byteLength: number;
+}
+
+export interface UniKvWasteTelemetry {
+  readonly prefillMode: UniElasticPrefillMode;
+  readonly downstreamTarget: 'u' | 'g';
+  readonly batchSize: UniCfgBatchSize;
+  readonly seqLen: number;
+  readonly allocatedBytes: number;
+  readonly activeBytes: number;
+  readonly wastedSplitUBytes: number;
+  readonly wastedSplitULayerCount: number;
+  readonly wastedFraction: number;
+}
+
+export interface UniKvCacheState {
+  readonly batchSize: UniCfgBatchSize;
+  readonly capacity: number;
+  readonly seqLen: number;
+  readonly slabs: readonly UniKvPositionSlab[];
+  /** Mirrors `_nlduni_dual_tower_has_generation` on HF `DynamicCache`. */
+  readonly dualTowerHasGeneration: boolean;
+  readonly prefillMode: UniElasticPrefillMode;
+  readonly downstreamTarget: 'u' | 'g';
+  readonly wasteTelemetry: UniKvWasteTelemetry;
+}
+
+export interface UniTextBlockDiffusionOptions {
+  /** Text prompt token IDs (used to build embeddings when `inputsEmbeds` is omitted). */
+  readonly promptTokenIds: ArrayLike<number>;
+  /** Optional pre-assembled multimodal embeddings (e.g., RADIO-H visual embeddings spliced into `<SPECIAL_23>`). */
+  readonly inputsEmbeds?: Float32Array;
+  /** Block length `B` (miniature default `4`; production `32`). */
+  readonly blockLength?: number;
+  /** Maximum number of newly generated tokens. */
+  readonly maxNewTokens: number;
+  /** Maximum denoising steps per block (default `blockLength`). */
+  readonly stepsPerBlock?: number;
+  /** Confidence threshold for parallel unmasking (default `0.9`). */
+  readonly confidenceThreshold?: number;
+  /** Sampling temperature (`0` = greedy argmax; `> 0` = log-domain Gumbel per `U22`). */
+  readonly temperature?: number;
+  /** When true, pre-seeds slot 0 of each block from prior causal commit logits (`chat_utils.py:242-255`). */
+  readonly causalContext?: boolean;
+  /** Browser guard `U21`: mask `[MASK]` logit to `-Infinity` before argmax/sampling (default `true`). */
+  readonly suppressMaskLogit?: boolean;
+  /** Seed for `Xoshiro128**` when `temperature > 0` (`U23`). */
+  readonly seed?: number;
+  /** Optional explicit uniform variates in `(0, 1)` for 0-ULP stochastic parity (`U23`). */
+  readonly explicitUniformVariates?: ArrayLike<number>;
+  readonly eosTokenId?: number;
+  readonly maskTokenId?: number;
+}
+
+export interface UniTextBlockStepTrace {
+  readonly blockIndex: number;
+  readonly stepIndex: number;
+  readonly blockStartPos: number;
+  readonly blockTokensBefore: Int32Array;
+  readonly blockTokensAfter: Int32Array;
+  /** Relative offsets within `[0 .. blockLength - 1]` unmasked on this step. */
+  readonly unmaskedOffsets: readonly number[];
+  /** Per-slot top-1 confidence (after optional mask suppression). */
+  readonly slotConfidences: Float32Array;
+  /** Unconstrained raw top-1 token ID per slot BEFORE `U21` `[MASK]` suppression. */
+  readonly rawTop1TokenIds: Int32Array;
+  /** Offsets where raw top-1 was `[MASK]` and the `U21` guard intervened. */
+  readonly guardIntervenedOffsets: readonly number[];
+  /** Shifted FLARE logits `[blockLength, 64]` predicting slots `0 .. B-1`. */
+  readonly shiftedLogits: Float32Array;
+  /** Shifted probabilities `[blockLength, 64]`. */
+  readonly shiftedProbs: Float32Array;
+  readonly usedCausalPreSeed: boolean;
+}
+
+export interface UniTextBlockDiffusionResult {
+  readonly promptLen: number;
+  readonly blockLength: number;
+  readonly causalContext: boolean;
+  readonly generatedTokenIds: Int32Array;
+  readonly fullTokenIds: Int32Array;
+  readonly decodedTokens: readonly string[];
+  readonly stoppedByEos: boolean;
+  readonly eosOffset: number | null;
+  readonly stopReason: 'eos' | 'max_new_tokens' | 'capacity_exhausted';
+  readonly steps: readonly UniTextBlockStepTrace[];
+  readonly finalCache: UniKvCacheState;
+  /** Number of forward evaluations (1 prefill + denoise steps + commit passes). */
+  readonly nfeCount: number;
+  readonly totalGuardInterventions: number;
+}
+
+export interface UniGroundingOptions {
+  /** Prompt prefix token IDs before the assistant grounding template. */
+  readonly promptTokenIds: ArrayLike<number>;
+  /** Optional multimodal embeddings for the prompt prefix (`[promptLen, 8]`). */
+  readonly promptInputsEmbeds?: Float32Array;
+  readonly imageWidth: number;
+  readonly imageHeight: number;
+  /** Object tags to ground (`1..4` in miniature; single tag uses compact template). */
+  readonly tags: readonly string[];
+  /** Iterative unmasking steps (`1`, `2`, or `4`; default `2`). */
+  readonly steps?: 1 | 2 | 4;
+  /** Browser guard `U21`: constrain coordinate slots to `<LOC_0..16>` (default `true`). */
+  readonly enforceLocDomainGuard?: boolean;
+}
+
+export interface UniGroundingStepTrace {
+  readonly stepIndex: number;
+  readonly slotTokenIdsBefore: Int32Array;
+  readonly slotTokenIdsAfter: Int32Array;
+  readonly unmaskedSlotIndices: readonly number[];
+  readonly slotConfidences: Float32Array;
+  readonly rawTop1TokenIds: Int32Array;
+  readonly guardIntervenedSlotIndices: readonly number[];
+}
+
+export interface UniGroundingBox {
+  readonly tag: string;
+  /** Exact token IDs in `[43..59]` (`<LOC_0>..<LOC_16>`). */
+  readonly locTokenIds: readonly [number, number, number, number];
+  /** Exact token strings (`'<LOC_k>'`), never stripped (`U27`). */
+  readonly locTokenStrings: readonly [string, string, string, string];
+  /** Integer normalized bins in `[0..16]`. */
+  readonly normalizedBins: readonly [number, number, number, number];
+  /** Un-letterboxed `[x1, y1, x2, y2]` in source image pixels (`pixel_box`). */
+  readonly pixelBox: readonly [number, number, number, number];
+  /** Unconstrained raw top-1 token IDs before `U21` `<LOC_*>` domain mask. */
+  readonly rawTop1Ids: readonly [number, number, number, number];
+  readonly guardIntervenedCount: number;
+}
+
+export interface UniGroundingResult {
+  readonly imageWidth: number;
+  readonly imageHeight: number;
+  readonly stepsRequested: 1 | 2 | 4;
+  readonly assembledTemplateIds: Int32Array;
+  readonly slotOffsetsInFullSequence: Int32Array;
+  readonly boxes: readonly UniGroundingBox[];
+  readonly stepTraces: readonly UniGroundingStepTrace[];
+  readonly prefillCache: UniKvCacheState;
+  /** Provenance (`U27`): confirms direct ID decoding preserves all `<LOC_*>` tokens. */
+  readonly directTokenDecodePreservesLoc: true;
+  /** Count of `<LOC_*>` / `<box_p>` / `<LOC_BEGIN/END>` tokens `skip_special_tokens=True` would strip (`U27`). */
+  readonly skipSpecialTokensWouldStripCount: number;
+  readonly skipSpecialTokensHazardNote: string;
+  readonly totalGuardInterventions: number;
 }

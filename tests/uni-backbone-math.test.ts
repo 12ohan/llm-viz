@@ -252,6 +252,8 @@ describe('UNI1 Slice 1B: 1D YaRN RoPE, Llama-4 Scaling & 2D SinCos', () => {
     for (let p = 32; p < 36; p++) {
       expect(scales[p]).toBe(Math.fround(1.0 + beta * Math.log(3.0)));
     }
+    expect(() => computeLlama4AttnScale(-1, beta, origMaxPos)).toThrow(RangeError);
+    expect(() => computeLlama4AttnScale(Number.NaN, beta, origMaxPos)).toThrow(RangeError);
   });
 
   it('computes exact 2D SinCos frequencies and 0-ULP content-column match for markerColumn=true vs false', () => {

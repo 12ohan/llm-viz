@@ -525,11 +525,12 @@ describe('NLD-Uni 34L Elastic-MoT Core Backbone — Independent PyTorch 2.15.0 P
       maskMode: 'causal',
       useCache: true,
       prefillMode: 'hf_faithful',
+      downstreamTarget: 'u',
     });
 
     expect(prefill.canonicalRouting).toBe('u_only');
     expect(prefill.telemetry.executedLayerCount).toBe(34);
-    expect(prefill.telemetry.wastedPrefixKvLayers).toBe(16);
+    expect(prefill.telemetry.wastedPrefixKvLayers).toBe(0);
 
     for (const k of fixture.keyCheckpointLayers) {
       assertFiniteArrayParity(
@@ -620,12 +621,14 @@ describe('NLD-Uni 34L Elastic-MoT Core Backbone — Independent PyTorch 2.15.0 P
       maskMode: 'causal',
       useCache: true,
       prefillMode: 'hf_faithful',
+      downstreamTarget: 'g',
     });
     const s1Pruned = runUniForwardPass(model, {
       tokenIds: t2i.promptTokenIds,
       maskMode: 'causal',
       useCache: true,
       prefillMode: 'elastic_pruned',
+      downstreamTarget: 'g',
     });
 
     // Verify D5 telemetry & skipped layers
@@ -759,6 +762,7 @@ describe('NLD-Uni 34L Elastic-MoT Core Backbone — Independent PyTorch 2.15.0 P
       maskMode: 'causal',
       useCache: true,
       prefillMode: 'hf_faithful',
+      downstreamTarget: 'g',
     });
     const s1Pruned = runUniForwardPass(model, {
       inputsEmbeds: s1Embeds,
@@ -766,16 +770,36 @@ describe('NLD-Uni 34L Elastic-MoT Core Backbone — Independent PyTorch 2.15.0 P
       maskMode: 'causal',
       useCache: true,
       prefillMode: 'elastic_pruned',
+      downstreamTarget: 'g',
     });
 
+    expect(s1Hf.telemetry.executedLayerCount).toBe(34);
+    expect(s1Hf.telemetry.wastedPrefixKvLayers).toBe(16);
     expect(s1Pruned.telemetry.executedLayerCount).toBe(34);
     expect(s1Pruned.telemetry.understandingTokensPrunedAtSplit).toBe(8);
     expect(s1Pruned.telemetry.wastedPrefixKvLayers).toBe(0);
+    expect(s1Pruned.textLogits).toBeNull();
+    expect(s1Pruned.textProbs).toBeNull();
+    expect(s1Pruned.genLogits).not.toBeNull();
 
-    // U tokens (0..7) remain frozen at L17 residual across L18..33 in elastic_pruned,
+    // U tokens (0..7) remain frozen at L17 residual across L18..33 and skipped in finalNorm in elastic_pruned,
     // while G tokens (8..11) match hf_faithful to 0 ULP!
     const d = model.config.hiddenSize;
     const l17U = s1Pruned.residualCheckpoints[18]!.subarray(0, 8 * d);
+    for (let i = 0; i < 8 * d; i++) {
+      expect(s1Pruned.finalNorm![i]).toBe(0);
+    }
+    assertBitExactFiniteArray(
+      s1Pruned.finalNorm!.subarray(8 * d),
+      s1Hf.finalNorm!.subarray(8 * d),
+      'edit.s1Pruned.finalNorm.G_exact',
+    );
+    assertFiniteArrayParity(
+      s1Pruned.finalNorm!,
+      ed.stage1Pruned.finalNorm,
+      2e-5,
+      'edit.s1Pruned.finalNorm',
+    );
     for (let l = 18; l < 34; l++) {
       const ckptPr = s1Pruned.residualCheckpoints[l + 1]!;
       const ckptHf = s1Hf.residualCheckpoints[l + 1]!;

@@ -532,10 +532,11 @@ export function runUniForwardPass(
       model.finalNorm,
       model.finalNormGen,
       cfg.rmsNormEps,
-      false,
+      pruneUnderstandingAtSplit,
     );
 
-    const computeTextHead = options.computeTextHead ?? routingPlan.hasUnderstanding;
+    const computeTextHead =
+      options.computeTextHead ?? (routingPlan.hasUnderstanding && !pruneUnderstandingAtSplit);
     const computeGenHead = options.computeGenHead ?? routingPlan.hasGeneration;
 
     if (computeTextHead) {
@@ -550,7 +551,10 @@ export function runUniForwardPass(
   }
 
   const wastedPrefixKvLayers =
-    prefillMode === 'hf_faithful' && options.useCache && canonicalRouting === 'u_only'
+    prefillMode === 'hf_faithful' &&
+    options.useCache &&
+    routingPlan.hasUnderstanding &&
+    options.downstreamTarget === 'g'
       ? numLayers - dualTowerLayers
       : 0;
 

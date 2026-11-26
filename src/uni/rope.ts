@@ -249,6 +249,11 @@ export function computeLlama4AttnScale(
   beta: number,
   origMaxPos: number,
 ): number {
+  if (!Number.isFinite(cachePosition) || cachePosition < 0) {
+    throw new RangeError(
+      `cachePosition must be a finite non-negative number, got ${cachePosition}`,
+    );
+  }
   if (!(origMaxPos > 0)) {
     throw new RangeError(`origMaxPos must be positive, got ${origMaxPos}`);
   }
