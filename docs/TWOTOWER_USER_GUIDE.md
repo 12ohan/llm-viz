@@ -1,6 +1,6 @@
 # Nemotron-Labs-TwoTower — User Guide
 
-This guide explains how to explore the **Nemotron-Labs-TwoTower 30B-A3B** interactive 3D WebGL2 visualizer (`/twotower/` locally, planned at `https://12ohan.github.io/llm-viz/twotower/`), understand its dual-tower block-diffusion lifecycle, and interpret every inspector readout accurately.
+This guide explains how to explore the **Nemotron-Labs-TwoTower 30B-A3B** interactive 3D WebGL2 visualizer (`/twotower/` locally, live at <https://12ohan.github.io/llm-viz/twotower/>), understand its dual-tower block-diffusion lifecycle, and interpret every inspector readout accurately.
 
 > [!NOTE]
 > **Synthetic Miniature Execution vs. Production Metadata**
@@ -82,12 +82,12 @@ The bottom **Timeline Dock** tracks your full copy-on-step generation history:
 Open the **`Sampler`** tab in the right inspector rail to inspect and tune block unmasking:
 
 - **Confidence Threshold `γ` Presets:**
-  - **`0.22 Mini Default`** — Calibrated for synthetic `V = 34` logits so default trajectories show informative multi-step unmasking and early completion.
-  - **`0.80 Paper`** — `arXiv:2606.26493v2` (§3.1 / §3.6) and model-card operating point.
-  - **`0.90 Ref Code`** — Reference `modeling_nemotron_twotower.py` default.
+  - **`0.22 Mini Default`** — Browser miniature educational default (`γ = 0.22, T = 0.0`), calibrated for synthetic `V = 34` logits so default trajectories show informative multi-step unmasking and early completion.
+  - **`0.80 Paper`** — Published paper operating point (`arXiv:2606.26493v2` §3.1 / §3.6: `γ = 0.80`); note that the Hugging Face model-card usage example pairs `γ = 0.80` with `T = 0.1`.
+  - **`0.90 Ref Code`** — Reference `modeling_nemotron_twotower.py` default (`γ = 0.90` and `T = 0.0` greedy).
   - Fine-tune any custom `γ ∈ [0.00, 1.00]` via the slider or number box.
 - **Decoupled Block Width `B` & Refinement Budget `K`:** Independently select **`B = 4` or `B = 8`** and **`K ∈ [1..12]`** to explore `K < B`, `K = B`, and `K > B` regimes.
-- **Temperature `T` & Deterministic Seed:** `T = 0.0` runs exact greedy argmax. Setting `T > 0` runs **deterministic Gumbel-max sampling** seeded by the explicit integer Seed (zero `Math.random()`).
+- **Temperature `T` & Deterministic Seed:** Browser miniature and reference code default to `T = 0.0` (exact greedy argmax), while the model-card usage example uses `T = 0.1` (paired with `γ = 0.80`). Setting `T > 0` runs **deterministic Gumbel-max sampling** seeded by the explicit integer Seed (zero `Math.random()`).
 - **Per-Slot Decision Table:** Shows every block slot's candidate token, raw vs. constrained MDLM confidence (`[MASK]` clamped to `0%`), and commit reason:
   - `Locked (prior step)` — Carried over immutably from an earlier refinement.
   - `Threshold (conf > γ)` — Exceeded strict `>` threshold.
@@ -127,7 +127,7 @@ Open the **`Architecture`** tab in the right inspector rail to inspect pinned pr
   1. **`Operational (≤128K)`** — Model-card operational range (`≤ 131,072` tokens).
   2. **`Configured Limit (≤256K)`** — `config.json` `max_position_embeddings = 262,144` (explicitly marked as **NOT** empirically validated production runtime support).
   3. **`Extrapolated (>256K)`** — Analytical linear KV scaling projection (`512K`, `1M`).
-- **Discrepancy Ledger & Community NVFP4 Note:** Expand the inline ledger to review all 9 verified paper-vs-checkpoint discrepancies (`1.5M` vs. `30.02M` adaLN, `128K` vs. `256K`, `γ = 0.8` vs. `0.9`, etc.) and the explicitly separated non-official community NVFP4 (~`42 GiB`) reference.
+- **Discrepancy Ledger & Community NVFP4 Note:** Expand the inline ledger to review all 9 verified paper-vs-checkpoint discrepancies (`1.5M` vs. `30.02M` adaLN, `128K` vs. `256K`, `γ = 0.80` published paper operating point / `γ = 0.80, T = 0.1` model-card usage example vs. `γ = 0.90, T = 0.0` reference code default, etc.) and the explicitly separated non-official community NVFP4 (~`42 GiB`) reference.
 
 ---
 

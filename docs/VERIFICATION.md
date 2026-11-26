@@ -3,7 +3,7 @@
 This runbook documents how to reproduce and verify mathematical parity, unit/contract invariants, Topology A MPA bundle isolation, real-browser WebGL2 rendering (software SwiftShader and hardware Metal/GPU), accessibility, static artifact checksums, and CI/Pages workflows for both applications:
 
 - **Nemotron 3 Nano 30B-A3B** (`/` & `/llm-viz/` · `v1.0.0` preserved)
-- **Nemotron-Labs-TwoTower 30B-A3B** (`/twotower/` & `/llm-viz/twotower/` · `twotower-v1.0.0` release candidate)
+- **Nemotron-Labs-TwoTower 30B-A3B** (`/twotower/` & `/llm-viz/twotower/` · `twotower-v1.0.0`)
 
 ---
 
@@ -86,7 +86,7 @@ The Node regression suite runs `46` test files (`33` Nano files + `13` TwoTower 
 
 ### Independent PyTorch `2.15.0` Parity Tolerances
 
-TypeScript accumulates inner dot products in JS `float64` prior to `Math.fround` writes while PyTorch `torch.float32` accumulates in `float32` BLAS/SIMD. Checked-in fixtures (`tests/fixtures/*.json`) enforce:
+TypeScript accumulates inner dot products in JS `float64` prior to `Math.fround` writes while PyTorch `torch.float32` accumulates in `float32` BLAS/SIMD. All `6` checked-in SHA-256-verified independent PyTorch `2.15.0` reference fixtures (including all `8` TwoTower parity categories) were verified by Vitest during TT5; they were **not regenerated during TT5 because local PyTorch was unavailable** (and zero TT1–TT2 kernel/session files changed). Checked-in fixtures (`tests/fixtures/*.json`) enforce:
 
 | Fixture File | Scope | Max Absolute Tolerance |
 | --- | --- | --- |
@@ -121,7 +121,7 @@ Enforced hard gates (non-zero exit on any failure):
 4. Zero `.map` sources in Nano's transitive graph match `src/twotower/` or `twotower/`.
 5. Zero forbidden TwoTower markers (`NemotronHTwoTowerForCausalLM`, `twotower-denoiser-v1`, `twotower-context-v1`, `TwoTowerSession`, `diffusion_block_commit`, `TWOTOWER_SPEC`) appear in Nano's transitive JS/CSS assets.
 6. TwoTower's transitive JS sourcemaps positively contain `src/twotower/` sources (`22` confirmed `src/twotower/*` modules; `0` runtime dependencies).
-7. Nano's transitive JS+CSS level-9 gzip total stays `<= 215.00 KiB` (`220,160 B`), verified identically on both `/` and `/llm-viz/`: Nano **`207.60 KiB`** (`212,585 B`, `7.40 KiB` headroom; `+77 B` gzip CSS for quiet `TwoTower ↗` link, `0 B` Nano JS, `0` leaks, `0` markers), shared `assets/overlay-*.js` **`127.27 KiB`** (`130,321 B` gzip / `442,996 B` raw, `0` TwoTower sources), and TwoTower **`317.76 KiB`** (`325,382 B` / `~318 KiB` gzip).
+7. Nano's transitive JS+CSS level-9 gzip total stays `<= 215.00 KiB` (`220,160 B`), verified on both `/` and `/llm-viz/`: Nano **`207.60 KiB`** (`212,585 B` gzip / `764,974 B` raw, `7.40 KiB` headroom; `+77 B` gzip CSS for quiet `TwoTower ↗` link, `0 B` Nano JS, `0` leaks, `0` markers), shared `assets/overlay-*.js` **`127.27 KiB`** (`130,321 B` gzip / `442,996 B` raw, `0` TwoTower sources), and TwoTower **`317.74 KiB`** (`325,363 B` root / `325,370 B` `/llm-viz/` gzip; `1,149,477 B` / `1,149,485 B` raw).
 
 ---
 
@@ -193,7 +193,7 @@ npx vite preview --outDir dist --base / --port 4173 --strictPort --host 127.0.0.
 5. **GitHub Pages `/llm-viz/twotower/` Subpath Build & HTTP `200` Assets**.
 6. **Guided 4-Act / 28-Beat Walkthrough (`T`) & Strict User-Session Restoration**.
 7. **Persistent Nested Timeline, Completed-Uncommitted vs. Committed Boundary Warning & Branching**.
-8. **Advanced Sampler Inspector (`0.22`/`0.80`/`0.90` Presets, Decoupled `B`/`K`, Zero-`Infinity`, Non-Retroactive Scope)**.
+8. **Advanced Sampler Inspector (Browser Mini `γ = 0.22, T = 0.0` / Paper `γ = 0.80` [Model-Card Example `γ = 0.80, T = 0.1`] / Ref Code `γ = 0.90, T = 0.0` Presets, Decoupled `B`/`K`, Zero-`Infinity`, Non-Retroactive Scope)**.
 9. **Production Architecture & 3-Regime Context-Length Scaling Tab (`63.19B` / `126.37 GB` / `117.69 GiB`, 4-Way Caches, Ledger, SVG Chart)**.
 10. **Keyboard Navigation (`T`/Arrows/`Esc`/`W`/`Tab`), Reduced-Motion Instant Transitions, Zero Geometry Rebuilds on Orbit & Idle RAF Sleep**.
 11. **GitHub Pages `/llm-viz/twotower/` Subpath Parity (Tour, Timeline, Sampler & Architecture)**.
@@ -212,19 +212,19 @@ mkdir -p test-results/release-artifacts
 # 1. Portable static archive (serves at root `/` and `/twotower/`)
 VITE_BASE_PATH=/ npx vite build --outDir test-results/dist-portable
 node scripts/verify_bundle_isolation.mjs --dir test-results/dist-portable
-tar -czf test-results/release-artifacts/nemotron-viz-twotower-v1.0.0-portable.tar.gz \
+tar -czf test-results/release-artifacts/nemotron-viz-twotower-v1.0.0-static-portable.tar.gz \
   -C test-results/dist-portable .
 
 # 2. GitHub Pages subpath archive (serves at `/llm-viz/` and `/llm-viz/twotower/`)
 VITE_BASE_PATH=/llm-viz/ npx vite build --outDir test-results/dist-pages
 node scripts/verify_bundle_isolation.mjs --dir test-results/dist-pages
-tar -czf test-results/release-artifacts/nemotron-viz-twotower-v1.0.0-pages.tar.gz \
+tar -czf test-results/release-artifacts/nemotron-viz-twotower-v1.0.0-ghpages-llm-viz.tar.gz \
   -C test-results/dist-pages .
 
 # 3. Generate and verify SHA-256 checksums
 (
   cd test-results/release-artifacts
-  shasum -a 256 nemotron-viz-twotower-v1.0.0-*.tar.gz > SHA256SUMS.txt
+  shasum -a 256 nemotron-viz-twotower-v1.0.0-static-portable.tar.gz nemotron-viz-twotower-v1.0.0-ghpages-llm-viz.tar.gz > SHA256SUMS.txt
   shasum -a 256 -c SHA256SUMS.txt
 )
 ```
@@ -246,5 +246,8 @@ Verification and production deployment remain strictly separated under `.github/
 
 - **Miniature Synthetic Simulators:** Browser execution uses deterministic synthetic Float32/Float64 weights (`d = 8`, `V_mini = 32` for Nano; `V_mini = 34` for TwoTower). Neither entry loads NVIDIA checkpoints, runs the `131,072`-token Nemotron tokenizer, or simulates hardware FP8 E4M3 quantization rounding.
 - **4-Way Memory Boundary (Peak Runtime Workspace Excluded):** Production memory readouts account for resident BF16/FP32 weights, Persistent Context Cache (`47.08 MiB + P × 6 KiB`), optional snapshots/mirrors (`mamba_s2` `+47.08 MiB` in `Mock-AR`, optional cross-GPU mirror), and Transient Denoiser Block KV (`B × 6 KiB`). Complete peak inference memory (intermediate activations, `[B × 131,072]` logits, CUDA/framework scratchpad, allocator fragmentation) is explicitly excluded.
-- **3-Regime Context Scaling Caveat:** `262,144` (`256K`) reflects `config.json max_position_embeddings` and is explicitly distinguished from the model card's `128K` operational note and from `> 256K` analytical extrapolation.
+- **3-Regime Context Scaling Caveat:** `262,144` (`256K`) reflects `config.json max_position_embeddings` (not empirically validated runtime support) and is explicitly distinguished from the model card's `128K` operational note and from `> 256K` analytical extrapolation.
+- **Trimmed Ancestral Branch Metadata:** When active-branch history exceeds `128` records and leading entries are trimmed in the untouched TT2 session engine, ancestral `forkPointIndex` / `parentBranchId` metadata pointers are not re-indexed.
+- **Historical Stochastic Previews vs. Newly Forked Execution:** Rewound `diffusion_refinement` previews derive deterministic Gumbel variates using historical `branchId` + `configAtStep`, whereas stepping or committing from a rewound cursor auto-forks a new branch using `pendingConfig` (so stochastic draws on the newly forked branch differ deterministically by branch ID / pending config).
+- **PyTorch Fixture Verification vs. Regeneration:** All `6` checked-in SHA-256-verified independent PyTorch `2.15.0` reference fixtures (including all `8` TwoTower parity categories) were verified by Vitest during TT5, **not regenerated during TT5 because local PyTorch was unavailable** (and zero TT1–TT2 kernel/session files changed).
 - **Software vs. Hardware GPU Verification:** Headless CI runs Chromium WebGL2 on ANGLE/SwiftShader; hardware GPU visual/cadence inspection remains a targeted pre-release step.

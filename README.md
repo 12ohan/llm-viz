@@ -5,7 +5,7 @@ A zero-runtime-dependency WebGL2 multi-page application (MPA) hosting **two isol
 | Interactive App | Entry Path | GitHub Pages URL | Release Status | Architecture Scope |
 | --- | --- | --- | --- | --- |
 | **Nemotron 3 Nano 30B-A3B** | `/` (`index.html`) | <https://12ohan.github.io/llm-viz/> | **`v1.0.0`** (preserved & live) | Single-tower 52-layer causal hybrid (`23 Mamba-2 · 23 MoE 128+1 · 6 GQA`), live cached AR decode & branching, 5 cutaways, 22-beat tour, Selective FP8 & `1 → 1M` chart. |
-| **Nemotron-Labs-TwoTower 30B-A3B** | `/twotower/` (`twotower/index.html`) | <https://12ohan.github.io/llm-viz/twotower/> *(planned upon merge to `main`)* | **`twotower-v1.0.0`** (release candidate) | Dual-tower `2 × 52`-layer Context + Block-Diffusion Denoiser (`63.19B` / `126.37 GB` SI / `117.69 GiB` IEC), 7 spatial views, 3 execution modes, persistent nested timeline, MDLM sampler, 4-act / 28-beat tour. |
+| **Nemotron-Labs-TwoTower 30B-A3B** | `/twotower/` (`twotower/index.html`) | <https://12ohan.github.io/llm-viz/twotower/> | **`twotower-v1.0.0`** (released & live) | Dual-tower `2 × 52`-layer Context + Block-Diffusion Denoiser (`63.19B` / `126.37 GB` SI / `117.69 GiB` IEC), 7 spatial views, 3 execution modes, persistent nested timeline, MDLM sampler, 4-act / 28-beat tour. |
 
 Both apps compile as an isolated **Topology A multi-entry Vite MPA** enforced by an automated 7-gate bundle-isolation check (`npm run verify:isolation`) so TwoTower code never leaks into Nano's `/` bundle, connected by **quiet, base-path-aware reciprocal navigation** (`TwoTower ↗` in Nano's top bar and `Nano ↗` in TwoTower's top bar) across both `/` ↔ `/twotower/` and `/llm-viz/` ↔ `/llm-viz/twotower/`.
 
@@ -35,7 +35,7 @@ Interactive WebGL2 explorer for NVIDIA's dual-tower **Autoregressive Context + B
   - **`AR`**: Context-only single-token causal decode with Denoiser and timestep conditioning bypassed (`t = null`).
   - **`Mock-AR`**: Denoiser causal `S = 1` re-evaluation seeded from Context `KV[:-1]` + `mamba_s2` with `adaLN-single` bypassed (`0`-ULP parity with Context AR when `ΔW = 0`).
 - **Persistent Nested Timeline & Branching**: Bottom timeline dock for scrubbing any historical milestone non-destructively, auto-forking branches from rewound cursors, active-branch-safe branch deletion, and retained memory tracking.
-- **Advanced MDLM Sampler Inspector (`Sampler` Tab)**: Confidence threshold presets (`0.22` Mini Default, `0.80` Paper, `0.90` Ref Code), decoupled Block Width (`B ∈ {4, 8}`) and Refinement Budget (`K ∈ [1..12]`), threshold vs. remaining-budget floor (`ceil(nMasked / remainingSteps)`) unmasking reasons, deterministic Gumbel-max (`T > 0` with explicit seed), explicit non-retroactive config scope badges, and unscaled calibration caveats.
+- **Advanced MDLM Sampler Inspector (`Sampler` Tab)**: Confidence threshold & temperature controls (browser miniature educational default `γ = 0.22, T = 0.0`, published paper operating point `γ = 0.80`, model-card usage example `γ = 0.80, T = 0.1`, reference code default `γ = 0.90, T = 0.0`), decoupled Block Width (`B ∈ {4, 8}`) and Refinement Budget (`K ∈ [1..12]`), threshold vs. remaining-budget floor (`ceil(nMasked / remainingSteps)`) unmasking reasons, deterministic Gumbel-max (`T > 0` with explicit seed), explicit non-retroactive config scope badges, and unscaled calibration caveats.
 - **4-Act / 28-Beat Guided Walkthrough (`T`)**: Strictly isolated educational tour (`Act I` Architecture & Modes · `Act II` Layers & Mechanics · `Act III` Output & Sampler · `Act IV` Commit & Production) that restores your Free Explore session untouched upon exit.
 - **Production Architecture & 3-Regime Context Scaling (`Architecture` Tab)**: Dual `GB`/`GiB` checkpoint reconciliation (`63.19B` · `126.37 GB` / `117.69 GiB`), 4-way memory separation (explicitly excluding peak runtime inference workspace), 3-regime context scaling (`≤ 128K` Model-Card Operational · `128K–256K` Configured Positional Limit · `> 256K` Analytical Extrapolation), 9-entry discrepancy ledger, and collapsible Developer Diagnostic Workbench (`W`).
 
@@ -105,6 +105,12 @@ npm run verify:isolation
 npm run test:e2e
 ```
 
+**Measured Production Bundle Sizes (`npm run verify:isolation`, enforced on both `/` and `/llm-viz/`):**
+
+- **Nano transitive JS+CSS:** **`207.60 KiB`** (`212,585 B`) gzip (`764,974 B` raw) vs. `215.00 KiB` (`220,160 B`) hard budget (`7.40 KiB` headroom, `0` sourcemap/marker leaks, `+77 B` gzip CSS / `0 B` Nano JS for the quiet `TwoTower ↗` link).
+- **Shared `assets/overlay-*.js`:** **`127.27 KiB`** (`130,321 B`) gzip (`442,996 B` raw, `0` TwoTower sources).
+- **TwoTower transitive JS+CSS:** **`317.74 KiB`** (`325,363 B` root / `325,370 B` `/llm-viz/`) gzip (`1,149,477 B` / `1,149,485 B` raw, `22` confirmed `src/twotower/*` modules, `0` runtime dependencies).
+
 ---
 
 ## Documentation
@@ -112,8 +118,8 @@ npm run test:e2e
 - [**TwoTower User Guide (`docs/TWOTOWER_USER_GUIDE.md`)**](docs/TWOTOWER_USER_GUIDE.md) — Practical walkthrough of all 7 spatial views, 3 execution modes, 4-step block diffusion lifecycle, `t = nMasked / B` & historical mismatch banners, Persistent Nested Timeline, Advanced MDLM Sampler, 4-Act Guided Tour, 3-regime scaling, Workbench (`W`), and shortcuts.
 - [**TwoTower Architecture & Checkpoint Audit (`docs/TWOTOWER_ARCHITECTURE.md`)**](docs/TWOTOWER_ARCHITECTURE.md) — Pinned provenance (`35b64985`), 3-tier epistemic sourcing matrix, dual `GB`/`GiB` reconciliation, 3-regime context scaling, 4-way memory boundary, 9-entry discrepancy ledger, and Topology A isolation contract.
 - [**Nano Architecture Guide (`docs/ARCHITECTURE.md`)**](docs/ARCHITECTURE.md) — Single-tower Nano module boundaries, 5-pass WebGL2 pipeline, context-loss recovery, runtime performance architecture, immutable AR cache contracts, and shared Topology A seams.
-- [**Verification & Reproducibility Runbook (`docs/VERIFICATION.md`)**](docs/VERIFICATION.md) — Complete Vitest (`369` tests / `46` files), independent PyTorch `2.15.0` parity (Nano + 8 TwoTower categories), Topology A isolation gate (`207.60 KiB` Nano / `317.76 KiB` TwoTower gzip), Playwright Chromium WebGL2 E2E (`21` tests, SwiftShader & hardware Metal), CI/Pages workflows, and static tarball checksum steps.
-- [**Draft TwoTower v1.0.0 Release Notes (`docs/RELEASE_NOTES_TWOTOWER_v1.0.0.md`)**](docs/RELEASE_NOTES_TWOTOWER_v1.0.0.md) — Release summary, planned public URLs, verification snapshot, discrepancy ledger, and limitations for reserved tag `twotower-v1.0.0`.
+- [**Verification & Reproducibility Runbook (`docs/VERIFICATION.md`)**](docs/VERIFICATION.md) — Complete Vitest (`369` tests / `46` files), independent PyTorch `2.15.0` parity (Nano + 8 TwoTower categories), Topology A isolation gate (`207.60 KiB` Nano / `127.27 KiB` shared / `317.74 KiB` TwoTower gzip), Playwright Chromium WebGL2 E2E (`21` tests, SwiftShader & hardware Metal), CI/Pages workflows, and static tarball checksum steps.
+- [**TwoTower v1.0.0 Release Notes (`docs/RELEASE_NOTES_TWOTOWER_v1.0.0.md`)**](docs/RELEASE_NOTES_TWOTOWER_v1.0.0.md) — Release summary, live public URLs, verification snapshot, discrepancy ledger, and known limitations for `twotower-v1.0.0`.
 - [**Third-Party Notices (`THIRD_PARTY_NOTICES.md`)**](THIRD_PARTY_NOTICES.md) — Verified upstream licenses, architectural citations, non-redistribution statement, and exact dev-only dependency inventory.
 - [**Changelog (`CHANGELOG.md`)**](CHANGELOG.md) — Release history for Nano `v1.0.0` and TwoTower `twotower-v1.0.0`.
 - **Historical Milestone 1 Briefs (superseded):** [`docs/archive/DESIGN_BRIEF.md`](docs/archive/DESIGN_BRIEF.md) · [`docs/archive/IMPLEMENTATION_PLAN.md`](docs/archive/IMPLEMENTATION_PLAN.md).
