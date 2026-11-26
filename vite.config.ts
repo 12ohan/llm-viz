@@ -27,6 +27,7 @@ export default defineConfig({
       input: {
         nano: resolve(__dirname, 'index.html'),
         twotower: resolve(__dirname, 'twotower/index.html'),
+        diffusion: resolve(__dirname, 'diffusion/index.html'),
       },
     },
   },

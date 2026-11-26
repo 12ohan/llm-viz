@@ -533,7 +533,31 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   resetCamBtn.dataset.testid = 'diffusion-camera-reset-btn';
   resetCamBtn.addEventListener('click', () => fitCameraToScene(true));
 
-  topActions.append(tourToggleBtn, inspectorToggleBtn, resetCamBtn);
+  const baseUrl = (import.meta.env.BASE_URL || '../').replace(/\/?$/, '/');
+
+  const navToNanoLink = el('a', 'df-top-link');
+  navToNanoLink.href = baseUrl;
+  navToNanoLink.dataset.testid = 'nav-to-nano';
+  navToNanoLink.title = 'Open Nemotron 3 Nano 30B-A3B architecture visualizer';
+  const navNanoArrow = el('span', undefined, '↗');
+  navNanoArrow.setAttribute('aria-hidden', 'true');
+  navToNanoLink.append(document.createTextNode('Nano '), navNanoArrow);
+
+  const navToTwoTowerLink = el('a', 'df-top-link');
+  navToTwoTowerLink.href = `${baseUrl}twotower/`;
+  navToTwoTowerLink.dataset.testid = 'nav-to-twotower';
+  navToTwoTowerLink.title = 'Open Nemotron-Labs-TwoTower dual-tower diffusion visualizer';
+  const navTwoTowerArrow = el('span', undefined, '↗');
+  navTwoTowerArrow.setAttribute('aria-hidden', 'true');
+  navToTwoTowerLink.append(document.createTextNode('TwoTower '), navTwoTowerArrow);
+
+  topActions.append(
+    tourToggleBtn,
+    inspectorToggleBtn,
+    resetCamBtn,
+    navToNanoLink,
+    navToTwoTowerLink,
+  );
   topbar.append(brand, viewNav, topActions);
   shell.appendChild(topbar);
 

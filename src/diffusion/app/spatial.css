@@ -122,7 +122,7 @@ body {
   font-family: var(--df-font-mono);
   font-size: 10px;
   font-weight: 600;
-  max-width: 340px;
+  max-width: 240px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -168,6 +168,7 @@ body {
 
 .df-view-tab:focus-visible,
 .df-top-btn:focus-visible,
+.df-top-link:focus-visible,
 .df-btn:focus-visible,
 .df-seg-btn:focus-visible,
 .df-select:focus-visible {
@@ -195,10 +196,35 @@ body {
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
+  transition: background-color 110ms ease, border-color 110ms ease, color 110ms ease;
 }
 
 .df-top-btn:hover {
   background: rgba(255, 255, 255, 0.16);
+}
+
+.df-top-link {
+  height: 27px;
+  padding: 0 8px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.05);
+  color: #E2E8F0;
+  font-family: var(--df-font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  transition: background-color 110ms ease, border-color 110ms ease, color 110ms ease;
+}
+
+.df-top-link:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.38);
+  color: #FFFFFF;
 }
 
 /* ============================================================================
@@ -1345,21 +1371,6 @@ body {
   text-overflow: ellipsis;
 }
 
-@media (max-width: 1080px) {
-  .df-epistemic-pill {
-    max-width: 190px;
-  }
-  .df-token-preview {
-    display: none;
-  }
-  .df-inspector-drawer {
-    width: 340px;
-  }
-  .df-stage.is-inspector-open .df-rope-phasor {
-    right: 360px;
-  }
-}
-
 /* ============================================================================
  * 7. DF4 Visually Hidden Live Region, Top Bar Active States & Focus Rings
  * ============================================================================ */
@@ -2253,6 +2264,224 @@ body {
   font-weight: 800;
 }
 
+@media (max-width: 1360px) {
+  .df-topbar {
+    flex-wrap: wrap;
+    padding: 6px 10px;
+    gap: 6px 8px;
+  }
+
+  .df-epistemic-pill {
+    max-width: 200px;
+  }
+
+  .df-view-tabs {
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .df-view-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .df-top-actions {
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+}
+
+@media (max-width: 1080px) {
+  .df-title {
+    font-size: 12.5px;
+  }
+
+  .df-epistemic-pill {
+    max-width: 170px;
+    font-size: 9.5px;
+    padding: 2px 6px;
+  }
+
+  .df-view-tab {
+    font-size: 11px;
+    padding: 3px 7px;
+  }
+
+  .df-top-btn,
+  .df-top-link {
+    padding: 0 7px;
+    font-size: 10.5px;
+  }
+
+  .df-control-strip {
+    padding: 5px 10px;
+    gap: 5px 7px;
+  }
+
+  .df-token-preview {
+    display: none;
+  }
+
+  .df-inspector-drawer {
+    width: 340px;
+  }
+
+  .df-stage.is-inspector-open .df-rope-phasor {
+    right: 360px;
+  }
+}
+
+@media (max-width: 768px) {
+  .df-topbar {
+    padding: 6px 8px;
+    gap: 5px 6px;
+  }
+
+  .df-brand {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    gap: 4px 6px;
+  }
+
+  .df-title {
+    font-size: 12px;
+  }
+
+  .df-epistemic-pill {
+    max-width: 100%;
+    font-size: 9px;
+    padding: 1px 6px;
+  }
+
+  .df-top-actions {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .df-top-btn,
+  .df-top-link {
+    height: 26px;
+    padding: 0 7px;
+    font-size: 10.5px;
+  }
+
+  .df-view-tabs {
+    order: 3;
+    width: 100%;
+    max-width: 100%;
+    justify-content: flex-start;
+  }
+
+  .df-control-strip {
+    padding: 4px 8px;
+    gap: 4px 6px;
+  }
+
+  .df-strip-group {
+    max-width: 100%;
+    gap: 4px;
+  }
+
+  .df-sep {
+    display: none;
+  }
+
+  .df-segmented {
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .df-segmented::-webkit-scrollbar {
+    display: none;
+  }
+
+  .df-seg-btn {
+    padding: 0 6px;
+    font-size: 10.5px;
+  }
+
+  .df-btn,
+  .df-select {
+    height: 25px;
+    padding: 0 7px;
+    font-size: 10.5px;
+  }
+
+  .df-provenance-bar {
+    padding: 3px 8px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .df-provenance-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .df-badge-row {
+    flex-wrap: nowrap;
+    flex-shrink: 0;
+  }
+
+  .df-stage {
+    min-height: 220px;
+  }
+
+  .df-view-caption {
+    top: 6px;
+    left: 8px;
+    max-width: calc(100% - 16px);
+    padding: 4px 7px;
+  }
+
+  .df-rope-phasor {
+    right: 8px;
+    bottom: 8px;
+    width: min(268px, calc(100% - 16px));
+    padding: 7px 8px;
+  }
+
+  .df-stage.is-inspector-open .df-rope-phasor {
+    right: 8px;
+  }
+
+  .df-inspector-drawer {
+    top: 6px;
+    right: 6px;
+    bottom: 6px;
+    left: 6px;
+    width: auto;
+    max-width: none;
+  }
+
+  .df-tour-hud {
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    width: auto;
+    max-width: none;
+    max-height: calc(100% - 60px);
+    padding: 8px 10px;
+  }
+
+  .df-formula-dock {
+    min-height: 36px;
+    padding: 4px 8px;
+    gap: 6px;
+  }
+
+  .df-timeline-dock {
+    padding: 4px 8px;
+    max-height: 88px;
+  }
+
+  .df-timeline-lanes {
+    max-height: 54px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -2261,5 +2490,9 @@ body {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+
+  .df-top-link {
+    transition: none !important;
   }
 }

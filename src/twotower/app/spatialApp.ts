@@ -1303,13 +1303,23 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   btnToggleMobileInspector.setAttribute('aria-controls', 'sp-inspector-drawer');
   btnToggleMobileInspector.title = 'Toggle spatial inspector drawer';
 
+  const baseUrl = (import.meta.env.BASE_URL || '../').replace(/\/?$/, '/');
+
   const navToNanoLink = el('a', 'sp-top-link');
-  navToNanoLink.href = (import.meta.env.BASE_URL || '../').replace(/\/?$/, '/');
+  navToNanoLink.href = baseUrl;
   navToNanoLink.dataset.testid = 'nav-to-nano';
   navToNanoLink.title = 'Open Nemotron 3 Nano 30B-A3B architecture visualizer';
   const navArrow = el('span', undefined, '↗');
   navArrow.setAttribute('aria-hidden', 'true');
   navToNanoLink.append(document.createTextNode('Nano '), navArrow);
+
+  const navToDiffusionLink = el('a', 'sp-top-link');
+  navToDiffusionLink.href = `${baseUrl}diffusion/`;
+  navToDiffusionLink.dataset.testid = 'nav-to-diffusion';
+  navToDiffusionLink.title = 'Open Nemotron-Labs-Diffusion-14B interactive 3D architecture visualizer';
+  const navDiffusionArrow = el('span', undefined, '↗');
+  navDiffusionArrow.setAttribute('aria-hidden', 'true');
+  navToDiffusionLink.append(document.createTextNode('Diffusion '), navDiffusionArrow);
 
   topActions.append(
     btnTourToggle,
@@ -1317,6 +1327,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     btnToggleWorkbench,
     btnToggleMobileInspector,
     navToNanoLink,
+    navToDiffusionLink,
   );
   topbar.append(brand, tablist, topActions);
 
