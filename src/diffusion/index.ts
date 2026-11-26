@@ -20,3 +20,6 @@ export * from './sampler';
 export * from './speculative';
 export * from './execution';
 export * from './session';
+export * from './archReadouts';
+export * from './story/types';
+export * from './story/walkthrough';
