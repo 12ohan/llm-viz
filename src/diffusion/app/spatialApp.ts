@@ -176,7 +176,8 @@ const MASK_TABS: readonly MaskTabDef[] = Object.freeze([
   Object.freeze({
     id: 'vlm_quadratic_ss',
     label: 'VLM Quadratic SS',
-    title: 'VLM quadratic visual-prefix + block-diffusion self-supervised mask',
+    title:
+      'Read-only VLM-8B cached Quadratic Self-Speculation reference mask (k(k+1) interleaved queries, [draft_kv || clean_kv])',
   }),
 ]);
 

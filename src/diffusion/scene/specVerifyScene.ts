@@ -217,7 +217,47 @@ interface ResolvedSpecData {
   readonly loraOnPreview: LinearSpecCycleResult | null;
 }
 
+interface SpecDataCacheEntry {
+  readonly key: string;
+  readonly data: ResolvedSpecData;
+}
+
+/**
+ * Lightweight 1-entry memoization cache for `resolveSpecData(ctx)`.
+ * Prevents pointer hover / cell selection rebuilds in `spec_verify` from re-running
+ * 2–6 full 40-layer forward passes while replacing the single slot on record/config change
+ * (zero unbounded memory growth).
+ */
+let lastResolvedSpecData: SpecDataCacheEntry | null = null;
+
+function buildSpecDataCacheKey(ctx: DiffusionResolvedSessionContext): string {
+  const { model, record, kvSnapshot, parentRecord } = ctx;
+  const cfg = record.configAtStep;
+  return [
+    model.combinedFingerprint,
+    record.recordId,
+    kvSnapshot.snapshotDigest,
+    cfg.mode,
+    cfg.blockLength,
+    cfg.temperature,
+    cfg.samplerBThreshold,
+    cfg.samplingSeed,
+    record.pendingSeedToken ?? 'none',
+    parentRecord?.kvSnapshot.snapshotDigest ?? 'root',
+  ].join('|');
+}
+
 function resolveSpecData(ctx: DiffusionResolvedSessionContext): ResolvedSpecData {
+  const cacheKey = buildSpecDataCacheKey(ctx);
+  if (lastResolvedSpecData && lastResolvedSpecData.key === cacheKey) {
+    return lastResolvedSpecData.data;
+  }
+  const computed = computeSpecDataUncached(ctx);
+  lastResolvedSpecData = { key: cacheKey, data: computed };
+  return computed;
+}
+
+function computeSpecDataUncached(ctx: DiffusionResolvedSessionContext): ResolvedSpecData {
   const { model, record, kvSnapshot } = ctx;
   const cfg = record.configAtStep;
   const V = model.config.vocabSize;
