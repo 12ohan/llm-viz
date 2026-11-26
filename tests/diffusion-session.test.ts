@@ -180,6 +180,64 @@ describe('DiffusionSession — Step-by-Step Parity, Copy-on-Step Branching, Prov
     expect(nextAr.kvMaskProvenance).toBe('token_causal');
   });
 
+  it('includes already-emitted pendingSeedToken on token_causal -> block_bidirectional re-prefill when under kvCapacity and stays aligned at capacity', () => {
+    // Subcase A: below kvCapacity -> pendingSeedToken is folded into bidirectional re-prefill
+    const sessionUnderCap = createDiffusionSession(model, {
+      promptTokenIds: prompt,
+      config: { mode: 'ar', maxNewTokens: 12, temperature: 0 },
+    });
+    const arPrefill = sessionUnderCap.step();
+    const arStep1 = sessionUnderCap.step();
+    expect(arPrefill.kvSnapshot.seqLen).toBe(8);
+    expect(arStep1.kvSnapshot.seqLen).toBe(9);
+    expect(arStep1.generatedTokenIds.length).toBe(2);
+    expect(arStep1.pendingSeedToken).not.toBeNull();
+    const pendingSeed = arStep1.pendingSeedToken!;
+
+    sessionUnderCap.updateConfig({
+      mode: 'dlm',
+      causalContext: false,
+      blockLength: 4,
+      allowExplicitRePrefill: true,
+    });
+    const bidirRePrefill = sessionUnderCap.getActiveRecord()!;
+    expect(bidirRePrefill.kind).toBe('prefill');
+    expect(bidirRePrefill.kvMaskProvenance).toBe('block_bidirectional');
+    expect(bidirRePrefill.kvSnapshot.seqLen).toBe(10); // 8 prompt + 2 generated (incl. pendingSeed)
+    expect(bidirRePrefill.kvSnapshot.committedTokenIds[9]).toBe(pendingSeed);
+    expect(prompt.length + bidirRePrefill.generatedTokenIds.length).toBe(
+      bidirRePrefill.kvSnapshot.seqLen,
+    );
+
+    // Subcase B: at kvCapacity -> generatedTokenIds trims to match committed KV without overflow
+    const sessionAtCap = createDiffusionSession(model, {
+      promptTokenIds: prompt,
+      bounds: { kvCapacity: 10 },
+      config: { mode: 'ar', maxNewTokens: 12, temperature: 0 },
+    });
+    sessionAtCap.step(); // prefill: seqLen=8, gen=1
+    sessionAtCap.step(); // ar_step: seqLen=9, gen=2
+    const atCapAr = sessionAtCap.step(); // ar_step: seqLen=10 (full kvCapacity), gen=3 (pendingSeed uncached)
+    expect(atCapAr.kvSnapshot.seqLen).toBe(10);
+    expect(atCapAr.generatedTokenIds.length).toBe(3);
+
+    sessionAtCap.updateConfig({
+      mode: 'dlm',
+      causalContext: false,
+      blockLength: 4,
+      allowExplicitRePrefill: true,
+    });
+    const cappedRePrefill = sessionAtCap.getActiveRecord()!;
+    expect(cappedRePrefill.kvMaskProvenance).toBe('block_bidirectional');
+    expect(cappedRePrefill.kvSnapshot.seqLen).toBe(10);
+    expect(prompt.length + cappedRePrefill.generatedTokenIds.length).toBe(
+      cappedRePrefill.kvSnapshot.seqLen,
+    );
+    expect(
+      cappedRePrefill.guardFlags.warnings.some((w) => w.includes('omitted at kvCapacity')),
+    ).toBe(true);
+  });
+
   it('detects single-float KV slab tampering via verifyKvSnapshotIntegrity & assertKvSnapshotIntegrity', () => {
     const session = createDiffusionSession(model, {
       promptTokenIds: prompt,

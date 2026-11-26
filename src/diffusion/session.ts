@@ -1066,10 +1066,33 @@ export class DiffusionSession {
     newProvenance: KvMaskProvenance,
   ): DiffusionSessionRecord {
     const isCausal = newProvenance === 'token_causal';
-    const committedTokens = Int32Array.from(parent.kvSnapshot.committedTokenIds);
+    const baseCommittedTokens = Int32Array.from(parent.kvSnapshot.committedTokenIds);
     const vocabSize = this.model.config.vocabSize;
     const eosTokenId = this.model.config.eosTokenId;
     const prng = this.derivePrngFromRecord(parent, nextConfig);
+
+    let committedTokens: Int32Array = baseCommittedTokens;
+    let generatedTokenIds: Int32Array = parent.generatedTokenIds;
+    const extraWarnings: string[] = [];
+
+    // Handle token_causal -> block_bidirectional when an already-emitted pendingSeedToken is not yet in KV
+    if (!isCausal && this.isSeedAlreadyEmitted(parent) && parent.pendingSeedToken !== null) {
+      if (baseCommittedTokens.length < this.bounds.kvCapacity) {
+        committedTokens = appendInt32(
+          baseCommittedTokens,
+          Int32Array.of(parent.pendingSeedToken),
+        );
+      } else {
+        const keepGenCount = Math.max(
+          0,
+          baseCommittedTokens.length - this.promptTokenIds.length,
+        );
+        generatedTokenIds = parent.generatedTokenIds.slice(0, keepGenCount);
+        extraWarnings.push(
+          `Pending emitted seed token (${parent.pendingSeedToken}) omitted at kvCapacity (${this.bounds.kvCapacity}) during bidirectional re-prefill to keep generated tokens aligned with KV.`,
+        );
+      }
+    }
 
     const emptyKv = createEmptyKvSnapshot(newProvenance, this.bounds.kvCapacity);
     const prefillForward = runDiffusionForwardPass(this.model, {
@@ -1093,7 +1116,6 @@ export class DiffusionSession {
       referenceMethodNfe: isDlm ? 0 : 1,
     });
 
-    let generatedTokenIds = parent.generatedTokenIds;
     let stepEmittedTokenIds = new Int32Array(0);
     let pendingSeedToken: number | null = null;
     let lifecyclePhase: DiffusionLifecyclePhase =
@@ -1109,7 +1131,7 @@ export class DiffusionSession {
         pendingSeedToken = sample.tokenId;
       } else {
         stepEmittedTokenIds = Int32Array.of(sample.tokenId);
-        generatedTokenIds = appendInt32(parent.generatedTokenIds, stepEmittedTokenIds);
+        generatedTokenIds = appendInt32(generatedTokenIds, stepEmittedTokenIds);
         if (sample.tokenId === eosTokenId) {
           lifecyclePhase = 'completed_eos';
           pendingSeedToken = null;
@@ -1141,6 +1163,7 @@ export class DiffusionSession {
           capacityExhausted: false,
           warnings: Object.freeze([
             `Explicit re-prefill (${parent.kvMaskProvenance} -> ${newProvenance}) executed over ${committedTokens.length} committed tokens`,
+            ...extraWarnings,
           ]),
         }),
         cropProvenance: null,
