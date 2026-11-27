@@ -8,7 +8,7 @@
  * zero forbidden model-internal markers.
  */
 
-export type ModelEntryId = 'nano' | 'twotower' | 'diffusion' | 'uni';
+export type ModelEntryId = 'nano' | 'twotower' | 'diffusion' | 'uni' | 'dory';
 
 export interface ModelEntryMeta {
   readonly id: ModelEntryId;
@@ -51,6 +51,14 @@ export const MODEL_REGISTRY: readonly ModelEntryMeta[] = Object.freeze([
     subtitle: '34L Elastic-MoT · Multimodal Diffusion',
     pathSuffix: 'uni/',
     testId: 'nav-to-uni' as const,
+  }),
+  Object.freeze({
+    id: 'dory' as const,
+    shortLabel: 'Dory1.0-4B',
+    title: 'Nemotron-Labs-Dory1.0-4B',
+    subtitle: '72L Looped nGPT · SWA/Full + Self-Spec',
+    pathSuffix: 'dory/',
+    testId: 'nav-to-dory' as const,
   }),
 ]);
 

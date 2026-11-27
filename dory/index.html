@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nemotron-Labs-Dory1.0-4B — Interactive 3D Architecture Visualizer</title>
+    <meta
+      name="description"
+      content="Interactive 3D WebGL2 architecture visualizer for NVIDIA Nemotron-Labs-Dory1.0-4B: 3.975B looped Full-nGPT causal language model with 72 physical sublayers (16 Input Prelude + 40 Shared Recurrent Core + 16 Output Coda), elastic depth k=1..4/6/8, channel-wise nGPT NLERP hyperspherical residuals, 3:1 SWA/Full Gated GQA with Dual RoPE, Normalized SwiGLU, Dual-Axis per_loop vs. last_loop KV cache, Paper §6.2 Contract A Self-Speculative Decoding, and read-only 4-format production &amp; TBPTL readouts."
+    />
+    <meta
+      property="og:title"
+      content="Nemotron-Labs-Dory1.0-4B — Interactive 3D Architecture Visualizer"
+    />
+    <meta
+      property="og:description"
+      content="Interactive 3D WebGL2 drafting-table visualizer for NVIDIA Nemotron-Labs-Dory1.0-4B (72L looped Full-nGPT hyperspherical residual dynamics, SWA/Full Dual-RoPE GQA, dual-axis KV cache, and Paper §6.2 Contract A self-speculative decoding)."
+    />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230F172A'/%3E%3Ccircle cx='16' cy='16' r='10' fill='none' stroke='%231A8A7A' stroke-width='2.2'/%3E%3Cpath d='M9 16a7 7 0 0 1 11.4-5.4' fill='none' stroke='%233861BD' stroke-width='2.2' stroke-linecap='round'/%3E%3Cpath d='M23 16a7 7 0 0 1-11.4 5.4' fill='none' stroke='%23B56E06' stroke-width='2.2' stroke-linecap='round'/%3E%3Ccircle cx='16' cy='16' r='2.5' fill='%23F7F8FA'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <div id="dory-app" data-testid="dory-app"></div>
+    <script type="module" src="/src/dory/app/main.ts"></script>
+  </body>
+</html>
