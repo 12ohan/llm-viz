@@ -32,6 +32,7 @@ export default defineConfig({
         twotower: resolve(__dirname, 'twotower/index.html'),
         diffusion: resolve(__dirname, 'diffusion/index.html'),
         uni: resolve(__dirname, 'uni/index.html'),
+        dory: resolve(__dirname, 'dory/index.html'),
       },
     },
   },

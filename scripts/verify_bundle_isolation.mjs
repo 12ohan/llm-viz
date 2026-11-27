@@ -3,8 +3,8 @@
  * Automated N-Way Bundle-Isolation, Architectural-Boundary & Payload-Budget Gate
  * (`scripts/verify_bundle_isolation.mjs`)
  *
- * Scales dynamically with `ENTRIES` (currently 4: Nano, TwoTower, Diffusion, Uni; ready for 5–6+
- * entries by appending to `ENTRIES`). Enforces all 7 hard gates over a built Vite MPA output
+ * Scales dynamically with `ENTRIES` (currently 5: Nano, TwoTower, Diffusion, Uni, Dory; ready for
+ * 6+ entries by appending to `ENTRIES`). Enforces all 7 hard gates over a built Vite MPA output
  * directory (default `dist`, or `--dir <path>`):
  *   1. All entry HTML files exist.
  *   2. Parse all `<script src>`, `<link rel="modulepreload" href>`, and `<link rel="stylesheet" href>`
@@ -76,18 +76,30 @@ const FORBIDDEN_UNI_MARKERS = Object.freeze([
   'buildUniOpdExplorerScene',
 ]);
 
+const FORBIDDEN_DORY_MARKERS = Object.freeze([
+  'DORY_MINI_CONFIG',
+  'DorySession',
+  'buildDorySpatialScene',
+  'DORY_DISCREPANCY_LEDGER',
+  'runDorySelfSpecCycle',
+  'dory-nlerp-residual',
+  '__dorySpatialDebug',
+  'output_shallow',
+]);
+
 const NANO_ONLY_SOURCE_RE =
   /(?:^|\/)src\/(?:main\.ts|ui\/memoryChart\.ts)$|^(?:main\.ts|ui\/memoryChart\.ts)$/i;
 const TWOTOWER_SOURCE_RE = /(?:^|\/)(?:src\/)?twotower\//i;
 const DIFFUSION_SOURCE_RE = /(?:^|\/)(?:src\/)?diffusion\//i;
 const UNI_SOURCE_RE = /(?:^|\/)(?:src\/)?uni\//i;
+const DORY_SOURCE_RE = /(?:^|\/)(?:src\/)?dory\//i;
 const CONTROLS_SOURCE_RE = /(?:^|\/)(?:src\/)?ui\/controls(?:\.ts)?$/i;
 
 // Gate 4b: Nano UI, controller, walkthrough, and exclusive cutaway modules forbidden in EVERY non-Nano entry.
 const NANO_UI_EXCLUSIVE_SOURCE_RE =
   /^(?:src\/)?(?:main\.ts|ui\/(?:controls|overlay|memoryChart)\.ts|story\/walkthrough\.ts|model\/rcPlayback\.ts|scene\/(?:gqaCutaway|mambaCutaway)\.ts)$/i;
 
-// Gate 4c: Nano/TwoTower 52L hybrid core modules forbidden in EVERY non-hybrid entry (Diffusion, Uni, Models #5/#6).
+// Gate 4c: Nano/TwoTower 52L hybrid core modules forbidden in EVERY non-hybrid entry (Diffusion, Uni, Dory, and future Models #6+).
 const NANO_HYBRID_CORE_SOURCE_RE =
   /^(?:src\/)?(?:scene\/(?:spine|hybridPick|embeddingCutaway|outputCutaway|moeCutaway|gqaSpatial|mambaSpatial|moeSpatial|accumulation)\.ts|math\/(?:gqaSim|mambaSim|moeSim|hybridFlow|incrementalDecode)\.ts|model\/(?:spec|memory|state)\.ts)$/i;
 
@@ -139,6 +151,18 @@ const ENTRIES = Object.freeze([
     sourceRe: UNI_SOURCE_RE,
     sourceDesc: '"src/uni/"',
     markers: FORBIDDEN_UNI_MARKERS,
+  },
+  {
+    key: 'dory',
+    label: 'Dory',
+    shortCode: 'dory',
+    camelKey: 'dory',
+    pascalKey: 'Dory',
+    htmlRelPath: 'dory/index.html',
+    usesNanoHybridMath: false,
+    sourceRe: DORY_SOURCE_RE,
+    sourceDesc: '"src/dory/"',
+    markers: FORBIDDEN_DORY_MARKERS,
   },
 ]);
 
