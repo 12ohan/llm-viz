@@ -72,7 +72,6 @@ import type {
   UniSessionTaskMode,
 } from '../types';
 import {
-  createUniFocusTrap,
   handleUniTablistKeydown,
   isUniReducedMotionPreferred,
   shouldDeferGlobalShortcut,
@@ -253,6 +252,78 @@ export function createAtlasUploadTracker(): UniAtlasUploadTracker {
       lastAtlasKey = null;
     },
   };
+}
+
+const REFINEMENT_4X6_PLATES: ReadonlySet<string> = new Set([
+  'vq_code_stage',
+  'vq_paper_age',
+  'vq_tree_level',
+  'vq_mask_noise',
+  'vq_stratified_order',
+  'vq_unmask_rank',
+]);
+
+const REFINEMENT_24_ROW_PLATES: ReadonlySet<string> = new Set([
+  'vq_tree_embeddings',
+  'cfg_branch_0_logits',
+  'cfg_branch_1_logits',
+  'cfg_branch_2_logits',
+  'cfg_guided_logits',
+]);
+
+/**
+ * Pure helper mapping a View 5 (`refinement`) `UniPickIdentity` hit into a marked `4×6` grid
+ * cell index (`0..23`):
+ *   - `4×6` spatial plates (`vq_code_stage`, `vq_paper_age`, `vq_tree_level`, `vq_mask_noise`,
+ *     `vq_stratified_order`, `vq_unmask_rank`) -> `row * 6 + col` (`0..23`)
+ *   - `4×4` content-only `stratified_order` plate -> `row * 6 + col` (content cols `0..3`)
+ *   - `24×*` row-indexed plates (`vq_tree_embeddings`, `cfg_*_logits`) -> `row` (`0..23`)
+ */
+export function resolveRefinementGridCellFromPick(picked: UniPickIdentity): number | null {
+  const key = picked.tensorKey ?? picked.partId ?? '';
+
+  if (REFINEMENT_4X6_PLATES.has(key)) {
+    if (
+      picked.row !== null &&
+      picked.col !== null &&
+      picked.row >= 0 &&
+      picked.row < 4 &&
+      picked.col >= 0 &&
+      picked.col < 6
+    ) {
+      return picked.row * 6 + picked.col;
+    }
+    return null;
+  }
+
+  if (key === 'stratified_order') {
+    if (
+      picked.row !== null &&
+      picked.col !== null &&
+      picked.row >= 0 &&
+      picked.row < 4 &&
+      picked.col >= 0 &&
+      picked.col < 4
+    ) {
+      return picked.row * 6 + picked.col;
+    }
+    return null;
+  }
+
+  if (REFINEMENT_24_ROW_PLATES.has(key)) {
+    if (picked.row !== null && picked.row >= 0 && picked.row < 24) {
+      return picked.row;
+    }
+    if (picked.tokenIndex !== null && picked.tokenIndex >= 0 && picked.tokenIndex < 24) {
+      return picked.tokenIndex;
+    }
+    return null;
+  }
+
+  if (picked.tokenIndex !== null && picked.tokenIndex >= 0 && picked.tokenIndex < 24) {
+    return picked.tokenIndex;
+  }
+  return null;
 }
 
 // ============================================================================
@@ -538,10 +609,10 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
   viewportHost.appendChild(rgbInsetHost);
   const pixelPanel = createUniPixelCanvasPanel(rgbInsetHost);
 
-  // 28-Beat Guided Tour HUD Card
+  // 28-Beat Guided Tour HUD Card (non-modal region anchored top-right)
   const tourHud = el('aside', 'uni-tour-hud');
   tourHud.dataset.testid = 'uni-tour-hud';
-  tourHud.setAttribute('role', 'dialog');
+  tourHud.setAttribute('role', 'region');
   tourHud.setAttribute('aria-label', 'Guided Pedagogical Tour');
   tourHud.tabIndex = -1;
   tourHud.hidden = true;
@@ -607,10 +678,6 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     tourFooter,
   );
   viewportHost.appendChild(tourHud);
-
-  const tourFocusTrap = createUniFocusTrap(tourHud, () => {
-    exitTourInternal(true);
-  });
 
   // Bottom Timeline Dock Host
   const dockHost = el('div', 'uni-dock-host');
@@ -765,7 +832,7 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
 
   function computePresetPose(scene: UniSpatialScene): CameraPose {
     const metrics = readViewportMetrics();
-    const topInsetPx = 88;
+    const topInsetPx = tour.isActive() ? 116 : 88;
     const bottomInsetPx = scene.rgbPreviews.length > 0 ? 180 : 40;
     return fitOpBoundsCamera(scene.cameraPreset.fitBounds, metrics, {
       azimuthDeg: scene.cameraPreset.azimuthDeg,
@@ -946,7 +1013,9 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
       stageBadgesEl.appendChild(el('span', `uni-badge uni-badge--${b.tone}`, b.label));
     }
 
-    opdReadOnlyBanner.hidden = currentScene.viewMode !== 'opd_readonly';
+    const isOpd = currentScene.viewMode === 'opd_readonly';
+    opdReadOnlyBanner.hidden = !isOpd;
+    tourHud.classList.toggle('has-opd-banner', isOpd);
   }
 
   function syncTopViewTabs(): void {
@@ -967,11 +1036,17 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     }
   }
 
+  const exhaustedBranchIds = new Set<string>();
+
   function refreshDock(): void {
     const sess = getActiveSession();
+    const activeBranchId = sess.getActiveBranchId();
     const dockState = buildUniTimelineDockState(sess, {
       isPlaying,
       tourActive: tour.isActive(),
+      ...(activeBranchId && exhaustedBranchIds.has(activeBranchId)
+        ? { branchFinished: true }
+        : {}),
     });
     timelineDock.update(dockState);
   }
@@ -980,6 +1055,7 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     readonly refitCamera?: boolean;
     readonly animateCamera?: boolean;
     readonly syncRender?: boolean;
+    readonly preserveViewControlsDom?: boolean;
   }): void {
     const activeSess = getActiveSession();
     if (tour.isActive()) {
@@ -1017,7 +1093,9 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     refreshStageHud();
     refreshRgbInset();
     refreshDock();
-    renderInspectorBody();
+    renderInspectorBody({
+      preserveViewControlsDom: opts?.preserveViewControlsDom === true,
+    });
 
     if (opts?.refitCamera) {
       flyToCurrentScenePreset(opts.animateCamera === true);
@@ -1090,12 +1168,15 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
       ? freeSession.getBranch(freeSession.getActiveBranchId()!)
       : undefined;
     const highestRow = Math.max(0, (activeBranch?.cfgBatchSize ?? 1) - 1);
+    const nextScenePresetId: UniScenePresetId =
+      activeBranch?.scenePresetId ??
+      (taskMode === 'image_edit' ? 'harbor_panorama_16x8' : 'sunlit_cat_16x16');
     focus = {
       ...focus,
       executionViewId: taskMode,
       batchRow: highestRow,
       cfgBranchRow: highestRow,
-      ...(taskMode === 'image_edit' ? { scenePresetId: 'harbor_panorama_16x8' } : {}),
+      scenePresetId: nextScenePresetId,
     };
     hoveredCell = null;
     selectedCell = null;
@@ -1108,33 +1189,32 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
   }
 
   function setPrefillModeInternal(mode: UniElasticPrefillMode, syncRender = false): void {
+    if (tour.isActive()) return;
     focus = {
       ...focus,
       prefillMode: mode,
     };
 
-    if (!tour.isActive()) {
-      const curBranchId = freeSession.getActiveBranchId();
-      const curBranch = curBranchId ? freeSession.getBranch(curBranchId) : undefined;
-      if (
-        curBranch &&
-        curBranch.prefillMode !== mode &&
-        (curBranch.taskMode === 'text_to_image' || curBranch.taskMode === 'image_edit')
-      ) {
-        const match = freeSession
-          .getAllBranches()
-          .find((b) => b.taskMode === curBranch.taskMode && b.prefillMode === mode);
-        if (match && match.recordIds.length > 0) {
-          freeSession.setActiveRecord(match.recordIds[match.recordIds.length - 1]!);
-        } else {
-          const curRecId = freeSession.getActiveRecordId();
-          if (curRecId) {
-            const forked = freeSession.forkBranch(curRecId, {
-              label: `${curBranch.taskMode} · ${mode}`,
-              prefillMode: mode,
-            });
-            freeSession.stepBranch(forked.branchId);
-          }
+    const curBranchId = freeSession.getActiveBranchId();
+    const curBranch = curBranchId ? freeSession.getBranch(curBranchId) : undefined;
+    if (
+      curBranch &&
+      curBranch.prefillMode !== mode &&
+      (curBranch.taskMode === 'text_to_image' || curBranch.taskMode === 'image_edit')
+    ) {
+      const match = freeSession
+        .getAllBranches()
+        .find((b) => b.taskMode === curBranch.taskMode && b.prefillMode === mode);
+      if (match && match.recordIds.length > 0) {
+        freeSession.setActiveRecord(match.recordIds[match.recordIds.length - 1]!);
+      } else {
+        const curRecId = freeSession.getActiveRecordId();
+        if (curRecId) {
+          const forked = freeSession.forkBranch(curRecId, {
+            label: `${curBranch.taskMode} · ${mode}`,
+            prefillMode: mode,
+          });
+          freeSession.stepBranch(forked.branchId);
         }
       }
     }
@@ -1143,6 +1223,7 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
   }
 
   function stepCursorBy(delta: number): void {
+    if (tour.isActive()) return;
     const sess = getActiveSession();
     const branchId = sess.getActiveBranchId();
     const branch = branchId ? sess.getBranch(branchId) : undefined;
@@ -1158,6 +1239,7 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
   }
 
   function scrubToRecordIndex(indexInBranch: number): void {
+    if (tour.isActive()) return;
     const sess = getActiveSession();
     const branchId = sess.getActiveBranchId();
     const branch = branchId ? sess.getBranch(branchId) : undefined;
@@ -1172,10 +1254,13 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
 
   function executeNextStep(): void {
     if (tour.isActive()) return;
+    const activeBranchId = freeSession.getActiveBranchId();
     const rec = freeSession.stepBranch();
     if (rec) {
+      if (activeBranchId) exhaustedBranchIds.delete(activeBranchId);
       rebuildSceneAndRefresh();
     } else {
+      if (activeBranchId) exhaustedBranchIds.add(activeBranchId);
       refreshDock();
     }
   }
@@ -1196,12 +1281,16 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     const branch = freeSession.getBranch(branchId);
     if (!branch || branch.recordIds.length === 0) return;
     freeSession.setActiveRecord(branch.recordIds[branch.recordIds.length - 1]!);
+    const nextScenePresetId: UniScenePresetId =
+      branch.scenePresetId ??
+      (branch.taskMode === 'image_edit' ? 'harbor_panorama_16x8' : 'sunlit_cat_16x16');
     focus = {
       ...focus,
       executionViewId: branch.taskMode,
       prefillMode: branch.prefillMode,
       batchRow: Math.max(0, branch.cfgBatchSize - 1),
       cfgBranchRow: Math.max(0, branch.cfgBatchSize - 1),
+      scenePresetId: nextScenePresetId,
     };
     rebuildSceneAndRefresh();
   }
@@ -1215,6 +1304,7 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
   }
 
   function togglePlayback(): void {
+    if (tour.isActive()) return;
     if (isPlaying) {
       stopPlayback();
       return;
@@ -1307,7 +1397,6 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     hoveredCell = null;
     selectedCell = null;
     updateTourHudDom(state);
-    tourFocusTrap.activate();
     rebuildSceneAndRefresh({
       refitCamera: true,
       animateCamera: !syncRender,
@@ -1333,9 +1422,16 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
 
   function exitTourInternal(restoreFreeExplore: boolean, syncRender = false): void {
     if (!tour.isActive()) return;
+    const focusWasInTour =
+      typeof document !== 'undefined' &&
+      document.activeElement !== null &&
+      tourHud.contains(document.activeElement);
     const restored = tour.exit();
-    tourFocusTrap.deactivate();
     tourHud.hidden = true;
+    tourHud.classList.remove('has-opd-banner');
+    if (focusWasInTour && typeof tourLaunchBtn.focus === 'function') {
+      tourLaunchBtn.focus();
+    }
     hoveredCell = null;
     selectedCell = null;
     selectedPartId = null;
@@ -1369,11 +1465,28 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     scheduler.requestFrame();
   }
 
-  function renderViewControlsSection(container: HTMLElement): void {
+  function renderViewControlsSection(container: HTMLElement, cfgSize: number): () => void {
+    const tourLocked = tour.isActive();
     const sec = el('section', 'uni-inspector-section');
     sec.appendChild(
       el('h3', 'uni-section-heading', `View Controls · ${currentScene.viewMode.replace('_', ' ')}`),
     );
+
+    if (tourLocked) {
+      const lockNote = el(
+        'p',
+        'uni-tour-lock-note',
+        'Guided Tour Active — Exit Tour to customize',
+      );
+      lockNote.dataset.testid = 'uni-tour-lock-note';
+      sec.appendChild(lockNote);
+    }
+
+    const syncFns: (() => void)[] = [];
+    const syncSliderValue = (slider: HTMLInputElement, nextVal: string): void => {
+      if (typeof document !== 'undefined' && document.activeElement === slider) return;
+      if (slider.value !== nextVal) slider.value = nextVal;
+    };
 
     if (viewMode === 'macro' || viewMode === 'joint_attn') {
       // Live D5 Prefill Mode Toggle
@@ -1384,63 +1497,83 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
       const hfBtn = el('button', 'uni-chip-btn uni-chip-btn--amber', 'HF-Faithful (34L U)');
       hfBtn.type = 'button';
       hfBtn.dataset.testid = 'uni-inspector-d5-hf';
-      hfBtn.classList.toggle('is-active', focus.prefillMode === 'hf_faithful');
-      hfBtn.addEventListener('click', () => setPrefillModeInternal('hf_faithful'));
+      hfBtn.disabled = tourLocked;
+      hfBtn.addEventListener('click', () => {
+        if (tour.isActive()) return;
+        setPrefillModeInternal('hf_faithful');
+      });
 
       const prunedBtn = el('button', 'uni-chip-btn uni-chip-btn--teal', 'Elastic-Pruned (18L U)');
       prunedBtn.type = 'button';
       prunedBtn.dataset.testid = 'uni-inspector-d5-pruned';
-      prunedBtn.classList.toggle('is-active', focus.prefillMode === 'elastic_pruned');
-      prunedBtn.addEventListener('click', () => setPrefillModeInternal('elastic_pruned'));
+      prunedBtn.disabled = tourLocked;
+      prunedBtn.addEventListener('click', () => {
+        if (tour.isActive()) return;
+        setPrefillModeInternal('elastic_pruned');
+      });
+
+      syncFns.push(() => {
+        hfBtn.classList.toggle('is-active', focus.prefillMode === 'hf_faithful');
+        prunedBtn.classList.toggle('is-active', focus.prefillMode === 'elastic_pruned');
+      });
 
       d5Chips.append(hfBtn, prunedBtn);
       d5Row.appendChild(d5Chips);
       sec.appendChild(d5Row);
 
-      // Layer Presets (L0, L17, L18, L33) + 0..33 Slider
-      const activeLayer =
-        viewMode === 'macro'
-          ? (focus.selectedLayerIndex ?? 17)
-          : focus.jointLayerIndex;
+      // Layer Presets (L0, L17, L18, L33) + 0..33 Slider (stable DOM node preserved mid-drag)
+      const getActiveLayer = (): number =>
+        viewMode === 'macro' ? (focus.selectedLayerIndex ?? 17) : focus.jointLayerIndex;
       const layerRow = el('div', 'uni-control-row');
       const layerLbl = el('div', 'uni-control-label');
-      layerLbl.append(
-        el('span', undefined, 'Layer Index (0..33)'),
-        el(
-          'span',
-          'uni-control-value',
-          `L${activeLayer} · ${activeLayer < 18 ? 'Joint' : 'Split U⊥G'}`,
-        ),
-      );
+      const layerValEl = el('span', 'uni-control-value');
+      layerLbl.append(el('span', undefined, 'Layer Index (0..33)'), layerValEl);
+
       const presetChips = el('div', 'uni-chip-group');
+      const presetBtns: { readonly preset: number; readonly btn: HTMLButtonElement }[] = [];
       for (const preset of LAYER_PRESETS) {
         const b = el('button', 'uni-chip-btn', `L${preset}`);
         b.type = 'button';
-        b.classList.toggle('is-active', activeLayer === preset);
+        b.disabled = tourLocked;
         b.addEventListener('click', () => {
+          if (tour.isActive()) return;
           focus =
             viewMode === 'macro'
               ? { ...focus, selectedLayerIndex: preset }
               : { ...focus, jointLayerIndex: preset };
-          rebuildSceneAndRefresh();
+          rebuildSceneAndRefresh({ preserveViewControlsDom: true });
         });
+        presetBtns.push({ preset, btn: b });
         presetChips.appendChild(b);
       }
+
       const slider = el('input', 'uni-range-input');
       slider.type = 'range';
       slider.min = '0';
       slider.max = '33';
-      slider.value = String(activeLayer);
+      slider.disabled = tourLocked;
+      slider.dataset.testid = 'uni-layer-slider';
       slider.setAttribute('aria-label', 'Select transformer layer index');
+      const syncLayerControl = (): void => {
+        const activeLayer = getActiveLayer();
+        layerValEl.textContent = `L${activeLayer} · ${activeLayer < 18 ? 'Joint' : 'Split U⊥G'}`;
+        for (const item of presetBtns) {
+          item.btn.classList.toggle('is-active', activeLayer === item.preset);
+        }
+        syncSliderValue(slider, String(activeLayer));
+      };
       slider.addEventListener('input', () => {
+        if (tour.isActive()) return;
         const val = Number.parseInt(slider.value, 10);
         if (!Number.isFinite(val)) return;
         focus =
           viewMode === 'macro'
             ? { ...focus, selectedLayerIndex: val }
             : { ...focus, jointLayerIndex: val };
-        rebuildSceneAndRefresh();
+        syncLayerControl();
+        rebuildSceneAndRefresh({ preserveViewControlsDom: true });
       });
+      syncFns.push(syncLayerControl);
       layerRow.append(layerLbl, presetChips, slider);
       sec.appendChild(layerRow);
     }
@@ -1449,17 +1582,25 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
       const execRow = el('div', 'uni-control-row');
       execRow.appendChild(el('div', 'uni-control-label', 'Execution View (Tower Dimming)'));
       const chips = el('div', 'uni-chip-group');
-      const curExec = focus.executionViewId ?? currentScene.executionViewId;
+      const execBtns: { readonly id: UniExecutionViewId; readonly btn: HTMLButtonElement }[] = [];
       for (const choice of EXECUTION_VIEW_CHOICES) {
         const b = el('button', 'uni-chip-btn', choice.label);
         b.type = 'button';
-        b.classList.toggle('is-active', curExec === choice.id);
+        b.disabled = tourLocked;
         b.addEventListener('click', () => {
+          if (tour.isActive()) return;
           focus = { ...focus, executionViewId: choice.id };
-          rebuildSceneAndRefresh();
+          rebuildSceneAndRefresh({ preserveViewControlsDom: true });
         });
+        execBtns.push({ id: choice.id, btn: b });
         chips.appendChild(b);
       }
+      syncFns.push(() => {
+        const curExec = focus.executionViewId ?? currentScene.executionViewId;
+        for (const item of execBtns) {
+          item.btn.classList.toggle('is-active', curExec === item.id);
+        }
+      });
       execRow.appendChild(chips);
       sec.appendChild(execRow);
     }
@@ -1468,62 +1609,80 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
       const presetRow = el('div', 'uni-control-row');
       presetRow.appendChild(el('div', 'uni-control-label', 'Procedural RGB Scene Preset'));
       const chips = el('div', 'uni-chip-group');
-      const curPreset = focus.scenePresetId ?? 'sunlit_cat_16x16';
+      const presetBtns: { readonly id: UniScenePresetId; readonly btn: HTMLButtonElement }[] = [];
       for (const p of SCENE_PRESET_CHOICES) {
         const b = el('button', 'uni-chip-btn', p.label);
         b.type = 'button';
-        b.classList.toggle('is-active', curPreset === p.id);
+        b.disabled = tourLocked;
         b.addEventListener('click', () => {
+          if (tour.isActive()) return;
           focus = { ...focus, scenePresetId: p.id };
-          rebuildSceneAndRefresh();
+          rebuildSceneAndRefresh({ preserveViewControlsDom: true });
         });
+        presetBtns.push({ id: p.id, btn: b });
         chips.appendChild(b);
       }
+      syncFns.push(() => {
+        const curPreset = focus.scenePresetId ?? 'sunlit_cat_16x16';
+        for (const item of presetBtns) {
+          item.btn.classList.toggle('is-active', curPreset === item.id);
+        }
+      });
       presetRow.appendChild(chips);
       sec.appendChild(presetRow);
 
       const gainRow = el('div', 'uni-control-row');
       gainRow.appendChild(el('div', 'uni-control-label', 'D3 Multimodal Gain Preset'));
       const gChips = el('div', 'uni-chip-group');
-      const curGain: UniGainPresetId = focus.gainPresetId ?? 'mini_default';
+      const gainBtns: { readonly id: UniGainPresetId; readonly btn: HTMLButtonElement }[] = [];
       for (const g of [
         { id: 'mini_default' as const, label: 'Mini Default (0.25)' },
         { id: 'prod_exact' as const, label: 'Prod-Exact (0.01)' },
       ]) {
         const b = el('button', 'uni-chip-btn uni-chip-btn--teal', g.label);
         b.type = 'button';
-        b.classList.toggle('is-active', curGain === g.id);
+        b.disabled = tourLocked;
         b.addEventListener('click', () => {
+          if (tour.isActive()) return;
           focus = { ...focus, gainPresetId: g.id };
-          rebuildSceneAndRefresh();
+          rebuildSceneAndRefresh({ preserveViewControlsDom: true });
         });
+        gainBtns.push({ id: g.id, btn: b });
         gChips.appendChild(b);
       }
+      syncFns.push(() => {
+        const curGain: UniGainPresetId = focus.gainPresetId ?? 'mini_default';
+        for (const item of gainBtns) {
+          item.btn.classList.toggle('is-active', curGain === item.id);
+        }
+      });
       gainRow.appendChild(gChips);
       sec.appendChild(gainRow);
 
-      const discLabel = el('label', 'uni-checkbox-label');
+      const discLabel = el(
+        'label',
+        `uni-checkbox-label${tourLocked ? ' is-disabled' : ''}`,
+      );
       const discCb = el('input');
       discCb.type = 'checkbox';
-      discCb.checked = focus.includeDiscreteStream !== false;
+      discCb.disabled = tourLocked;
       discCb.addEventListener('change', () => {
+        if (tour.isActive()) return;
         focus = { ...focus, includeDiscreteStream: discCb.checked };
-        rebuildSceneAndRefresh();
+        rebuildSceneAndRefresh({ preserveViewControlsDom: true });
+      });
+      syncFns.push(() => {
+        discCb.checked = focus.includeDiscreteStream !== false;
       });
       discLabel.append(discCb, document.createTextNode('Show Emu3 IBQ + Packed Codec Stream (G)'));
       sec.appendChild(discLabel);
     }
 
     if (viewMode === 'joint_attn') {
-      const sess = getActiveSession();
-      const activeBranch = sess.getActiveBranchId()
-        ? sess.getBranch(sess.getActiveBranchId()!)
-        : undefined;
-      const cfgSize = activeBranch?.cfgBatchSize ?? 1;
-
       const cfgRow = el('div', 'uni-control-row');
       cfgRow.appendChild(el('div', 'uni-control-label', `CFG Batch Row (B_cfg = ${cfgSize})`));
       const cfgChips = el('div', 'uni-chip-group');
+      const cfgBtns: { readonly row: number; readonly btn: HTMLButtonElement }[] = [];
       for (let r = 0; r < cfgSize; r++) {
         const label =
           cfgSize === 3
@@ -1539,37 +1698,47 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
               : 'Row 0';
         const b = el('button', 'uni-chip-btn', label);
         b.type = 'button';
-        b.classList.toggle('is-active', focus.batchRow === r);
+        b.disabled = tourLocked;
         b.addEventListener('click', () => {
+          if (tour.isActive()) return;
           focus = { ...focus, batchRow: r };
-          rebuildSceneAndRefresh();
+          rebuildSceneAndRefresh({ preserveViewControlsDom: true });
         });
+        cfgBtns.push({ row: r, btn: b });
         cfgChips.appendChild(b);
       }
+      syncFns.push(() => {
+        for (const item of cfgBtns) {
+          item.btn.classList.toggle('is-active', focus.batchRow === item.row);
+        }
+      });
       cfgRow.appendChild(cfgChips);
       sec.appendChild(cfgRow);
 
       const qRow = el('div', 'uni-control-row');
       const qLbl = el('div', 'uni-control-label');
-      qLbl.append(
-        el('span', undefined, 'Focused Q Head (4:1 GQA)'),
-        el(
-          'span',
-          'uni-control-value',
-          `Q${focus.selectedQHead} → KV${Math.floor(focus.selectedQHead / 4)}`,
-        ),
-      );
+      const qValEl = el('span', 'uni-control-value');
+      qLbl.append(el('span', undefined, 'Focused Q Head (4:1 GQA)'), qValEl);
       const qChips = el('div', 'uni-chip-group');
+      const qBtns: { readonly head: number; readonly btn: HTMLButtonElement }[] = [];
       for (let h = 0; h < 8; h++) {
         const b = el('button', 'uni-chip-btn uni-chip-btn--teal', `Q${h}`);
         b.type = 'button';
-        b.classList.toggle('is-active', focus.selectedQHead === h);
+        b.disabled = tourLocked;
         b.addEventListener('click', () => {
+          if (tour.isActive()) return;
           focus = { ...focus, selectedQHead: h };
-          rebuildSceneAndRefresh();
+          rebuildSceneAndRefresh({ preserveViewControlsDom: true });
         });
+        qBtns.push({ head: h, btn: b });
         qChips.appendChild(b);
       }
+      syncFns.push(() => {
+        qValEl.textContent = `Q${focus.selectedQHead} → KV${Math.floor(focus.selectedQHead / 4)}`;
+        for (const item of qBtns) {
+          item.btn.classList.toggle('is-active', focus.selectedQHead === item.head);
+        }
+      });
       qRow.append(qLbl, qChips);
       sec.appendChild(qRow);
     }
@@ -1577,38 +1746,47 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     if (viewMode === 'ball_tree') {
       const codeRow = el('div', 'uni-control-row');
       const codeLbl = el('div', 'uni-control-label');
-      codeLbl.append(
-        el('span', undefined, 'Selected VQ Code (0..255)'),
-        el('span', 'uni-control-value', `#${focus.selectedCodeId}`),
-      );
+      const codeValEl = el('span', 'uni-control-value');
+      codeLbl.append(el('span', undefined, 'Selected VQ Code (0..255)'), codeValEl);
       const codeSlider = el('input', 'uni-range-input');
       codeSlider.type = 'range';
       codeSlider.min = '0';
       codeSlider.max = '255';
-      codeSlider.value = String(focus.selectedCodeId);
+      codeSlider.disabled = tourLocked;
+      codeSlider.dataset.testid = 'uni-code-slider';
       codeSlider.setAttribute('aria-label', 'Selected VQ codebook ID');
+      const syncCodeControl = (): void => {
+        codeValEl.textContent = `#${focus.selectedCodeId}`;
+        syncSliderValue(codeSlider, String(focus.selectedCodeId));
+      };
       codeSlider.addEventListener('input', () => {
+        if (tour.isActive()) return;
         const val = Number.parseInt(codeSlider.value, 10);
         if (Number.isFinite(val)) {
           focus = { ...focus, selectedCodeId: val };
-          rebuildSceneAndRefresh();
+          syncCodeControl();
+          rebuildSceneAndRefresh({ preserveViewControlsDom: true });
         }
       });
+      syncFns.push(syncCodeControl);
       codeRow.append(codeLbl, codeSlider);
       sec.appendChild(codeRow);
 
       const nRow = el('div', 'uni-control-row');
       nRow.appendChild(el('div', 'uni-control-label', 'Refinement Steps N (N=1 ≡ Binary MDM)'));
       const nChips = el('div', 'uni-chip-group');
+      const nBtns: { readonly n: UniRefinementStepPreset; readonly btn: HTMLButtonElement }[] = [];
       for (const n of REFINEMENT_STEP_PRESETS) {
         const b = el('button', 'uni-chip-btn uni-chip-btn--teal', `N = ${n}`);
         b.type = 'button';
-        b.classList.toggle('is-active', focus.refinementSteps === n);
+        b.disabled = tourLocked;
         b.addEventListener('click', () => {
+          if (tour.isActive()) return;
           const clampedStage = Math.min(n, focus.stageIndex);
           focus = { ...focus, refinementSteps: n, stageIndex: clampedStage };
-          rebuildSceneAndRefresh();
+          rebuildSceneAndRefresh({ preserveViewControlsDom: true });
         });
+        nBtns.push({ n, btn: b });
         nChips.appendChild(b);
       }
       nRow.appendChild(nChips);
@@ -1616,33 +1794,50 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
 
       const stageRow = el('div', 'uni-control-row');
       const stageLbl = el('div', 'uni-control-label');
-      stageLbl.append(
-        el('span', undefined, 'Active Stage (-1..N)'),
-        el('span', 'uni-control-value', `stage = ${focus.stageIndex}`),
-      );
+      const stageValEl = el('span', 'uni-control-value');
+      stageLbl.append(el('span', undefined, 'Active Stage (-1..N)'), stageValEl);
       const stageSlider = el('input', 'uni-range-input');
       stageSlider.type = 'range';
       stageSlider.min = '-1';
       stageSlider.max = String(focus.refinementSteps);
-      stageSlider.value = String(focus.stageIndex);
+      stageSlider.disabled = tourLocked;
+      stageSlider.dataset.testid = 'uni-stage-slider';
       stageSlider.setAttribute('aria-label', 'Ball-tree stage index');
+      const syncStageControl = (): void => {
+        for (const item of nBtns) {
+          item.btn.classList.toggle('is-active', focus.refinementSteps === item.n);
+        }
+        stageSlider.max = String(focus.refinementSteps);
+        stageValEl.textContent = `stage = ${focus.stageIndex}`;
+        syncSliderValue(stageSlider, String(focus.stageIndex));
+      };
       stageSlider.addEventListener('input', () => {
+        if (tour.isActive()) return;
         const val = Number.parseInt(stageSlider.value, 10);
         if (Number.isFinite(val)) {
           focus = { ...focus, stageIndex: val };
-          rebuildSceneAndRefresh();
+          syncStageControl();
+          rebuildSceneAndRefresh({ preserveViewControlsDom: true });
         }
       });
+      syncFns.push(syncStageControl);
       stageRow.append(stageLbl, stageSlider);
       sec.appendChild(stageRow);
 
-      const u26Label = el('label', 'uni-checkbox-label');
+      const u26Label = el(
+        'label',
+        `uni-checkbox-label${tourLocked ? ' is-disabled' : ''}`,
+      );
       const u26Cb = el('input');
       u26Cb.type = 'checkbox';
-      u26Cb.checked = focus.showProductionD17Comparison;
+      u26Cb.disabled = tourLocked;
       u26Cb.addEventListener('change', () => {
+        if (tour.isActive()) return;
         focus = { ...focus, showProductionD17Comparison: u26Cb.checked };
-        rebuildSceneAndRefresh();
+        rebuildSceneAndRefresh({ preserveViewControlsDom: true });
+      });
+      syncFns.push(() => {
+        u26Cb.checked = focus.showProductionD17Comparison;
       });
       u26Label.append(
         u26Cb,
@@ -1652,13 +1847,20 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     }
 
     if (viewMode === 'refinement') {
-      const stratLabel = el('label', 'uni-checkbox-label');
+      const stratLabel = el(
+        'label',
+        `uni-checkbox-label${tourLocked ? ' is-disabled' : ''}`,
+      );
       const stratCb = el('input');
       stratCb.type = 'checkbox';
-      stratCb.checked = focus.showStratifiedOrder;
+      stratCb.disabled = tourLocked;
       stratCb.addEventListener('change', () => {
+        if (tour.isActive()) return;
         focus = { ...focus, showStratifiedOrder: stratCb.checked };
-        rebuildSceneAndRefresh();
+        rebuildSceneAndRefresh({ preserveViewControlsDom: true });
+      });
+      syncFns.push(() => {
+        stratCb.checked = focus.showStratifiedOrder;
       });
       stratLabel.append(
         stratCb,
@@ -1668,23 +1870,30 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
 
       const cellRow = el('div', 'uni-control-row');
       const cellLbl = el('div', 'uni-control-label');
-      cellLbl.append(
-        el('span', undefined, 'Marked 4×6 Grid Cell (0..23)'),
-        el('span', 'uni-control-value', `#${focus.selectedGridCell ?? 0}`),
-      );
+      const cellValEl = el('span', 'uni-control-value');
+      cellLbl.append(el('span', undefined, 'Marked 4×6 Grid Cell (0..23)'), cellValEl);
       const cellSlider = el('input', 'uni-range-input');
       cellSlider.type = 'range';
       cellSlider.min = '0';
       cellSlider.max = '23';
-      cellSlider.value = String(focus.selectedGridCell ?? 0);
+      cellSlider.disabled = tourLocked;
+      cellSlider.dataset.testid = 'uni-grid-cell-slider';
       cellSlider.setAttribute('aria-label', 'Select marked 4x6 grid cell');
+      const syncCellControl = (): void => {
+        const curCell = focus.selectedGridCell ?? 0;
+        cellValEl.textContent = `#${curCell}`;
+        syncSliderValue(cellSlider, String(curCell));
+      };
       cellSlider.addEventListener('input', () => {
+        if (tour.isActive()) return;
         const val = Number.parseInt(cellSlider.value, 10);
         if (Number.isFinite(val)) {
           focus = { ...focus, selectedGridCell: val };
-          rebuildSceneAndRefresh();
+          syncCellControl();
+          rebuildSceneAndRefresh({ preserveViewControlsDom: true });
         }
       });
+      syncFns.push(syncCellControl);
       cellRow.append(cellLbl, cellSlider);
       sec.appendChild(cellRow);
     }
@@ -1693,38 +1902,60 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
       const modeRow = el('div', 'uni-control-row');
       modeRow.appendChild(el('div', 'uni-control-label', 'Dual-CFG Edit Guidance Mode (U16)'));
       const mChips = el('div', 'uni-chip-group');
-      const curMode: UniEditGuidanceMode = focus.editGuidanceMode ?? 'legacy';
+      const modeBtns: { readonly mode: UniEditGuidanceMode; readonly btn: HTMLButtonElement }[] = [];
       for (const m of ['legacy', 'independent', 'ip2p'] as const) {
         const b = el('button', 'uni-chip-btn uni-chip-btn--teal', m);
         b.type = 'button';
-        b.classList.toggle('is-active', curMode === m);
+        b.disabled = tourLocked;
         b.addEventListener('click', () => {
+          if (tour.isActive()) return;
           focus = { ...focus, editGuidanceMode: m };
-          rebuildSceneAndRefresh();
+          rebuildSceneAndRefresh({ preserveViewControlsDom: true });
         });
+        modeBtns.push({ mode: m, btn: b });
         mChips.appendChild(b);
       }
+      syncFns.push(() => {
+        const curMode: UniEditGuidanceMode = focus.editGuidanceMode ?? 'legacy';
+        for (const item of modeBtns) {
+          item.btn.classList.toggle('is-active', curMode === item.mode);
+        }
+      });
       modeRow.appendChild(mChips);
       sec.appendChild(modeRow);
 
-      const cropLabel = el('label', 'uni-checkbox-label');
+      const cropLabel = el(
+        'label',
+        `uni-checkbox-label${tourLocked ? ' is-disabled' : ''}`,
+      );
       const cropCb = el('input');
       cropCb.type = 'checkbox';
-      cropCb.checked = focus.cropToSource;
+      cropCb.disabled = tourLocked;
       cropCb.addEventListener('change', () => {
+        if (tour.isActive()) return;
         focus = { ...focus, cropToSource: cropCb.checked };
-        rebuildSceneAndRefresh();
+        rebuildSceneAndRefresh({ preserveViewControlsDom: true });
+      });
+      syncFns.push(() => {
+        cropCb.checked = focus.cropToSource;
       });
       cropLabel.append(cropCb, document.createTextNode('Crop Decoded 16×16 Back to Native Source'));
       sec.appendChild(cropLabel);
 
-      const lockLabel = el('label', 'uni-checkbox-label');
+      const lockLabel = el(
+        'label',
+        `uni-checkbox-label${tourLocked ? ' is-disabled' : ''}`,
+      );
       const lockCb = el('input');
       lockCb.type = 'checkbox';
-      lockCb.checked = focus.showPaddingLockOverlay;
+      lockCb.disabled = tourLocked;
       lockCb.addEventListener('change', () => {
+        if (tour.isActive()) return;
         focus = { ...focus, showPaddingLockOverlay: lockCb.checked };
-        rebuildSceneAndRefresh();
+        rebuildSceneAndRefresh({ preserveViewControlsDom: true });
+      });
+      syncFns.push(() => {
+        lockCb.checked = focus.showPaddingLockOverlay;
       });
       lockLabel.append(
         lockCb,
@@ -1738,6 +1969,7 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
       const bayRow = el('div', 'uni-control-row');
       bayRow.appendChild(el('div', 'uni-control-label', 'OPD Read-Only Bay Focus'));
       const bChips = el('div', 'uni-chip-group');
+      const bayBtns: { readonly id: UniOpdBayFocus; readonly btn: HTMLButtonElement }[] = [];
       for (const bay of [
         { id: 'both' as UniOpdBayFocus, label: 'Both Bays' },
         { id: 'understanding' as UniOpdBayFocus, label: 'Understanding (U)' },
@@ -1745,41 +1977,61 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
       ]) {
         const b = el('button', 'uni-chip-btn', bay.label);
         b.type = 'button';
-        b.classList.toggle('is-active', focus.opdSelectedBay === bay.id);
+        b.disabled = tourLocked;
         b.addEventListener('click', () => {
+          if (tour.isActive()) return;
           focus = { ...focus, opdSelectedBay: bay.id };
-          rebuildSceneAndRefresh();
+          rebuildSceneAndRefresh({ preserveViewControlsDom: true });
         });
+        bayBtns.push({ id: bay.id, btn: b });
         bChips.appendChild(b);
       }
+      syncFns.push(() => {
+        for (const item of bayBtns) {
+          item.btn.classList.toggle('is-active', focus.opdSelectedBay === item.id);
+        }
+      });
       bayRow.appendChild(bChips);
       sec.appendChild(bayRow);
 
       const rRow = el('div', 'uni-control-row');
       const rLbl = el('div', 'uni-control-label');
-      rLbl.append(
-        el('span', undefined, 'Flow Noising Ratio r'),
-        el('span', 'uni-control-value', focus.opdR.toFixed(2)),
-      );
+      const rValEl = el('span', 'uni-control-value');
+      rLbl.append(el('span', undefined, 'Flow Noising Ratio r'), rValEl);
       const rSlider = el('input', 'uni-range-input');
       rSlider.type = 'range';
       rSlider.min = '0.5';
       rSlider.max = '0.95';
       rSlider.step = '0.05';
-      rSlider.value = String(focus.opdR);
+      rSlider.disabled = tourLocked;
+      rSlider.dataset.testid = 'uni-opd-r-slider';
       rSlider.setAttribute('aria-label', 'Continuous-flow OPD noising ratio r');
+      const syncRControl = (): void => {
+        rValEl.textContent = focus.opdR.toFixed(2);
+        syncSliderValue(rSlider, String(focus.opdR));
+      };
       rSlider.addEventListener('input', () => {
+        if (tour.isActive()) return;
         const val = Number.parseFloat(rSlider.value);
         if (Number.isFinite(val)) {
           focus = { ...focus, opdR: val };
-          rebuildSceneAndRefresh();
+          syncRControl();
+          rebuildSceneAndRefresh({ preserveViewControlsDom: true });
         }
       });
+      syncFns.push(syncRControl);
       rRow.append(rLbl, rSlider);
       sec.appendChild(rRow);
     }
 
     container.appendChild(sec);
+    const syncAll = (): void => {
+      for (let i = 0; i < syncFns.length; i++) {
+        syncFns[i]!();
+      }
+    };
+    syncAll();
+    return syncAll;
   }
 
   function renderCellInspectSection(container: HTMLElement): void {
@@ -2130,13 +2382,72 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     }
   }
 
-  function renderInspectorBody(): void {
-    inspectorBody.innerHTML = '';
+  let mountedInspectorTab: UniInspectorTabId | null = null;
+  let mountedControlsKey: string | null = null;
+  let viewControlsSlot: HTMLElement | null = null;
+  let cellInspectSlot: HTMLElement | null = null;
+  let diagnosticsSlot: HTMLElement | null = null;
+  let syncViewControlsInPlace: (() => void) | null = null;
+
+  function renderCellInspectOnly(): void {
+    if (inspectorTab !== 'inspect' || !cellInspectSlot) return;
+    cellInspectSlot.innerHTML = '';
+    renderCellInspectSection(cellInspectSlot);
+  }
+
+  function renderInspectorBody(opts?: { readonly preserveViewControlsDom?: boolean }): void {
     if (inspectorTab === 'inspect') {
-      renderViewControlsSection(inspectorBody);
-      renderCellInspectSection(inspectorBody);
-      renderViewDiagnosticsSection(inspectorBody);
-    } else if (inspectorTab === 'architecture') {
+      if (
+        mountedInspectorTab !== 'inspect' ||
+        !viewControlsSlot ||
+        !cellInspectSlot ||
+        !diagnosticsSlot
+      ) {
+        inspectorBody.innerHTML = '';
+        viewControlsSlot = el('div', 'uni-inspector-slot');
+        viewControlsSlot.dataset.testid = 'uni-inspector-controls-slot';
+        cellInspectSlot = el('div', 'uni-inspector-slot');
+        cellInspectSlot.dataset.testid = 'uni-inspector-cell-slot';
+        diagnosticsSlot = el('div', 'uni-inspector-slot');
+        diagnosticsSlot.dataset.testid = 'uni-inspector-diagnostics-slot';
+        inspectorBody.append(viewControlsSlot, cellInspectSlot, diagnosticsSlot);
+        mountedInspectorTab = 'inspect';
+        mountedControlsKey = null;
+        syncViewControlsInPlace = null;
+      }
+
+      const activeSess = getActiveSession();
+      const activeBranch = activeSess.getActiveBranchId()
+        ? activeSess.getBranch(activeSess.getActiveBranchId()!)
+        : undefined;
+      const cfgSize = activeBranch?.cfgBatchSize ?? 1;
+      const nextControlsKey = `${viewMode}|${tour.isActive() ? '1' : '0'}|${cfgSize}`;
+
+      if (!opts?.preserveViewControlsDom && mountedControlsKey !== nextControlsKey) {
+        viewControlsSlot.innerHTML = '';
+        syncViewControlsInPlace = renderViewControlsSection(viewControlsSlot, cfgSize);
+        mountedControlsKey = nextControlsKey;
+      } else if (syncViewControlsInPlace) {
+        syncViewControlsInPlace();
+      }
+
+      cellInspectSlot.innerHTML = '';
+      renderCellInspectSection(cellInspectSlot);
+
+      diagnosticsSlot.innerHTML = '';
+      renderViewDiagnosticsSection(diagnosticsSlot);
+      return;
+    }
+
+    mountedInspectorTab = inspectorTab;
+    mountedControlsKey = null;
+    viewControlsSlot = null;
+    cellInspectSlot = null;
+    diagnosticsSlot = null;
+    syncViewControlsInPlace = null;
+
+    inspectorBody.innerHTML = '';
+    if (inspectorTab === 'architecture') {
       renderArchitectureTab(inspectorBody);
     } else {
       renderLedgerTab(inspectorBody);
@@ -2208,7 +2519,7 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     if (prevKey !== nextKey) {
       hoveredCell = nextHover;
       if (inspectorTab === 'inspect') {
-        renderInspectorBody();
+        renderCellInspectOnly();
       }
       scheduler.requestFrame();
     }
@@ -2233,35 +2544,38 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     if (picked && !tour.isActive()) {
       if (viewMode === 'macro' && picked.layerIndex !== null) {
         focus = { ...focus, selectedLayerIndex: picked.layerIndex };
-        rebuildSceneAndRefresh();
+        rebuildSceneAndRefresh({ preserveViewControlsDom: true });
         return;
       }
       if (viewMode === 'joint_attn' && picked.qHeadIndex !== null) {
         focus = { ...focus, selectedQHead: picked.qHeadIndex };
-        rebuildSceneAndRefresh();
+        rebuildSceneAndRefresh({ preserveViewControlsDom: true });
         return;
       }
       if (viewMode === 'ball_tree') {
         if (picked.tensorKey === 'codebook_pca_node' && picked.tokenIndex !== null) {
           focus = { ...focus, selectedCodeId: picked.tokenIndex };
-          rebuildSceneAndRefresh();
+          rebuildSceneAndRefresh({ preserveViewControlsDom: true });
           return;
         }
         if (picked.tensorKey === 'ball_membership' && picked.row !== null && picked.row <= 8) {
-          if (inspectorTab === 'inspect') renderInspectorBody();
+          if (inspectorTab === 'inspect') renderCellInspectOnly();
           scheduler.requestFrame();
           return;
         }
       }
-      if (viewMode === 'refinement' && picked.tokenIndex !== null && picked.tokenIndex <= 23) {
-        focus = { ...focus, selectedGridCell: picked.tokenIndex };
-        rebuildSceneAndRefresh();
-        return;
+      if (viewMode === 'refinement') {
+        const mappedCell = resolveRefinementGridCellFromPick(picked);
+        if (mappedCell !== null) {
+          focus = { ...focus, selectedGridCell: mappedCell };
+          rebuildSceneAndRefresh({ preserveViewControlsDom: true });
+          return;
+        }
       }
     }
 
     if (inspectorTab === 'inspect') {
-      renderInspectorBody();
+      renderCellInspectOnly();
     }
     scheduler.requestFrame();
   };
@@ -2271,7 +2585,7 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     if (hoveredCell !== null) {
       hoveredCell = null;
       if (inspectorTab === 'inspect') {
-        renderInspectorBody();
+        renderCellInspectOnly();
       }
       scheduler.requestFrame();
     }
@@ -2303,9 +2617,6 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
   // --------------------------------------------------------------------------
 
   const onWindowKeydown = (ev: KeyboardEvent): void => {
-    if (tour.isActive() && tourFocusTrap.handleKeydown(ev)) {
-      return;
-    }
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     if (shouldDeferGlobalShortcut(ev.target as HTMLElement | null)) return;
 
@@ -2501,7 +2812,6 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     if (disposed) return;
     disposed = true;
     scheduler.dispose();
-    tourFocusTrap.deactivate();
     if (resizeObserver) {
       resizeObserver.disconnect();
       resizeObserver = null;

@@ -654,16 +654,16 @@ input {
   pointer-events: none;
 }
 
-.uni-rgb-inset-host:empty {
-  display: none;
-}
-
 .uni-pixel-strip {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   align-items: flex-end;
   pointer-events: auto;
+}
+
+.uni-pixel-strip:empty {
+  display: none;
 }
 
 .uni-pixel-card {
@@ -772,9 +772,9 @@ input {
 
 .uni-tour-hud {
   position: absolute;
+  top: 10px;
   right: 12px;
-  bottom: 12px;
-  width: min(460px, calc(100% - 24px));
+  width: min(440px, calc(100% - 24px));
   padding: 12px 14px;
   border-radius: var(--uni-radius-lg);
   background: rgba(255, 255, 255, 0.97);
@@ -787,8 +787,36 @@ input {
   gap: 8px;
 }
 
+.uni-tour-hud.has-opd-banner {
+  top: 52px;
+}
+
 .uni-tour-hud[hidden] {
   display: none;
+}
+
+.uni-tour-lock-note {
+  margin: 0 0 4px 0;
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: var(--uni-u-indigo-bg);
+  border: 1px solid var(--uni-u-indigo-border);
+  color: var(--uni-u-indigo);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.uni-chip-btn:disabled,
+.uni-range-input:disabled,
+.uni-dock-toggle-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.uni-checkbox-label.is-disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .uni-tour-acts {

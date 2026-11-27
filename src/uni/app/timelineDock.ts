@@ -100,18 +100,80 @@ export function sessionTaskModeToDockChoice(mode: UniSessionTaskMode): UniDockTa
   }
 }
 
+const UNI_DEFAULT_UNDERSTANDING_MAX_NEW_TOKENS = 8;
+
+/**
+ * Compact structural signature for `<select>` branch options so `createUniTimelineDock`
+ * avoids clearing/rebuilding `<option>` nodes when only the active step or playback changes.
+ */
+export function computeBranchOptionsSignature(
+  branches: readonly UniTimelineBranchSummary[],
+): string {
+  const parts = new Array<string>(branches.length);
+  for (let i = 0; i < branches.length; i++) {
+    const b = branches[i]!;
+    parts[i] = `${b.branchId}|${b.label}|${b.recordCount}`;
+  }
+  return parts.join(';;');
+}
+
+function resolveBranchInitialPromptLen(
+  session: UniSession,
+  branch: UniSessionBranch,
+): number {
+  let cursorBranch: UniSessionBranch | undefined = branch;
+  let hops = 0;
+  while (cursorBranch && hops < 16) {
+    if (cursorBranch.recordIds.length > 0) {
+      const firstRec = session.getRecord(cursorBranch.recordIds[0]!);
+      if (firstRec && firstRec.kind === 'prefill') {
+        return firstRec.routing.length;
+      }
+    }
+    if (!cursorBranch.parentBranchId) break;
+    cursorBranch = session.getBranch(cursorBranch.parentBranchId);
+    hops += 1;
+  }
+  if (branch.recordIds.length > 0) {
+    const firstRec = session.getRecord(branch.recordIds[0]!);
+    if (firstRec) return firstRec.positionIds[0] ?? 0;
+  }
+  return 0;
+}
+
 function canBranchExecuteAnotherStep(
+  session: UniSession,
   branch: UniSessionBranch | undefined,
   lastRecord: UniSessionRecord | undefined,
   tourActive: boolean,
   maxRecords: number,
   totalSessionRecords: number,
+  opts?: {
+    readonly maxNewTokens?: number;
+    readonly branchFinished?: boolean;
+  },
 ): boolean {
   if (!branch || tourActive) return false;
+  if (opts?.branchFinished === true) return false;
   if (totalSessionRecords >= maxRecords) return false;
+
+  // Respect explicit completion signals if exposed by UniSession or a branch wrapper
+  const maybeFinishedFn = (
+    session as unknown as { isBranchFinished?: (branchId: string) => boolean }
+  ).isBranchFinished;
+  if (typeof maybeFinishedFn === 'function' && maybeFinishedFn.call(session, branch.branchId)) {
+    return false;
+  }
+  if ((branch as unknown as { finished?: boolean }).finished === true) {
+    return false;
+  }
 
   if (branch.taskMode === 'text_to_image' || branch.taskMode === 'image_edit') {
     const totalRounds = branch.schedule?.totalRounds ?? 0;
+    if (totalRounds <= 0) return false;
+    if (lastRecord?.kind === 'image_denoise' && lastRecord.imageState) {
+      return lastRecord.imageState.roundIndex + 1 < totalRounds;
+    }
     return branch.recordIds.length < 1 + totalRounds;
   }
 
@@ -126,13 +188,48 @@ function canBranchExecuteAnotherStep(
   }
 
   // `text_understanding` | `visual_understanding`
-  if (branch.prefixCache.seqLen >= UNI_MINI_CONFIG.kvCapacity) return false;
-  if (!lastRecord || lastRecord.kind === 'prefill') return true;
+  const effectiveMaxNewTokens = opts?.maxNewTokens ?? UNI_DEFAULT_UNDERSTANDING_MAX_NEW_TOKENS;
+  if (effectiveMaxNewTokens <= 0) return false;
+
+  const initialPromptLen = resolveBranchInitialPromptLen(session, branch);
+  const generatedTokens = Math.max(0, branch.prefixCache.seqLen - initialPromptLen);
+
+  if (!lastRecord || lastRecord.kind === 'prefill') {
+    const defaultBlockLen = 4;
+    return (
+      generatedTokens < effectiveMaxNewTokens &&
+      branch.prefixCache.seqLen + defaultBlockLen <= branch.prefixCache.capacity
+    );
+  }
+
   const tokens = lastRecord.textState?.tokenIds;
+  const blockLength = tokens && tokens.length > 0 ? tokens.length : 4;
+  let hasRemainingMask = false;
   if (tokens) {
     for (let i = 0; i < tokens.length; i++) {
       if (tokens[i] === UNI_MINI_EOS_TOKEN_ID) return false;
+      if (tokens[i] === UNI_MINI_MASK_TOKEN_ID) {
+        hasRemainingMask = true;
+      }
     }
+  }
+
+  // Mid-block denoising steps still have [MASK] slots to unmask within the active block
+  if (hasRemainingMask) {
+    return true;
+  }
+
+  // Block just committed: check maxNewTokens budget, partial-block budget truncation, and KV room
+  if (generatedTokens >= effectiveMaxNewTokens) {
+    return false;
+  }
+  const blockEndPos = (lastRecord.positionIds[0] ?? initialPromptLen) + blockLength;
+  if (blockEndPos > branch.prefixCache.seqLen) {
+    // Commit cropped the block short (EOS or custom maxNewTokens < blockLength boundary)
+    return false;
+  }
+  if (branch.prefixCache.seqLen + blockLength > branch.prefixCache.capacity) {
+    return false;
   }
   return true;
 }
@@ -166,6 +263,8 @@ export function buildUniTimelineDockState(
     readonly isPlaying?: boolean;
     readonly tourActive?: boolean;
     readonly activeRecordId?: string | null;
+    readonly maxNewTokens?: number;
+    readonly branchFinished?: boolean;
   },
 ): UniTimelineDockState {
   const isPlaying = opts?.isPlaying === true;
@@ -193,8 +292,9 @@ export function buildUniTimelineDockState(
   const rawIdx = activeRecordId ? recordIds.indexOf(activeRecordId) : -1;
   const currentStepIndex = rawIdx >= 0 ? rawIdx : Math.max(0, totalRecordsInBranch - 1);
 
-  const canStepBack = totalRecordsInBranch > 0 && currentStepIndex > 0;
-  const canStepForward = totalRecordsInBranch > 0 && currentStepIndex < totalRecordsInBranch - 1;
+  const canStepBack = !tourActive && totalRecordsInBranch > 0 && currentStepIndex > 0;
+  const canStepForward =
+    !tourActive && totalRecordsInBranch > 0 && currentStepIndex < totalRecordsInBranch - 1;
 
   const lastRecordId =
     totalRecordsInBranch > 0 ? recordIds[totalRecordsInBranch - 1]! : undefined;
@@ -202,11 +302,16 @@ export function buildUniTimelineDockState(
   const memoryAudit = session.auditMemory();
 
   const canExecuteStep = canBranchExecuteAnotherStep(
+    session,
     activeBranch,
     lastRecord,
     tourActive,
     memoryAudit.maxRecords,
     memoryAudit.recordCount,
+    {
+      ...(opts?.maxNewTokens !== undefined ? { maxNewTokens: opts.maxNewTokens } : {}),
+      ...(opts?.branchFinished !== undefined ? { branchFinished: opts.branchFinished } : {}),
+    },
   );
 
   const allBranches = session.getAllBranches();
@@ -413,6 +518,7 @@ export function createUniTimelineDock(
   container.appendChild(root);
 
   let disposed = false;
+  let lastBranchOptionsSignature = '';
 
   function update(state: UniTimelineDockState): void {
     if (disposed) return;
@@ -425,11 +531,11 @@ export function createUniTimelineDock(
       taskButtons[i]!.disabled = state.tourActive;
     }
 
-    stepBackBtn.disabled = !state.canStepBack;
-    stepFwdBtn.disabled = !state.canStepForward;
+    stepBackBtn.disabled = state.tourActive || !state.canStepBack;
+    stepFwdBtn.disabled = state.tourActive || !state.canStepForward;
     executeBtn.disabled = !state.canExecuteStep || state.tourActive;
     forkBtn.disabled = state.tourActive || state.activeRecordId === null;
-    playBtn.disabled = state.totalRecordsInBranch <= 1;
+    playBtn.disabled = state.tourActive || state.totalRecordsInBranch <= 1;
     playBtn.textContent = state.isPlaying ? '⏸ Pause' : '▶ Play';
     playBtn.setAttribute('aria-pressed', state.isPlaying ? 'true' : 'false');
 
@@ -437,28 +543,34 @@ export function createUniTimelineDock(
     scrubber.min = '0';
     scrubber.max = String(maxIdx);
     scrubber.value = String(Math.max(0, Math.min(maxIdx, state.currentStepIndex)));
-    scrubber.disabled = state.totalRecordsInBranch <= 1;
+    scrubber.disabled = state.tourActive || state.totalRecordsInBranch <= 1;
 
     const displayCur = state.totalRecordsInBranch > 0 ? state.currentStepIndex + 1 : 0;
     stepLabel.textContent = `Step ${displayCur} / ${state.totalRecordsInBranch}`;
 
-    // Rebuild branch options only when branch list or active selection changes
-    branchSelect.innerHTML = '';
-    for (let i = 0; i < state.branches.length; i++) {
-      const b = state.branches[i]!;
-      const opt = document.createElement('option');
-      opt.value = b.branchId;
-      opt.textContent = `${b.label} (${b.recordCount})`;
-      opt.selected = b.isActive;
-      branchSelect.appendChild(opt);
+    // Rebuild branch <option> nodes ONLY when the branch list signature changes
+    const nextBranchSig = computeBranchOptionsSignature(state.branches);
+    if (nextBranchSig !== lastBranchOptionsSignature) {
+      lastBranchOptionsSignature = nextBranchSig;
+      branchSelect.innerHTML = '';
+      for (let i = 0; i < state.branches.length; i++) {
+        const b = state.branches[i]!;
+        const opt = document.createElement('option');
+        opt.value = b.branchId;
+        opt.textContent = `${b.label} (${b.recordCount})`;
+        branchSelect.appendChild(opt);
+      }
     }
+    branchSelect.value = state.activeBranchId ?? '';
     branchSelect.disabled = state.tourActive || state.branches.length === 0;
 
     const isHf = state.prefillMode === 'hf_faithful';
     hfBtn.classList.toggle('is-active', isHf);
     hfBtn.setAttribute('aria-pressed', isHf ? 'true' : 'false');
+    hfBtn.disabled = state.tourActive;
     prunedBtn.classList.toggle('is-active', !isHf);
     prunedBtn.setAttribute('aria-pressed', !isHf ? 'true' : 'false');
+    prunedBtn.disabled = state.tourActive;
 
     const usedMiB = (state.memoryAudit.totalRetainedBytes / (1024 * 1024)).toFixed(2);
     const maxMiB = (state.memoryAudit.maxAllowedBytes / (1024 * 1024)).toFixed(2);

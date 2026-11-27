@@ -36,6 +36,7 @@ import { renderRgbDescriptorToRgba } from '../src/uni/app/pixelCanvas';
 import {
   createAtlasUploadTracker,
   createIdleRafScheduler,
+  resolveRefinementGridCellFromPick,
 } from '../src/uni/app/spatialApp';
 import {
   computeOverlayCellNumBudget,
@@ -43,6 +44,8 @@ import {
 } from '../src/uni/app/spatialOverlay';
 import {
   buildUniTimelineDockState,
+  computeBranchOptionsSignature,
+  createUniTimelineDock,
   sessionTaskModeToDockChoice,
   taskChoiceToSessionTaskMode,
   UNI_DOCK_TASK_CHOICES,
@@ -528,6 +531,233 @@ describe('timelineDock.ts contracts (4 tasks, D5 telemetry & round-trip mapping)
     expect(hfState.layerSummary).toContain('split-U waste');
     expect(hfState.layerSummary).toContain('34L U + 34L G');
   });
+
+  it('disables canExecuteStep immediately when an Understanding branch reaches maxNewTokens and locks transport on tourActive', () => {
+    const session = new UniSession(SHARED_BUNDLE);
+    const branch = session.startBranch({
+      taskMode: 'text_understanding',
+      blockLength: 4,
+      stepsPerBlock: 4,
+      maxNewTokens: 8,
+    });
+
+    // At prefill, branch can execute next step
+    expect(buildUniTimelineDockState(session).canExecuteStep).toBe(true);
+
+    // Run to completion (default maxNewTokens = 8)
+    session.runBranchToCompletion(branch.branchId);
+    const doneState = buildUniTimelineDockState(session);
+    expect(doneState.canExecuteStep).toBe(false);
+    expect(doneState.canStepBack).toBe(true);
+    expect(doneState.canStepForward).toBe(false);
+
+    // When tourActive === true, dock state reports tourActive and disables stepping & execution
+    const tourState = buildUniTimelineDockState(session, { tourActive: true });
+    expect(tourState.tourActive).toBe(true);
+    expect(tourState.canExecuteStep).toBe(false);
+    expect(tourState.canStepBack).toBe(false);
+    expect(tourState.canStepForward).toBe(false);
+
+    // Custom lower maxNewTokens passed via opts also disables immediately at 4 generated tokens
+    const customSession = new UniSession(SHARED_BUNDLE);
+    const customBranch = customSession.startBranch({
+      taskMode: 'visual_understanding',
+      blockLength: 4,
+      stepsPerBlock: 4,
+      maxNewTokens: 4,
+    });
+    customSession.runBranchToCompletion(customBranch.branchId);
+    expect(buildUniTimelineDockState(customSession, { maxNewTokens: 4 }).canExecuteStep).toBe(
+      false,
+    );
+  });
+
+  it('createUniTimelineDock disables transport/D5 controls during tourActive and preserves <select> options when branch signature is unchanged', () => {
+    type MockNode = {
+      tagName: string;
+      type?: string;
+      className: string;
+      textContent: string;
+      value: string;
+      min: string;
+      max: string;
+      disabled: boolean;
+      tabIndex: number;
+      title: string;
+      dataset: Record<string, string>;
+      attributes: Record<string, string>;
+      classes: Set<string>;
+      children: MockNode[];
+      parentNode: MockNode | null;
+      classList: {
+        toggle(cls: string, force?: boolean): boolean;
+        contains(cls: string): boolean;
+      };
+      setAttribute(k: string, v: string): void;
+      getAttribute(k: string): string | null;
+      addEventListener(type: string, fn: (...args: unknown[]) => void): void;
+      appendChild(child: MockNode): MockNode;
+      append(...nodes: MockNode[]): void;
+      removeChild(child: MockNode): MockNode;
+      focus(): void;
+      innerHTML: string;
+    };
+
+    let optionCreations = 0;
+    const makeMockNode = (tag: string): MockNode => {
+      if (tag.toLowerCase() === 'option') optionCreations += 1;
+      const classes = new Set<string>();
+      const node: MockNode = {
+        tagName: tag.toUpperCase(),
+        className: '',
+        textContent: '',
+        value: '',
+        min: '0',
+        max: '0',
+        disabled: false,
+        tabIndex: 0,
+        title: '',
+        dataset: {},
+        attributes: {},
+        classes,
+        children: [],
+        parentNode: null,
+        classList: {
+          toggle(cls: string, force?: boolean): boolean {
+            const next = force !== undefined ? force : !classes.has(cls);
+            if (next) classes.add(cls);
+            else classes.delete(cls);
+            return next;
+          },
+          contains(cls: string): boolean {
+            return classes.has(cls);
+          },
+        },
+        setAttribute(k: string, v: string): void {
+          node.attributes[k] = v;
+        },
+        getAttribute(k: string): string | null {
+          return node.attributes[k] ?? null;
+        },
+        addEventListener(): void {
+          // no-op in mock
+        },
+        appendChild(child: MockNode): MockNode {
+          child.parentNode = node;
+          node.children.push(child);
+          return child;
+        },
+        append(...nodes: MockNode[]): void {
+          for (const c of nodes) node.appendChild(c);
+        },
+        removeChild(child: MockNode): MockNode {
+          const idx = node.children.indexOf(child);
+          if (idx >= 0) node.children.splice(idx, 1);
+          child.parentNode = null;
+          return child;
+        },
+        focus(): void {
+          // no-op
+        },
+        get innerHTML(): string {
+          return '';
+        },
+        set innerHTML(v: string) {
+          if (v === '') {
+            for (const c of node.children) c.parentNode = null;
+            node.children.length = 0;
+          }
+        },
+      };
+      return node;
+    };
+
+    const findByTestId = (rootNode: MockNode, id: string): MockNode | null => {
+      if (rootNode.dataset.testid === id) return rootNode;
+      for (const c of rootNode.children) {
+        const hit = findByTestId(c, id);
+        if (hit) return hit;
+      }
+      return null;
+    };
+
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => makeMockNode(tag),
+    });
+
+    try {
+      const container = makeMockNode('div');
+      const dock = createUniTimelineDock(container as unknown as HTMLElement, {
+        onStepBack: () => {},
+        onStepForward: () => {},
+        onScrubIndex: () => {},
+        onTogglePlay: () => {},
+        onExecuteNextStep: () => {},
+        onSelectTaskChoice: () => {},
+        onSelectPrefillMode: () => {},
+        onForkBranch: () => {},
+        onSwitchBranch: () => {},
+      });
+
+      const session = new UniSession(SHARED_BUNDLE);
+      const b1 = session.startBranch({ taskMode: 'text_to_image', prefillMode: 'elastic_pruned' });
+      session.stepBranch(b1.branchId);
+      session.stepBranch(b1.branchId);
+
+      const state1 = buildUniTimelineDockState(session, { isPlaying: false, tourActive: false });
+      expect(computeBranchOptionsSignature(state1.branches)).toContain(b1.branchId);
+      dock.update(state1);
+
+      const branchSelect = findByTestId(container, 'uni-dock-branch-select')!;
+      expect(branchSelect.children).toHaveLength(1);
+      const firstOptRef = branchSelect.children[0]!;
+      expect(optionCreations).toBe(1);
+
+      // Re-updating with same branch signature (e.g., scrubbing cursor or toggling play) must NOT rebuild <option>s
+      const stateScrub = buildUniTimelineDockState(session, {
+        isPlaying: true,
+        tourActive: false,
+        activeRecordId: b1.recordIds[0]!,
+      });
+      dock.update(stateScrub);
+      expect(optionCreations).toBe(1);
+      expect(branchSelect.children[0]).toBe(firstOptRef);
+      expect(branchSelect.value).toBe(b1.branchId);
+
+      // Entering tourActive === true disables transport, scrubber, play, D5 toggles, execute, fork, branchSelect, and tasks
+      const tourState = buildUniTimelineDockState(session, { tourActive: true });
+      dock.update(tourState);
+      for (const testId of [
+        'uni-dock-step-back',
+        'uni-dock-step-forward',
+        'uni-dock-scrubber',
+        'uni-dock-play-pause',
+        'uni-dock-execute-step',
+        'uni-dock-fork-branch',
+        'uni-dock-branch-select',
+        'uni-dock-prefill-hf_faithful',
+        'uni-dock-prefill-elastic_pruned',
+        'uni-dock-task-understanding',
+        'uni-dock-task-grounding',
+        'uni-dock-task-t2i',
+        'uni-dock-task-image_edit',
+      ]) {
+        expect(findByTestId(container, testId)!.disabled).toBe(true);
+      }
+
+      // Adding a new branch changes the signature and rebuilds <option>s cleanly
+      const b2 = session.startBranch({ taskMode: 'image_edit', prefillMode: 'hf_faithful' });
+      const state2 = buildUniTimelineDockState(session, { tourActive: false });
+      dock.update(state2);
+      expect(branchSelect.children).toHaveLength(2);
+      expect(branchSelect.value).toBe(b2.branchId);
+      expect(optionCreations).toBe(3);
+
+      dock.dispose();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 // ============================================================================
@@ -633,6 +863,63 @@ describe('spatialApp.ts pure state machines (idle-RAF & RG32F atlas upload dedup
     expect(tracker.getLastAtlasKey()).toBeNull();
     expect(tracker.shouldUpload('joint_attn:256x256:def')).toBe(true);
     expect(tracker.getUploadCount()).toBe(3);
+  });
+
+  it('resolveRefinementGridCellFromPick maps 4x6 plates to row*6+col (0..23) and 24x* row-indexed plates to row', () => {
+    const makePick = (
+      tensorKey: string,
+      row: number | null,
+      col: number | null,
+      tokenIndex: number | null = row,
+    ) => ({
+      viewMode: 'refinement' as const,
+      layerIndex: null,
+      isSplitLayer: null,
+      branch: 'g' as const,
+      partId: tensorKey,
+      tensorKey,
+      qHeadIndex: null,
+      kvHeadIndex: null,
+      cfgBatchRow: null,
+      rotaryPlane: null,
+      treeDepth: null,
+      tokenIndex,
+      absPosition: null,
+      row,
+      col,
+      semanticTag: null,
+    });
+
+    // Exact (row=2, col=4) -> 16 on vq_code_stage
+    expect(resolveRefinementGridCellFromPick(makePick('vq_code_stage', 2, 4, 2))).toBe(16);
+
+    // Exhaustive 0..23 mapping across all 4x6 marked plates
+    for (const plate of [
+      'vq_code_stage',
+      'vq_paper_age',
+      'vq_tree_level',
+      'vq_mask_noise',
+      'vq_stratified_order',
+      'vq_unmask_rank',
+    ]) {
+      for (let r = 0; r < 4; r++) {
+        for (let c = 0; c < 6; c++) {
+          expect(resolveRefinementGridCellFromPick(makePick(plate, r, c, r))).toBe(r * 6 + c);
+        }
+      }
+      // Out-of-bounds col/row on 4x6 plate returns null
+      expect(resolveRefinementGridCellFromPick(makePick(plate, 4, 0, 4))).toBeNull();
+      expect(resolveRefinementGridCellFromPick(makePick(plate, 0, 6, 0))).toBeNull();
+    }
+
+    // 4x4 stratified_order maps content cell (row, col) -> row*6 + col
+    expect(resolveRefinementGridCellFromPick(makePick('stratified_order', 3, 2, 3))).toBe(20);
+    expect(resolveRefinementGridCellFromPick(makePick('stratified_order', 0, 4, 0))).toBeNull();
+
+    // 24x* row-indexed plates map directly to row (0..23)
+    expect(resolveRefinementGridCellFromPick(makePick('cfg_guided_logits', 19, 12, 19))).toBe(19);
+    expect(resolveRefinementGridCellFromPick(makePick('vq_tree_embeddings', 23, 7, 23))).toBe(23);
+    expect(resolveRefinementGridCellFromPick(makePick('cfg_branch_2_logits', 24, 0, 24))).toBeNull();
   });
 });
 
