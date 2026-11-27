@@ -109,7 +109,7 @@ import {
   type DoryTourActId,
   type DoryTourState,
 } from '../story/types';
-import { createDoryGuidedTour } from '../story/walkthrough';
+import { createDoryGuidedTour } from '../story/guidedTour';
 import {
   DORY_DEFAULT_GREEDY_SAMPLING,
   DORY_MINI_CONFIG,

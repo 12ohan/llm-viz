@@ -1451,6 +1451,7 @@ describe('Static architectural isolation & clean-room guardrails across all src/
     expect(rels.has('speculative.ts')).toBe(true);
     expect(rels.has('session.ts')).toBe(true);
     expect(rels.has('scene/index.ts')).toBe(true);
+    expect(rels.has('story/guidedTour.ts')).toBe(true);
     expect(rels.has('story/walkthrough.ts')).toBe(true);
     expect(rels.has('app/spatialApp.ts')).toBe(true);
     expect(rels.has('app/spatialOverlay.ts')).toBe(true);
@@ -1492,6 +1493,11 @@ describe('Static architectural isolation & clean-room guardrails across all src/
       'src/shared/overlayLayout',
     ]);
 
+    // Raw specifier collision guard: ensure no import/export specifier under `src/dory/`
+    // matches Gate 4b/4c Nano module substrings (e.g. `../story/walkthrough` matching `story/walkthrough`).
+    const rawForbiddenSpecifierRe =
+      /(?:^|\/)(?:ui\/(?:controls|overlay|memoryChart)|scene\/(?:spine|sheetInspector)|model\/(?:spec|memory|state|rcPlayback)|math\/(?:gqaSim|mambaSim|moeSim|hybridFlow|incrementalDecode)|story\/walkthrough|src\/main)(?:\.ts)?$/i;
+
     const violations: string[] = [];
 
     for (const filePath of doryTsFiles) {
@@ -1502,6 +1508,11 @@ describe('Static architectural isolation & clean-room guardrails across all src/
       for (const spec of specifiers) {
         if (!spec.startsWith('.')) {
           violations.push(`${relFile}: forbidden non-relative / runtime npm import "${spec}"`);
+          continue;
+        }
+
+        if (rawForbiddenSpecifierRe.test(spec)) {
+          violations.push(`${relFile}: raw specifier "${spec}" collides with a Gate 4b/4c forbidden pattern`);
           continue;
         }
 
