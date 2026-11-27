@@ -622,8 +622,7 @@ test.describe('Nemotron-Labs-Diffusion-14B · Full Chromium WebGL2 E2E Suite', (
 
       await expect(page.getByTestId('diffusion-step-btn')).toBeVisible();
       await expect(page.getByTestId('diffusion-mode-ar')).toBeVisible();
-      await expect(page.getByTestId('nav-to-nano')).toBeVisible();
-      await expect(page.getByTestId('nav-to-twotower')).toBeVisible();
+      await expect(page.getByTestId('model-switcher-trigger')).toBeVisible();
 
       const overflow = await page.evaluate(
         () => document.documentElement.scrollWidth - window.innerWidth,
@@ -643,6 +642,24 @@ test.describe('Nemotron-Labs-Diffusion-14B · Full Chromium WebGL2 E2E Suite', (
     page,
   }) => {
     const guards = attachRuntimeGuards(page);
+
+    async function navViaSwitcher(
+      targetTestId: string,
+      expectedUrl: string,
+      mode: 'click' | 'keyboard',
+    ): Promise<void> {
+      const trigger = page.getByTestId('model-switcher-trigger');
+      await expect(trigger).toBeVisible();
+      await trigger.click();
+      const link = page.getByTestId(targetTestId);
+      await expect(link).toBeVisible();
+      if (mode === 'keyboard') {
+        await link.focus();
+        await Promise.all([page.waitForURL(expectedUrl), page.keyboard.press('Enter')]);
+      } else {
+        await Promise.all([page.waitForURL(expectedUrl), link.click()]);
+      }
+    }
 
     // 1. Subpath /llm-viz/diffusion/ parity
     await page.goto(`${PAGES_BASE_URL}diffusion/`, { waitUntil: 'networkidle' });
@@ -678,64 +695,35 @@ test.describe('Nemotron-Labs-Diffusion-14B · Full Chromium WebGL2 E2E Suite', (
     await waitFrames(page, 4);
     await expect(page.getByTestId('gl-canvas')).toBeVisible();
 
-    await Promise.all([
-      page.waitForURL(`${ROOT_BASE_URL}/diffusion/`),
-      page.getByTestId('nav-to-diffusion').click(),
-    ]);
+    await navViaSwitcher('nav-to-diffusion', `${ROOT_BASE_URL}/diffusion/`, 'click');
     await waitForDiffusionSettled(page);
     await assertCanvasNonBlank(diffCanvas, 'Root Nano -> Diffusion');
 
-    await Promise.all([
-      page.waitForURL(`${ROOT_BASE_URL}/twotower/`),
-      page.getByTestId('nav-to-twotower').click(),
-    ]);
+    await navViaSwitcher('nav-to-twotower', `${ROOT_BASE_URL}/twotower/`, 'click');
     await waitForTwoTowerSettled(page);
     await expect(page.getByTestId('twotower-canvas')).toBeVisible();
 
-    await Promise.all([
-      page.waitForURL(`${ROOT_BASE_URL}/diffusion/`),
-      page.getByTestId('nav-to-diffusion').click(),
-    ]);
+    await navViaSwitcher('nav-to-diffusion', `${ROOT_BASE_URL}/diffusion/`, 'click');
     await waitForDiffusionSettled(page);
     await assertCanvasNonBlank(diffCanvas, 'Root TwoTower -> Diffusion');
 
-    await Promise.all([
-      page.waitForURL(`${ROOT_BASE_URL}/`),
-      page.getByTestId('nav-to-nano').click(),
-    ]);
+    await navViaSwitcher('nav-to-nano', `${ROOT_BASE_URL}/`, 'click');
     await waitFrames(page, 4);
     await expect(page.getByTestId('gl-canvas')).toBeVisible();
 
     // Root `/` keyboard Enter: Nano -> Diffusion -> Nano & TwoTower -> Diffusion -> TwoTower
-    const rootNanoToDiff = page.getByTestId('nav-to-diffusion');
-    await rootNanoToDiff.focus();
-    await Promise.all([
-      page.waitForURL(`${ROOT_BASE_URL}/diffusion/`),
-      page.keyboard.press('Enter'),
-    ]);
+    await navViaSwitcher('nav-to-diffusion', `${ROOT_BASE_URL}/diffusion/`, 'keyboard');
     await waitForDiffusionSettled(page);
 
-    const rootDiffToNano = page.getByTestId('nav-to-nano');
-    await rootDiffToNano.focus();
-    await Promise.all([page.waitForURL(`${ROOT_BASE_URL}/`), page.keyboard.press('Enter')]);
+    await navViaSwitcher('nav-to-nano', `${ROOT_BASE_URL}/`, 'keyboard');
     await waitFrames(page, 4);
 
     await page.goto(`${ROOT_BASE_URL}/twotower/`, { waitUntil: 'networkidle' });
     await waitForTwoTowerSettled(page);
-    const rootTtToDiff = page.getByTestId('nav-to-diffusion');
-    await rootTtToDiff.focus();
-    await Promise.all([
-      page.waitForURL(`${ROOT_BASE_URL}/diffusion/`),
-      page.keyboard.press('Enter'),
-    ]);
+    await navViaSwitcher('nav-to-diffusion', `${ROOT_BASE_URL}/diffusion/`, 'keyboard');
     await waitForDiffusionSettled(page);
 
-    const rootDiffToTt = page.getByTestId('nav-to-twotower');
-    await rootDiffToTt.focus();
-    await Promise.all([
-      page.waitForURL(`${ROOT_BASE_URL}/twotower/`),
-      page.keyboard.press('Enter'),
-    ]);
+    await navViaSwitcher('nav-to-twotower', `${ROOT_BASE_URL}/twotower/`, 'keyboard');
     await waitForTwoTowerSettled(page);
 
     // 3. Subpath `/llm-viz/` 3-way navigation cycle via click & Enter
@@ -743,63 +731,34 @@ test.describe('Nemotron-Labs-Diffusion-14B · Full Chromium WebGL2 E2E Suite', (
     await waitFrames(page, 4);
     await expect(page.getByTestId('gl-canvas')).toBeVisible();
 
-    await Promise.all([
-      page.waitForURL(`${PAGES_BASE_URL}diffusion/`),
-      page.getByTestId('nav-to-diffusion').click(),
-    ]);
+    await navViaSwitcher('nav-to-diffusion', `${PAGES_BASE_URL}diffusion/`, 'click');
     await waitForDiffusionSettled(page);
     await assertCanvasNonBlank(diffCanvas, 'Subpath Nano -> Diffusion');
 
-    await Promise.all([
-      page.waitForURL(`${PAGES_BASE_URL}twotower/`),
-      page.getByTestId('nav-to-twotower').click(),
-    ]);
+    await navViaSwitcher('nav-to-twotower', `${PAGES_BASE_URL}twotower/`, 'click');
     await waitForTwoTowerSettled(page);
     await expect(page.getByTestId('twotower-canvas')).toBeVisible();
 
-    await Promise.all([
-      page.waitForURL(`${PAGES_BASE_URL}diffusion/`),
-      page.getByTestId('nav-to-diffusion').click(),
-    ]);
+    await navViaSwitcher('nav-to-diffusion', `${PAGES_BASE_URL}diffusion/`, 'click');
     await waitForDiffusionSettled(page);
 
-    await Promise.all([
-      page.waitForURL(PAGES_BASE_URL),
-      page.getByTestId('nav-to-nano').click(),
-    ]);
+    await navViaSwitcher('nav-to-nano', PAGES_BASE_URL, 'click');
     await waitFrames(page, 4);
     await expect(page.getByTestId('gl-canvas')).toBeVisible();
 
     // Subpath `/llm-viz/` keyboard Enter: Nano -> Diffusion -> Nano & TwoTower -> Diffusion -> TwoTower
-    const pagesNanoToDiff = page.getByTestId('nav-to-diffusion');
-    await pagesNanoToDiff.focus();
-    await Promise.all([
-      page.waitForURL(`${PAGES_BASE_URL}diffusion/`),
-      page.keyboard.press('Enter'),
-    ]);
+    await navViaSwitcher('nav-to-diffusion', `${PAGES_BASE_URL}diffusion/`, 'keyboard');
     await waitForDiffusionSettled(page);
 
-    const pagesDiffToNano = page.getByTestId('nav-to-nano');
-    await pagesDiffToNano.focus();
-    await Promise.all([page.waitForURL(PAGES_BASE_URL), page.keyboard.press('Enter')]);
+    await navViaSwitcher('nav-to-nano', PAGES_BASE_URL, 'keyboard');
     await waitFrames(page, 4);
 
     await page.goto(`${PAGES_BASE_URL}twotower/`, { waitUntil: 'networkidle' });
     await waitForTwoTowerSettled(page);
-    const pagesTtToDiff = page.getByTestId('nav-to-diffusion');
-    await pagesTtToDiff.focus();
-    await Promise.all([
-      page.waitForURL(`${PAGES_BASE_URL}diffusion/`),
-      page.keyboard.press('Enter'),
-    ]);
+    await navViaSwitcher('nav-to-diffusion', `${PAGES_BASE_URL}diffusion/`, 'keyboard');
     await waitForDiffusionSettled(page);
 
-    const pagesDiffToTt = page.getByTestId('nav-to-twotower');
-    await pagesDiffToTt.focus();
-    await Promise.all([
-      page.waitForURL(`${PAGES_BASE_URL}twotower/`),
-      page.keyboard.press('Enter'),
-    ]);
+    await navViaSwitcher('nav-to-twotower', `${PAGES_BASE_URL}twotower/`, 'keyboard');
     await waitForTwoTowerSettled(page);
 
     guards.assertClean();

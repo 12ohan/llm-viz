@@ -960,57 +960,48 @@ test.describe('Nemotron-Labs-Diffusion-Uni · Full Chromium WebGL2 E2E Suite', (
     const guards = attachRuntimeGuards(page);
     const uniCanvas = page.getByTestId('uni-webgl-canvas');
 
+    async function navViaSwitcher(targetTestId: string, expectedUrl: string): Promise<void> {
+      const trigger = page.getByTestId('model-switcher-trigger');
+      await expect(trigger).toBeVisible();
+      await trigger.click();
+      const link = page.getByTestId(targetTestId);
+      await expect(link).toBeVisible();
+      await Promise.all([page.waitForURL(expectedUrl), link.click()]);
+    }
+
     // --- A. Root `/` 4-way reciprocal hops ---
     // Nano (`/`) -> Uni (`/uni/`)
     await page.goto(`${ROOT_BASE_URL}/`, { waitUntil: 'networkidle' });
     await waitFrames(page, 4);
     await expect(page.getByTestId('gl-canvas')).toBeVisible();
 
-    await Promise.all([
-      page.waitForURL(`${ROOT_BASE_URL}/uni/`),
-      page.getByTestId('nav-to-uni').click(),
-    ]);
+    await navViaSwitcher('nav-to-uni', `${ROOT_BASE_URL}/uni/`);
     await waitForUniSettled(page);
     await assertCanvasNonBlank(uniCanvas, 'Root Nano -> Uni');
     expect((await getUniDebug(page)).glErrorCount).toBe(0);
 
     // Uni (`/uni/`) -> TwoTower (`/twotower/`) -> Uni (`/uni/`)
-    await Promise.all([
-      page.waitForURL(`${ROOT_BASE_URL}/twotower/`),
-      page.getByTestId('nav-to-twotower').click(),
-    ]);
+    await navViaSwitcher('nav-to-twotower', `${ROOT_BASE_URL}/twotower/`);
     await waitForTwoTowerSettled(page);
     await expect(page.getByTestId('twotower-canvas')).toBeVisible();
 
-    await Promise.all([
-      page.waitForURL(`${ROOT_BASE_URL}/uni/`),
-      page.getByTestId('nav-to-uni').click(),
-    ]);
+    await navViaSwitcher('nav-to-uni', `${ROOT_BASE_URL}/uni/`);
     await waitForUniSettled(page);
     await assertCanvasNonBlank(uniCanvas, 'Root TwoTower -> Uni');
     expect((await getUniDebug(page)).glErrorCount).toBe(0);
 
     // Uni (`/uni/`) -> Diffusion (`/diffusion/`) -> Uni (`/uni/`)
-    await Promise.all([
-      page.waitForURL(`${ROOT_BASE_URL}/diffusion/`),
-      page.getByTestId('nav-to-diffusion').click(),
-    ]);
+    await navViaSwitcher('nav-to-diffusion', `${ROOT_BASE_URL}/diffusion/`);
     await waitForDiffusionSettled(page);
     await expect(page.getByTestId('diffusion-canvas')).toBeVisible();
 
-    await Promise.all([
-      page.waitForURL(`${ROOT_BASE_URL}/uni/`),
-      page.getByTestId('nav-to-uni').click(),
-    ]);
+    await navViaSwitcher('nav-to-uni', `${ROOT_BASE_URL}/uni/`);
     await waitForUniSettled(page);
     await assertCanvasNonBlank(uniCanvas, 'Root Diffusion -> Uni');
     expect((await getUniDebug(page)).glErrorCount).toBe(0);
 
     // Uni (`/uni/`) -> Nano (`/`)
-    await Promise.all([
-      page.waitForURL(`${ROOT_BASE_URL}/`),
-      page.getByTestId('nav-to-nano').click(),
-    ]);
+    await navViaSwitcher('nav-to-nano', `${ROOT_BASE_URL}/`);
     await waitFrames(page, 4);
     await expect(page.getByTestId('gl-canvas')).toBeVisible();
 
@@ -1034,44 +1025,26 @@ test.describe('Nemotron-Labs-Diffusion-Uni · Full Chromium WebGL2 E2E Suite', (
     );
 
     // Subpath reciprocal hops: Uni -> Nano -> Uni -> TwoTower -> Uni -> Diffusion -> Uni
-    await Promise.all([
-      page.waitForURL(PAGES_BASE_URL),
-      page.getByTestId('nav-to-nano').click(),
-    ]);
+    await navViaSwitcher('nav-to-nano', PAGES_BASE_URL);
     await waitFrames(page, 4);
     await expect(page.getByTestId('gl-canvas')).toBeVisible();
 
-    await Promise.all([
-      page.waitForURL(`${PAGES_BASE_URL}uni/`),
-      page.getByTestId('nav-to-uni').click(),
-    ]);
+    await navViaSwitcher('nav-to-uni', `${PAGES_BASE_URL}uni/`);
     await waitForUniSettled(page);
     await assertCanvasNonBlank(uniCanvas, 'Subpath Nano -> Uni');
 
-    await Promise.all([
-      page.waitForURL(`${PAGES_BASE_URL}twotower/`),
-      page.getByTestId('nav-to-twotower').click(),
-    ]);
+    await navViaSwitcher('nav-to-twotower', `${PAGES_BASE_URL}twotower/`);
     await waitForTwoTowerSettled(page);
     await expect(page.getByTestId('twotower-canvas')).toBeVisible();
 
-    await Promise.all([
-      page.waitForURL(`${PAGES_BASE_URL}uni/`),
-      page.getByTestId('nav-to-uni').click(),
-    ]);
+    await navViaSwitcher('nav-to-uni', `${PAGES_BASE_URL}uni/`);
     await waitForUniSettled(page);
 
-    await Promise.all([
-      page.waitForURL(`${PAGES_BASE_URL}diffusion/`),
-      page.getByTestId('nav-to-diffusion').click(),
-    ]);
+    await navViaSwitcher('nav-to-diffusion', `${PAGES_BASE_URL}diffusion/`);
     await waitForDiffusionSettled(page);
     await expect(page.getByTestId('diffusion-canvas')).toBeVisible();
 
-    await Promise.all([
-      page.waitForURL(`${PAGES_BASE_URL}uni/`),
-      page.getByTestId('nav-to-uni').click(),
-    ]);
+    await navViaSwitcher('nav-to-uni', `${PAGES_BASE_URL}uni/`);
     await waitForUniSettled(page);
     await assertCanvasNonBlank(uniCanvas, 'Subpath Diffusion -> Uni');
     expect((await getUniDebug(page)).glErrorCount).toBe(0);

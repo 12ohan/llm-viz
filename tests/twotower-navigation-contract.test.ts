@@ -14,18 +14,20 @@ const FORBIDDEN_NANO_MARKERS = [
 ] as const;
 
 describe('TwoTower / Nano Reciprocal Navigation & Release Metadata Contract', () => {
-  it('exposes base-path-safe Nano -> TwoTower link in index.html with zero forbidden Nano markers', () => {
+  it('mounts compact model switcher in index.html / src/main.ts with zero forbidden Nano markers', () => {
     const html = readFileSync(resolve(ROOT, 'index.html'), 'utf8');
-    expect(html).toContain('data-testid="nav-to-twotower"');
-    expect(html).toContain('href="%BASE_URL%twotower/"');
-    expect(html).toContain('class="top-nav-link"');
+    expect(html).toContain('id="model-switcher-slot"');
     for (const marker of FORBIDDEN_NANO_MARKERS) {
       expect(html).not.toContain(marker);
     }
 
+    const mainSrc = readFileSync(resolve(ROOT, 'src/main.ts'), 'utf8');
+    expect(mainSrc).toContain("mountModelSwitcher(switcherSlot");
+    expect(mainSrc).toContain("activeId: 'nano'");
+
     const nanoCss = readFileSync(resolve(ROOT, 'src/ui/theme.css'), 'utf8');
-    expect(nanoCss).toContain('.top-nav-link');
-    expect(nanoCss).toContain('.top-nav-link:focus-visible');
+    expect(nanoCss).toContain('.top-bar');
+    expect(nanoCss).toContain('overflow: visible;');
     for (const marker of FORBIDDEN_NANO_MARKERS) {
       expect(nanoCss).not.toContain(marker);
     }
@@ -46,13 +48,14 @@ describe('TwoTower / Nano Reciprocal Navigation & Release Metadata Contract', ()
     expect(diagSrc).not.toMatch(/Stage\s+TT\d/i);
   });
 
-  it('wires base-path-safe TwoTower -> Nano link after btnToggleWorkbench in spatialApp.ts', () => {
+  it('mounts base-path-safe compact model switcher after btnToggleWorkbench in spatialApp.ts', () => {
     const src = readFileSync(resolve(ROOT, 'src/twotower/app/spatialApp.ts'), 'utf8');
-    expect(src).toContain("navToNanoLink.dataset.testid = 'nav-to-nano'");
     expect(src).toContain("import.meta.env.BASE_URL || '../'");
+    expect(src).toContain("mountModelSwitcher(topActions");
+    expect(src).toContain("activeId: 'twotower'");
     const wbIdx = src.indexOf('btnToggleWorkbench,');
-    const nanoIdx = src.indexOf('navToNanoLink,');
+    const switcherIdx = src.indexOf('mountModelSwitcher(topActions');
     expect(wbIdx).toBeGreaterThan(-1);
-    expect(nanoIdx).toBeGreaterThan(wbIdx);
+    expect(switcherIdx).toBeGreaterThan(wbIdx);
   });
 });

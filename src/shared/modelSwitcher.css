@@ -1,0 +1,203 @@
+/* Shared Compact Multi-Model Top-Bar Switcher (`src/shared/modelSwitcher.css`)
+ * Imported by `src/shared/modelSwitcher.ts` across all MPA visualizers. */
+
+.nv-model-switcher {
+  --sw-bg: rgba(255, 255, 255, 0.08);
+  --sw-bg-h: rgba(255, 255, 255, 0.16);
+  --sw-bd: rgba(255, 255, 255, 0.26);
+  --sw-bd-h: rgba(255, 255, 255, 0.42);
+  --sw-fg: #F1F5F9;
+  --sw-fg-h: #FFFFFF;
+  --sw-ac: #7DD3FC;
+  --sw-p-bg: rgba(125, 211, 252, 0.2);
+  --sw-p-fg: #BAE6FD;
+  --sw-m-bg: #141B30;
+  --sw-m-bd: rgba(148, 163, 184, 0.32);
+  --sw-mut: #94A3B8;
+  --sw-h-bg: rgba(255, 255, 255, 0.09);
+  --sw-c-bg: rgba(125, 211, 252, 0.12);
+  --sw-c-bd: rgba(125, 211, 252, 0.34);
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  z-index: 60;
+}
+
+.nv-model-switcher--light {
+  --sw-bg: #F8FAFC;
+  --sw-bg-h: #EEF2F8;
+  --sw-bd: #CBD5E1;
+  --sw-bd-h: #94A3B8;
+  --sw-fg: #1E293B;
+  --sw-fg-h: #0F172A;
+  --sw-ac: #3861BD;
+  --sw-p-bg: #DBEAFE;
+  --sw-p-fg: #1D4ED8;
+  --sw-m-bg: #FFFFFF;
+  --sw-m-bd: #CBD5E1;
+  --sw-mut: #475569;
+  --sw-h-bg: #F1F5F9;
+  --sw-c-bg: #EEF2FF;
+  --sw-c-bd: #C7D2FE;
+}
+
+.nv-switcher-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 5px;
+  border: 1px solid var(--sw-bd);
+  background: var(--sw-bg);
+  color: var(--sw-fg);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 110ms ease, border-color 110ms ease, color 110ms ease;
+}
+
+.nv-switcher-btn:hover,
+.nv-switcher-btn[aria-expanded="true"] {
+  background: var(--sw-bg-h);
+  border-color: var(--sw-bd-h);
+  color: var(--sw-fg-h);
+}
+
+.nv-switcher-btn:focus-visible,
+.nv-switcher-item:focus-visible {
+  outline: 2px solid var(--sw-ac);
+  outline-offset: 1px;
+}
+
+.nv-switcher-count,
+.nv-switcher-item-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--sw-p-bg);
+  color: var(--sw-p-fg);
+  font: 700 9.5px/13px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.nv-switcher-count {
+  min-width: 16px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+}
+
+.nv-switcher-caret {
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.8;
+  transition: transform 120ms ease;
+}
+
+.nv-switcher-btn[aria-expanded="true"] .nv-switcher-caret {
+  transform: rotate(180deg);
+}
+
+.nv-switcher-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 1200;
+  width: 280px;
+  max-width: calc(100vw - 16px);
+  box-sizing: border-box;
+  padding: 6px;
+  border-radius: 8px;
+  border: 1px solid var(--sw-m-bd);
+  background: var(--sw-m-bg);
+  color: var(--sw-fg);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.24), 0 2px 6px rgba(15, 23, 42, 0.12);
+}
+
+.nv-switcher-menu[hidden] {
+  display: none;
+}
+
+.nv-switcher-header {
+  padding: 3px 8px 5px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sw-mut);
+  border-bottom: 1px solid var(--sw-m-bd);
+}
+
+.nv-switcher-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  color: var(--sw-fg);
+  text-decoration: none;
+  transition: background-color 100ms ease, border-color 100ms ease;
+}
+
+.nv-switcher-item:hover {
+  background: var(--sw-h-bg);
+  border-color: var(--sw-m-bd);
+  color: var(--sw-fg-h);
+}
+
+.nv-switcher-item.is-current {
+  background: var(--sw-c-bg);
+  border-color: var(--sw-c-bd);
+}
+
+.nv-switcher-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+  line-height: 15px;
+  font-weight: 600;
+}
+
+.nv-switcher-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nv-switcher-item-badge {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.nv-switcher-item-arrow {
+  flex: 0 0 auto;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.nv-switcher-item-sub {
+  color: var(--sw-mut);
+  font: 400 10px/13.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: normal;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nv-switcher-btn,
+  .nv-switcher-caret,
+  .nv-switcher-item {
+    transition: none !important;
+  }
+}

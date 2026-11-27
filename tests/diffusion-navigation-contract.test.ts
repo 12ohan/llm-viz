@@ -28,27 +28,16 @@ function stripJsComments(source: string): string {
     .replace(/^\s*\/\/.*$/gm, '');
 }
 
-describe('Diffusion / TwoTower / Nano 3-Way Reciprocal Navigation & Release Metadata Contract', () => {
-  it('exposes base-path-safe Nano -> Diffusion and TwoTower links in index.html with zero forbidden Diffusion markers', () => {
+describe('Diffusion / TwoTower / Nano Multi-App Navigation & Release Metadata Contract', () => {
+  it('mounts compact model switcher slot in index.html with zero forbidden Diffusion markers', () => {
     const html = readFileSync(resolve(ROOT, 'index.html'), 'utf8');
-    expect(html).toContain('data-testid="nav-to-twotower"');
-    expect(html).toContain('href="%BASE_URL%twotower/"');
-    expect(html).toContain('data-testid="nav-to-diffusion"');
-    expect(html).toContain('href="%BASE_URL%diffusion/"');
-    expect(html).toContain('class="top-nav-link"');
-
-    const twotowerIdx = html.indexOf('data-testid="nav-to-twotower"');
-    const diffusionIdx = html.indexOf('data-testid="nav-to-diffusion"');
-    expect(twotowerIdx).toBeGreaterThan(-1);
-    expect(diffusionIdx).toBeGreaterThan(twotowerIdx);
+    expect(html).toContain('id="model-switcher-slot"');
 
     for (const marker of FORBIDDEN_DIFFUSION_MARKERS) {
       expect(html).not.toContain(marker);
     }
 
     const nanoCss = readFileSync(resolve(ROOT, 'src/ui/theme.css'), 'utf8');
-    expect(nanoCss).toContain('.top-nav-link');
-    expect(nanoCss).toContain('.top-nav-link:focus-visible');
     for (const marker of FORBIDDEN_DIFFUSION_MARKERS) {
       expect(nanoCss).not.toContain(marker);
     }
@@ -72,15 +61,10 @@ describe('Diffusion / TwoTower / Nano 3-Way Reciprocal Navigation & Release Meta
     }
   });
 
-  it('wires base-path-safe TwoTower -> Diffusion link after navToNanoLink without src/diffusion/ imports', () => {
+  it('mounts compact model switcher in TwoTower without src/diffusion/ imports or markers', () => {
     const src = readFileSync(resolve(ROOT, 'src/twotower/app/spatialApp.ts'), 'utf8');
-    expect(src).toContain("navToNanoLink.dataset.testid = 'nav-to-nano'");
-    expect(src).toContain("navToDiffusionLink.dataset.testid = 'nav-to-diffusion'");
-    expect(src).toContain('`${baseUrl}diffusion/`');
-    const nanoIdx = src.indexOf('navToNanoLink,');
-    const diffIdx = src.indexOf('navToDiffusionLink,');
-    expect(nanoIdx).toBeGreaterThan(-1);
-    expect(diffIdx).toBeGreaterThan(nanoIdx);
+    expect(src).toContain("mountModelSwitcher(topActions");
+    expect(src).toContain("activeId: 'twotower'");
 
     expect(src).not.toMatch(/from\s+['"][^'"]*diffusion\//);
     for (const marker of FORBIDDEN_DIFFUSION_MARKERS) {
@@ -88,18 +72,11 @@ describe('Diffusion / TwoTower / Nano 3-Way Reciprocal Navigation & Release Meta
     }
   });
 
-  it('wires base-path-safe Diffusion -> Nano and TwoTower links in src/diffusion/app/spatialApp.ts without TwoTower imports or dev stage tags in UI strings', () => {
+  it('mounts compact model switcher in src/diffusion/app/spatialApp.ts without TwoTower imports or dev stage tags in UI strings', () => {
     const src = readFileSync(resolve(ROOT, 'src/diffusion/app/spatialApp.ts'), 'utf8');
     expect(src).toContain("import.meta.env.BASE_URL || '../'");
-    expect(src).toContain("navToNanoLink.dataset.testid = 'nav-to-nano'");
-    expect(src).toContain('navToNanoLink.href = baseUrl;');
-    expect(src).toContain("navToTwoTowerLink.dataset.testid = 'nav-to-twotower'");
-    expect(src).toContain('`${baseUrl}twotower/`');
-
-    const nanoIdx = src.indexOf('navToNanoLink,');
-    const ttIdx = src.indexOf('navToTwoTowerLink,');
-    expect(nanoIdx).toBeGreaterThan(-1);
-    expect(ttIdx).toBeGreaterThan(nanoIdx);
+    expect(src).toContain("mountModelSwitcher(topActions");
+    expect(src).toContain("activeId: 'diffusion'");
 
     expect(src).not.toContain('src/twotower/');
     expect(src).not.toMatch(/from\s+['"][^'"]*twotower\//);

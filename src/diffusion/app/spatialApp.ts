@@ -44,6 +44,7 @@ import { FlatFlowRibbonsPass, RibbonsPass } from '../../render/ribbons';
 import { SheetsPass } from '../../render/sheets';
 import { SolidsPass } from '../../render/solids';
 import { handleTablistKeydown } from '../../shared/a11y';
+import { mountModelSwitcher } from '../../shared/modelSwitcher';
 import type { OverlayRect } from '../../shared/overlayLayout';
 import {
   buildDiffusionArchReadouts,
@@ -537,38 +538,16 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
 
   const baseUrl = (import.meta.env.BASE_URL || '../').replace(/\/?$/, '/');
 
-  const navToNanoLink = el('a', 'df-top-link');
-  navToNanoLink.href = baseUrl;
-  navToNanoLink.dataset.testid = 'nav-to-nano';
-  navToNanoLink.title = 'Open Nemotron 3 Nano 30B-A3B architecture visualizer';
-  const navNanoArrow = el('span', undefined, '↗');
-  navNanoArrow.setAttribute('aria-hidden', 'true');
-  navToNanoLink.append(document.createTextNode('Nano '), navNanoArrow);
-
-  const navToTwoTowerLink = el('a', 'df-top-link');
-  navToTwoTowerLink.href = `${baseUrl}twotower/`;
-  navToTwoTowerLink.dataset.testid = 'nav-to-twotower';
-  navToTwoTowerLink.title = 'Open Nemotron-Labs-TwoTower dual-tower diffusion visualizer';
-  const navTwoTowerArrow = el('span', undefined, '↗');
-  navTwoTowerArrow.setAttribute('aria-hidden', 'true');
-  navToTwoTowerLink.append(document.createTextNode('TwoTower '), navTwoTowerArrow);
-
-  const navToUniLink = el('a', 'df-top-link');
-  navToUniLink.href = `${baseUrl}uni/`;
-  navToUniLink.dataset.testid = 'nav-to-uni';
-  navToUniLink.title = 'Open Nemotron-Labs-Diffusion-Uni multimodal architecture visualizer';
-  const navUniArrow = el('span', undefined, '↗');
-  navUniArrow.setAttribute('aria-hidden', 'true');
-  navToUniLink.append(document.createTextNode('Uni '), navUniArrow);
-
   topActions.append(
     tourToggleBtn,
     inspectorToggleBtn,
     resetCamBtn,
-    navToNanoLink,
-    navToTwoTowerLink,
-    navToUniLink,
   );
+  const modelSwitcher = mountModelSwitcher(topActions, {
+    activeId: 'diffusion',
+    baseUrl,
+    theme: 'dark',
+  });
   topbar.append(brand, viewNav, topActions);
   shell.appendChild(topbar);
 
@@ -2705,6 +2684,7 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
       canvas.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('contextmenu', onContextMenu);
       timelineDock.dispose();
+      modelSwitcher.destroy();
       solidsPass?.dispose();
       linesPass?.dispose();
       ribbonsPass?.dispose();

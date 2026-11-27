@@ -111,6 +111,7 @@ import {
   pickHitToMambaCell,
   pickHitToMoeCell,
 } from './scene/hybridPick';
+import { mountModelSwitcher } from './shared/modelSwitcher';
 import { FlatFlowRibbonsPass, RibbonsPass } from './render/ribbons';
 import { SheetsPass } from './render/sheets';
 import { SolidsPass } from './render/solids';
@@ -622,6 +623,15 @@ function boot(): void {
 
   if (!host || !canvas || !overlaySvg || !overlayLabels || !fallbackEl || !memoryChartHost) {
     throw new Error('Required stage DOM elements are missing');
+  }
+
+  const switcherSlot = document.getElementById('model-switcher-slot');
+  if (switcherSlot) {
+    mountModelSwitcher(switcherSlot, {
+      activeId: 'nano',
+      baseUrl: import.meta.env?.BASE_URL ?? '/',
+      theme: 'dark',
+    });
   }
 
   const initialMetrics =

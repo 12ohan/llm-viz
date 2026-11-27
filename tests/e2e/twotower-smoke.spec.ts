@@ -245,10 +245,10 @@ test.describe('Nemotron-Labs-TwoTower Stage TT3 · Interactive WebGL2 Spatial Sm
     await page.goto(`${ROOT_BASE_URL}/twotower/`, { waitUntil: 'networkidle' });
     await waitFrames(page, 5);
 
-    // Quiet reciprocal navigation link back to Nano with base-path-safe root href `/`
-    const navToNano = page.getByTestId('nav-to-nano');
-    await expect(navToNano).toBeVisible();
-    await expect(navToNano).toHaveAttribute('href', '/');
+    // Compact model switcher trigger visible + base-path-safe root href `/` on Nano link
+    const switcherTrigger = page.getByTestId('model-switcher-trigger');
+    await expect(switcherTrigger).toBeVisible();
+    await expect(page.getByTestId('nav-to-nano')).toHaveAttribute('href', '/');
 
     // WebGL2 canvas mounted, fallback hidden, non-blank rendered pixels
     const canvas = page.getByTestId('twotower-canvas');
@@ -1276,18 +1276,33 @@ test.describe('Nemotron-Labs-TwoTower Stage TT4 · Walkthrough, Timeline, Sample
   }) => {
     const guards = attachRuntimeGuards(page);
 
+    async function navViaSwitcher(
+      targetTestId: string,
+      expectedHref: string,
+      expectedUrl: string,
+      mode: 'click' | 'keyboard',
+    ): Promise<void> {
+      const trigger = page.getByTestId('model-switcher-trigger');
+      await expect(trigger).toBeVisible();
+      await trigger.click();
+      const link = page.getByTestId(targetTestId);
+      await expect(link).toBeVisible();
+      await expect(link).toHaveAttribute('href', expectedHref);
+      if (mode === 'keyboard') {
+        await link.focus();
+        await expect(link).toBeFocused();
+        await Promise.all([page.waitForURL(expectedUrl), page.keyboard.press('Enter')]);
+      } else {
+        await Promise.all([page.waitForURL(expectedUrl), link.click()]);
+      }
+    }
+
     // 1. Root `/` -> `/twotower/` -> `/` via pointer click
     await page.goto(`${ROOT_BASE_URL}/`, { waitUntil: 'networkidle' });
     await waitFrames(page, 4);
     await expect(page.getByTestId('gl-canvas')).toBeVisible();
 
-    const rootToTwoTower = page.getByTestId('nav-to-twotower');
-    await expect(rootToTwoTower).toBeVisible();
-    await expect(rootToTwoTower).toHaveAttribute('href', '/twotower/');
-    await Promise.all([
-      page.waitForURL(`${ROOT_BASE_URL}/twotower/`),
-      rootToTwoTower.click(),
-    ]);
+    await navViaSwitcher('nav-to-twotower', '/twotower/', `${ROOT_BASE_URL}/twotower/`, 'click');
     await waitForTwoTowerSettled(page);
     await expect(page.getByTestId('twotower-canvas')).toBeVisible();
     await assertCanvasNonBlank(
@@ -1296,28 +1311,17 @@ test.describe('Nemotron-Labs-TwoTower Stage TT4 · Walkthrough, Timeline, Sample
     );
     expect((await getTelemetry(page)).glErrorCount).toBe(0);
 
-    const rootToNano = page.getByTestId('nav-to-nano');
-    await expect(rootToNano).toBeVisible();
-    await expect(rootToNano).toHaveAttribute('href', '/');
-    await Promise.all([page.waitForURL(`${ROOT_BASE_URL}/`), rootToNano.click()]);
+    await navViaSwitcher('nav-to-nano', '/', `${ROOT_BASE_URL}/`, 'click');
     await waitFrames(page, 4);
     await expect(page.getByTestId('gl-canvas')).toBeVisible();
 
     // 2. Root `/` -> `/twotower/` -> `/` via native keyboard Enter
-    await rootToTwoTower.focus();
-    await expect(rootToTwoTower).toBeFocused();
-    await Promise.all([
-      page.waitForURL(`${ROOT_BASE_URL}/twotower/`),
-      page.keyboard.press('Enter'),
-    ]);
+    await navViaSwitcher('nav-to-twotower', '/twotower/', `${ROOT_BASE_URL}/twotower/`, 'keyboard');
     await waitForTwoTowerSettled(page);
     await expect(page.getByTestId('twotower-canvas')).toBeVisible();
     expect((await getTelemetry(page)).glErrorCount).toBe(0);
 
-    const rootToNanoKey = page.getByTestId('nav-to-nano');
-    await rootToNanoKey.focus();
-    await expect(rootToNanoKey).toBeFocused();
-    await Promise.all([page.waitForURL(`${ROOT_BASE_URL}/`), page.keyboard.press('Enter')]);
+    await navViaSwitcher('nav-to-nano', '/', `${ROOT_BASE_URL}/`, 'keyboard');
     await waitFrames(page, 4);
     await expect(page.getByTestId('gl-canvas')).toBeVisible();
 
@@ -1326,14 +1330,12 @@ test.describe('Nemotron-Labs-TwoTower Stage TT4 · Walkthrough, Timeline, Sample
     await waitFrames(page, 4);
     await expect(page.getByTestId('gl-canvas')).toBeVisible();
 
-    const pagesToTwoTower = page.getByTestId('nav-to-twotower');
-    await expect(pagesToTwoTower).toBeVisible();
-    await expect(pagesToTwoTower).toHaveAttribute('href', '/llm-viz/twotower/');
-    await pagesToTwoTower.focus();
-    await Promise.all([
-      page.waitForURL(`${PAGES_BASE_URL}twotower/`),
-      page.keyboard.press('Enter'),
-    ]);
+    await navViaSwitcher(
+      'nav-to-twotower',
+      '/llm-viz/twotower/',
+      `${PAGES_BASE_URL}twotower/`,
+      'keyboard',
+    );
     await waitForTwoTowerSettled(page);
     await expect(page.getByTestId('twotower-canvas')).toBeVisible();
     await assertCanvasNonBlank(
@@ -1342,10 +1344,7 @@ test.describe('Nemotron-Labs-TwoTower Stage TT4 · Walkthrough, Timeline, Sample
     );
     expect((await getTelemetry(page)).glErrorCount).toBe(0);
 
-    const pagesToNano = page.getByTestId('nav-to-nano');
-    await expect(pagesToNano).toBeVisible();
-    await expect(pagesToNano).toHaveAttribute('href', '/llm-viz/');
-    await Promise.all([page.waitForURL(PAGES_BASE_URL), pagesToNano.click()]);
+    await navViaSwitcher('nav-to-nano', '/llm-viz/', PAGES_BASE_URL, 'click');
     await waitFrames(page, 4);
     await expect(page.getByTestId('gl-canvas')).toBeVisible();
 

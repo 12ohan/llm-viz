@@ -85,6 +85,7 @@ body {
  * 1. Top Header / View Bar (~48px, crisp single row at 1440px and 1024px)
  * ============================================================================ */
 .sp-topbar {
+  position: relative;
   flex: 0 0 auto;
   min-height: 48px;
   height: auto;
@@ -96,7 +97,8 @@ body {
   gap: 6px 10px;
   padding: 6px 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.10);
-  z-index: 30;
+  overflow: visible;
+  z-index: 40;
   min-width: 0;
 }
 
@@ -257,35 +259,6 @@ body {
 .sp-top-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
-}
-
-.sp-top-link {
-  height: 28px;
-  padding: 0 8px;
-  border-radius: 5px;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  background: rgba(255, 255, 255, 0.05);
-  color: #E2E8F0;
-  font-family: var(--sp-font-sans);
-  font-size: 11px;
-  font-weight: 600;
-  text-decoration: none;
-  white-space: nowrap;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  transition: background-color 110ms ease, border-color 110ms ease, color 110ms ease;
-}
-
-.sp-top-link:hover {
-  background: rgba(255, 255, 255, 0.14);
-  border-color: rgba(255, 255, 255, 0.38);
-  color: #FFFFFF;
-}
-
-.sp-top-link:focus-visible {
-  outline: 2px solid #7DD3FC;
-  outline-offset: 1px;
 }
 
 /* ============================================================================
@@ -2559,8 +2532,7 @@ body {
     padding: 3px 6px;
   }
 
-  .sp-top-btn,
-  .sp-top-link {
+  .sp-top-btn {
     padding: 0 7px;
     font-size: 10.8px;
   }
@@ -2822,7 +2794,6 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .sp-tab,
   .sp-top-btn,
-  .sp-top-link,
   .sp-btn,
   .sp-sidebar-tab,
   .sp-tl-node,

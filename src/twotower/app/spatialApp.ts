@@ -73,6 +73,7 @@ import {
 } from '../../scene/hybridPick';
 import type { OutputCellRef } from '../../scene/outputCutaway';
 import { handleTablistKeydown } from '../../shared/a11y';
+import { mountModelSwitcher } from '../../shared/modelSwitcher';
 import {
   buildAdvancedSamplerInspectorModel,
   buildTwoTowerArchitecturalReadout,
@@ -1286,39 +1287,17 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
 
   const baseUrl = (import.meta.env.BASE_URL || '../').replace(/\/?$/, '/');
 
-  const navToNanoLink = el('a', 'sp-top-link');
-  navToNanoLink.href = baseUrl;
-  navToNanoLink.dataset.testid = 'nav-to-nano';
-  navToNanoLink.title = 'Open Nemotron 3 Nano 30B-A3B architecture visualizer';
-  const navArrow = el('span', undefined, '↗');
-  navArrow.setAttribute('aria-hidden', 'true');
-  navToNanoLink.append(document.createTextNode('Nano '), navArrow);
-
-  const navToDiffusionLink = el('a', 'sp-top-link');
-  navToDiffusionLink.href = `${baseUrl}diffusion/`;
-  navToDiffusionLink.dataset.testid = 'nav-to-diffusion';
-  navToDiffusionLink.title = 'Open Nemotron-Labs-Diffusion-14B interactive 3D architecture visualizer';
-  const navDiffusionArrow = el('span', undefined, '↗');
-  navDiffusionArrow.setAttribute('aria-hidden', 'true');
-  navToDiffusionLink.append(document.createTextNode('Diffusion '), navDiffusionArrow);
-
-  const navToUniLink = el('a', 'sp-top-link');
-  navToUniLink.href = `${baseUrl}uni/`;
-  navToUniLink.dataset.testid = 'nav-to-uni';
-  navToUniLink.title = 'Open Nemotron-Labs-Diffusion-Uni multimodal architecture visualizer';
-  const navUniArrow = el('span', undefined, '↗');
-  navUniArrow.setAttribute('aria-hidden', 'true');
-  navToUniLink.append(document.createTextNode('Uni '), navUniArrow);
-
   topActions.append(
     btnTourToggle,
     btnResetCamera,
     btnToggleWorkbench,
     btnToggleMobileInspector,
-    navToNanoLink,
-    navToDiffusionLink,
-    navToUniLink,
   );
+  const modelSwitcher = mountModelSwitcher(topActions, {
+    activeId: 'twotower',
+    baseUrl,
+    theme: 'dark',
+  });
   topbar.append(brand, tablist, topActions);
 
   // 2. Compact Session Execution & Instructional Playback Control Strip (~40px)
@@ -6176,6 +6155,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
       rafActive = false;
       prevContinuousRafMs = null;
       resizeObserver.disconnect();
+      modelSwitcher.destroy();
       window.removeEventListener('keydown', onWindowKeyDown);
       window.removeEventListener('pagehide', onPageHide);
       if (reducedMotionMq) {

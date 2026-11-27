@@ -77,6 +77,7 @@ import {
   shouldDeferGlobalShortcut,
   syncRovingTabindex,
 } from './a11yHelpers';
+import { mountModelSwitcher } from '../../shared/modelSwitcher';
 import { createUniPixelCanvasPanel } from './pixelCanvas';
 import { UniSpatialOverlay } from './spatialOverlay';
 import {
@@ -562,38 +563,16 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
 
   const baseUrl = (import.meta.env.BASE_URL || '../').replace(/\/?$/, '/');
 
-  const navToNanoLink = el('a', 'uni-top-link');
-  navToNanoLink.href = baseUrl;
-  navToNanoLink.dataset.testid = 'nav-to-nano';
-  navToNanoLink.title = 'Open Nemotron 3 Nano 30B-A3B architecture visualizer';
-  const navNanoArrow = el('span', undefined, '↗');
-  navNanoArrow.setAttribute('aria-hidden', 'true');
-  navToNanoLink.append(document.createTextNode('Nano '), navNanoArrow);
-
-  const navToTwoTowerLink = el('a', 'uni-top-link');
-  navToTwoTowerLink.href = `${baseUrl}twotower/`;
-  navToTwoTowerLink.dataset.testid = 'nav-to-twotower';
-  navToTwoTowerLink.title = 'Open Nemotron-Labs-TwoTower dual-tower diffusion visualizer';
-  const navTwoTowerArrow = el('span', undefined, '↗');
-  navTwoTowerArrow.setAttribute('aria-hidden', 'true');
-  navToTwoTowerLink.append(document.createTextNode('TwoTower '), navTwoTowerArrow);
-
-  const navToDiffusionLink = el('a', 'uni-top-link');
-  navToDiffusionLink.href = `${baseUrl}diffusion/`;
-  navToDiffusionLink.dataset.testid = 'nav-to-diffusion';
-  navToDiffusionLink.title = 'Open Nemotron-Labs-Diffusion-14B interactive 3D architecture visualizer';
-  const navDiffusionArrow = el('span', undefined, '↗');
-  navDiffusionArrow.setAttribute('aria-hidden', 'true');
-  navToDiffusionLink.append(document.createTextNode('Diffusion '), navDiffusionArrow);
-
   topActions.append(
     tourLaunchBtn,
     resetCamBtn,
     inspectorToggleBtn,
-    navToNanoLink,
-    navToTwoTowerLink,
-    navToDiffusionLink,
   );
+  const modelSwitcher = mountModelSwitcher(topActions, {
+    activeId: 'uni',
+    baseUrl,
+    theme: 'light',
+  });
   topbar.append(brand, viewTablist, topActions);
 
   // Main Workspace
@@ -2881,6 +2860,7 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     overlay.dispose();
     pixelPanel.dispose();
     timelineDock.dispose();
+    modelSwitcher.destroy();
 
     if (glBundle) {
       glBundle.solids.dispose();
