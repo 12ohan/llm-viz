@@ -838,6 +838,22 @@ describe('Dory1.0-4B Contract A §6.2 Self-Speculation — 6-Layer Parity & Gate
       expect(Array.from(cyc.emittedTokens)).toEqual(refCyc.emittedTokens);
       expect(cyc.verifyTrace).not.toBeNull();
       expect(cyc.verifyTrace!.executedSublayerCount).toBe(192);
+      expect(cyc.verifyTrace!.executedSublayers.length).toBe(192);
+      expect(cyc.verifyTrace!.seqLen).toBe(cyc.verifiedPositions);
+      expect(cyc.verifyTrace!.startPos).toBe(cyc.startCommittedLen);
+      // Cleanup 3: ALL 192 sublayers (including harmonized Prelude 0..15 & Loop-1 16..55)
+      // carry uniform seqLen = verifiedPositions, startPos = startCommittedLen, and exact masks!
+      for (let e = 0; e < 192; e += 1) {
+        const sub = cyc.verifyTrace!.executedSublayers[e];
+        expect(sub.executedLayerIdx).toBe(e);
+        expect(sub.coord.absTokenPos).toBe(cyc.startCommittedLen + cyc.verifiedPositions - 1);
+        expect(sub.trace.seqLen).toBe(cyc.verifiedPositions);
+        if (sub.trace.kind === 'attention') {
+          expect(sub.trace.startPos).toBe(cyc.startCommittedLen);
+          expect(sub.trace.kvLen).toBe(sub.trace.pastLen + cyc.verifiedPositions);
+          expect(sub.trace.maskVisible.length).toBe(cyc.verifiedPositions * sub.trace.kvLen);
+        }
+      }
       assertAll104BanksSyncedAndRolledBackClean(prefillS.kvCache, cyc.endCommittedLen);
 
       // Reused k=4 verify logits vs PyTorch AND vs fresh uncached TS k=4 across S > 8 rollback!
@@ -1127,5 +1143,13 @@ describe('Dory1.0-4B Contract A §6.2 Self-Speculation — 6-Layer Parity & Gate
     expect(computeStrictMaxAbsDiff(buggyDeltaFallback, [1.0, 0.0], 'layer6.negControl3.buggy')).toBeGreaterThan(
       0.49,
     );
+
+    // Cleanup 4: computePearsonChiSquared asserts sum(observedCounts) === sampleCount loudly
+    expect(() =>
+      computePearsonChiSquared([10, 10], Float64Array.of(0.5, 0.5), 25),
+    ).toThrow(RangeError);
+    expect(() =>
+      computePearsonChiSquared([15, 15], Float64Array.of(0.5, 0.5), 25),
+    ).toThrow(RangeError);
   });
 });

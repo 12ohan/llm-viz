@@ -65,12 +65,15 @@ import {
   DORY_SPEC_VERIFY_LOOPS,
   DorySessionImmutableConfigError,
   DorySpecSupportInvariantError,
+  type DoryAttentionSublayerTrace,
   type DoryExecutedSublayerRecord,
   type DoryForwardTrace,
   type DoryHaltReason,
   type DoryKvCache,
   type DoryLoopTrajectoryMetrics,
   type DoryMiniConfig,
+  type DoryMlpSublayerTrace,
+  type DoryNlerpTrace,
   type DoryPearsonChiSquaredResult,
   type DoryPrng,
   type DoryRejectionSampleResult,
@@ -914,6 +917,7 @@ export function computePearsonChiSquared(
   let activeBins = 0;
   let minExpectedCount = Infinity;
   let l1Diff = 0.0;
+  let observedSum = 0.0;
 
   for (let i = 0; i < bins; i += 1) {
     const obs = observedCounts[i];
@@ -924,6 +928,7 @@ export function computePearsonChiSquared(
     if (!Number.isFinite(prob) || prob < 0.0) {
       throw new RangeError(`Invalid expectedProbs[${i}]=${String(prob)}: expected finite >= 0.`);
     }
+    observedSum += obs;
 
     const empProb = obs / sampleCount;
     l1Diff += Math.abs(empProb - prob);
@@ -944,6 +949,12 @@ export function computePearsonChiSquared(
       const delta = obs - expected;
       statistic += (delta * delta) / expected;
     }
+  }
+
+  if (observedSum !== sampleCount) {
+    throw new RangeError(
+      `observedCounts sum (${observedSum}) must equal sampleCount (${sampleCount}).`,
+    );
   }
 
   if (activeBins === 0) {
@@ -1122,6 +1133,216 @@ export function prefillDorySelfSpec(input: DorySpecCyclePrefillInput): DorySpecC
     deepTrace: deepPrefill.trace,
     shallowCodaTrace: captureTrace ? shallowCoda.executedSublayers : null,
   };
+}
+
+function mergeSingleTokenNlerpTraces(
+  nlerps: readonly DoryNlerpTrace[],
+): DoryNlerpTrace {
+  const first = nlerps[0];
+  const m = nlerps.length;
+  const d = first.hiddenSize;
+  const aNorm = new Float32Array(m * d);
+  const bNorm = new Float32Array(m * d);
+  const delta = new Float32Array(m * d);
+  const blendedPreNorm = new Float32Array(m * d);
+  const output = new Float32Array(m * d);
+
+  for (let j = 0; j < m; j += 1) {
+    const tr = nlerps[j];
+    const off = j * d;
+    for (let c = 0; c < d; c += 1) {
+      aNorm[off + c] = tr.aNorm[c];
+      bNorm[off + c] = tr.bNorm[c];
+      delta[off + c] = tr.delta[c];
+      blendedPreNorm[off + c] = tr.blendedPreNorm[c];
+      output[off + c] = tr.output[c];
+    }
+  }
+
+  return {
+    seqLen: m,
+    hiddenSize: d,
+    aNorm,
+    bNorm,
+    delta,
+    effectiveAlpha: first.effectiveAlpha,
+    blendedPreNorm,
+    output,
+    extrapolatedChannelCount: first.extrapolatedChannelCount,
+    maxEffectiveAlpha: first.maxEffectiveAlpha,
+  };
+}
+
+function concatSingleTokenMatrixField(
+  rows: readonly Float32Array[],
+  rowWidth: number,
+): Float32Array {
+  const m = rows.length;
+  const out = new Float32Array(m * rowWidth);
+  for (let j = 0; j < m; j += 1) {
+    const src = rows[j];
+    const off = j * rowWidth;
+    for (let c = 0; c < rowWidth; c += 1) {
+      out[off + c] = src[c];
+    }
+  }
+  return out;
+}
+
+/**
+ * Harmonizes per-position single-token Prelude (`0..15`) or Loop-1 (`16..55`) traces collected
+ * across `[startCommittedLen .. startCommittedLen + m - 1]` into batched-shape
+ * (`seqLen = m`, `startPos = startCommittedLen`) `DoryExecutedSublayerRecord`s aligned identically
+ * with `verifyTrace.executedSublayers[56..191]` (DORY2 audit Step-0 cleanup).
+ */
+function mergePerPositionSublayerTraces(
+  perPosRecords: readonly (readonly DoryExecutedSublayerRecord[])[],
+  startCommittedLen: number,
+  config: DoryMiniConfig,
+): DoryExecutedSublayerRecord[] {
+  const m = perPosRecords.length;
+  if (m === 0) {
+    return [];
+  }
+  const sublayerCount = perPosRecords[0].length;
+  const merged: DoryExecutedSublayerRecord[] = new Array<DoryExecutedSublayerRecord>(sublayerCount);
+  const headAbsTokenPos = startCommittedLen + m - 1;
+  const d = config.hiddenSize;
+  const dFf = config.intermediateSize;
+  const hQ = config.numAttentionHeads;
+  const qDim = config.qProjOutDim;
+  const kvDim = config.kvProjOutDim;
+
+  for (let s = 0; s < sublayerCount; s += 1) {
+    const firstRec = perPosRecords[0][s];
+    const mergedCoord = {
+      ...firstRec.coord,
+      absTokenPos: headAbsTokenPos,
+    };
+
+    if (firstRec.trace.kind === 'mlp') {
+      const trs: DoryMlpSublayerTrace[] = new Array<DoryMlpSublayerTrace>(m);
+      for (let j = 0; j < m; j += 1) {
+        trs[j] = perPosRecords[j][s].trace as DoryMlpSublayerTrace;
+      }
+      const firstTr = trs[0];
+      const mergedTrace: DoryMlpSublayerTrace = {
+        kind: 'mlp',
+        physicalLayerIdx: firstTr.physicalLayerIdx,
+        pairedLayerIdx: firstTr.pairedLayerIdx,
+        stage: firstTr.stage,
+        loopIteration: firstTr.loopIteration,
+        seqLen: m,
+        gatePre: concatSingleTokenMatrixField(trs.map((t) => t.gatePre), dFf),
+        upPre: concatSingleTokenMatrixField(trs.map((t) => t.upPre), dFf),
+        effectiveSuvGate: firstTr.effectiveSuvGate,
+        effectiveSuvUp: firstTr.effectiveSuvUp,
+        gateScaled: concatSingleTokenMatrixField(trs.map((t) => t.gateScaled), dFf),
+        upScaled: concatSingleTokenMatrixField(trs.map((t) => t.upScaled), dFf),
+        gateSilu: concatSingleTokenMatrixField(trs.map((t) => t.gateSilu), dFf),
+        swigluProduct: concatSingleTokenMatrixField(trs.map((t) => t.swigluProduct), dFf),
+        ffnSubNorm: concatSingleTokenMatrixField(trs.map((t) => t.ffnSubNorm), dFf),
+        downProjOut: concatSingleTokenMatrixField(trs.map((t) => t.downProjOut), d),
+        nlerp: mergeSingleTokenNlerpTraces(trs.map((t) => t.nlerp)),
+      };
+      merged[s] = {
+        executedLayerIdx: firstRec.executedLayerIdx,
+        coord: mergedCoord,
+        trace: mergedTrace,
+      };
+      continue;
+    }
+
+    const trs: DoryAttentionSublayerTrace[] = new Array<DoryAttentionSublayerTrace>(m);
+    for (let j = 0; j < m; j += 1) {
+      trs[j] = perPosRecords[j][s].trace as DoryAttentionSublayerTrace;
+    }
+    const tr0 = trs[0];
+    const pastLen = tr0.pastLen;
+    const kvLen = pastLen + m;
+    const firstKeyAbsPos = startCommittedLen - pastLen;
+
+    const kvAbsPositions = new Int32Array(kvLen);
+    const kvWriterLoops = new Int32Array(kvLen);
+    for (let ki = 0; ki < pastLen; ki += 1) {
+      kvAbsPositions[ki] = tr0.kvAbsPositions[ki];
+      kvWriterLoops[ki] = tr0.kvWriterLoops[ki];
+    }
+    for (let j = 0; j < m; j += 1) {
+      const trJ = trs[j];
+      kvAbsPositions[pastLen + j] = startCommittedLen + j;
+      kvWriterLoops[pastLen + j] = trJ.kvWriterLoops[trJ.kvLen - 1];
+    }
+
+    const maskVisible = new Uint8Array(m * kvLen);
+    const scores = new Float32Array(hQ * m * kvLen);
+    scores.fill(-Infinity);
+    const probs = new Float32Array(hQ * m * kvLen);
+
+    for (let j = 0; j < m; j += 1) {
+      const trJ = trs[j];
+      const kvLenJ = trJ.kvLen;
+      for (let colJ = 0; colJ < kvLenJ; colJ += 1) {
+        const mergedCol = trJ.kvAbsPositions[colJ] - firstKeyAbsPos;
+        if (mergedCol < 0 || mergedCol >= kvLen) {
+          continue;
+        }
+        maskVisible[j * kvLen + mergedCol] = trJ.maskVisible[colJ];
+        for (let qh = 0; qh < hQ; qh += 1) {
+          scores[(qh * m + j) * kvLen + mergedCol] = trJ.scores[qh * kvLenJ + colJ];
+          probs[(qh * m + j) * kvLen + mergedCol] = trJ.probs[qh * kvLenJ + colJ];
+        }
+      }
+    }
+
+    const mergedTrace: DoryAttentionSublayerTrace = {
+      kind: 'attention',
+      physicalLayerIdx: tr0.physicalLayerIdx,
+      pairedLayerIdx: tr0.pairedLayerIdx,
+      stage: tr0.stage,
+      loopIteration: tr0.loopIteration,
+      attentionKind: tr0.attentionKind,
+      ropeRegime: tr0.ropeRegime,
+      ropeTheta: tr0.ropeTheta,
+      seqLen: m,
+      startPos: startCommittedLen,
+      pastLen,
+      kvLen,
+      writeKv: tr0.writeKv,
+      bankSlotId: tr0.bankSlotId,
+      bankKind: tr0.bankKind,
+      kvAbsPositions,
+      kvWriterLoops,
+      qPre: concatSingleTokenMatrixField(trs.map((t) => t.qPre), qDim),
+      kPre: concatSingleTokenMatrixField(trs.map((t) => t.kPre), kvDim),
+      vNew: concatSingleTokenMatrixField(trs.map((t) => t.vNew), kvDim),
+      gPre: concatSingleTokenMatrixField(trs.map((t) => t.gPre), qDim),
+      qRot: concatSingleTokenMatrixField(trs.map((t) => t.qRot), qDim),
+      kRot: concatSingleTokenMatrixField(trs.map((t) => t.kRot), kvDim),
+      qNorm: concatSingleTokenMatrixField(trs.map((t) => t.qNorm), qDim),
+      kCache: concatSingleTokenMatrixField(trs.map((t) => t.kCache), kvDim),
+      effectiveSqkSq: tr0.effectiveSqkSq,
+      qScaled: concatSingleTokenMatrixField(trs.map((t) => t.qScaled), qDim),
+      maskVisible,
+      scores,
+      probs,
+      attnContext: concatSingleTokenMatrixField(trs.map((t) => t.attnContext), qDim),
+      effectiveSGateSq: tr0.effectiveSGateSq,
+      gateValues: concatSingleTokenMatrixField(trs.map((t) => t.gateValues), qDim),
+      gatedContext: concatSingleTokenMatrixField(trs.map((t) => t.gatedContext), qDim),
+      attnSubNorm: concatSingleTokenMatrixField(trs.map((t) => t.attnSubNorm), qDim),
+      oProjOut: concatSingleTokenMatrixField(trs.map((t) => t.oProjOut), d),
+      nlerp: mergeSingleTokenNlerpTraces(trs.map((t) => t.nlerp)),
+    };
+
+    merged[s] = {
+      executedLayerIdx: firstRec.executedLayerIdx,
+      coord: mergedCoord,
+      trace: mergedTrace,
+    };
+  }
+
+  return merged;
 }
 
 /**
@@ -1335,8 +1556,8 @@ export function runDorySelfSpecCycle(input: DorySelfSpecCycleInput): DorySelfSpe
   const draftSteps: DorySpecDraftStepRecord[] = [];
   let draftEndedWithEos = false;
 
-  let lastReusedPreludeTrace: readonly DoryExecutedSublayerRecord[] = [];
-  let lastReusedLoop1Trace: readonly DoryExecutedSublayerRecord[] = [];
+  const preludeTracesByPos: (readonly DoryExecutedSublayerRecord[])[] = [];
+  const loop1TracesByPos: (readonly DoryExecutedSublayerRecord[])[] = [];
 
   for (let j = 0; j < gammaEffective; j += 1) {
     const absPos = startCommittedLen + j;
@@ -1376,8 +1597,8 @@ export function runDorySelfSpecCycle(input: DorySelfSpecCycleInput): DorySelfSpe
     });
 
     if (captureTrace) {
-      lastReusedPreludeTrace = prelude.executedSublayers;
-      lastReusedLoop1Trace = loop1.executedSublayers;
+      preludeTracesByPos.push(prelude.executedSublayers);
+      loop1TracesByPos.push(loop1.executedSublayers);
     }
 
     // Shallow Coda (56..71) against persistent output_shallow KV -> exact standalone k = 1 logits!
@@ -1464,7 +1685,7 @@ export function runDorySelfSpecCycle(input: DorySelfSpecCycleInput): DorySelfSpe
       kvCache,
       ropeTables,
       writeKv: true,
-      captureTrace: false,
+      captureTrace,
       forwardStepId,
       sessionBranchId,
       role: 'spec_verify_deep',
@@ -1482,11 +1703,16 @@ export function runDorySelfSpecCycle(input: DorySelfSpecCycleInput): DorySelfSpe
       kvCache,
       ropeTables,
       writeKv: true,
-      captureTrace: false,
+      captureTrace,
       forwardStepId,
       sessionBranchId,
       role: 'spec_verify_deep',
     });
+
+    if (captureTrace) {
+      preludeTracesByPos.push(bonusPrelude.executedSublayers);
+      loop1TracesByPos.push(bonusLoop1.executedSublayers);
+    }
 
     bonusXAnchor = bonusPrelude.xAnchor;
     bonusU1 = bonusLoop1.uEntry;
@@ -1505,7 +1731,10 @@ export function runDorySelfSpecCycle(input: DorySelfSpecCycleInput): DorySelfSpe
   const batchLoopExitStates: Float32Array[] = [batchS1];
 
   const verifyTraceSublayers: DoryExecutedSublayerRecord[] = captureTrace
-    ? [...lastReusedPreludeTrace, ...lastReusedLoop1Trace]
+    ? [
+        ...mergePerPositionSublayerTraces(preludeTracesByPos, startCommittedLen, config),
+        ...mergePerPositionSublayerTraces(loop1TracesByPos, startCommittedLen, config),
+      ]
     : [];
   const verifyTraceLoopMetrics: DoryLoopTrajectoryMetrics[] = [];
 

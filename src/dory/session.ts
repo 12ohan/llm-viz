@@ -228,6 +228,34 @@ function validateExplicitUniform(u: number | undefined, label: string): void {
   }
 }
 
+function validateSpecExplicitVariates(
+  explicit: DorySpecExplicitVariates | undefined,
+): void {
+  if (explicit === undefined) {
+    return;
+  }
+  if (explicit.draftSampleUniforms !== undefined) {
+    for (let i = 0; i < explicit.draftSampleUniforms.length; i += 1) {
+      validateExplicitUniform(
+        explicit.draftSampleUniforms[i],
+        `specExplicitVariates.draftSampleUniforms[${i}]`,
+      );
+    }
+  }
+  if (explicit.acceptUniforms !== undefined) {
+    for (let i = 0; i < explicit.acceptUniforms.length; i += 1) {
+      validateExplicitUniform(
+        explicit.acceptUniforms[i],
+        `specExplicitVariates.acceptUniforms[${i}]`,
+      );
+    }
+  }
+  validateExplicitUniform(
+    explicit.correctionOrBonusUniform,
+    'specExplicitVariates.correctionOrBonusUniform',
+  );
+}
+
 function validatePrefillChunkSizes(
   prefillChunkSizes: readonly number[] | undefined,
   promptLen: number,
@@ -315,14 +343,14 @@ function resolveBranchConfig(
 
   const speculativeGamma =
     opts.speculativeGamma ?? fallback?.speculativeGamma ?? DORY_SPEC_DEFAULT_GAMMA;
-  const maxSafeGamma = config.swaRingCapacity - config.slidingWindow;
+  const maxSafeGamma = config.swaRingCapacity - config.slidingWindow - 1;
   if (
     !Number.isInteger(speculativeGamma) ||
     speculativeGamma < 1 ||
     speculativeGamma > maxSafeGamma
   ) {
     throw new RangeError(
-      `Invalid speculativeGamma=${String(speculativeGamma)}: expected integer in 1..${maxSafeGamma} (cap_swa=${config.swaRingCapacity}, W=${config.slidingWindow}).`,
+      `Invalid speculativeGamma=${String(speculativeGamma)}: expected integer in 1..${maxSafeGamma} satisfying DR19 W(${config.slidingWindow}) + gamma + 1 <= cap_swa(${config.swaRingCapacity}).`,
     );
   }
 
@@ -1946,17 +1974,24 @@ export function createDorySession(options: DorySessionCreateOptions = {}): DoryS
         }
         targetBranch = createCopyOnStepBranchFromRecord(activeBranch, activeRecord);
         parentRecordId = activeRecord.recordId;
-        const record = executeStandardChunkOnBranch(
-          targetBranch,
-          chunkTokens,
-          'chunk',
-          parentRecordId,
-          true,
-          appendOptions.sampleUniform,
-        );
-        enforceBranchCap(new Set([targetBranch.branchId, activeBranch.branchId]));
-        enforceRecordCap();
-        return record;
+        try {
+          const record = executeStandardChunkOnBranch(
+            targetBranch,
+            chunkTokens,
+            'chunk',
+            parentRecordId,
+            true,
+            appendOptions.sampleUniform,
+          );
+          enforceBranchCap(new Set([targetBranch.branchId, activeBranch.branchId]));
+          enforceRecordCap();
+          return record;
+        } catch (err) {
+          if (targetBranch.recordIds.length === 0) {
+            branchesById.delete(targetBranch.branchId);
+          }
+          throw err;
+        }
       }
       targetBranch = activeBranch;
       parentRecordId = activeBranch.headRecordId;
@@ -1981,10 +2016,12 @@ export function createDorySession(options: DorySessionCreateOptions = {}): DoryS
 
   function step(stepOptions: DorySessionStepOptions = {}): DorySessionRecord {
     validateExplicitUniform(stepOptions.sampleUniform, 'sampleUniform');
+    validateSpecExplicitVariates(stepOptions.specExplicitVariates);
 
     let targetBranch: InternalBranch;
     let parentRecordId: string;
     let sourceBranchToPin: string | null = null;
+    let provisionalBranchId: string | null = null;
 
     if (stepOptions.branchId !== undefined) {
       const found = branchesById.get(stepOptions.branchId);
@@ -2044,6 +2081,7 @@ export function createDorySession(options: DorySessionCreateOptions = {}): DoryS
         targetBranch = createCopyOnStepBranchFromRecord(activeBranch, activeRecord);
         parentRecordId = activeRecord.recordId;
         sourceBranchToPin = activeBranch.branchId;
+        provisionalBranchId = targetBranch.branchId;
       } else {
         targetBranch = activeBranch;
         parentRecordId = activeBranch.headRecordId;
@@ -2051,53 +2089,60 @@ export function createDorySession(options: DorySessionCreateOptions = {}): DoryS
     }
 
     let resultRecord: DorySessionRecord;
-    if (targetBranch.config.executionMode === 'self_spec') {
-      resultRecord = executeSpecCycleOnBranch(
-        targetBranch,
-        parentRecordId,
-        stepOptions.specExplicitVariates,
-      );
-    } else {
-      if (targetBranch.haltReason !== null) {
-        throw new RangeError(
-          `Cannot step halted branch '${targetBranch.branchId}' (haltReason='${targetBranch.haltReason}').`,
+    try {
+      if (targetBranch.config.executionMode === 'self_spec') {
+        resultRecord = executeSpecCycleOnBranch(
+          targetBranch,
+          parentRecordId,
+          stepOptions.specExplicitVariates,
         );
-      }
-      if (targetBranch.kvCache.committedLen >= config.maxPositionEmbeddings) {
-        throw new RangeError(
-          `Cannot step branch '${targetBranch.branchId}': committedLen(${targetBranch.kvCache.committedLen}) reached maxPositionEmbeddings(${config.maxPositionEmbeddings}).`,
-        );
-      }
-
-      let tokenToConsume = targetBranch.pendingToken;
-      if (tokenToConsume === null) {
-        const headRec = recordsById.get(parentRecordId);
-        if (headRec === undefined) {
+      } else {
+        if (targetBranch.haltReason !== null) {
           throw new RangeError(
-            `Cannot step branch '${targetBranch.branchId}': pendingToken is null and parent record is missing.`,
+            `Cannot step halted branch '${targetBranch.branchId}' (haltReason='${targetBranch.haltReason}').`,
           );
         }
-        tokenToConsume = sampleFromFilteredProbs(
-          headRec.lastTokenProbs,
-          targetBranch.config.sampling,
-          targetBranch.prng,
-          undefined,
-        );
-        if (isEosToken(tokenToConsume)) {
+        if (targetBranch.kvCache.committedLen >= config.maxPositionEmbeddings) {
           throw new RangeError(
-            `Cannot step branch '${targetBranch.branchId}': sampled pending token is EOS (${tokenToConsume}).`,
+            `Cannot step branch '${targetBranch.branchId}': committedLen(${targetBranch.kvCache.committedLen}) reached maxPositionEmbeddings(${config.maxPositionEmbeddings}).`,
           );
         }
-      }
 
-      resultRecord = executeStandardChunkOnBranch(
-        targetBranch,
-        [tokenToConsume],
-        'decode_step',
-        parentRecordId,
-        true,
-        stepOptions.sampleUniform,
-      );
+        let tokenToConsume = targetBranch.pendingToken;
+        if (tokenToConsume === null) {
+          const headRec = recordsById.get(parentRecordId);
+          if (headRec === undefined) {
+            throw new RangeError(
+              `Cannot step branch '${targetBranch.branchId}': pendingToken is null and parent record is missing.`,
+            );
+          }
+          tokenToConsume = sampleFromFilteredProbs(
+            headRec.lastTokenProbs,
+            targetBranch.config.sampling,
+            targetBranch.prng,
+            undefined,
+          );
+          if (isEosToken(tokenToConsume)) {
+            throw new RangeError(
+              `Cannot step branch '${targetBranch.branchId}': sampled pending token is EOS (${tokenToConsume}).`,
+            );
+          }
+        }
+
+        resultRecord = executeStandardChunkOnBranch(
+          targetBranch,
+          [tokenToConsume],
+          'decode_step',
+          parentRecordId,
+          true,
+          stepOptions.sampleUniform,
+        );
+      }
+    } catch (err) {
+      if (provisionalBranchId !== null && targetBranch.recordIds.length === 0) {
+        branchesById.delete(provisionalBranchId);
+      }
+      throw err;
     }
 
     if (sourceBranchToPin !== null) {

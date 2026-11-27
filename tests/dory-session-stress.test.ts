@@ -767,4 +767,73 @@ describe('Dory1.0-4B DorySession — Bounded <= 12 MiB Stress (k=4 & k=8), DR18,
       assertBitExactFiniteArray(kvAfter.allBanks[b].v, kvBeforeDump.vCopies[b], `cf.kv.v[${b}]`);
     }
   });
+
+  it('enforces DR19 maxSafeGamma = cap_swa - W - 1 (7) at branch creation and leaves zero zombie branches on throwing rewound specExplicitVariates', () => {
+    const session = createDorySession({
+      params,
+      ropeTables,
+      autoStartInitialBranch: false,
+    });
+
+    // Cleanup 1: gamma = 8 violates DR19 (W=8 + gamma=8 + 1 = 17 > cap_swa=16) and MUST fail at startBranch()
+    expect(() =>
+      session.startBranch({
+        executionMode: 'self_spec',
+        kvCacheMode: 'per_loop',
+        kLoops: 4,
+        speculativeGamma: 8,
+      }),
+    ).toThrow(RangeError);
+    expect(session.listBranches().length).toBe(0);
+
+    // gamma = 7 satisfies DR19 (8 + 7 + 1 = 16 <= 16) and executes cleanly
+    const maxSafeRec = session.startBranch({
+      promptTokens: [1, 10, 4, 18],
+      executionMode: 'self_spec',
+      kvCacheMode: 'per_loop',
+      kLoops: 4,
+      speculativeGamma: 7,
+      sampling: { temperature: 1.0, topK: 0, topP: 1.0 },
+      seed: 0xd0419901,
+    });
+    const steppedSafe = session.step({ branchId: maxSafeRec.branchId });
+    expect(steppedSafe.specSummary).not.toBeNull();
+
+    // Cleanup 2: Rewind to maxSafeRec and pass invalid specExplicitVariates -> throws RangeError
+    // and leaves ZERO zombie recordless branch or leaked KV memory in branchesById!
+    session.seekRecord(maxSafeRec.recordId);
+    const branchesBefore = session.listBranches().length;
+    const memBefore = session.measureMemory();
+
+    expect(() =>
+      session.step({
+        specExplicitVariates: {
+          draftSampleUniforms: [1.5], // invalid uniform >= 1
+        },
+      }),
+    ).toThrow(RangeError);
+
+    expect(() =>
+      session.step({
+        specExplicitVariates: {
+          acceptUniforms: [-0.01], // invalid uniform < 0
+        },
+      }),
+    ).toThrow(RangeError);
+
+    expect(() =>
+      session.step({
+        specExplicitVariates: {
+          correctionOrBonusUniform: Number.NaN,
+        },
+      }),
+    ).toThrow(RangeError);
+
+    expect(session.listBranches().length).toBe(branchesBefore);
+    for (const br of session.listBranches()) {
+      expect(br.headRecordId).not.toBe('');
+      expect(br.recordIds.length).toBeGreaterThan(0);
+    }
+    expect(session.measureMemory()).toEqual(memBefore);
+  });
 });
