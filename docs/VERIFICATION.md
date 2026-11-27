@@ -1,11 +1,12 @@
-# Verification & Reproducibility Runbook — Nemotron 3 Nano, TwoTower, Diffusion-14B & NLD-Uni
+# Verification & Reproducibility Runbook — Nemotron 3 Nano, TwoTower, Diffusion-14B, NLD-Uni & Dory1.0-4B
 
-This runbook documents how to reproduce and verify mathematical parity, unit/contract invariants, 4-way Topology A MPA bundle isolation, real-browser WebGL2 rendering (software SwiftShader and hardware Metal/GPU), accessibility, static artifact checksums, and CI/Pages workflows across all four applications:
+This runbook documents how to reproduce and verify mathematical parity, unit/contract invariants, 5-way Topology A MPA bundle isolation (`20` directional pairs), real-browser WebGL2 rendering (software SwiftShader and hardware Metal/GPU), accessibility, static artifact checksums, and CI/Pages workflows across all five applications:
 
 - **Nemotron 3 Nano 30B-A3B** (`/` & `/llm-viz/` · `v1.0.0` preserved)
 - **Nemotron-Labs-TwoTower 30B-A3B** (`/twotower/` & `/llm-viz/twotower/` · `twotower-v1.0.0`)
 - **Nemotron-Labs-Diffusion-14B** (`/diffusion/` & `/llm-viz/diffusion/` · `diffusion-v1.0.0`)
 - **Nemotron-Labs-Diffusion-Uni (NLD-Uni)** (`/uni/` & `/llm-viz/uni/` · `uni-v1.0.0`)
+- **Nemotron-Labs-Dory1.0-4B (`Dory1.0-4B`)** (`/dory/` & `/llm-viz/dory/` · `dory-v1.0.0`)
 
 ---
 
@@ -27,11 +28,11 @@ npm ci
 # 2. Strict TypeScript verification
 npm run typecheck
 
-# 3. Full Vitest unit, contract & PyTorch-parity suite (631 tests across 76 files; zero Python needed)
+# 3. Full Vitest unit, contract & PyTorch-parity suite (731 tests across 85 files; zero Python needed)
 npm test
 
 # 4. (Optional) Regenerate independent PyTorch 2.15.0 parity fixtures
-#    (Nano, TwoTower Categories 1-8, Diffusion Categories 1-11, NLD-Uni Backbone/Multimodal/Diffusion)
+#    (Nano, TwoTower Cat 1-8, Diffusion Cat 1-11, NLD-Uni Backbone/Multimodal/Diffusion, Dory1.0-4B Backbone & Spec)
 node scripts/reference/export_52layer_params.mjs /tmp/nemotron-viz-ref-params
 uv run scripts/reference/generate_pytorch_parity_fixtures.py \
   --model-manifest /tmp/nemotron-viz-ref-params/model_52layer_manifest.json
@@ -45,26 +46,29 @@ uv run scripts/reference/generate_uni_backbone_pytorch_fixtures.py
 node scripts/reference/export_uni_multimodal_params.mjs
 uv run scripts/reference/generate_uni_multimodal_pytorch_fixtures.py
 uv run scripts/reference/generate_uni_diffusion_pytorch_fixtures.py
+node scripts/reference/export_dory_params.mjs
+uv run scripts/reference/generate_dory_pytorch_fixtures.py
+uv run scripts/reference/generate_dory_spec_fixtures.py
 npm test
 
-# 5. Root production build (`/` + `/twotower/` + `/diffusion/` + `/uni/`) & 4-way isolation check
+# 5. Root production build (`/` + `/twotower/` + `/diffusion/` + `/uni/` + `/dory/`) & 5-way 20-pair isolation check
 VITE_BASE_PATH=/ npm run build
 npm run verify:isolation
 
-# 6. GitHub Pages subpath build (`/llm-viz/` + `/llm-viz/twotower/` + `/llm-viz/diffusion/` + `/llm-viz/uni/`) & 4-way isolation check
+# 6. GitHub Pages subpath build (`/llm-viz/` + `/llm-viz/twotower/` + `/llm-viz/diffusion/` + `/llm-viz/uni/` + `/llm-viz/dory/`) & 5-way isolation check
 VITE_BASE_PATH=/llm-viz/ npx vite build --outDir test-results/dist-pages
 node scripts/verify_bundle_isolation.mjs --dir test-results/dist-pages
 
-# 7. Real Chromium WebGL2 E2E smoke suite across all 4 apps & both base paths
+# 7. Real Chromium WebGL2 E2E smoke suite across all 5 apps & both base paths
 #    (first time: npx playwright install chromium)
 npm run test:e2e
 ```
 
 ---
 
-## 2. Vitest Unit, Contract & PyTorch `2.15.0` Parity Suite (`631` Tests Across `76` Files)
+## 2. Vitest Unit, Contract & PyTorch `2.15.0` Parity Suite (`731` Tests Across `85` Files)
 
-The Node regression suite runs `76` test files (`33` Nano files + `13` TwoTower files + `11` Diffusion files + `18` NLD-Uni files + `1` shared navigation switcher contract file `tests/navigation-switcher-contract.test.ts` [`4` tests]) totaling **`631` tests** (`236` Nano + `133` TwoTower + `70` Diffusion + `188` NLD-Uni + `4` shared switcher):
+The Node regression suite runs `85` test files (`33` Nano files + `13` TwoTower files + `11` Diffusion files + `18` NLD-Uni files + `9` Dory1.0-4B files + `1` shared navigation switcher contract file `tests/navigation-switcher-contract.test.ts` [`4` tests]) totaling **`731` tests** (`236` Nano + `133` TwoTower + `70` Diffusion + `188` NLD-Uni + `100` Dory1.0-4B + `4` shared switcher):
 
 ### A. Nano `v1.0.0` Core Suite (`236` Tests Across `33` Files)
 
@@ -121,9 +125,21 @@ The Node regression suite runs `76` test files (`33` Nano files + `13` TwoTower 
 | **Semantic Ball-Tree, Diffusion & OPD Parity** | `uni-semantic-tree.test.ts` (`19`), `uni-diffusion-parity.test.ts` (`11`), `uni-opd-readouts.test.ts` (`10`) | `BalancedSemanticTree` (`D = 8` mini / `U26` `D = 17` floor-rounding mismatch), stratified quadtree refinement, Dual-CFG edit (`legacy`/`independent`/`ip2p`, `U18` border-lock), Read-Only OPD (`U28`), and PyTorch `2.15.0` parity (`pytorch-uni-diffusion.json`). |
 | **Session Stress, All 7 Spatial Scenes, Tour & App Contracts** | `uni-session-stress.test.ts` (`7`), `uni-macro-scene.test.ts` (`7`), `uni-visual-input-scene.test.ts` (`7`), `uni-joint-attn-scene.test.ts` (`6`), `uni-ball-tree-scene.test.ts` (`5`), `uni-refinement-edit-scene.test.ts` (`9`), `uni-opd-scene.test.ts` (`6`), `uni-walkthrough.test.ts` (`5`), `uni-app-contracts.test.ts` (`19`) | `<= 12.00 MiB` `Set<ArrayBufferLike>` session budget, all 7 WebGL2 scenes + 2D RGB canvas insets, 5-act / 28-beat isolated tour, WAI-ARIA helpers, zero-idle-RAF, and `D4` isolation contracts. |
 
+### E. Nemotron-Labs-Dory1.0-4B (`dory-v1.0.0`) Suite (`100` Tests Across `9` Files)
+
+| Category | Test File | Verified Properties |
+| --- | --- | --- |
+| **Backbone Math & PyTorch `2.15.0` Parity** | `dory-math-parity.test.ts` | Cryptographic `SHA-256` match (`cd3a8ad3...`, `507` tensors / `93,248` floats = `372,992 B`), `DR1–DR24` & `D1–D10`, single-op nGPT kernels (`<= 1e-6`), planted `|α_hat| > 1` NLERP (`DR7`), sublayers (`<= 1e-5`), full 72L `k ∈ {1..4, 6}` (`<= 2e-5`), `per_loop` long-chunk `L = 24, 32 > cap_swa = 16` (`DR24`), `last_loop` Theorems 1–3 + constructive `max_abs > 1e-2` divergence (`DR17`) + `W_v = 0` counterexample, and upstream differential variants (`DR5/DR6/DR8/DR9`). |
+| **Contract A §6.2 Self-Spec (6-Layer Parity)** | `dory-speculative-parity.test.ts` | All 6 verification layers against `pytorch-dory-spec.json`: (1) binary64 algebraic identity `<= 1e-15`, (2) `V = 4` exact analytical enumeration `<= 1e-15`, (3) explicit-variate boundary checks, (4) adversarial edges (`p === q`, disjoint, `q = 1e-40`, `Δ = 4e-13`, one-hot), (5) multi-cycle Contract A `104`-bank `k = 4` verify & `output_shallow` `k = 1` draft parity (`<= 2e-5`) across `S > 8` rollback & greedy `===` AR, and (6) Pearson `χ² < 103.51` (`N = 20,000, α = 0.001, df = 63`) + mandatory failing negative controls. |
+| **Session Immutability, `D10` LRU Pool & Stress** | `dory-session-stress.test.ts` | Non-aliased CoW branch isolation, `DR18` immutable depth/policy fork guard, `DR24` `last_loop` `chunkSizes[]` `0-ULP` lazy trace replay, and 12-branch / 128-record stress strictly `<= 12.00 MiB` at **both `k = 4` and `k = 8`** via `D10` `3.00 MiB` LRU sparse-checkpoint pool. |
+| **Spatial Provenance, Views 1–6 & `DR20`/`DR21`** | `dory-scene-provenance.test.ts`, `dory-scene-macro-hypersphere.test.ts`, `dory-scene-mixers-kv-spec.test.ts` | `0` `NaN`/`Inf`, `0` atlas overlaps, `<= 512 KiB` `RG32F`, `DR20` throw guard on unmasked SWA/Full plates, `DR21` `pick.ts` immutability, Folded/Unrolled shared weights, anti-SLERP / Exploratory 2D PCA (`8D` metrics) / read-only Counterfactual Coda, Dual-RoPE GQA, SwiGLU, `kv_compare`, and Contract A `self_spec`. |
+| **View 7, Readouts & 4-Act / 14-Beat Tour** | `dory-readouts-tour.test.ts` | `0 B` diff 4-checkpoint constants, `$S$-invariant (4 + 5k) / 9` ratio, `READ-ONLY · NO GRADIENTS` TBPTL guard, full 8-tuple `DoryExecutionCoord` validation on all 14 beats, and byte-exact isolation from external Free-Explore `DorySession`. |
+| **App Shell, Charts, Overlay & Static `D4` Guard** | `dory-app-contracts.test.ts` | `idle-RAF`, dual-hash atlas dedup, `<= 64` pooled overlay cells, 6 headless `<svg>` charts, in-place slider/dock DOM identity, and recursive static guard banning Gate 4b/4c Nano modules, sibling entries, and `Math.random(`. |
+| **5-Way MPA Navigation & Release Metadata** | `dory-navigation-contract.test.ts` (`6` tests) | 5-entry `MODEL_REGISTRY` (`/` & `/llm-viz/`), clean `dory/index.html` & `vite.config.ts`, `0` forbidden Dory markers across all 4 prior apps & shared switcher, light-theme switcher mount, `verify_bundle_isolation.mjs` registration, and 5-way WAI-ARIA keyboard navigation. |
+
 ### Independent PyTorch `2.15.0` Parity Tolerances
 
-TypeScript accumulates inner dot products in JS `float64` prior to `Math.fround` writes while PyTorch `torch.float32` accumulates in `float32` BLAS/SIMD. All `11` checked-in SHA-256-verified independent PyTorch `2.15.0` reference fixtures (`tests/fixtures/*.json`) pass under Vitest:
+TypeScript accumulates inner dot products in JS `float64` prior to binary32 write-backs while PyTorch `torch.float32` accumulates in `float32` BLAS/SIMD. All `13` checked-in SHA-256-verified independent PyTorch `2.15.0` reference fixtures (`tests/fixtures/*.json`) pass under Vitest:
 
 | Fixture File | Scope | Observed / Enforced Max Absolute Tolerance |
 | --- | --- | --- |
@@ -138,49 +154,52 @@ TypeScript accumulates inner dot products in JS `float64` prior to `Math.fround`
 | `tests/fixtures/pytorch-uni-backbone.json` | NLD-Uni 34L Elastic-MoT backbone (18 Joint + 16 Split, 1D dyadic YaRN + Llama-4 `p = 16` + 2D `SinCos-G`, `D5` `HF-Faithful` vs. `Elastic-Pruned`) | Dyadic YaRN `inv_freq`: **`0`-ULP** · Backbone logits/residuals/KV: **`<= 5e-5`** · `D5` Stage-2 equivalence: **`0` ULP** |
 | `tests/fixtures/pytorch-uni-multimodal.json` | NLD-Uni Multimodal Understanding (`RADIO-H`, `Emu3` IBQ, `2×2` `PackedLinearImageCodec`, FLARE shifted-logit understanding, `<LOC_0..16>` grounding) | Patch/codebook/codec projections & logits: **`<= 5e-5`** · Argmax VQ codes & `<LOC_*>` tokens: **exact match** |
 | `tests/fixtures/pytorch-uni-diffusion.json` | NLD-Uni Discrete Diffusion (`BalancedSemanticTree`, stratified quadtree refinement, Dual-CFG edit `legacy`/`independent`/`ip2p`, Read-Only OPD `tail_kl`) | Tree/CFG logits & probs: **`<= 5e-5`** · Selected codes, `U18` border-lock & OPD buckets: **exact match** |
+| `tests/fixtures/pytorch-dory-backbone.json` | Dory1.0-4B 72L Full-nGPT backbone (`507` tensors / `93,248` F32, SHA-256 `cd3a8ad3ff987fd9e175a3d1f593322965a171446ce971e357bbf79353defa1b`), 5 scale families, Dual-RoPE, `k ∈ {1..4, 6}`, `per_loop` long-chunk (`L = 24, 32`), `last_loop` Theorems 1–3, & upstream differential variants | Single-op: **`<= 1e-6`** · Sublayers: **`<= 1e-5`** · Full 72L & `per_loop`/`last_loop` chunks: **`<= 2e-5`** · `last_loop` Theorem 3 divergence: **`> 1e-2`** |
+| `tests/fixtures/pytorch-dory-spec.json` | Dory1.0-4B Paper §6.2 Contract A Self-Speculation (`104` Dual-Coda banks, `k = 1 → 4`, `γ = 4`, binary64 division-free rejection & residual, 6-layer hierarchy + 2 failing negative controls) | Binary64 algebraic & `V = 4` exact enum: **`<= 1e-15`** · Multi-cycle `k = 4` verify & `output_shallow` `k = 1` draft: **`<= 2e-5`** · Greedy: **`===` AR** · Pearson `χ² < 103.51` (`N = 20,000, α = 0.001`) |
 
 ---
 
-## 3. Topology A N-Way Multi-Entry MPA Build & Bundle-Isolation Gate
+## 3. Topology A 5-Way Multi-Entry MPA Build & Bundle-Isolation Gate
 
 Run the automated 7-gate N-way verifier (`scripts/verify_bundle_isolation.mjs`) against **both** root (`/`) and GitHub Pages (`/llm-viz/`) builds:
 
 ```bash
-# Root build (`/` + `/twotower/` + `/diffusion/` + `/uni/`)
+# Root build (`/` + `/twotower/` + `/diffusion/` + `/uni/` + `/dory/`)
 VITE_BASE_PATH=/ npm run build
 npm run verify:isolation
 
-# GitHub Pages subpath build (`/llm-viz/` + `/llm-viz/twotower/` + `/llm-viz/diffusion/` + `/llm-viz/uni/`)
+# GitHub Pages subpath build (`/llm-viz/` + `/llm-viz/twotower/` + `/llm-viz/diffusion/` + `/llm-viz/uni/` + `/llm-viz/dory/`)
 VITE_BASE_PATH=/llm-viz/ npx vite build --outDir test-results/dist-pages
 node scripts/verify_bundle_isolation.mjs --dir test-results/dist-pages
 ```
 
 Enforced hard gates across all configured entries (non-zero exit on any failure):
 
-1. All 4 HTML entries exist: `index.html` (Nano), `twotower/index.html` (TwoTower), `diffusion/index.html` (Diffusion), and `uni/index.html` (Uni).
+1. All 5 HTML entries exist: `index.html` (Nano), `twotower/index.html` (TwoTower), `diffusion/index.html` (Diffusion), `uni/index.html` (Uni), and `dory/index.html` (Dory).
 2. Every `<script src>`, `<link rel="modulepreload" href>`, and `<link rel="stylesheet" href>` resolves cleanly under `/` or `/llm-viz/`.
 3. TypeScript ECMAScript AST walks every transitive static `import`/`export ... from` and literal dynamic `import(...)` edge across all graphs.
-4. Strict N-way sourcemap mutual isolation across all `12` directional pairs plus **Gate 4b** (zero Nano UI/controller/walkthrough/cutaway-exclusive sources in any non-Nano entry, generalizing `D4`) and **Gate 4c** (zero Nano/TwoTower hybrid core sources in any non-hybrid entry such as Diffusion or Uni).
-5. Strict N-way payload marker mutual isolation across all `12` directional pairs.
-6. Positive presence: Nano (`2`), TwoTower (`22`), Diffusion (`31`), and Uni (`36`) transitive JS sourcemaps positively contain their own exclusive sources (`0` runtime dependencies).
+4. Strict 5-way sourcemap mutual isolation across all **`20` directional pairs** plus **Gate 4b** (zero Nano UI/controller/walkthrough/cutaway-exclusive sources in any non-Nano entry, generalizing `D4`) and **Gate 4c** (zero Nano/TwoTower hybrid core sources in any non-hybrid entry: Diffusion, Uni, and Dory).
+5. Strict 5-way payload marker mutual isolation across all **`20` directional pairs**.
+6. Positive presence: Nano (`2`), TwoTower (`22`), Diffusion (`31`), Uni (`36`), and Dory (`32`) transitive JS sourcemaps positively contain their own exclusive sources (`0` runtime dependencies).
 7. Nano payload budget gate (`<= 215.00 KiB` / `220,160 B` gzip, verified on both `/` and `/llm-viz/`):
-   - **Nano (4 JS, 2 CSS):** `773,248 B` (`/`) / `773,256 B` (`/llm-viz/`) raw | **`216,711 B` (`211.63 KiB`)** `/` / **`216,724 B` (`211.64 KiB`)** `/llm-viz/` gzip (**`+3.37 KiB` / `+3,449 B` headroom**, `0` leaks).
-   - **TwoTower (4 JS, 2 CSS):** `1,128,268 B` (`/`) / `1,128,276 B` (`/llm-viz/`) raw | **`321,001 B` (`313.48 KiB`)** `/` / **`321,010 B` (`313.49 KiB`)** `/llm-viz/` gzip (`22` `src/twotower/*` sources, `0` leaks, `nanoUI=0`).
-   - **Diffusion (3 JS, 2 CSS):** `491,090 B` (`/`) / `491,098 B` (`/llm-viz/`) raw | **`146,853 B` (`143.41 KiB`)** `/` / **`146,861 B` (`143.42 KiB`)** `/llm-viz/` gzip (`31` `src/diffusion/*` sources, `0` leaks, `nanoUI=0`, `nonHybridCore=0`).
-   - **NLD-Uni (2 JS, 2 CSS):** `577,806 B` (`/`) / `577,814 B` (`/llm-viz/`) raw | **`169,367 B` (`165.40 KiB`)** `/` / **`169,376 B` (`165.41 KiB`)** `/llm-viz/` gzip (`36` `src/uni/*` sources, `0` leaks, `nanoUI=0`, `nonHybridCore=0`).
-   - **Shared Chunks (3 JS, 1 CSS):** `assets/atlasPacker-*.js` (`shared(all4)`, `25,561 B` gzip) + `assets/atlasPacker-*.css` (`shared(all4)`, `1,178 B` gzip) + `assets/moeCutaway-*.js` (`shared(n+tt)`, `95,178 B` gzip) + `assets/overlayLayout-*.js` (`shared(n+tt+df)`, `4,379 B` gzip) = `423,152 B` (`413.23 KiB`) raw / **`126,296 B` (`123.34 KiB`)** gzip.
+   - **Nano (5 JS, 2 CSS):** `774,270 B` (`/`) / `774,278 B` (`/llm-viz/`) raw | **`216,915 B` (`211.83 KiB`)** `/` / **`216,926 B` (`211.84 KiB`)** `/llm-viz/` gzip (**`+3.17 KiB` / `+3,245 B` headroom**, `0` leaks).
+   - **TwoTower (5 JS, 2 CSS):** `1,129,331 B` (`/`) / `1,129,339 B` (`/llm-viz/`) raw | **`321,265 B` (`313.74 KiB`)** `/` / **`321,274 B` (`313.74 KiB`)** `/llm-viz/` gzip (`22` `src/twotower/*` sources, `0` leaks, `nanoUI=0`).
+   - **Diffusion (4 JS, 2 CSS):** `492,139 B` (`/`) / `492,147 B` (`/llm-viz/`) raw | **`147,294 B` (`143.84 KiB`)** `/` / **`147,301 B` (`143.85 KiB`)** `/llm-viz/` gzip (`31` `src/diffusion/*` sources, `0` leaks, `nanoUI=0`, `nonHybridCore=0`).
+   - **NLD-Uni (2 JS, 2 CSS):** `578,473 B` (`/`) / `578,481 B` (`/llm-viz/`) raw | **`169,458 B` (`165.49 KiB`)** `/` / **`169,464 B` (`165.49 KiB`)** `/llm-viz/` gzip (`36` `src/uni/*` sources, `0` leaks, `nanoUI=0`, `nonHybridCore=0`).
+   - **Dory1.0-4B (3 JS, 2 CSS):** `753,226 B` (`/`) / `753,242 B` (`/llm-viz/`) raw | **`217,516 B` (`212.42 KiB`)** `/` / **`217,531 B` (`212.43 KiB`)** `/llm-viz/` gzip (`32` `src/dory/*` sources, `0` leaks, `nanoUI=0`, `nonHybridCore=0`).
+   - **Shared Chunks (4 JS, 1 CSS):** `assets/atlasPacker-*.js` (`shared(all5)`, `25,767 B` gzip) + `assets/atlasPacker-*.css` (`shared(all5)`, `1,178 B` gzip) + `assets/moeCutaway-*.js` (`shared(n+tt)`, `94,962 B` gzip) + `assets/overlayLayout-*.js` (`shared(n+tt+df+dory)`, `2,548 B` gzip) + `assets/sheetInspector-*.js` (`shared(n+tt+df)`, `2,102 B` gzip) = `424,128 B` (`414.19 KiB`) raw / **`126,557 B` (`123.59 KiB`)** gzip.
 
 ---
 
-## 4. Playwright / Chromium WebGL2 E2E Smoke Suite (`36` Tests Across `5` Files)
+## 4. Playwright / Chromium WebGL2 E2E Smoke Suite (`43` Tests Across `6` Files)
 
-`playwright.config.ts` starts two isolated preview servers (`127.0.0.1:4173` for root `/` and `127.0.0.1:4174/llm-viz/` for GitHub Pages subpath) and runs all four E2E suites:
+`playwright.config.ts` starts two isolated preview servers (`127.0.0.1:4173` for root `/` and `127.0.0.1:4174/llm-viz/` for GitHub Pages subpath) and runs all six E2E suites:
 
 ```bash
 # First-time local browser setup
 npx playwright install chromium
 
-# Run all Nano + TwoTower + Diffusion + NLD-Uni WebGL2 E2E tests (SwiftShader headless Chromium)
+# Run all Nano + TwoTower + Diffusion + NLD-Uni + Dory1.0-4B WebGL2 E2E tests (SwiftShader headless Chromium)
 npm run test:e2e
 ```
 
@@ -219,7 +238,7 @@ npx vite preview --outDir dist --base / --port 4173 --strictPort --host 127.0.0.
 > **Application-Side JS Callback Time vs. Full GPU Execution Latency**
 > Measurements captured with `performance.now()` around `drawFrame()` (`lastFrameMs` / `JS cb`) quantify **application-side main-thread CPU processing and WebGL command submission time** — they do **NOT** measure full asynchronous GPU rasterization, fragment shading, or display compositor latency. Observed smoothness during active camera flies or replay is tracked separately via continuous **observed RAF interval cadence (`RAF Δ`)**, measured strictly between consecutive animating frames (excluding idle-sleep pauses).
 
-### Covered E2E Scenarios (`36` Tests Across `5` Files, Shared Helpers in `tests/e2e/helpers.ts`)
+### Covered E2E Scenarios (`43` Tests Across `6` Files, Shared Helpers in `tests/e2e/helpers.ts`)
 
 #### Nano E2E Suite (`tests/e2e/smoke.spec.ts` — `9` Tests, hardened with observable `waitForProjectedOverlaySettled`)
 1. **52-Layer Tower Boot** — Clean initial WebGL2 frame, zero console/page errors, `#webgl-fallback` hidden.
@@ -262,10 +281,19 @@ npx vite preview --outDir dist --base / --port 4173 --strictPort --host 127.0.0.
 7. **28-Beat Guided Tour + `1280×800` Zero-Overlap Layout + `Escape` Deferral + Free-Explore Restoration** — Verifies tour lock, ledger ref chips, `Escape` deferral inside search, and Free-Explore restoration.
 8. **GitHub Pages Subpath `/llm-viz/uni/` Parity** — Verifies `/llm-viz/uni/` HTTP `200` assets, WebGL2 render, `D5` toggle, and subpath switcher hrefs.
 
-#### Unified Multi-Model Switcher & Containment E2E Suite (`tests/e2e/navigation.spec.ts` — `3` Tests)
-1. **Root `/` N-Way Switcher Navigation (Click & Keyboard `ArrowDown`/`Enter`)** — Full cycle across all 4 apps verifying non-blank WebGL2 canvases and `glErrorCount === 0`.
-2. **GitHub Pages `/llm-viz/` Subpath N-Way Switcher Navigation (Click & Keyboard)** — Full cycle verifying `/llm-viz/assets/*` HTTP `200`, subpath hrefs, non-blank WebGL2, and `glErrorCount === 0`.
-3. **4 Apps × 4 Viewports Popover Non-Clipping (`1440×900`, `1280×800`, `1024×800`, `390×844`)** — Verifies the top-bar model switcher popover never clips horizontally or vertically, introduces `0` horizontal overflow, marks `aria-current="page"`, and restores focus on `Escape` across all 16 app × viewport combinations.
+#### Dory1.0-4B E2E Suite (`tests/e2e/dory-smoke.spec.ts` — `7` Tests)
+1. **Root `/dory/` Boot, Zero GL Errors & Idle-RAF Settled** — Verifies clean WebGL2 boot, non-blank Macro frame (`k = 2, 112L, 56 per_loop banks`), `<= 64` overlay pool, `<= 512 KiB` atlas, `D10` memory bounds, and strict `rafActive === false` rest window.
+2. **All 7 Editorial Spatial Views + 2D Analytical `<svg>` Insets + `RG32F` Atlas Deduplication** — Sweeps all 7 views (`macro` through `bookends`), verifies all 6 `<svg>` charts (`spanning_subspace`, `exploratory_pca`, `dual_rope_phasors`, `kv_scaling_256k`, `self_spec_probs`, `tbptl_schematic`), and confirms `0` spurious atlas re-uploads on hover, orbit-drag, tab re-click, or inspector toggle.
+3. **Elastic Depth `k` (`1..4` & `+6,8`) + `per_loop`/`last_loop` `DR18` Immutable Forking** — Verifies `k = 2 → 4` (`192L, 96` banks), Folded/Unrolled Macro toggle, `+6,8` extrapolation (`k = 8, 352L, 176` banks bounded `<= 12 MiB`), `last_loop` (`36` frozen banks), View 5 `DR17` partition modes, and preservation of all 5 immutable branches.
+4. **Contract A Paper §6.2 Self-Speculative View (`104` Banks) & View 7 Read-Only Bookends/Readouts/Ledger** — Verifies `Reconstructed from Paper §6.2` banner, live `104`-bank Contract A activation & `γ = 4` cycle, View 7 `READ-ONLY · NO GRADIENTS` banner & zero fake quant toggles, `0 B` diff 4-checkpoint Readouts table, and `DR23` Ledger search.
+5. **In-Place Slider DOM Identity & Hover Controls-Slot Preservation** — Verifies exact DOM node & focus identity across sequential inputs on `dory-layer-slider`, `dory-gqa-layer-slider`, `dory-swiglu-reveal-slider`, and `dory-dock-temp-slider`, plus hover controls-slot preservation across the WebGL2 canvas.
+6. **4-Act / 14-Beat Guided Tour + Tour Lock + `Escape` Deferral + Free-Explore Isolation** — Verifies representative beats across all 4 Acts & 7 views, live 8-tuple `DoryExecutionCoord`, dock/inspector lock during tour, Ledger ref chips, `Escape` deferral inside search, and identical Free-Explore restoration on exit.
+7. **GitHub Pages Subpath `/llm-viz/dory/` Parity** — Verifies `/llm-viz/assets/*` HTTP `200`, non-blank WebGL2 render, all 5 subpath switcher hrefs (`aria-current="page"` on `nav-to-dory`), View 2 `<svg>` insets, and live `104`-bank Contract A activation under `/llm-viz/dory/`.
+
+#### Unified 5-Model Switcher & Containment E2E Suite (`tests/e2e/navigation.spec.ts` — `3` Tests)
+1. **Root `/` 5-Way Switcher Navigation (Click & Keyboard `ArrowDown`/`Enter`)** — Full cycle across all 5 apps (`Nano → TwoTower → Diffusion → Uni → Dory → Nano`) verifying non-blank WebGL2 canvases and `glErrorCount === 0`.
+2. **GitHub Pages `/llm-viz/` Subpath 5-Way Switcher Navigation (Click & Keyboard)** — Full 5-app cycle verifying `/llm-viz/assets/*` HTTP `200`, subpath hrefs, non-blank WebGL2, and `glErrorCount === 0`.
+3. **5 Apps × 4 Viewports Popover Non-Clipping (`1440×900`, `1280×800`, `1024×800`, `390×844`)** — Verifies the top-bar model switcher popover never clips horizontally or vertically, introduces `0` horizontal overflow, marks `aria-current="page"`, and restores focus on `Escape` across all `20` app × viewport combinations.
 
 ---
 
@@ -277,13 +305,13 @@ To produce verifiable, self-contained static release tarballs for both root (`/`
 # Clean output staging directory (gitignored)
 mkdir -p test-results/release-artifacts
 
-# 1. Portable static archive (serves at root `/`, `/twotower/`, `/diffusion/`, and `/uni/`)
+# 1. Portable static archive (serves at root `/`, `/twotower/`, `/diffusion/`, `/uni/`, and `/dory/`)
 VITE_BASE_PATH=/ npx vite build --outDir test-results/dist-portable
 node scripts/verify_bundle_isolation.mjs --dir test-results/dist-portable
 tar -czf test-results/release-artifacts/nemotron-viz-static-portable.tar.gz \
   -C test-results/dist-portable .
 
-# 2. GitHub Pages subpath archive (serves at `/llm-viz/`, `/llm-viz/twotower/`, `/llm-viz/diffusion/`, and `/llm-viz/uni/`)
+# 2. GitHub Pages subpath archive (serves at `/llm-viz/`, `/llm-viz/twotower/`, `/llm-viz/diffusion/`, `/llm-viz/uni/`, and `/llm-viz/dory/`)
 VITE_BASE_PATH=/llm-viz/ npx vite build --outDir test-results/dist-pages
 node scripts/verify_bundle_isolation.mjs --dir test-results/dist-pages
 tar -czf test-results/release-artifacts/nemotron-viz-ghpages-llm-viz.tar.gz \
@@ -312,7 +340,8 @@ Verification and production deployment remain strictly separated under `.github/
 
 ## 7. Known Limitations & Scope Boundaries
 
-- **Miniature Synthetic Simulators:** Browser execution uses deterministic synthetic Float32/Float64 weights (`d = 8`, `V_mini = 32` for Nano; `V_mini = 34` for TwoTower; `V_mini = 36` for Diffusion; `V_txt = 64` + `V_vq = 256` for NLD-Uni). None of the four entries loads NVIDIA checkpoints, runs production `131K`/`132K` tokenizers, loads `pca_tree.pt`, or simulates hardware FP8 E4M3 quantization rounding.
+- **Miniature Synthetic Simulators:** Browser execution uses deterministic synthetic Float32/Float64 weights (`d = 8`, `V_mini = 32` for Nano; `V_mini = 34` for TwoTower; `V_mini = 36` for Diffusion; `V_txt = 64` + `V_vq = 256` for NLD-Uni; `V_mini = 64` across `72` sublayers / `507` tensors for Dory1.0-4B). None of the five entries loads NVIDIA checkpoints, GGUFs, `131K`/`132K` tokenizers, or `pca_tree.pt`, nor simulates hardware FP8/FP4 quantization rounding.
+- **Dory1.0-4B Paper §6.2 Contract A Disclosure (`DR23`):** Live self-speculation (`104` Dual-Coda banks, `k = 1 → 4, γ = 4`) is reconstructed from Paper §6.2 (absent from upstream runtimes) and explicitly badged in View 6, the timeline dock, and the tour; production 4-checkpoint sizes and TBPTL depth-1 diagrams are strictly read-only (`zeroFakeQuantToggles = true`, `hasGradients = false`).
 - **Diffusion Projection-Width Reversal (`Mini` vs. `14B`):** Miniature `40L` Diffusion expands `8 → 256` (`qConcat = 256`, `kvConcat = 64`), whereas canonical `14B` contracts `5,120 → 4,096` (`kv = 1,024`); explicitly disclosed in `gqa_rope`, `macro`, and `Architecture` readouts.
 - **Excluded Peak Inference Workspace:** Accounted production weight & KV totals explicitly exclude intermediate layer activations, `[B × 131,072]` logits, CUDA/framework scratchpads, and allocator fragmentation.
 - **VLM-8B Quadratic SS Reference Only (`D10`, `D24`):** Quadratic Self-Speculation is absent from all 6 text checkpoints and shown strictly as a badged read-only reference tab inside the Diffusion Mask Explorer.

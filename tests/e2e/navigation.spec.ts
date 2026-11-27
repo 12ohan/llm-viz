@@ -11,7 +11,7 @@ import {
   waitForAppSettled,
 } from './helpers';
 
-const FULL_TOUR_SEQUENCE: readonly ModelEntryId[] = ['twotower', 'diffusion', 'uni', 'nano'];
+const FULL_TOUR_SEQUENCE: readonly ModelEntryId[] = ['twotower', 'diffusion', 'uni', 'dory', 'nano'];
 
 const REQUIRED_VIEWPORTS = [
   { width: 1440, height: 900 },
@@ -36,7 +36,7 @@ test.describe('Multi-Model Top-Bar Switcher · N-Way Navigation & Responsive Con
     await waitForAppSettled(page, 'nano');
     await assertCanvasNonBlank(getAppCanvasLocator(page, 'nano'), 'Root Nano initial');
 
-    // Click cycle across every registered visualizer: Nano -> TwoTower -> Diffusion -> Uni -> Nano
+    // Click cycle across every registered visualizer: Nano -> TwoTower -> Diffusion -> Uni -> Dory -> Nano
     for (const targetId of FULL_TOUR_SEQUENCE) {
       const entry = MODEL_REGISTRY.find((e) => e.id === targetId)!;
       await navigateViaModelSwitcher(page, targetId, urlFor(ROOT_BASE_URL, targetId), {
@@ -54,7 +54,7 @@ test.describe('Multi-Model Top-Bar Switcher · N-Way Navigation & Responsive Con
       ).toBe(0);
     }
 
-    // Keyboard cycle (ArrowDown on trigger + Enter on focused target link): Nano -> TwoTower -> Diffusion -> Uni -> Nano
+    // Keyboard cycle (ArrowDown on trigger + Enter on focused target link): Nano -> TwoTower -> Diffusion -> Uni -> Dory -> Nano
     for (const targetId of FULL_TOUR_SEQUENCE) {
       const entry = MODEL_REGISTRY.find((e) => e.id === targetId)!;
       await navigateViaModelSwitcher(page, targetId, urlFor(ROOT_BASE_URL, targetId), {
@@ -84,7 +84,7 @@ test.describe('Multi-Model Top-Bar Switcher · N-Way Navigation & Responsive Con
     expect(initialJs.length, 'Expected /llm-viz/assets/*.js HTTP 200').toBeGreaterThan(0);
     expect(initialCss.length, 'Expected /llm-viz/assets/*.css HTTP 200').toBeGreaterThan(0);
 
-    // Click cycle across all 4 apps under /llm-viz/
+    // Click cycle across all 5 apps under /llm-viz/
     for (const targetId of FULL_TOUR_SEQUENCE) {
       const entry = MODEL_REGISTRY.find((e) => e.id === targetId)!;
       await navigateViaModelSwitcher(page, targetId, urlFor(PAGES_BASE_URL, targetId), {
@@ -102,7 +102,7 @@ test.describe('Multi-Model Top-Bar Switcher · N-Way Navigation & Responsive Con
       ).toBe(0);
     }
 
-    // Keyboard cycle across all 4 apps under /llm-viz/
+    // Keyboard cycle across all 5 apps under /llm-viz/
     for (const targetId of FULL_TOUR_SEQUENCE) {
       const entry = MODEL_REGISTRY.find((e) => e.id === targetId)!;
       await navigateViaModelSwitcher(page, targetId, urlFor(PAGES_BASE_URL, targetId), {
@@ -119,7 +119,7 @@ test.describe('Multi-Model Top-Bar Switcher · N-Way Navigation & Responsive Con
     guards.assertClean();
   });
 
-  test('3. Top-bar model switcher popover never clips across all 4 apps × 4 viewports (1440×900, 1280×800, 1024×800, 390×844)', async ({
+  test('3. Top-bar model switcher popover never clips across all 5 apps × 4 viewports (1440×900, 1280×800, 1024×800, 390×844)', async ({
     page,
   }) => {
     const guards = attachRuntimeGuards(page);
