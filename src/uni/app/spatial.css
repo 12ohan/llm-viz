@@ -388,6 +388,10 @@ input {
   max-width: min(420px, calc(100% - 438px));
 }
 
+.uni-stage-title-card.is-tour-active .uni-badge-strip {
+  display: none;
+}
+
 .uni-stage-title {
   margin: 0;
   font-size: 13px;
@@ -546,17 +550,17 @@ input {
   left: 0;
   display: inline-flex;
   align-items: center;
-  height: 20px;
-  padding: 0 7px;
+  height: 18px;
+  padding: 0 6px;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.92);
+  background: rgba(255, 255, 255, 0.9);
   border: 1px solid var(--uni-border-strong);
   color: var(--uni-ink);
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 600;
   font-family: var(--uni-font-mono);
   white-space: nowrap;
-  box-shadow: 0 1px 2px rgba(24, 32, 44, 0.07);
+  box-shadow: 0 1px 2px rgba(24, 32, 44, 0.06);
   will-change: transform;
 }
 
@@ -938,21 +942,23 @@ input {
   margin: 0;
   font-size: 11.5px;
   color: var(--uni-ink-secondary);
-  line-height: 1.38;
-  max-height: 92px;
+  line-height: 16px;
+  max-height: 112px;
+  padding-bottom: 1px;
   overflow-y: auto;
 }
 
 .uni-tour-equation {
-  padding: 4px 7px;
+  padding: 5px 8px;
   border-radius: var(--uni-radius-sm);
   background: var(--uni-bg-surface);
   border: 1px solid var(--uni-border);
   font-family: var(--uni-font-mono);
   font-size: 10.5px;
+  line-height: 1.38;
   color: var(--uni-ink);
-  white-space: nowrap;
-  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .uni-tour-footer {

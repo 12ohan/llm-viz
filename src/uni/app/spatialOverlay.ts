@@ -65,8 +65,69 @@ function overlapsAny(
   return false;
 }
 
-function estimateTextWidth(text: string, pxPerChar = 6.4): number {
+function estimateTextWidth(text: string, pxPerChar = 6.0): number {
   return Math.ceil(text.length * pxPerChar);
+}
+
+function tokenizeOverlayLabel(text: string): readonly string[] {
+  const cleaned = text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  if (!cleaned) return [];
+  return cleaned.split(/\s+/).filter((tok) => tok.length >= 2);
+}
+
+function areOverlayLabelsRedundant(a: string, b: string): boolean {
+  const normA = a.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const normB = b.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  if (!normA || !normB) return false;
+  if (normA === normB) return true;
+  if (normA.length >= 14 && normB.includes(normA)) return true;
+  if (normB.length >= 14 && normA.includes(normB)) return true;
+
+  const toksA = tokenizeOverlayLabel(normA);
+  const toksB = tokenizeOverlayLabel(normB);
+  const minLen = Math.min(toksA.length, toksB.length);
+  if (minLen < 3) return false;
+  const setB = new Set(toksB);
+  let shared = 0;
+  for (let i = 0; i < toksA.length; i++) {
+    if (setB.has(toksA[i]!)) shared += 1;
+  }
+  return shared >= 3 && shared / minLen >= 0.7;
+}
+
+function rectOverlapArea(
+  rects: readonly UniOverlayRect[],
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  pad = 3,
+): number {
+  let area = 0;
+  for (let i = 0; i < rects.length; i++) {
+    const r = rects[i]!;
+    const ox = Math.min(x1 + pad, r.x1 + pad) - Math.max(x0 - pad, r.x0 - pad);
+    const oy = Math.min(y1 + pad, r.y1 + pad) - Math.max(y0 - pad, r.y0 - pad);
+    if (ox > 0 && oy > 0) {
+      area += ox * oy;
+    }
+  }
+  return area;
+}
+
+function pointInsideRects(
+  rects: readonly UniOverlayRect[],
+  x: number,
+  y: number,
+  pad = 4,
+): boolean {
+  for (let i = 0; i < rects.length; i++) {
+    const r = rects[i]!;
+    if (x >= r.x0 - pad && x <= r.x1 + pad && y >= r.y0 - pad && y <= r.y1 + pad) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function buildElbowPath(
@@ -74,15 +135,25 @@ function buildElbowPath(
   anchorY: number,
   rect: UniOverlayRect,
 ): string {
-  const cx = (rect.x0 + rect.x1) * 0.5;
   const cy = (rect.y0 + rect.y1) * 0.5;
+  // Side-attached leader when pill sits cleanly left or right of its 3D anchor
+  if (rect.x1 + 4 < anchorX) {
+    const midX = rect.x1 + Math.min(18, (anchorX - rect.x1) * 0.45);
+    if (Math.hypot(rect.x1 - anchorX, cy - anchorY) < 4) return '';
+    return `M${anchorX.toFixed(1)},${anchorY.toFixed(1)}L${midX.toFixed(1)},${cy.toFixed(1)}L${rect.x1.toFixed(1)},${cy.toFixed(1)}`;
+  }
+  if (rect.x0 - 4 > anchorX) {
+    const midX = rect.x0 - Math.min(18, (rect.x0 - anchorX) * 0.45);
+    if (Math.hypot(rect.x0 - anchorX, cy - anchorY) < 4) return '';
+    return `M${anchorX.toFixed(1)},${anchorY.toFixed(1)}L${midX.toFixed(1)},${cy.toFixed(1)}L${rect.x0.toFixed(1)},${cy.toFixed(1)}`;
+  }
   const edgeX = clamp(anchorX, rect.x0 + 4, rect.x1 - 4);
   const edgeY = anchorY <= cy ? rect.y0 : rect.y1;
   const midY = (anchorY + edgeY) * 0.5;
   if (Math.hypot(edgeX - anchorX, edgeY - anchorY) < 4) {
     return '';
   }
-  return `M${anchorX.toFixed(1)},${anchorY.toFixed(1)}L${anchorX.toFixed(1)},${midY.toFixed(1)}L${edgeX.toFixed(1)},${edgeY.toFixed(1)}M${cx.toFixed(1)},${edgeY.toFixed(1)}`;
+  return `M${anchorX.toFixed(1)},${anchorY.toFixed(1)}L${anchorX.toFixed(1)},${midY.toFixed(1)}L${edgeX.toFixed(1)},${edgeY.toFixed(1)}`;
 }
 
 function formatCalloutLines(
@@ -300,10 +371,13 @@ export class UniSpatialOverlay {
 
     const minY = Math.max(8, input.topInsetPx ?? 12);
     const maxY = Math.max(minY + 48, hostHeight - Math.max(10, input.bottomInsetPx ?? 16));
+    const hudAvoidRects: UniOverlayRect[] = [];
     const occupied: UniOverlayRect[] = [];
     if (input.avoidRects) {
       for (let i = 0; i < input.avoidRects.length; i++) {
-        occupied.push(input.avoidRects[i]!);
+        const r = input.avoidRects[i]!;
+        hudAvoidRects.push(r);
+        occupied.push(r);
       }
     }
 
@@ -311,7 +385,33 @@ export class UniSpatialOverlay {
     const caliperSegs: string[] = [];
     const activePart = input.hoveredCell?.partId ?? input.selectedPartId ?? null;
 
+    // Pre-scan visible anchor horizontal span so side-flanked labels clear central 3D RG32F plates
+    let projMinX = hostWidth;
+    let projMaxX = 0;
+    let projCount = 0;
+    for (let i = 0; i < scene.landmarks.length; i++) {
+      const p = projectWorldToHostCss(scene.landmarks[i]!.world, snapshot);
+      if (p.visible && p.x >= 0 && p.x <= hostWidth && p.y >= minY - 24 && p.y <= maxY + 24) {
+        if (p.x < projMinX) projMinX = p.x;
+        if (p.x > projMaxX) projMaxX = p.x;
+        projCount += 1;
+      }
+    }
+    for (let i = 0; i < scene.overlayAnchors.length; i++) {
+      const w = scene.overlayAnchors[i]!.worldPos;
+      const p = projectWorldToHostCss([w[0], w[1], w[2]], snapshot);
+      if (p.visible && p.x >= 0 && p.x <= hostWidth && p.y >= minY - 24 && p.y <= maxY + 24) {
+        if (p.x < projMinX) projMinX = p.x;
+        if (p.x > projMaxX) projMaxX = p.x;
+        projCount += 1;
+      }
+    }
+    const sceneMidX = projCount > 0 ? (projMinX + projMaxX) * 0.5 : hostWidth * 0.5;
+    const plateHalfClearance = projCount > 0 ? clamp((projMaxX - projMinX) * 0.24, 34, 96) : 52;
+
+    const placedLabels: { readonly label: string; readonly ax: number; readonly ay: number }[] = [];
     let pillCursor = 0;
+    let sideToggle = 0;
 
     const placePill = (
       label: string,
@@ -321,6 +421,7 @@ export class UniSpatialOverlay {
       align: LandmarkAnchor['align'] | undefined,
       isActive: boolean,
       badge?: string,
+      preferSideFlank = false,
     ): void => {
       if (pillCursor >= this.pillPool.length) return;
       const pt = projectWorldToHostCss([worldPos[0], worldPos[1], worldPos[2]], snapshot);
@@ -329,13 +430,53 @@ export class UniSpatialOverlay {
       }
 
       const display = badge ? `${label} · ${badge}` : label;
-      const w = Math.min(Math.max(120, hostWidth - 24), estimateTextWidth(display, 6.4) + 18);
-      const h = 20;
-      const gap = 6;
+
+      // Deduplicate near-identical overlapping pill labels (e.g., landmark + overlayAnchor on same plate)
+      if (!isActive) {
+        for (let i = 0; i < placedLabels.length; i++) {
+          const prev = placedLabels[i]!;
+          if (
+            Math.hypot(pt.x - prev.ax, pt.y - prev.ay) <= 150 &&
+            areOverlayLabelsRedundant(display, prev.label)
+          ) {
+            return;
+          }
+        }
+      }
+
+      const w = Math.min(Math.max(110, hostWidth - 24), estimateTextWidth(display, 6.0) + 14);
+      const h = 18;
+      const gap = 10;
+
+      const maxX = Math.max(8, hostWidth - w - 8);
+      const maxTopY = Math.max(minY, maxY - h);
+
+      // Determine side preference for flanking away from central 3D tensor plates
+      let flankLeft = pt.x < sceneMidX - 10;
+      if (Math.abs(pt.x - sceneMidX) <= 10) {
+        flankLeft = sideToggle % 2 === 0;
+        sideToggle += 1;
+      }
+
+      const leftFlankX = clamp(
+        Math.min(pt.x - w - gap - 10, projMinX - w - 12),
+        8,
+        maxX,
+      );
+      const rightFlankX = clamp(
+        Math.max(pt.x + gap + 10, projMaxX + 12),
+        8,
+        maxX,
+      );
+      const nearLeftX = clamp(pt.x - w - plateHalfClearance, 8, maxX);
+      const nearRightX = clamp(pt.x + plateHalfClearance, 8, maxX);
 
       let idealX = pt.x - w * 0.5;
       let idealY = pt.y - h - gap;
-      if (align === 'left') {
+      if (preferSideFlank && !isActive) {
+        idealX = flankLeft ? nearLeftX : nearRightX;
+        idealY = pt.y - h * 0.5;
+      } else if (align === 'left') {
         idealX = pt.x - w - gap;
         idealY = pt.y - h * 0.5;
       } else if (align === 'right') {
@@ -346,17 +487,27 @@ export class UniSpatialOverlay {
         idealY = pt.y + gap;
       }
 
-      const maxX = Math.max(8, hostWidth - w - 8);
-      const maxTopY = Math.max(minY, maxY - h);
       let lx = clamp(idealX, 8, maxX);
       let ly = clamp(idealY, minY, maxTopY);
 
       if (overlapsAny(occupied, lx, ly, lx + w, ly + h)) {
+        const primaryFlankX = flankLeft ? leftFlankX : rightFlankX;
+        const secondaryFlankX = flankLeft ? rightFlankX : leftFlankX;
+        const primaryNearX = flankLeft ? nearLeftX : nearRightX;
+        const secondaryNearX = flankLeft ? nearRightX : nearLeftX;
         const candidates: readonly (readonly [number, number])[] = [
-          [lx, clamp(ly - (h + 4), minY, maxTopY)],
-          [lx, clamp(ly + (h + 4), minY, maxTopY)],
-          [clamp(lx - 20, 8, maxX), ly],
-          [clamp(lx + 20, 8, maxX), ly],
+          [primaryFlankX, clamp(pt.y - h * 0.5, minY, maxTopY)],
+          [primaryNearX, clamp(pt.y - h * 0.5, minY, maxTopY)],
+          [secondaryFlankX, clamp(pt.y - h * 0.5, minY, maxTopY)],
+          [secondaryNearX, clamp(pt.y - h * 0.5, minY, maxTopY)],
+          [primaryFlankX, clamp(pt.y - h - 6, minY, maxTopY)],
+          [primaryFlankX, clamp(pt.y + 6, minY, maxTopY)],
+          [secondaryFlankX, clamp(pt.y - h - 6, minY, maxTopY)],
+          [secondaryFlankX, clamp(pt.y + 6, minY, maxTopY)],
+          [lx, clamp(ly - (h + 5), minY, maxTopY)],
+          [lx, clamp(ly + (h + 5), minY, maxTopY)],
+          [clamp(pt.x - w * 0.5, 8, maxX), clamp(pt.y - h - gap - 4, minY, maxTopY)],
+          [clamp(pt.x - w * 0.5, 8, maxX), clamp(pt.y + gap + 4, minY, maxTopY)],
         ];
         let placed = false;
         for (const [cx, cy] of candidates) {
@@ -379,6 +530,7 @@ export class UniSpatialOverlay {
 
       const rect: UniOverlayRect = { x0: lx, y0: ly, x1: lx + w, y1: ly + h };
       occupied.push(rect);
+      placedLabels.push({ label: display, ax: pt.x, ay: pt.y });
 
       const seg = buildElbowPath(clamp(pt.x, 4, hostWidth - 4), clamp(pt.y, minY, maxY), rect);
       if (seg) leaderSegs.push(seg);
@@ -397,7 +549,7 @@ export class UniSpatialOverlay {
       placePill(lm.label, lm.sublabel, lm.world, toneClass, lm.align, isAct);
     }
 
-    // 2. Project scene overlayAnchors
+    // 2. Project scene overlayAnchors (side-flanked so central RG32F heatmaps stay clearly readable)
     for (let i = 0; i < scene.overlayAnchors.length; i++) {
       const anchor: UniOverlayAnchor = scene.overlayAnchors[i]!;
       const isAct = anchor.id === activePart;
@@ -410,42 +562,97 @@ export class UniSpatialOverlay {
         'top',
         isAct,
         anchor.badge,
+        true,
       );
     }
 
-    // 3. Project callout / hover badge pill
+    // 3. Project callout / hover badge pill (strict HUD + pill collision avoidance)
     const callout = formatCalloutLines(input.hoveredCell, input.selectedPartId);
     if (callout) {
+      const isHoverActive = Boolean(input.hoveredCell);
       const worldTarget = findCalloutWorldPos(scene, callout.partId);
       const pt = worldTarget
         ? projectWorldToHostCss([worldTarget[0], worldTarget[1], worldTarget[2]], snapshot)
         : null;
-      const titleW = estimateTextWidth(callout.title, 6.8);
-      const detailW = estimateTextWidth(callout.detail, 6.2);
-      const cardW = clamp(Math.max(titleW, detailW) + 24, 140, Math.max(160, hostWidth - 24));
-      const cardH = callout.detail ? 38 : 24;
+      const titleW = estimateTextWidth(callout.title, 6.6);
+      const detailW = estimateTextWidth(callout.detail, 6.0);
+      const cardW = clamp(Math.max(titleW, detailW) + 22, 132, Math.max(160, hostWidth - 24));
+      const cardH = callout.detail ? 36 : 22;
 
       const anchorX = pt && pt.visible ? clamp(pt.x, 12, hostWidth - 12) : hostWidth - 24;
       const anchorY = pt && pt.visible ? clamp(pt.y, minY, maxY) : minY + 12;
 
-      const cx = clamp(anchorX + 14, 10, Math.max(10, hostWidth - cardW - 10));
-      const cy = clamp(anchorY - cardH - 12, minY, Math.max(minY, maxY - cardH));
+      const maxCardX = Math.max(10, hostWidth - cardW - 10);
+      const maxCardY = Math.max(minY, maxY - cardH);
 
-      this.calloutTitleEl.textContent = callout.title;
-      this.calloutDetailEl.textContent = callout.detail;
-      this.calloutDetailEl.style.display = callout.detail ? 'inline' : 'none';
-      this.calloutPill.style.display = 'flex';
-      this.calloutPill.style.transform = `translate3d(${cx.toFixed(1)}px, ${cy.toFixed(1)}px, 0)`;
+      // Suppress static "Selected" callout if its anchor itself is occluded under a HUD panel (e.g. Tour HUD)
+      const anchorHiddenByHud =
+        !isHoverActive && pt && pt.visible && pointInsideRects(hudAvoidRects, anchorX, anchorY, 4);
 
-      const calloutRect: UniOverlayRect = { x0: cx, y0: cy, x1: cx + cardW, y1: cy + cardH };
-      occupied.push(calloutRect);
+      if (!anchorHiddenByHud) {
+        const candidates: readonly (readonly [number, number])[] = [
+          // Left of anchor
+          [clamp(anchorX - cardW - 14, 10, maxCardX), clamp(anchorY - cardH * 0.5, minY, maxCardY)],
+          [clamp(anchorX - cardW - 14, 10, maxCardX), clamp(anchorY - cardH - 10, minY, maxCardY)],
+          // Below anchor
+          [clamp(anchorX - cardW * 0.5, 10, maxCardX), clamp(anchorY + 14, minY, maxCardY)],
+          [clamp(anchorX - cardW - 10, 10, maxCardX), clamp(anchorY + 14, minY, maxCardY)],
+          // Above anchor
+          [clamp(anchorX - cardW * 0.5, 10, maxCardX), clamp(anchorY - cardH - 14, minY, maxCardY)],
+          // Right of anchor
+          [clamp(anchorX + 14, 10, maxCardX), clamp(anchorY - cardH - 12, minY, maxCardY)],
+          [clamp(anchorX + 14, 10, maxCardX), clamp(anchorY - cardH * 0.5, minY, maxCardY)],
+          [clamp(anchorX + 14, 10, maxCardX), clamp(anchorY + 14, minY, maxCardY)],
+        ];
 
-      if (pt && pt.visible) {
-        const seg = buildElbowPath(anchorX, anchorY, calloutRect);
-        if (seg) this.calloutLeaderPath.setAttribute('d', seg);
-        this.calloutAnchorDot.setAttribute('cx', anchorX.toFixed(1));
-        this.calloutAnchorDot.setAttribute('cy', anchorY.toFixed(1));
-        this.calloutAnchorDot.style.display = 'inline';
+        let chosen: readonly [number, number] | null = null;
+        // Pass 1: zero overlap with ALL occupied rects (HUD panels + placed pills)
+        for (const [tx, ty] of candidates) {
+          if (!overlapsAny(occupied, tx, ty, tx + cardW, ty + cardH, 4)) {
+            chosen = [tx, ty];
+            break;
+          }
+        }
+        // Pass 2: zero overlap with HUD avoidRects (acceptable to touch a pill only when user hovers, or fallback)
+        if (!chosen && isHoverActive) {
+          for (const [tx, ty] of candidates) {
+            if (!overlapsAny(hudAvoidRects, tx, ty, tx + cardW, ty + cardH, 4)) {
+              chosen = [tx, ty];
+              break;
+            }
+          }
+        }
+        // Pass 3: live hover always renders at minimum HUD-overlap spot; static "Selected" suppresses cleanly
+        if (!chosen && isHoverActive) {
+          let bestArea = Infinity;
+          for (const [tx, ty] of candidates) {
+            const area = rectOverlapArea(hudAvoidRects, tx, ty, tx + cardW, ty + cardH, 4);
+            if (area < bestArea) {
+              bestArea = area;
+              chosen = [tx, ty];
+            }
+          }
+        }
+
+        if (chosen) {
+          const [cx, cy] = chosen;
+          this.calloutTitleEl.textContent = callout.title;
+          this.calloutDetailEl.textContent = callout.detail;
+          this.calloutDetailEl.style.display = callout.detail ? 'inline' : 'none';
+          this.calloutPill.style.display = 'flex';
+          this.calloutPill.style.transform = `translate3d(${cx.toFixed(1)}px, ${cy.toFixed(1)}px, 0)`;
+
+          const calloutRect: UniOverlayRect = { x0: cx, y0: cy, x1: cx + cardW, y1: cy + cardH };
+          occupied.push(calloutRect);
+
+          if (pt && pt.visible) {
+            const seg = buildElbowPath(anchorX, anchorY, calloutRect);
+            if (seg) this.calloutLeaderPath.setAttribute('d', seg);
+            this.calloutAnchorDot.setAttribute('cx', anchorX.toFixed(1));
+            this.calloutAnchorDot.setAttribute('cy', anchorY.toFixed(1));
+            this.calloutAnchorDot.style.display = 'inline';
+          }
+        }
       }
     }
 

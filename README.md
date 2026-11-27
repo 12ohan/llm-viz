@@ -136,7 +136,7 @@ npm run test:e2e
 - **Nano transitive JS+CSS (`4` JS, `1` CSS):** **`209.35 KiB`** (`214,375 B`) gzip (`765,603 B` raw) vs. `215.00 KiB` (`220,160 B`) hard cap (**`+5.65 KiB` / `+5,785 B` headroom**, `0` leaks across all 12 directional pairs).
 - **TwoTower transitive JS+CSS (`3` JS, `1` CSS):** **`318.40 KiB`** (`326,045 B` root) / **`318.41 KiB`** (`326,056 B` `/llm-viz/`) gzip (`1,149,920 B` / `1,149,928 B` raw, `22` `src/twotower/*` sources, `0` leaks).
 - **Diffusion transitive JS+CSS (`4` JS, `1` CSS):** **`294.82 KiB`** (`301,892 B` root / `301,900 B` `/llm-viz/`) gzip (`1,025,690 B` / `1,025,698 B` raw, `31` `src/diffusion/*` sources, `0` leaks).
-- **NLD-Uni transitive JS+CSS (`2` JS, `1` CSS):** **`188.01 KiB`** (`192,524 B` root) / **`188.02 KiB`** (`192,531 B` `/llm-viz/`) gzip (`658,912 B` / `658,920 B` raw, `37` `src/uni/*` sources, `0` leaks, Locked Decision **`D4`** **`0`** `src/ui/controls.ts` sourcemap references).
+- **NLD-Uni transitive JS+CSS (`2` JS, `1` CSS):** **`188.96 KiB`** (`193,495 B` root) / **`188.97 KiB`** (`193,502 B` `/llm-viz/`) gzip (`661,685 B` / `661,693 B` raw, `37` `src/uni/*` sources, `0` leaks, Locked Decision **`D4`** **`0`** `src/ui/controls.ts` sourcemap references).
 - **Shared Chunks (`3` JS):** `assets/atlasPacker-*.js` (`shared(all4)`, `50,302 B` gzip) + `assets/controls-*.js` (`shared(n+df)`, `54,829 B` gzip) + `assets/overlay-*.js` (`shared(n+tt+df)`, `80,754 B` gzip) = **`181.53 KiB`** (`185,885 B` gzip / `634,667 B` raw).
 
 ---
