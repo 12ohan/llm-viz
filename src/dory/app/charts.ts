@@ -455,11 +455,24 @@ export function renderExploratoryPcaSvg(
     `<text x="${rightX + 3}" y="58" font-family="${FONT_MONO}" font-size="7.8" font-weight="700" fill="${PALETTE.inkSecondary}">t  ‖s‖   cos(x)  θ°    J_N</text>`,
   );
 
-  const maxRows = Math.min(metadata.loopMetrics8d.length, 6);
-  const rowStartY = 73;
-  const rowStepY = 17;
-  for (let i = 0; i < maxRows; i += 1) {
-    const m = metadata.loopMetrics8d[i]!;
+  // Local 120-deg anchor-map Jacobian caveat box (always clamped inside SVG height)
+  const caveatH = 44;
+  const caveatY = Math.max(66, height - caveatH - 8);
+  const rowStartY = 71;
+  const rowStepY = metadata.loopMetrics8d.length > 6 && height < 270 ? 14 : 16;
+  const maxVisibleRows = Math.max(1, Math.floor((caveatY - 4 - (rowStartY - 10)) / rowStepY));
+  const allRows = metadata.loopMetrics8d;
+  let visibleRows = allRows.slice(0, maxVisibleRows);
+  if (allRows.length > maxVisibleRows) {
+    const selIdx = allRows.findIndex((m) => m.loopIteration === metadata.selectedLoopIteration);
+    if (selIdx >= maxVisibleRows) {
+      const start = Math.max(0, Math.min(allRows.length - maxVisibleRows, selIdx - maxVisibleRows + 1));
+      visibleRows = allRows.slice(start, start + maxVisibleRows);
+    }
+  }
+
+  for (let i = 0; i < visibleRows.length; i += 1) {
+    const m = visibleRows[i]!;
     const ry = rowStartY + i * rowStepY;
     const isSel = m.loopIteration === metadata.selectedLoopIteration;
     const isLocalContract = m.entryAnchorJacobian.isLocalContractiveRegime;
@@ -469,7 +482,7 @@ export function renderExploratoryPcaSvg(
 
     if (isSel) {
       parts.push(
-        `<rect x="${rightX}" y="${ry - 10}" width="${rightW}" height="14" rx="2" fill="${PALETTE.specBg}" stroke="#F1B5A8" stroke-width="0.6"/>`,
+        `<rect x="${rightX}" y="${ry - 10}" width="${rightW}" height="13" rx="2" fill="${PALETTE.specBg}" stroke="#F1B5A8" stroke-width="0.6"/>`,
       );
     }
     const rowColor = isSel ? PALETTE.specOxide : PALETTE.ink;
@@ -483,10 +496,8 @@ export function renderExploratoryPcaSvg(
     );
   }
 
-  // Local 120-deg anchor-map Jacobian caveat box
-  const caveatY = Math.max(rowStartY + maxRows * rowStepY + 4, height - 56);
   parts.push(
-    `<rect x="${rightX}" y="${caveatY}" width="${rightW}" height="44" rx="4" fill="${PALETTE.bgSurface}" stroke="${PALETTE.border}" stroke-width="0.8"/>`,
+    `<rect x="${rightX}" y="${caveatY}" width="${rightW}" height="${caveatH}" rx="4" fill="${PALETTE.bgSurface}" stroke="${PALETTE.border}" stroke-width="0.8"/>`,
     `<text x="${rightX + 5}" y="${caveatY + 12}" font-family="${FONT_MONO}" font-size="7.5" font-weight="700" fill="${PALETTE.inkSecondary}">Anchor Jacobian Caveat:</text>`,
     `<text x="${rightX + 5}" y="${caveatY + 23}" font-family="${FONT_SANS}" font-size="7.8" fill="${PALETTE.inkSecondary}">θ &lt; 120° contracts N(s+x)</text>`,
     `<text x="${rightX + 5}" y="${caveatY + 34}" font-family="${FONT_SANS}" font-size="7.8" fill="${PALETTE.inkSecondary}">locally ONLY — NOT core F_θ.</text>`,

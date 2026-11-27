@@ -816,7 +816,7 @@ export class DorySpatialOverlay implements DorySpatialOverlayHandle {
       input.hoveredCell,
       input.bakedPopoverCell,
     );
-    const isHoverPopover = Boolean(activePopoverSpec);
+    const isHoverPopover = Boolean(input.hoveredCell);
     const popoverRect = this.renderCellPopover(
       activePopoverSpec,
       isHoverPopover,

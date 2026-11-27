@@ -34,6 +34,7 @@ import {
   DORY_SPEC_CONTRACT_A_BADGE,
   type DoryExecutionMode,
   type DoryKvCacheMode,
+  type DorySamplingConfig,
   type DorySession,
   type DorySupportedLoopCount,
 } from '../types';
@@ -127,6 +128,8 @@ export interface BuildDoryTimelineDockStateOptions {
   readonly tourActive?: boolean;
   readonly activeRecordId?: string | null;
   readonly dr18ForkNotice?: string | null;
+  /** Optional pending sampling override (e.g. unsaved slider change prior to next step fork). */
+  readonly sampling?: DorySamplingConfig;
 }
 
 /**
@@ -168,7 +171,10 @@ export function buildDoryTimelineDockState(
   const executionMode: DoryExecutionMode =
     activeRecord?.executionMode ?? activeBranch?.config.executionMode ?? 'standard';
   const sampling =
-    activeRecord?.sampling ?? activeBranch?.config.sampling ?? DORY_DEFAULT_GREEDY_SAMPLING;
+    opts.sampling ??
+    activeRecord?.sampling ??
+    activeBranch?.config.sampling ??
+    DORY_DEFAULT_GREEDY_SAMPLING;
 
   const recordIds = activeBranch?.recordIds ?? [];
   const totalRecordsInBranch = recordIds.length;

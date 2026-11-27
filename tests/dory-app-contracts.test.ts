@@ -128,6 +128,7 @@ import {
   projectWorldToHostCss,
 } from '../src/render/camera';
 import { pickHitToDoryCell } from '../src/dory/scene/provenance';
+import type { PickBox, PickHit } from '../src/render/pick';
 import { MODEL_REGISTRY, type ModelEntryMeta } from '../src/shared/modelRegistry';
 
 const SHARED_PARAMS = getDefaultDoryModelParameters();
@@ -441,8 +442,18 @@ function createMockDomHarness(): {
         }
         return false;
       },
-      querySelectorAll(): MockDomNode[] {
-        return [];
+      querySelectorAll(selector: string): MockDomNode[] {
+        const cls = selector.startsWith('.') ? selector.slice(1) : null;
+        if (!cls) return [];
+        const matches: MockDomNode[] = [];
+        const walk = (cur: MockDomNode): void => {
+          if (cur.classes.has(cls) || cur.className.split(/\s+/).includes(cls)) {
+            matches.push(cur);
+          }
+          for (const c of cur.children) walk(c);
+        };
+        for (const c of node.children) walk(c);
+        return matches;
       },
       getBoundingClientRect() {
         return {
@@ -885,45 +896,112 @@ describe('spatialApp.ts pure Node state machines (idle-RAF, atlas dedup, switche
     }
   });
 
-  it('resolveDoryPickInteraction maps ray-picked identities cleanly across all 7 spatial views', () => {
-    // View 1 (Macro) & View 2 (Hypersphere): physicalLayerIdx + clamped loopIteration
-    expect(
-      resolveDoryPickInteraction(
-        'macro',
-        makePickIdentity({ viewMode: 'macro', physicalLayerIdx: 16, loopIteration: 9 }),
-        4,
-      ),
-    ).toEqual({ selectedPhysicalLayerIdx: 16, selectedLoopIteration: 4 });
+  it('resolveDoryPickInteraction routes REAL buildDorySpatialScene() PickBoxes across all 7 spatial views (zero fabricated tensorKeys)', () => {
+    const pickBoxToIdentity = (
+      scene: DorySpatialScene,
+      matcher: (pb: PickBox) => boolean,
+      hitCell?: { readonly row?: number; readonly col?: number },
+    ): DoryPickIdentity => {
+      const pb = scene.pickBoxes.find(matcher);
+      expect(pb).toBeDefined();
+      const hit: PickHit = {
+        bayId: pb!.bayId,
+        ...(pb!.partId !== undefined ? { partId: pb!.partId } : {}),
+        ...(pb!.headIndex !== undefined ? { headIndex: pb!.headIndex } : {}),
+        ...(pb!.kvHeadIndex !== undefined ? { kvHeadIndex: pb!.kvHeadIndex } : {}),
+        ...(pb!.groupIndex !== undefined ? { groupIndex: pb!.groupIndex } : {}),
+        ...(pb!.tensorKey !== undefined ? { tensorKey: pb!.tensorKey } : {}),
+        ...(pb!.tokenIndex !== undefined ? { tokenIndex: pb!.tokenIndex } : {}),
+        ...(pb!.tapIndex !== undefined ? { tapIndex: pb!.tapIndex } : {}),
+        ...(pb!.stateTokenIndex !== undefined ? { stateTokenIndex: pb!.stateTokenIndex } : {}),
+        ...(pb!.towerRole !== undefined ? { towerRole: pb!.towerRole } : {}),
+        ...(pb!.executionId !== undefined ? { executionId: pb!.executionId } : {}),
+        ...(pb!.traceOrigin !== undefined ? { traceOrigin: pb!.traceOrigin } : {}),
+        ...(pb!.semanticTag !== undefined ? { semanticTag: pb!.semanticTag } : {}),
+        ...(pb!.absoluteTokenOffset !== undefined
+          ? { absoluteTokenOffset: pb!.absoluteTokenOffset }
+          : {}),
+        ...(hitCell?.row !== undefined ? { hitRow: hitCell.row } : {}),
+        ...(hitCell?.col !== undefined ? { hitCol: hitCell.col } : {}),
+        t: 1,
+        point: [
+          (pb!.min[0] + pb!.max[0]) * 0.5,
+          (pb!.min[1] + pb!.max[1]) * 0.5,
+          (pb!.min[2] + pb!.max[2]) * 0.5,
+        ],
+        isFascia: false,
+      };
+      const decoded = pickHitToDoryCell(hit, scene.viewMode);
+      expect(decoded).not.toBeNull();
+      return decoded!;
+    };
 
-    expect(
-      resolveDoryPickInteraction(
-        'hypersphere',
-        makePickIdentity({ viewMode: 'hypersphere', physicalLayerIdx: 22, loopIteration: 2 }),
-        4,
-      ),
-    ).toEqual({ selectedPhysicalLayerIdx: 22, selectedLoopIteration: 2 });
+    const k4Session = createSampleSession({ kLoops: 4, steps: 0 });
+    const specSession = createSampleSession({ executionMode: 'self_spec', steps: 1 });
 
-    // View 3 (GQA & RoPE): only even attention sublayers accepted; extracts qHead, plane, score row/col
-    expect(
-      resolveDoryPickInteraction(
-        'gqa_rope',
-        makePickIdentity({
-          viewMode: 'gqa_rope',
-          physicalLayerIdx: 22,
-          qHeadIndex: 5,
-          rotaryPlane: 3,
-          tensorKey: 'attn_probs',
-          row: 7,
-          col: 4,
-        }),
-        4,
-      ),
-    ).toEqual({
+    // View 1 (Macro — unrolled k=4): real recurrent sublayer box routes physicalLayerIdx & loopIteration
+    const macroScene = buildDorySpatialScene(k4Session, 'macro', {
+      ...DEFAULT_DORY_SPATIAL_FOCUS_STATE,
+      macroDisplayMode: 'unrolled',
+      selectedLoopIteration: 3,
+    });
+    const macroPick = pickBoxToIdentity(
+      macroScene,
+      (pb) => pb.bayId === 17 && (pb.semanticTag ?? '').includes('loop=3'),
+    );
+    expect(resolveDoryPickInteraction('macro', macroPick, 4)).toEqual({
+      selectedPhysicalLayerIdx: 16,
+      selectedLoopIteration: 3,
+    });
+    // Loop clamping when kLoops < picked.loopIteration
+    expect(resolveDoryPickInteraction('macro', macroPick, 2)).toEqual({
+      selectedPhysicalLayerIdx: 16,
+      selectedLoopIteration: 2,
+    });
+
+    // View 2 (Hypersphere): real sublayer sheet/solid routes physicalLayerIdx & loopIteration
+    const hyperScene = buildDorySpatialScene(k4Session, 'hypersphere', {
+      ...DEFAULT_DORY_SPATIAL_FOCUS_STATE,
+      selectedPhysicalLayerIdx: 22,
+      selectedLoopIteration: 2,
+    });
+    const hyperPick = pickBoxToIdentity(
+      hyperScene,
+      (pb) => pb.bayId === 23 && (pb.semanticTag ?? '').includes('loop=2'),
+    );
+    expect(resolveDoryPickInteraction('hypersphere', hyperPick, 4)).toEqual({
+      selectedPhysicalLayerIdx: 22,
+      selectedLoopIteration: 2,
+    });
+
+    // View 3 (GQA & RoPE): REAL 'scores' and 'probs' plates route layer, qHead, queryRow & keyCol
+    const gqaScene = buildDorySpatialScene(k4Session, 'gqa_rope', {
+      ...DEFAULT_DORY_SPATIAL_FOCUS_STATE,
+      gqaLayerIdx: 22,
+      selectedQHead: 0,
+      selectedLoopIteration: 1,
+    });
+    const scorePick = pickBoxToIdentity(
+      gqaScene,
+      (pb) => pb.partId === 'gqa_scores_h5' && pb.tensorKey === 'scores',
+      { row: 3, col: 2 },
+    );
+    expect(resolveDoryPickInteraction('gqa_rope', scorePick, 4)).toEqual({
       gqaLayerIdx: 22,
       selectedQHead: 5,
-      selectedRotaryPlane: 3,
-      selectedQueryRow: 7,
-      selectedKeyCol: 4,
+      selectedQueryRow: 3,
+      selectedKeyCol: 2,
+    });
+    const probPick = pickBoxToIdentity(
+      gqaScene,
+      (pb) => pb.partId === 'gqa_probs_h7' && pb.tensorKey === 'probs',
+      { row: 4, col: 1 },
+    );
+    expect(resolveDoryPickInteraction('gqa_rope', probPick, 4)).toEqual({
+      gqaLayerIdx: 22,
+      selectedQHead: 7,
+      selectedQueryRow: 4,
+      selectedKeyCol: 1,
     });
     // Odd layer ignored for gqaLayerIdx
     expect(
@@ -934,67 +1012,346 @@ describe('spatialApp.ts pure Node state machines (idle-RAF, atlas dedup, switche
       ),
     ).toBeNull();
 
-    // View 4 (SwiGLU): only odd MLP sublayers accepted; routes channel (0..23) vs outputDim (0..7)
-    expect(
-      resolveDoryPickInteraction(
-        'swiglu',
-        makePickIdentity({
-          viewMode: 'swiglu',
-          physicalLayerIdx: 17,
-          tensorKey: 'ffn_sub_norm',
-          col: 19,
-        }),
-        4,
-      ),
-    ).toEqual({ swigluLayerIdx: 17, swigluChannel: 19 });
-    expect(
-      resolveDoryPickInteraction(
-        'swiglu',
-        makePickIdentity({ viewMode: 'swiglu', tensorKey: 'mlp_out', col: 6 }),
-        4,
-      ),
-    ).toEqual({ swigluOutputDim: 6 });
+    // View 4 (SwiGLU): REAL scene tensorKeys route channel (0..23), down_proj (both!), neg suv markers & outputDim (0..7)
+    const swigluScene = buildDorySpatialScene(k4Session, 'swiglu', {
+      ...DEFAULT_DORY_SPATIAL_FOCUS_STATE,
+      swigluLayerIdx: 17,
+      selectedLoopIteration: 1,
+    });
+    for (const [partId, expectedKey, testCol] of [
+      ['swiglu_gate_pre', 'gate_proj', 11],
+      ['swiglu_up_pre', 'up_proj', 14],
+      ['swiglu_suv_gate_eff', 'suv_gate', 5],
+      ['swiglu_suv_up_eff', 'suv_up', 9],
+      ['swiglu_gate_scaled', 'gate_scaled', 13],
+      ['swiglu_up_scaled', 'up_scaled', 16],
+      ['swiglu_gate_silu', 'gate_silu', 18],
+      ['swiglu_product', 'swiglu_product', 20],
+      ['swiglu_ffn_sub_norm', 'ffn_sub_norm', 19],
+      ['swiglu_accum_terms', 'down_proj_accum', 23],
+    ] as const) {
+      const chPick = pickBoxToIdentity(
+        swigluScene,
+        (pb) => pb.partId === partId && pb.tensorKey === expectedKey,
+        { row: 0, col: testCol },
+      );
+      expect(resolveDoryPickInteraction('swiglu', chPick, 4)).toEqual({
+        swigluLayerIdx: 17,
+        swigluChannel: testCol,
+      });
+    }
+    // W_down [8, 24] updates BOTH swigluChannel (col) and swigluOutputDim (row)
+    const downWeightPick = pickBoxToIdentity(
+      swigluScene,
+      (pb) => pb.partId === 'swiglu_down_proj_weight' && pb.tensorKey === 'down_proj',
+      { row: 5, col: 17 },
+    );
+    expect(resolveDoryPickInteraction('swiglu', downWeightPick, 4)).toEqual({
+      swigluLayerIdx: 17,
+      swigluChannel: 17,
+      swigluOutputDim: 5,
+    });
+    // Raised 3D negative signed-suv marker carries channel=<ch> in semanticTag (no grid cell)
+    const negSuvPb = swigluScene.pickBoxes.find((pb) => pb.partId?.startsWith('swiglu_neg_suv_'));
+    if (negSuvPb) {
+      const expectedNegCh = Number.parseInt(negSuvPb.partId!.split('_').pop()!, 10);
+      const negSuvPick = pickBoxToIdentity(swigluScene, (pb) => pb.partId === negSuvPb.partId);
+      expect(resolveDoryPickInteraction('swiglu', negSuvPick, 4)).toEqual({
+        swigluLayerIdx: 17,
+        swigluChannel: expectedNegCh,
+      });
+    }
+    // Output-dim (0..7) sheets route swigluOutputDim cleanly
+    for (const [partId, expectedKey, testCol] of [
+      ['swiglu_down_proj_out', 'down_proj_out', 6],
+      ['swiglu_mlp_alpha_eff', 'mlp_alpha', 3],
+      ['swiglu_nlerp_output', 'nlerp_output', 7],
+      ['swiglu_h_in', 'nlerp_a_norm', 4],
+    ] as const) {
+      const outPick = pickBoxToIdentity(
+        swigluScene,
+        (pb) => pb.partId === partId && pb.tensorKey === expectedKey,
+        { row: 0, col: testCol },
+      );
+      expect(resolveDoryPickInteraction('swiglu', outPick, 4)).toEqual({
+        swigluLayerIdx: 17,
+        swigluOutputDim: testCol,
+      });
+    }
 
-    // View 5 (KV Compare): even attention layers + loop clamping
-    expect(
-      resolveDoryPickInteraction(
-        'kv_compare',
-        makePickIdentity({ viewMode: 'kv_compare', physicalLayerIdx: 20, loopIteration: 3 }),
-        4,
-      ),
-    ).toEqual({ kvCompareLayerIdx: 20, selectedLoopIteration: 3 });
+    // View 5 (KV Compare): real even attention pick box routes kvCompareLayerIdx & selectedLoopIteration
+    const kvScene = buildDorySpatialScene(k4Session, 'kv_compare', {
+      ...DEFAULT_DORY_SPATIAL_FOCUS_STATE,
+      kvCompareLayerIdx: 20,
+      selectedLoopIteration: 3,
+    });
+    const kvPick = pickBoxToIdentity(
+      kvScene,
+      (pb) => pb.bayId === 21 && (pb.semanticTag ?? '').includes('loop=3'),
+    );
+    expect(resolveDoryPickInteraction('kv_compare', kvPick, 4)).toEqual({
+      kvCompareLayerIdx: 20,
+      selectedLoopIteration: 3,
+    });
 
-    // View 6 (Self-Spec): specOffset + even attention layer
+    // View 6 (Self-Spec): real verify-offset & attention PickBoxes route selectedVerifyOffset & selfSpecAttentionLayerIdx
+    const specScene = buildDorySpatialScene(specSession, 'self_spec', {
+      ...DEFAULT_DORY_SPATIAL_FOCUS_STATE,
+      selfSpecAttentionLayerIdx: 56,
+      selectedVerifyOffset: 0,
+    });
+    const specVerifyPick = pickBoxToIdentity(
+      specScene,
+      (pb) => (pb.semanticTag ?? '').includes('spec=1'),
+    );
+    expect(resolveDoryPickInteraction('self_spec', specVerifyPick, 4)?.selectedVerifyOffset).toBe(1);
+    const specAttnPick = pickBoxToIdentity(specScene, (pb) => pb.bayId === 57);
     expect(
-      resolveDoryPickInteraction(
-        'self_spec',
-        makePickIdentity({ viewMode: 'self_spec', physicalLayerIdx: 56, specOffset: 2 }),
-        4,
-      ),
-    ).toEqual({ selfSpecAttentionLayerIdx: 56, selectedVerifyOffset: 2 });
+      resolveDoryPickInteraction('self_spec', specAttnPick, 4)?.selfSpecAttentionLayerIdx,
+    ).toBe(56);
 
-    // View 7 (Bookends): 4 read-only checkpoint cards + untied vocab token lookup
+    // View 7 (Bookends): REAL PickBoxes for checkpoints, top-12 bars (vocabTokenId, NOT rank!),
+    // 1x64 strips (picked.col, NOT tokenIndex=0!), 64x8 matrices (picked.row), seq sheets, and inert boxes
+    const bookendsScene = buildDorySpatialScene(k4Session, 'bookends', {
+      ...DEFAULT_DORY_SPATIAL_FOCUS_STATE,
+      selectedTokenOffset: 0,
+    });
     expect(
       resolveDoryPickInteraction(
         'bookends',
-        makePickIdentity({ viewMode: 'bookends', partId: 'bookend_ckpt_nvfp4' }),
+        pickBoxToIdentity(bookendsScene, (pb) => pb.partId === 'bookend_ckpt_nvfp4'),
         4,
       ),
     ).toEqual({ selectedCheckpointFormat: 'nvfp4' });
     expect(
       resolveDoryPickInteraction(
         'bookends',
-        makePickIdentity({ viewMode: 'bookends', partId: 'bookend_ckpt_q5_k_m' }),
+        pickBoxToIdentity(bookendsScene, (pb) => pb.partId === 'bookend_ckpt_q5_k_m'),
         4,
       ),
     ).toEqual({ selectedCheckpointFormat: 'q5_k_m' });
-    expect(
-      resolveDoryPickInteraction(
-        'bookends',
-        makePickIdentity({ viewMode: 'bookends', tokenIndex: 12 }),
-        4,
-      ),
-    ).toEqual({ selectedVocabTokenId: 12 });
+
+    // Top-12 bar rank=2 MUST decode vocabTokenId from semanticTag, NOT rank=2!
+    const topBarRow2 = bookendsScene.bookendsMetadata!.topLogitRows[2]!;
+    const topBarPick = pickBoxToIdentity(
+      bookendsScene,
+      (pb) => pb.partId === 'bookend_top_bar_2',
+    );
+    expect(topBarPick.tokenIndex).toBe(2); // rank is stored in tokenIndex
+    expect(resolveDoryPickInteraction('bookends', topBarPick, 4)).toEqual({
+      selectedVocabTokenId: topBarRow2.tokenId,
+    });
+
+    // 1x64 vocab strips MUST route picked.col (e.g. col=42), NEVER picked.tokenIndex (which is 0)!
+    for (const [partId, tensorKey, col] of [
+      ['bookend_raw_logits', 'raw_logits', 42],
+      ['bookend_logit_scale_raw', 'logit_scale_raw', 19],
+      ['bookend_logit_scale_eff', 'logit_scale_eff', 53],
+      ['bookend_scaled_logits', 'scaled_logits', 31],
+      ['bookend_softmax_probs', 'softmax_probs', 61],
+    ] as const) {
+      const stripPick = pickBoxToIdentity(
+        bookendsScene,
+        (pb) => pb.partId === partId && pb.tensorKey === tensorKey,
+        { row: 0, col },
+      );
+      expect(resolveDoryPickInteraction('bookends', stripPick, 4)).toEqual({
+        selectedVocabTokenId: col,
+      });
+    }
+
+    // 64x8 vocab matrices (embeddings & untied lm_head) MUST route picked.row (vocab ID)
+    for (const [partId, tensorKey, row] of [
+      ['bookend_embed_weight', 'embeddings', 37],
+      ['bookend_lm_head_weight', 'lm_head', 49],
+    ] as const) {
+      const matPick = pickBoxToIdentity(
+        bookendsScene,
+        (pb) => pb.partId === partId && pb.tensorKey === tensorKey,
+        { row, col: 3 },
+      );
+      expect(resolveDoryPickInteraction('bookends', matPick, 4)).toEqual({
+        selectedVocabTokenId: row,
+      });
+    }
+
+    // Sequence sheets route selectedTokenOffset (NEVER corrupting selectedVocabTokenId)
+    const embedLookupPick = pickBoxToIdentity(
+      bookendsScene,
+      (pb) => pb.partId === 'bookend_embed_tokens' && pb.tensorKey === 'embed_lookup',
+      { row: 3, col: 2 },
+    );
+    expect(resolveDoryPickInteraction('bookends', embedLookupPick, 4)).toEqual({
+      selectedTokenOffset: 3,
+    });
+    const codaHiddenPick = pickBoxToIdentity(
+      bookendsScene,
+      (pb) => pb.partId === 'bookend_coda_hidden' && pb.tensorKey === 'coda_hidden',
+      { row: 2, col: 5 },
+    );
+    expect(resolveDoryPickInteraction('bookends', codaHiddenPick, 4)).toEqual({
+      selectedTokenOffset: 2,
+    });
+
+    // Stage/active-row/bridge/TBPTL PickBoxes MUST NOT corrupt selectedVocabTokenId
+    for (const partId of [
+      'bookend_top12_stages',
+      'bookend_embed_active_row',
+      'bookend_lm_head_active_row',
+      'bookend_backbone_bridge',
+      'bookend_tbptl_stop_grad',
+    ]) {
+      const inertPick = pickBoxToIdentity(bookendsScene, (pb) => pb.partId === partId, {
+        row: 0,
+        col: 1,
+      });
+      expect(resolveDoryPickInteraction('bookends', inertPick, 4)).toBeNull();
+    }
+  });
+
+  it('sampling temperature slider preserves pending readout & thumb value across refresh/blur and forks on +Step', () => {
+    // 1. Pure dock state builder respects pending sampling override
+    const baseSess = createSampleSession({ kLoops: 2, steps: 1 });
+    const pendingSampling = Object.freeze({ temperature: 0.65, topK: 0, topP: 0.95 });
+    const dockStateWithPending = buildDoryTimelineDockState(baseSess, {
+      sampling: pendingSampling,
+    });
+    expect(dockStateWithPending.sampling).toEqual(pendingSampling);
+    const dockStateDefault = buildDoryTimelineDockState(baseSess);
+    expect(dockStateDefault.sampling.temperature).toBe(0);
+
+    // 2. Full mocked-DOM app regression: dragging temp slider MUST NOT clobber readout or snap back on blur
+    const harness = createMockDomHarness();
+    harness.stubGlobalDocument();
+    harness.stubGlobalWindow();
+
+    try {
+      const host = harness.makeNode('div');
+      const app = createDorySpatialApp({
+        host: host as unknown as HTMLElement,
+        initialViewMode: 'macro',
+        initialKLoops: 2,
+        attachDebugHandle: true,
+      });
+
+      const tempSlider = harness.findByTestId(host, 'dory-dock-temp-slider')!;
+      const tempReadout = harness.findByTestId(host, 'dory-dock-temp-readout')!;
+      const execBtn = harness.findByTestId(host, 'dory-dock-execute-step')!;
+      expect(tempReadout.textContent).toBe('T=0.00 (Greedy)');
+      expect(tempSlider.value).toBe('0');
+
+      // Drag slider to 0.65 while unfocused (simulating both input & post-blur sync)
+      tempSlider.value = '0.65';
+      tempSlider.dispatchEvent('input');
+
+      expect(tempReadout.textContent).toBe('T=0.65 (Stoch)');
+      expect(tempSlider.value).toBe('0.65');
+      expect(app.getState().sampling.temperature).toBeCloseTo(0.65, 6);
+
+      // Switching views refreshes the dock; pending sampling MUST remain intact (no snap-back to 0!)
+      app.debug.setView('bookends');
+      expect(tempReadout.textContent).toBe('T=0.65 (Stoch)');
+      expect(tempSlider.value).toBe('0.65');
+
+      // Executing '+ Step' forks a clean branch carrying T=0.65
+      const branchesBefore = app.debug.branchCount;
+      execBtn.click();
+      expect(app.debug.branchCount).toBe(branchesBefore + 1);
+      expect(tempReadout.textContent).toBe('T=0.65 (Stoch)');
+      expect(tempSlider.value).toBe('0.65');
+
+      app.dispose();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('exiting Guided Tour via debug config setters or view tabs restores Free-Explore focus and unlocks scene & inspector', () => {
+    const harness = createMockDomHarness();
+    harness.stubGlobalDocument();
+    harness.stubGlobalWindow();
+
+    try {
+      const host = harness.makeNode('div');
+      const app = createDorySpatialApp({
+        host: host as unknown as HTMLElement,
+        initialViewMode: 'macro',
+        initialKLoops: 2,
+        initialKvCacheMode: 'per_loop',
+        initialExecutionMode: 'standard',
+        attachDebugHandle: true,
+      });
+
+      // Set distinctive Free-Explore focus before entering tour
+      app.debug.updateFocus({
+        selectedPhysicalLayerIdx: 22,
+        swigluChannel: 13,
+        selectedCheckpointFormat: 'nvfp4',
+      });
+      const initialBranchCount = app.debug.branchCount;
+
+      const assertTourLockedOnBeat11 = (): void => {
+        const snap = app.debug.startTour(11);
+        expect(snap.tourActive).toBe(true);
+        expect(snap.viewMode).toBe('self_spec');
+        expect(app.getCurrentScene().viewMode).toBe('self_spec');
+        const lockNotes = host.querySelectorAll('.dory-tour-lock-note');
+        expect(lockNotes.length).toBeGreaterThan(0);
+      };
+
+      // 1. debug.setKLoops(2) ALREADY matches freeSession -> MUST exit tour, restore Free-Explore view/focus, unlock inspector, zero spurious forks
+      assertTourLockedOnBeat11();
+      const afterK = app.debug.setKLoops(2);
+      expect(afterK.tourActive).toBe(false);
+      expect(afterK.viewMode).toBe('macro');
+      expect(afterK.kLoops).toBe(2);
+      expect(afterK.executionMode).toBe('standard');
+      expect(afterK.branchCount).toBe(initialBranchCount);
+      expect(app.getCurrentScene().viewMode).toBe('macro');
+      expect(app.getState().focus.selectedPhysicalLayerIdx).toBe(22);
+      expect(app.getState().focus.swigluChannel).toBe(13);
+      expect(host.querySelectorAll('.dory-tour-lock-note')).toHaveLength(0);
+      expect(harness.findByTestId(host, 'dory-layer-slider')!.disabled).toBe(false);
+
+      // 2. debug.setKvCacheMode('per_loop') ALREADY matches freeSession -> MUST unlock cleanly
+      assertTourLockedOnBeat11();
+      const afterKv = app.debug.setKvCacheMode('per_loop');
+      expect(afterKv.tourActive).toBe(false);
+      expect(afterKv.viewMode).toBe('macro');
+      expect(afterKv.kvCacheMode).toBe('per_loop');
+      expect(afterKv.branchCount).toBe(initialBranchCount);
+      expect(app.getCurrentScene().viewMode).toBe('macro');
+      expect(host.querySelectorAll('.dory-tour-lock-note')).toHaveLength(0);
+      expect(harness.findByTestId(host, 'dory-layer-slider')!.disabled).toBe(false);
+
+      // 3. debug.setExecutionMode('standard') ALREADY matches freeSession -> MUST unlock cleanly
+      assertTourLockedOnBeat11();
+      const afterExec = app.debug.setExecutionMode('standard');
+      expect(afterExec.tourActive).toBe(false);
+      expect(afterExec.viewMode).toBe('macro');
+      expect(afterExec.executionMode).toBe('standard');
+      expect(afterExec.branchCount).toBe(initialBranchCount);
+      expect(app.getCurrentScene().viewMode).toBe('macro');
+      expect(host.querySelectorAll('.dory-tour-lock-note')).toHaveLength(0);
+      expect(harness.findByTestId(host, 'dory-layer-slider')!.disabled).toBe(false);
+
+      // 4. Exiting Guided Tour via clicking a View Tab restores Free-Explore focus without tour contamination
+      assertTourLockedOnBeat11();
+      const swigluTab = harness.findByTestId(host, 'dory-view-tab-swiglu')!;
+      swigluTab.click();
+      const afterTab = app.debug.getSnapshot();
+      expect(afterTab.tourActive).toBe(false);
+      expect(afterTab.viewMode).toBe('swiglu');
+      expect(app.getCurrentScene().viewMode).toBe('swiglu');
+      expect(app.getState().focus.swigluChannel).toBe(13);
+      expect(app.getState().focus.selectedCheckpointFormat).toBe('nvfp4');
+      expect(host.querySelectorAll('.dory-tour-lock-note')).toHaveLength(0);
+      expect(harness.findByTestId(host, 'dory-swiglu-channel-slider')!.disabled).toBe(false);
+
+      app.dispose();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('View 6 synthesized preview preserves active session telemetry in debug/getState and exposes reachable dory-activate-selfspec-btn', () => {
@@ -1645,6 +2002,31 @@ describe('charts.ts contracts (6 headless editorial <svg> charts, epistemic badg
     expect(tbptlChart.svgMarkup).toContain('0 fake quant toggles');
     for (const s of ['S1', 'S2', 'S3', 'S4', 'S5']) {
       expect(tbptlChart.svgMarkup).toContain(`>${s}<`);
+    }
+
+    // 7. Regression: Exploratory 2D PCA at k=8 (selectedLoopIteration=8) & compact 180px height
+    //    always includes selected row `t8` and keeps caveat box clamped inside SVG height
+    const k8Sess = createSampleSession({ kLoops: 8, steps: 0 });
+    const k8HyperScene = buildDorySpatialScene(k8Sess, 'hypersphere', {
+      ...DEFAULT_DORY_SPATIAL_FOCUS_STATE,
+      selectedPhysicalLayerIdx: 16,
+      selectedLoopIteration: 8,
+    });
+    const k8PcaDefault = renderExploratoryPcaSvg(k8HyperScene.hypersphereMetadata!);
+    assertCleanSvgChart(k8PcaDefault, 'exploratory_pca');
+    expect(k8PcaDefault.svgMarkup).toContain('t8 ');
+    const k8PcaCompact = renderExploratoryPcaSvg(k8HyperScene.hypersphereMetadata!, {
+      width: 340,
+      height: 180,
+    });
+    assertCleanSvgChart(k8PcaCompact, 'exploratory_pca');
+    expect(k8PcaCompact.svgMarkup).toContain('t8 ');
+    for (const rectMatch of k8PcaCompact.svgMarkup.matchAll(
+      /<rect[^>]*\by="([0-9.]+)"[^>]*\bheight="([0-9.]+)"/g,
+    )) {
+      const y = Number.parseFloat(rectMatch[1]!);
+      const h = Number.parseFloat(rectMatch[2]!);
+      expect(y + h).toBeLessThanOrEqual(180);
     }
   });
 

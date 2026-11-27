@@ -378,6 +378,50 @@ export function resolveDoryGlobalKeyAction(
   return { type: 'none' };
 }
 
+const SWIGLU_CHANNEL_TENSOR_KEYS = new Set<string>([
+  'gate_proj',
+  'up_proj',
+  'suv_gate',
+  'suv_up',
+  'gate_scaled',
+  'up_scaled',
+  'gate_silu',
+  'swiglu_product',
+  'ffn_sub_norm',
+  'down_proj_accum',
+]);
+
+const SWIGLU_OUTPUT_DIM_TENSOR_KEYS = new Set<string>([
+  'down_proj_out',
+  'mlp_alpha',
+  'nlerp_output',
+  'nlerp_a_norm',
+]);
+
+const BOOKEND_VOCAB_COL_TENSOR_KEYS = new Set<string>([
+  'raw_logits',
+  'logit_scale_raw',
+  'logit_scale_eff',
+  'scaled_logits',
+  'softmax_probs',
+]);
+
+const BOOKEND_VOCAB_ROW_TENSOR_KEYS = new Set<string>(['embeddings', 'lm_head']);
+
+function parseDorySemanticTagInt(semanticTag: string | null, key: string): number | null {
+  if (!semanticTag) return null;
+  const prefix = `${key}=`;
+  const parts = semanticTag.split(';');
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = parts[i]!;
+    if (part.startsWith(prefix)) {
+      const parsed = Number.parseInt(part.slice(prefix.length), 10);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+  }
+  return null;
+}
+
 /**
  * Pure Node-testable helper translating a ray-picked `DoryPickIdentity` click in any of the
  * 7 spatial views into a clean partial `DorySpatialFocusState` update.
@@ -439,17 +483,13 @@ export function resolveDoryPickInteraction(
     if (picked.rotaryPlane !== null) {
       patch.selectedRotaryPlane = picked.rotaryPlane;
     }
-    if (
-      picked.row !== null &&
-      (picked.tensorKey === 'attn_scores' || picked.tensorKey === 'attn_probs')
-    ) {
-      patch.selectedQueryRow = picked.row;
-    }
-    if (
-      picked.col !== null &&
-      (picked.tensorKey === 'attn_scores' || picked.tensorKey === 'attn_probs')
-    ) {
-      patch.selectedKeyCol = picked.col;
+    if (picked.tensorKey === 'scores' || picked.tensorKey === 'probs') {
+      if (picked.row !== null && picked.row >= 0) {
+        patch.selectedQueryRow = picked.row;
+      }
+      if (picked.col !== null && picked.col >= 0) {
+        patch.selectedKeyCol = picked.col;
+      }
     }
     return Object.keys(patch).length > 0 ? patch : null;
   }
@@ -463,23 +503,41 @@ export function resolveDoryPickInteraction(
     if (picked.physicalLayerIdx !== null && picked.physicalLayerIdx % 2 === 1) {
       patch.swigluLayerIdx = picked.physicalLayerIdx;
     }
-    if (
-      picked.col !== null &&
-      picked.col >= 0 &&
-      picked.col < DORY_MINI_CONFIG.intermediateSize &&
-      (picked.tensorKey === 'swiglu_gate' ||
-        picked.tensorKey === 'swiglu_up' ||
-        picked.tensorKey === 'swiglu_act' ||
-        picked.tensorKey === 'ffn_sub_norm')
-    ) {
-      patch.swigluChannel = picked.col;
+    if (picked.tensorKey === 'down_proj') {
+      if (
+        picked.col !== null &&
+        picked.col >= 0 &&
+        picked.col < DORY_MINI_CONFIG.intermediateSize
+      ) {
+        patch.swigluChannel = picked.col;
+      }
+      if (picked.row !== null && picked.row >= 0 && picked.row < DORY_MINI_CONFIG.hiddenSize) {
+        patch.swigluOutputDim = picked.row;
+      }
+    } else if (picked.tensorKey !== null && SWIGLU_CHANNEL_TENSOR_KEYS.has(picked.tensorKey)) {
+      if (
+        picked.col !== null &&
+        picked.col >= 0 &&
+        picked.col < DORY_MINI_CONFIG.intermediateSize
+      ) {
+        patch.swigluChannel = picked.col;
+      } else {
+        const tagChannel = parseDorySemanticTagInt(picked.semanticTag, 'channel');
+        if (
+          tagChannel !== null &&
+          tagChannel >= 0 &&
+          tagChannel < DORY_MINI_CONFIG.intermediateSize
+        ) {
+          patch.swigluChannel = tagChannel;
+        }
+      }
     } else if (
-      picked.col !== null &&
-      picked.col >= 0 &&
-      picked.col < DORY_MINI_CONFIG.hiddenSize &&
-      picked.tensorKey === 'mlp_out'
+      picked.tensorKey !== null &&
+      SWIGLU_OUTPUT_DIM_TENSOR_KEYS.has(picked.tensorKey)
     ) {
-      patch.swigluOutputDim = picked.col;
+      if (picked.col !== null && picked.col >= 0 && picked.col < DORY_MINI_CONFIG.hiddenSize) {
+        patch.swigluOutputDim = picked.col;
+      }
     }
     return Object.keys(patch).length > 0 ? patch : null;
   }
@@ -519,12 +577,34 @@ export function resolveDoryPickInteraction(
     if (part === 'bookend_ckpt_mxfp8') return { selectedCheckpointFormat: 'mxfp8' };
     if (part === 'bookend_ckpt_nvfp4') return { selectedCheckpointFormat: 'nvfp4' };
     if (part === 'bookend_ckpt_q5_k_m') return { selectedCheckpointFormat: 'q5_k_m' };
-    if (
-      picked.tokenIndex !== null &&
-      picked.tokenIndex >= 0 &&
-      picked.tokenIndex < DORY_MINI_CONFIG.vocabSize
-    ) {
-      return { selectedVocabTokenId: picked.tokenIndex };
+
+    if (part.startsWith('bookend_top_bar_')) {
+      const vocabId = parseDorySemanticTagInt(picked.semanticTag, 'vocabTokenId');
+      if (vocabId !== null && vocabId >= 0 && vocabId < DORY_MINI_CONFIG.vocabSize) {
+        return { selectedVocabTokenId: vocabId };
+      }
+      return null;
+    }
+
+    if (picked.tensorKey !== null && BOOKEND_VOCAB_COL_TENSOR_KEYS.has(picked.tensorKey)) {
+      if (picked.col !== null && picked.col >= 0 && picked.col < DORY_MINI_CONFIG.vocabSize) {
+        return { selectedVocabTokenId: picked.col };
+      }
+      return null;
+    }
+
+    if (picked.tensorKey !== null && BOOKEND_VOCAB_ROW_TENSOR_KEYS.has(picked.tensorKey)) {
+      if (picked.row !== null && picked.row >= 0 && picked.row < DORY_MINI_CONFIG.vocabSize) {
+        return { selectedVocabTokenId: picked.row };
+      }
+      return null;
+    }
+
+    if (picked.tensorKey === 'embed_lookup' || picked.tensorKey === 'coda_hidden') {
+      if (picked.row !== null && picked.row >= 0) {
+        return { selectedTokenOffset: picked.row };
+      }
+      return null;
     }
   }
 
@@ -1537,6 +1617,7 @@ export function createDorySpatialApp(
       isPlaying,
       tourActive: tour.isActive(),
       dr18ForkNotice: tour.isActive() ? null : dr18ForkNotice,
+      ...(tour.isActive() ? {} : { sampling }),
     });
     timelineDock.update(dockState);
   }
@@ -1632,7 +1713,11 @@ export function createDorySpatialApp(
    * `D6` / `DR18` immutable depth switch: NEVER mutates populated KV slabs — always forks and
    * re-prefills a clean branch from prompt tokens & seed.
    */
-  function selectKLoopsInternal(nextK: DorySupportedLoopCount, syncRender = false): void {
+  function selectKLoopsInternal(
+    nextK: DorySupportedLoopCount,
+    syncRender = false,
+    forceRebuildIfUnchanged = false,
+  ): void {
     if (tour.isActive()) return;
     stopPlayback();
     if (nextK > 4) {
@@ -1645,6 +1730,13 @@ export function createDorySpatialApp(
       curBranch.config.kLoops === nextK &&
       (curBranch.config.executionMode === 'standard' || nextK === DORY_SPEC_VERIFY_LOOPS)
     ) {
+      if (forceRebuildIfUnchanged) {
+        rebuildSceneAndRefresh({
+          refitCamera: true,
+          animateCamera: !syncRender,
+          syncRender,
+        });
+      }
       return;
     }
 
@@ -1653,11 +1745,20 @@ export function createDorySpatialApp(
       curBranch?.config.executionMode === 'self_spec' && nextK !== DORY_SPEC_VERIFY_LOOPS
         ? 'standard'
         : (curBranch?.config.executionMode ?? 'standard');
+    const activeKvMode: DoryKvCacheMode =
+      curBranch?.config.kvCacheMode ?? DORY_MINI_CONFIG.defaultKvCacheMode;
+    const preset = getDoryPromptPreset(promptPresetId);
+    const usePartition =
+      activeKvMode === 'last_loop' &&
+      nextExecMode === 'standard' &&
+      curBranch !== null &&
+      curBranch.promptTokens.length === preset.tokens.length;
 
     const newRec = freeSession.switchDepthOrPolicy({
       kLoops: nextK,
       executionMode: nextExecMode,
       sampling,
+      ...(usePartition ? { prefillChunkSizes: preset.defaultChunkPartition } : {}),
     });
     try {
       freeSession.step();
@@ -1682,7 +1783,7 @@ export function createDorySpatialApp(
     selectedPartId = null;
     announce(dr18ForkNotice);
     rebuildSceneAndRefresh({
-      refitCamera: viewMode === 'macro',
+      refitCamera: viewMode === 'macro' || forceRebuildIfUnchanged,
       animateCamera: !syncRender,
       syncRender,
     });
@@ -1699,11 +1800,22 @@ export function createDorySpatialApp(
    * existing KV slabs — always forks and re-prefills cleanly (preserving chunk schedule under
    * `last_loop` so `DR17`/`DR24` partition effects are immediately inspectable!).
    */
-  function selectKvCacheModeInternal(mode: DoryKvCacheMode, syncRender = false): void {
+  function selectKvCacheModeInternal(
+    mode: DoryKvCacheMode,
+    syncRender = false,
+    forceRebuildIfUnchanged = false,
+  ): void {
     if (tour.isActive()) return;
     stopPlayback();
     const curBranch = freeSession.getActiveBranch();
     if (curBranch && curBranch.config.kvCacheMode === mode) {
+      if (forceRebuildIfUnchanged) {
+        rebuildSceneAndRefresh({
+          refitCamera: true,
+          animateCamera: !syncRender,
+          syncRender,
+        });
+      }
       return;
     }
 
@@ -1741,7 +1853,8 @@ export function createDorySpatialApp(
     selectedPartId = null;
     announce(dr18ForkNotice);
     rebuildSceneAndRefresh({
-      refitCamera: false,
+      refitCamera: forceRebuildIfUnchanged,
+      animateCamera: !syncRender,
       syncRender,
     });
   }
@@ -1751,11 +1864,22 @@ export function createDorySpatialApp(
    * Entering Contract A `self_spec` forks a clean `104`-bank `k = 4, per_loop` branch and
    * executes 1 live `gamma = 4` cycle so View 6 immediately showcases real reuse & rejection data!
    */
-  function selectExecutionModeInternal(mode: DoryExecutionMode, syncRender = false): void {
+  function selectExecutionModeInternal(
+    mode: DoryExecutionMode,
+    syncRender = false,
+    forceRebuildIfUnchanged = false,
+  ): void {
     if (tour.isActive()) return;
     stopPlayback();
     const curBranch = freeSession.getActiveBranch();
     if (curBranch && curBranch.config.executionMode === mode) {
+      if (forceRebuildIfUnchanged) {
+        rebuildSceneAndRefresh({
+          refitCamera: true,
+          animateCamera: !syncRender,
+          syncRender,
+        });
+      }
       return;
     }
 
@@ -1789,7 +1913,8 @@ export function createDorySpatialApp(
     selectedPartId = null;
     announce(dr18ForkNotice);
     rebuildSceneAndRefresh({
-      refitCamera: false,
+      refitCamera: forceRebuildIfUnchanged,
+      animateCamera: !syncRender,
       syncRender,
     });
   }
@@ -1961,6 +2086,9 @@ export function createDorySpatialApp(
       kvCacheMode: execMode === 'self_spec' ? 'per_loop' : kvMode,
       executionMode: execMode,
       sampling,
+      ...(execMode === 'standard' && kvMode === 'last_loop'
+        ? { prefillChunkSizes: preset.defaultChunkPartition }
+        : {}),
     });
     try {
       freeSession.step();
@@ -2163,7 +2291,7 @@ export function createDorySpatialApp(
     selectedCell = null;
     selectedPartId = null;
 
-    if (restoreFreeExplore && restored) {
+    if (restored) {
       viewMode = restored.viewMode;
       focus = { ...restored.focus };
       if (restored.activeRecordId && freeSession.getRecord(restored.activeRecordId)) {
@@ -2178,12 +2306,15 @@ export function createDorySpatialApp(
       if (restored.inspectorOpen !== undefined) {
         applyInspectorCollapsedDom(!restored.inspectorOpen);
       }
-      if (restored.cameraPose) {
+      if (restoreFreeExplore && restored.cameraPose) {
         cameraPose = cloneCameraPose(restored.cameraPose);
       }
+    }
+
+    if (restoreFreeExplore) {
       announce('Exited Guided Tour and restored Free-Explore session.');
       rebuildSceneAndRefresh({
-        refitCamera: !restored.cameraPose,
+        refitCamera: !restored?.cameraPose,
         animateCamera: !syncRender,
         syncRender,
       });
@@ -2986,6 +3117,12 @@ export function createDorySpatialApp(
     if (cell.specOffset !== null) addKvRow(grid, 'Spec Offset', `verify[${cell.specOffset}]`);
     if (cell.row !== null && cell.col !== null) {
       addKvRow(grid, 'Cell [row, col]', `[${cell.row}, ${cell.col}]`);
+    } else if (cell.partId?.startsWith('bookend_top_bar_')) {
+      const vocabId = parseDorySemanticTagInt(cell.semanticTag, 'vocabTokenId');
+      if (vocabId !== null && vocabId >= 0 && vocabId < DORY_MINI_CONFIG.vocabSize) {
+        const rankSuffix = cell.tokenIndex !== null ? ` (Top #${cell.tokenIndex + 1})` : '';
+        addKvRow(grid, 'Vocab Token', `#${vocabId} "${decodeDoryToken(vocabId)}"${rankSuffix}`);
+      }
     } else if (cell.tokenIndex !== null) {
       addKvRow(grid, 'Token', `#${cell.tokenIndex} "${decodeDoryToken(cell.tokenIndex)}"`);
     }
@@ -3437,7 +3574,7 @@ export function createDorySpatialApp(
     renderCellInspectSection(cellInspectSlot);
   }
 
-  function renderInspectorBody(opts?: { readonly preserveViewControlsDom?: boolean }): void {
+  function renderInspectorBody(_opts?: { readonly preserveViewControlsDom?: boolean }): void {
     if (inspectorTab === 'inspect') {
       if (
         mountedInspectorTab !== 'inspect' ||
@@ -3463,10 +3600,7 @@ export function createDorySpatialApp(
       const sessionConfig = resolveActiveDorySessionConfig(getActiveSession());
       const activeK = sessionConfig.kLoops;
       const nextControlsKey = `${viewMode}|${tour.isActive() ? '1' : '0'}|${activeK}|${sessionConfig.executionMode}`;
-      if (
-        mountedControlsKey === null ||
-        (!opts?.preserveViewControlsDom && mountedControlsKey !== nextControlsKey)
-      ) {
+      if (mountedControlsKey === null || mountedControlsKey !== nextControlsKey) {
         viewControlsSlot.innerHTML = '';
         syncViewControlsInPlace = renderViewControlsSection(
           viewControlsSlot,
@@ -3910,24 +4044,27 @@ export function createDorySpatialApp(
       return getDebugSnapshot();
     },
     setKLoops(kLoops: DorySupportedLoopCount): DorySpatialDebugSnapshot {
-      if (tour.isActive()) {
+      const exitedTour = tour.isActive();
+      if (exitedTour) {
         exitTourInternal(false, true);
       }
-      selectKLoopsInternal(kLoops, true);
+      selectKLoopsInternal(kLoops, true, exitedTour);
       return getDebugSnapshot();
     },
     setKvCacheMode(mode: DoryKvCacheMode): DorySpatialDebugSnapshot {
-      if (tour.isActive()) {
+      const exitedTour = tour.isActive();
+      if (exitedTour) {
         exitTourInternal(false, true);
       }
-      selectKvCacheModeInternal(mode, true);
+      selectKvCacheModeInternal(mode, true, exitedTour);
       return getDebugSnapshot();
     },
     setExecutionMode(mode: DoryExecutionMode): DorySpatialDebugSnapshot {
-      if (tour.isActive()) {
+      const exitedTour = tour.isActive();
+      if (exitedTour) {
         exitTourInternal(false, true);
       }
-      selectExecutionModeInternal(mode, true);
+      selectExecutionModeInternal(mode, true, exitedTour);
       return getDebugSnapshot();
     },
     setKvComparePartitionMode(mode: DoryKvComparePartitionMode): DorySpatialDebugSnapshot {
