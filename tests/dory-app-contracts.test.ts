@@ -1566,4 +1566,159 @@ describe('Static architectural isolation & clean-room guardrails across all src/
 
     expect(violations).toEqual([]);
   });
+
+  it('guarantees every static dory-* class and state toggle in src/dory/app/*.ts matches a selector in spatial.css and styles #dory-app full-height', () => {
+    const appDir = resolve(doryRoot, 'app');
+    const cssPath = resolve(appDir, 'spatial.css');
+    const cssStripped = readFileSync(cssPath, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+
+    // 1. Default mount host `#dory-app` (and `#app`) must be styled full-height in root rule
+    expect(cssStripped).toMatch(/html\s*,\s*body\s*,[\s\S]*?#dory-app\b[\s\S]*?\{[\s\S]*?height\s*:\s*100%/);
+    expect(cssStripped).toMatch(/html\s*,\s*body\s*,[\s\S]*?#app\b[\s\S]*?\{[\s\S]*?height\s*:\s*100%/);
+
+    // 2. Collect all class selectors defined in spatial.css
+    const cssClasses = new Set<string>();
+    for (const m of cssStripped.matchAll(/\.([a-zA-Z0-9_-]+)/g)) {
+      cssClasses.add(m[1]!);
+    }
+
+    // 3. AST-extract every class name emitted in src/dory/app/*.ts
+    const extractStringFragments = (node: ts.Node | undefined): string[] => {
+      if (!node) return [];
+      if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+        return [node.text];
+      }
+      if (ts.isTemplateExpression(node)) {
+        const out = [node.head.text];
+        for (const span of node.templateSpans) {
+          out.push(...extractStringFragments(span.expression));
+          out.push(span.literal.text);
+        }
+        return out;
+      }
+      if (ts.isConditionalExpression(node)) {
+        return [
+          ...extractStringFragments(node.whenTrue),
+          ...extractStringFragments(node.whenFalse),
+        ];
+      }
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.PlusToken
+      ) {
+        return [
+          ...extractStringFragments(node.left),
+          ...extractStringFragments(node.right),
+        ];
+      }
+      return [];
+    };
+
+    const appTsFiles = collectTsFilesRecursive(appDir);
+    const missingClasses: string[] = [];
+
+    for (const filePath of appTsFiles) {
+      const relFile = toPosix(relative(repoRoot, filePath));
+      const raw = readFileSync(filePath, 'utf8');
+      const sf = ts.createSourceFile(filePath, raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+
+      const checkClassString = (rawStr: string, pos: number): void => {
+        const line = sf.getLineAndCharacterOfPosition(pos).line + 1;
+        for (const token of rawStr.split(/\s+/)) {
+          const cls = token.trim();
+          if (!cls) continue;
+          // Skip dynamic BEM prefix stems (e.g. `dory-badge--`, `dory-ov-tone--`, `dory-chart-badge--`)
+          if (cls.endsWith('--')) continue;
+          if (!/^(?:dory-|is-|has-)[a-z0-9_-]+$/.test(cls)) continue;
+          if (!cssClasses.has(cls)) {
+            missingClasses.push(`${relFile}:${line} -> .${cls}`);
+          }
+        }
+      };
+
+      const visit = (node: ts.Node): void => {
+        const pos = node.getStart(sf);
+
+        // DOM helper calls: el(tag, className), makeEl(tag, className), makeBtn(className, ...)
+        if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+          const fn = node.expression.text;
+          if ((fn === 'el' || fn === 'makeEl') && node.arguments.length >= 2) {
+            for (const s of extractStringFragments(node.arguments[1])) checkClassString(s, pos);
+          } else if (fn === 'makeBtn' && node.arguments.length >= 1) {
+            for (const s of extractStringFragments(node.arguments[0])) checkClassString(s, pos);
+          }
+        }
+
+        // Direct `.className = ...` assignments
+        if (
+          ts.isBinaryExpression(node) &&
+          node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          ts.isPropertyAccessExpression(node.left) &&
+          node.left.name.text === 'className'
+        ) {
+          for (const s of extractStringFragments(node.right)) checkClassString(s, pos);
+        }
+
+        // `.setAttribute('class', ...)`
+        if (
+          ts.isCallExpression(node) &&
+          ts.isPropertyAccessExpression(node.expression) &&
+          node.expression.name.text === 'setAttribute' &&
+          node.arguments.length >= 2 &&
+          ts.isStringLiteral(node.arguments[0]!) &&
+          node.arguments[0]!.text === 'class'
+        ) {
+          for (const s of extractStringFragments(node.arguments[1])) checkClassString(s, pos);
+        }
+
+        // `.classList.add/remove/toggle(...)`
+        if (
+          ts.isCallExpression(node) &&
+          ts.isPropertyAccessExpression(node.expression) &&
+          ts.isPropertyAccessExpression(node.expression.expression) &&
+          node.expression.expression.name.text === 'classList'
+        ) {
+          const method = node.expression.name.text;
+          if (method === 'add' || method === 'remove' || method === 'toggle') {
+            const limit = method === 'toggle' ? 1 : node.arguments.length;
+            for (let i = 0; i < limit; i += 1) {
+              for (const s of extractStringFragments(node.arguments[i])) checkClassString(s, pos);
+            }
+          }
+        }
+
+        ts.forEachChild(node, visit);
+      };
+
+      visit(sf);
+    }
+
+    // 4. Verify all finite dynamic tone/chart badge variants exist in spatial.css
+    const requiredDynamicClasses = [
+      'dory-badge--prelude_indigo',
+      'dory-badge--recurrent_teal',
+      'dory-badge--coda_amber',
+      'dory-badge--swa_cyan',
+      'dory-badge--full_indigo',
+      'dory-badge--nlerp_emerald',
+      'dory-badge--spec_oxide',
+      'dory-badge--readonly',
+      'dory-badge--warn',
+      'dory-badge--gold',
+      'dory-badge--muted',
+      'dory-chart-badge--spanning_subspace',
+      'dory-chart-badge--exploratory_pca',
+      'dory-chart-badge--dual_rope_phasors',
+      'dory-chart-badge--kv_scaling_256k',
+      'dory-chart-badge--self_spec_probs',
+      'dory-chart-badge--tbptl_schematic',
+    ];
+    for (const cls of requiredDynamicClasses) {
+      if (!cssClasses.has(cls)) {
+        missingClasses.push(`required dynamic variant -> .${cls}`);
+      }
+    }
+
+    expect(missingClasses).toEqual([]);
+  });
 });

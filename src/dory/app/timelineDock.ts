@@ -317,7 +317,7 @@ export function createDoryTimelineDock(
   const depthWrap = makeEl('div', 'dory-dock-group dory-dock-depth-group');
   const depthCaption = makeEl('span', 'dory-dock-group-label', 'Loops k');
 
-  const kTablist = makeEl('div', 'dory-dock-k-tablist');
+  const kTablist = makeEl('div', 'dory-dock-segmented dory-dock-k-tablist');
   kTablist.setAttribute('role', 'tablist');
   kTablist.setAttribute('aria-label', 'Recurrent loop depth k (DR18 immutable branch fork)');
 
@@ -329,7 +329,7 @@ export function createDoryTimelineDock(
     const kVal = DORY_ALL_LOOP_CHOICES[i]!;
     const isExtrap = kVal > 4;
     const btn = makeBtn(
-      `dory-dock-k-btn${isExtrap ? ' dory-dock-k-btn--extrap' : ''}`,
+      `dory-dock-seg-btn dory-dock-k-btn${isExtrap ? ' dory-dock-k-btn--extrap' : ''}`,
       `k=${kVal}`,
       `dory-dock-k-${kVal}`,
       isExtrap
@@ -383,12 +383,12 @@ export function createDoryTimelineDock(
   depthWrap.append(depthCaption, kTablist, extrapLabel);
 
   // 1b. Dual-Axis KV Cache Policy Toggle (`per_loop` vs. `last_loop`, DR17/DR18)
-  const kvGroup = makeEl('div', 'dory-dock-group dory-dock-kv-group');
+  const kvGroup = makeEl('div', 'dory-dock-segmented dory-dock-kv-group');
   kvGroup.setAttribute('role', 'group');
   kvGroup.setAttribute('aria-label', 'KV cache policy (DR18 immutable branch fork)');
 
   const perLoopBtn = makeBtn(
-    'dory-dock-toggle-btn',
+    'dory-dock-seg-btn dory-dock-toggle-btn',
     'per_loop',
     'dory-dock-kv-per_loop',
     'per_loop KV cache policy (16 + 20k independent banks; partition-invariant)',
@@ -397,7 +397,7 @@ export function createDoryTimelineDock(
   perLoopBtn.addEventListener('click', () => callbacks.onSelectKvCacheMode('per_loop'));
 
   const lastLoopBtn = makeBtn(
-    'dory-dock-toggle-btn',
+    'dory-dock-seg-btn dory-dock-toggle-btn',
     'last_loop',
     'dory-dock-kv-last_loop',
     'last_loop KV cache policy (36 frozen banks; partition-dependent for k >= 2 per DR17)',
@@ -408,12 +408,12 @@ export function createDoryTimelineDock(
   kvGroup.append(perLoopBtn, lastLoopBtn);
 
   // 1c. Contract A Self-Speculative Execution Mode Toggle (`standard` vs. `self_spec`, DR23)
-  const modeGroup = makeEl('div', 'dory-dock-group dory-dock-mode-group');
+  const modeGroup = makeEl('div', 'dory-dock-segmented dory-dock-mode-group');
   modeGroup.setAttribute('role', 'group');
   modeGroup.setAttribute('aria-label', 'Execution mode: standard decode or Contract A self-speculation');
 
   const standardModeBtn = makeBtn(
-    'dory-dock-toggle-btn',
+    'dory-dock-seg-btn dory-dock-toggle-btn',
     'Standard',
     'dory-dock-mode-standard',
     'Standard autoregressive decode at selected loop depth k',
@@ -422,7 +422,7 @@ export function createDoryTimelineDock(
   standardModeBtn.addEventListener('click', () => callbacks.onSelectExecutionMode('standard'));
 
   const selfSpecModeBtn = makeBtn(
-    'dory-dock-toggle-btn dory-dock-toggle-btn--spec',
+    'dory-dock-seg-btn dory-dock-toggle-btn dory-dock-toggle-btn--spec',
     'Self-Spec §6.2',
     'dory-dock-mode-self_spec',
     'Contract A Paper §6.2 self-speculative decoding (k=1 draft gamma=4 -> k=4 verify, 104 Dual-Coda banks, per_loop only)',
@@ -460,7 +460,7 @@ export function createDoryTimelineDock(
   tempWrap.append(tempLabel, tempSlider);
 
   // 1e. Deterministic Prompt Preset Selector (Created Once)
-  const promptSelect = makeEl('select', 'dory-dock-prompt-select');
+  const promptSelect = makeEl('select', 'dory-dock-select dory-dock-prompt-select');
   promptSelect.dataset.testid = 'dory-dock-prompt-select';
   promptSelect.setAttribute('aria-label', 'Deterministic miniature prompt preset');
   for (let i = 0; i < DORY_PROMPT_PRESETS.length; i += 1) {
@@ -544,7 +544,7 @@ export function createDoryTimelineDock(
   // 2b. Immutable Branch Switcher, Fork & Reset
   const branchGroup = makeEl('div', 'dory-dock-branches');
 
-  const branchSelect = makeEl('select', 'dory-dock-branch-select');
+  const branchSelect = makeEl('select', 'dory-dock-select dory-dock-branch-select');
   branchSelect.dataset.testid = 'dory-dock-branch-select';
   branchSelect.setAttribute('aria-label', 'Active immutable session branch');
   branchSelect.addEventListener('change', () => {
@@ -596,7 +596,7 @@ export function createDoryTimelineDock(
   // OPTIONAL DR18 IMMUTABLE FORK NOTICE BAR (IN-PLACE STATUS)
   // --------------------------------------------------------------------------
 
-  const dr18NoticeEl = makeEl('div', 'dory-dock-dr18-notice');
+  const dr18NoticeEl = makeEl('div', 'dory-dock-fork-notice dory-dock-dr18-notice');
   dr18NoticeEl.dataset.testid = 'dory-dock-dr18-notice';
   dr18NoticeEl.setAttribute('role', 'status');
   dr18NoticeEl.setAttribute('aria-live', 'polite');

@@ -943,7 +943,7 @@ export function createDorySpatialApp(
   const stageBadgesEl = el('div', 'dory-badge-strip');
   stageTitleCard.append(stageTitleEl, stageSubtitleEl, stageBadgesEl);
 
-  const selfSpecBanner = el('div', 'dory-selfspec-banner', DORY_SPEC_CONTRACT_A_BADGE);
+  const selfSpecBanner = el('div', 'dory-spec-banner', DORY_SPEC_CONTRACT_A_BADGE);
   selfSpecBanner.dataset.testid = 'dory-selfspec-banner';
   selfSpecBanner.hidden = true;
 
@@ -963,7 +963,7 @@ export function createDorySpatialApp(
   const overlay: DorySpatialOverlayHandle = createDorySpatialOverlay(viewportHost);
 
   // Dedicated 2D `<svg>` Analytical Charts Inset (`src/dory/app/charts.ts`)
-  const chartsInsetHost = el('div', 'dory-charts-inset-host');
+  const chartsInsetHost = el('div', 'dory-charts-host');
   chartsInsetHost.dataset.testid = 'dory-charts-inset-host';
   viewportHost.appendChild(chartsInsetHost);
   const chartsPanel: DoryAnalyticalChartsPanelHandle = createDoryChartsPanel(chartsInsetHost);
@@ -1117,7 +1117,7 @@ export function createDorySpatialApp(
   shortcutsBackdrop.dataset.testid = 'dory-shortcuts-backdrop';
   shortcutsBackdrop.hidden = true;
 
-  const shortcutsDialog = el('div', 'dory-modal-dialog');
+  const shortcutsDialog = el('div', 'dory-modal');
   shortcutsDialog.dataset.testid = 'dory-shortcuts-modal';
   shortcutsDialog.setAttribute('role', 'dialog');
   shortcutsDialog.setAttribute('aria-modal', 'true');
@@ -1135,10 +1135,9 @@ export function createDorySpatialApp(
   const modalList = el('dl', 'dory-shortcuts-list');
   for (let i = 0; i < SHORTCUT_ROWS.length; i += 1) {
     const row = SHORTCUT_ROWS[i]!;
-    modalList.append(
-      el('dt', 'dory-shortcut-key', row.key),
-      el('dd', 'dory-shortcut-desc', row.desc),
-    );
+    const keyDt = el('dt', 'dory-shortcut-key');
+    keyDt.appendChild(el('kbd', 'dory-kbd', row.key));
+    modalList.append(keyDt, el('dd', 'dory-shortcut-desc', row.desc));
   }
 
   shortcutsDialog.append(modalHeader, modalList);
@@ -1452,6 +1451,7 @@ export function createDorySpatialApp(
       );
       chartsInsetHost.hidden = renderedKinds.length === 0;
     }
+    chartsInsetHost.classList.toggle('is-collapsed', chartsPanelCollapsed);
     chartsInsetHost.classList.toggle('is-tour-active', tour.isActive());
   }
 
@@ -1471,7 +1471,8 @@ export function createDorySpatialApp(
 
     selfSpecBanner.hidden = !showSpecBanner;
     readOnlyBanner.hidden = !showReadOnlyBanner;
-    tourHud.classList.toggle('has-banner', showSpecBanner || showReadOnlyBanner);
+    tourHud.classList.toggle('has-top-banner', showSpecBanner || showReadOnlyBanner);
+    stageHud.classList.toggle('is-tour-active', tour.isActive());
     stageTitleCard.classList.toggle('is-tour-active', tour.isActive());
   }
 
@@ -2116,7 +2117,8 @@ export function createDorySpatialApp(
       tourHud.contains(document.activeElement);
     const restored = tour.exit();
     tourHud.hidden = true;
-    tourHud.classList.remove('has-banner');
+    tourHud.classList.remove('has-top-banner');
+    stageHud.classList.remove('is-tour-active');
     stageTitleCard.classList.remove('is-tour-active');
     chartsInsetHost.classList.remove('is-tour-active');
     if (focusWasInTour && typeof tourLaunchBtn.focus === 'function') {
@@ -3121,7 +3123,7 @@ export function createDorySpatialApp(
     if (viewMode === 'self_spec' && currentScene.selfSpecMetadata) {
       const sp = currentScene.selfSpecMetadata;
       const c = sp.cycleSummary;
-      const sec = el('section', 'dory-inspector-section dory-inspector-section--spec');
+      const sec = el('section', 'dory-inspector-section dory-inspector-section--oxide');
       sec.dataset.testid = 'dory-selfspec-diagnostics';
       sec.appendChild(el('h3', 'dory-section-heading', sp.contractBadge));
       const grid = el('div', 'dory-kv-grid');
@@ -3327,7 +3329,7 @@ export function createDorySpatialApp(
       if (entry.isBrowserGuard) {
         head.appendChild(el('span', 'dory-ledger-badge--guard', 'BROWSER GUARD'));
       }
-      head.appendChild(el('span', 'dory-ledger-title', entry.title));
+      head.appendChild(el('span', 'dory-ledger-topic', entry.title));
 
       card.append(
         head,
