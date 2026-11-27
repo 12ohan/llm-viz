@@ -84,7 +84,7 @@ import {
   type ActiveSheetCellGrid,
   type CellPopoverSpec,
 } from '../../shared/overlayLayout';
-import { vectorL2Norm } from '../ngptMath';
+import { resolveOutputGateInitScale, vectorL2Norm } from '../ngptMath';
 import {
   DORY_PRODUCTION_SPEC,
   decodeDoryToken,
@@ -100,6 +100,7 @@ import {
   type DoryForwardTrace,
   type DoryKvBank,
   type DoryKvCache,
+  type DoryMiniConfig,
   type DoryReconstructedStepResult,
   type DoryRopeTable,
   type DorySession,
@@ -386,12 +387,38 @@ interface PlacedGqaSheet {
   readonly kvHeadIndex?: number;
 }
 
+function formatG0Numeric(val: number): string {
+  if (Number.isInteger(val)) return String(val);
+  return val.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function formatOutputGateInitScaleLabels(
+  config: Pick<DoryMiniConfig, 'hiddenSize' | 'attentionOutputGateLogitScaleInit'>,
+): { readonly g0Label: string; readonly sqrtG0Label: string; readonly g0Value: number } {
+  const g0Value = resolveOutputGateInitScale(config);
+  if (config.attentionOutputGateLogitScaleInit !== null) {
+    const g0Label = formatG0Numeric(g0Value);
+    return Object.freeze({
+      g0Label,
+      sqrtG0Label: `sqrt(${g0Label})`,
+      g0Value,
+    });
+  }
+  const d = config.hiddenSize;
+  return Object.freeze({
+    g0Label: `sqrt(${d})`,
+    sqrtG0Label: `${d}^(1/4)`,
+    g0Value,
+  });
+}
+
 function buildGqaHoveredPopover(
   hovered: DoryPickIdentity | null | undefined,
   sheetsByPartId: ReadonlyMap<string, PlacedGqaSheet>,
   attnTrace: DoryAttentionSublayerTrace,
   weights: DoryAttentionSublayerWeights,
   metadata: DoryGqaRopeViewMetadata,
+  config: DoryMiniConfig,
   tokenLabels: readonly string[],
   kvColLabels: readonly string[],
 ): CellPopoverSpec | null {
@@ -481,24 +508,35 @@ function buildGqaHoveredPopover(
         : isScore
           ? `= ${fmtSigned(val, 4)}`
           : `= ${val.toFixed(4)}`,
-      operandColors: isMasked ? undefined : Object.freeze(['indigo', 'teal'] as const),
+      operandColors: isMasked
+        ? undefined
+        : col < attnTrace.pastLen
+          ? Object.freeze(['indigo'] as const)
+          : Object.freeze(['indigo', 'teal'] as const),
       sourceWorlds:
-        !isMasked && qScaledSheet && kCacheSheet
-          ? Object.freeze([
-              {
-                world: computeSheetCellWorldPos(qScaledSheet.grid, qh * dH, row, 0.5),
-                role: 'indigo' as const,
-              },
-              {
-                world: computeSheetCellWorldPos(
-                  kCacheSheet.grid,
-                  kvh * dH,
-                  Math.max(0, Math.min(attnTrace.seqLen - 1, col - attnTrace.pastLen)),
-                  0.5,
-                ),
-                role: 'teal' as const,
-              },
-            ])
+        !isMasked && qScaledSheet
+          ? col >= attnTrace.pastLen && kCacheSheet
+            ? Object.freeze([
+                {
+                  world: computeSheetCellWorldPos(qScaledSheet.grid, qh * dH, row, 0.5),
+                  role: 'indigo' as const,
+                },
+                {
+                  world: computeSheetCellWorldPos(
+                    kCacheSheet.grid,
+                    kvh * dH,
+                    Math.max(0, Math.min(attnTrace.seqLen - 1, col - attnTrace.pastLen)),
+                    0.5,
+                  ),
+                  role: 'teal' as const,
+                },
+              ])
+            : Object.freeze([
+                {
+                  world: computeSheetCellWorldPos(qScaledSheet.grid, qh * dH, row, 0.5),
+                  role: 'indigo' as const,
+                },
+              ])
           : undefined,
     });
   }
@@ -510,9 +548,9 @@ function buildGqaHoveredPopover(
     return Object.freeze({
       world,
       tensorLabel: rec.partId === 'gqa_sqk_raw' ? `Raw sqk[${col}]` : `Effective sqk^2[${col}] (Q-Only)`,
-      coordLabel: `Q-head h=${qh}, dim m=${col % dH} · sigma_0=0.0177`,
+      coordLabel: `Q-head h=${qh}, dim m=${col % dH} · sigma_0=${config.initializerRange}`,
       badge: 'FAMILY 2 · SQUARED ON Q ONLY (K UNSCALED)',
-      equation: `(${fmtSigned(raw, 4)} * sqrt(8) / 0.0177)^2 = ${effSq.toFixed(3)}`,
+      equation: `(${fmtSigned(raw, 4)} * sqrt(${dH}) / ${config.initializerRange})^2 = ${effSq.toFixed(3)}`,
       valueText: rec.partId === 'gqa_sqk_raw' ? `raw = ${fmtSigned(raw, 4)}` : `= ${effSq.toFixed(4)}`,
     });
   }
@@ -521,13 +559,14 @@ function buildGqaHoveredPopover(
     const qh = Math.floor(col / dH);
     const raw = weights.sGate[col] ?? 0;
     const effSq = attnTrace.effectiveSGateSq[col] ?? 0;
+    const g0Labels = formatOutputGateInitScaleLabels(config);
     return Object.freeze({
       world,
       tensorLabel:
         rec.partId === 'gqa_s_gate_raw' ? `Raw s_gate[${col}]` : `Effective s_gate^2[${col}]`,
-      coordLabel: `Q-head h=${qh}, dim m=${col % dH} · g_0=sqrt(8)`,
+      coordLabel: `Q-head h=${qh}, dim m=${col % dH} · g_0=${g0Labels.g0Label}`,
       badge: 'FAMILY 3 · SQUARED INSIDE SIGMOID (DR3)',
-      equation: `(${fmtSigned(raw, 4)} * 8^(1/4) / 0.0177)^2 = ${effSq.toFixed(3)}`,
+      equation: `(${fmtSigned(raw, 4)} * ${g0Labels.sqrtG0Label} / ${config.initializerRange})^2 = ${effSq.toFixed(3)}`,
       valueText: rec.partId === 'gqa_s_gate_raw' ? `raw = ${fmtSigned(raw, 4)}` : `= ${effSq.toFixed(4)}`,
     });
   }
@@ -619,6 +658,7 @@ export function buildDoryGqaRopeScene(
   const ctx = ensureDorySessionContext(sessionOrCtx, options.recordId);
   const config = ctx.params.config;
   const d = config.hiddenSize; // 8
+  const g0Labels = formatOutputGateInitScaleLabels(config);
   const hQ = config.numAttentionHeads; // 8
   const hKv = config.numKeyValueHeads; // 2
   const kvGroupSize = config.kvGroupSize; // 4
@@ -1784,7 +1824,7 @@ export function buildDoryGqaRopeScene(
   const sheetSGateEffSq = registerSheet({
     partId: 'gqa_s_gate_eff_sq',
     tensorKey: 's_gate',
-    label: 'Effective s_gate^2 (g_0=sqrt(8), DR3)',
+    label: `Effective s_gate^2 (g_0=${g0Labels.g0Label}, DR3)`,
     cx: 14.8,
     cy: 0,
     cz: 5.2,
@@ -2313,7 +2353,7 @@ export function buildDoryGqaRopeScene(
     Object.freeze({
       id: 'anchor_gqa_gate',
       label: 'Sigmoid Output Gate sigma(G * s_gate^2)',
-      sublabel: `s_gate^2 in [${sGateScaleRange[0].toFixed(2)}, ${sGateScaleRange[1].toFixed(2)}] · g_0=sqrt(8) (DR3)`,
+      sublabel: `s_gate^2 in [${sGateScaleRange[0].toFixed(2)}, ${sGateScaleRange[1].toFixed(2)}] · g_0=${g0Labels.g0Label} (DR3)`,
       worldPos: localToWorldOnFrame(sheetSGateEffSq.frame, 0, 0.75, 0.9),
       tone: 'coda_amber',
       badge: 'DR3',
@@ -2473,7 +2513,7 @@ export function buildDoryGqaRopeScene(
       body:
         `Squared query scale sqk^2 in [${sqkScaleRange[0].toFixed(2)}, ${sqkScaleRange[1].toFixed(2)}] multiplies Q ONLY ` +
         `so cached K stays unit-norm. Attention context C = P V is gated by sigma(G * s_gate^2) ` +
-        `(s_gate^2 in [${sGateScaleRange[0].toFixed(2)}, ${sGateScaleRange[1].toFixed(2)}], g_0=sqrt(8), DR3), then ` +
+        `(s_gate^2 in [${sGateScaleRange[0].toFixed(2)}, ${sGateScaleRange[1].toFixed(2)}], g_0=${g0Labels.g0Label}, DR3), then ` +
         `attn_sub_norm L2-normalizes across ALL q_dim=${qDim} concatenated channels (||Y_norm||_2 = ${attnSubNormL2Norm.toFixed(4)}) ` +
         `before o_proj and channel-wise NLERP (${DORY_ANTI_SLERP_PLAQUE}).`,
       tone: 'gold',
@@ -2504,6 +2544,7 @@ export function buildDoryGqaRopeScene(
     attnTrace,
     layerWeights,
     metadata,
+    config,
     tokenLabels,
     kvColLabels,
   );

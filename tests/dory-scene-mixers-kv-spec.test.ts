@@ -72,6 +72,7 @@ import {
   computeStrictMaxAbsDiff,
 } from './helpers/parityAssert';
 import {
+  DORY_BACKBONE_SEED,
   DORY_MAX_ATLAS_BYTES,
   DORY_MINI_CONFIG,
   DORY_NLERP_MARKER,
@@ -81,6 +82,7 @@ import {
   DORY_SPEC_CONTRACT_A_BANK_COUNT,
   buildDoryDualRopeTables,
   computeProductionKvBytesBf16,
+  createDoryModelParameters,
   createDorySession,
   effectiveSGateSquared,
   effectiveSqkSquared,
@@ -2117,6 +2119,212 @@ describe('Gate 4 DR21 Real Raycast Picking — pickMacroBay -> pickHitToDoryCell
         expect(Number.isFinite(coord)).toBe(true);
       }
     }
+  });
+
+  it('verifies DORY4 audit cleanups: masked softmax valueText, historical key sourceWorlds omission, custom DR3 g_0 copy, and View 5 evicted k_cache masking + SWA ring DR21 bank provenance', () => {
+    // 1. View 3 (gqa_rope): historical cached key omits sourceWorlds[1] while current-chunk key keeps both
+    const chunkedSession = createDorySession({
+      params: PARAMS,
+      ropeTables: ROPE_TABLES,
+      initialBranch: {
+        promptTokens: PROMPT_12,
+        prefillChunkSizes: [4, 8],
+        kLoops: 2,
+        kvCacheMode: 'per_loop',
+        executionMode: 'standard',
+      },
+    });
+    const gqaChunked = buildDoryGqaRopeScene(chunkedSession, {
+      physicalLayerIdx: 16,
+      loopIteration: 1,
+    });
+    expect(gqaChunked.gqaRopeMetadata!.pastLen).toBe(4);
+    const histCell = raycastPart(gqaChunked, 'gqa_scores_h0', 1, 2); // qPos=5, kPos=2 (col=2 < pastLen=4, visible!)
+    const gqaHistPop = buildDoryGqaRopeScene(chunkedSession, {
+      physicalLayerIdx: 16,
+      loopIteration: 1,
+      hoveredCell: histCell.cell,
+    });
+    expect(gqaHistPop.activeCellPopover).not.toBeNull();
+    expect(gqaHistPop.activeCellPopover!.sourceWorlds).toHaveLength(1);
+    expect(gqaHistPop.activeCellPopover!.sourceWorlds![0]!.role).toBe('indigo');
+    expect(gqaHistPop.activeCellPopover!.operandColors).toEqual(['indigo']);
+
+    const curCell = raycastPart(gqaChunked, 'gqa_scores_h0', 2, 5); // qPos=6, kPos=5 (col=5 >= pastLen=4, visible!)
+    const gqaCurPop = buildDoryGqaRopeScene(chunkedSession, {
+      physicalLayerIdx: 16,
+      loopIteration: 1,
+      hoveredCell: curCell.cell,
+    });
+    expect(gqaCurPop.activeCellPopover).not.toBeNull();
+    expect(gqaCurPop.activeCellPopover!.sourceWorlds).toHaveLength(2);
+    expect(gqaCurPop.activeCellPopover!.sourceWorlds![1]!.role).toBe('teal');
+    expect(gqaCurPop.activeCellPopover!.operandColors).toEqual(['indigo', 'teal']);
+
+    // 2. View 3 (gqa_rope): DR3 custom attentionOutputGateLogitScaleInit formats g_0 dynamically
+    const customG0Config = Object.freeze({
+      ...DORY_MINI_CONFIG,
+      attentionOutputGateLogitScaleInit: 12,
+    });
+    const customParams = createDoryModelParameters(DORY_BACKBONE_SEED, customG0Config);
+    const customSession = createDorySession({
+      params: customParams,
+      ropeTables: ROPE_TABLES,
+      initialBranch: {
+        promptTokens: PROMPT_8,
+        kLoops: 2,
+        kvCacheMode: 'per_loop',
+        executionMode: 'standard',
+      },
+    });
+    const customGqaBase = buildDoryGqaRopeScene(customSession, {
+      physicalLayerIdx: 16,
+      loopIteration: 1,
+    });
+    const sGatePicked = raycastPart(customGqaBase, 'gqa_s_gate_eff_sq', 0, 0);
+    const customGqaPop = buildDoryGqaRopeScene(customSession, {
+      physicalLayerIdx: 16,
+      loopIteration: 1,
+      hoveredCell: sGatePicked.cell,
+    });
+    expect(customGqaPop.activeCellPopover!.coordLabel).toContain('g_0=12');
+    expect(customGqaPop.activeCellPopover!.coordLabel).not.toContain('sqrt(8)');
+    expect(customGqaPop.activeCellPopover!.equation).toContain('sqrt(12)');
+    expect(customGqaPop.activeCellPopover!.equation).not.toContain('8^(1/4)');
+    const gateAnchor = customGqaPop.overlayAnchors.find((a) => a.id === 'anchor_gqa_gate');
+    expect(gateAnchor!.sublabel).toContain('g_0=12');
+    expect(gateAnchor!.sublabel).not.toContain('sqrt(8)');
+    const gateCallout = customGqaPop.callouts.find((c) => c.id === 'callout_gqa_sqk_gate_subnorm');
+    expect(gateCallout!.body).toContain('g_0=12');
+    expect(gateCallout!.body).not.toContain('sqrt(8)');
+
+    // 3. View 5 (kv_compare) & View 6 (self_spec): masked softmax popover returns '= 0.0000 (masked)' (not '= -inf')
+    const kvBase = buildDoryKvCompareScene(chunkedSession, {
+      kLoopsOverride: 4,
+      partitionMode: 'chunked',
+      physicalLayerIdx: 16,
+      loopIteration: 3, // non-1 loop on recurrent layer -> last_loop bank still has loopSlot = 1!
+    });
+    const kvMaskedProbCell = raycastPart(kvBase, 'last_loop_attn_probs', 0, 11);
+    const kvMaskedScoreCell = raycastPart(kvBase, 'last_loop_attn_scores', 0, 11);
+    const kvMaskedProbPop = buildDoryKvCompareScene(chunkedSession, {
+      kLoopsOverride: 4,
+      partitionMode: 'chunked',
+      physicalLayerIdx: 16,
+      loopIteration: 3,
+      hoveredCell: kvMaskedProbCell.cell,
+    });
+    const kvMaskedScorePop = buildDoryKvCompareScene(chunkedSession, {
+      kLoopsOverride: 4,
+      partitionMode: 'chunked',
+      physicalLayerIdx: 16,
+      loopIteration: 3,
+      hoveredCell: kvMaskedScoreCell.cell,
+    });
+    expect(kvMaskedProbPop.activeCellPopover!.valueText).toBe('= 0.0000 (masked)');
+    expect(kvMaskedScorePop.activeCellPopover!.valueText).toBe('= -inf');
+
+    // View 5 DR21 SWA ring provenance carries swaRingBank.bankSlotId, bankKind & loopSlot
+    const ringTagsPicked = raycastPart(kvBase, 'swa_ring_tags', 0, 5);
+    expect(ringTagsPicked.cell.kvBankSlotId).toBe(8);
+    expect(ringTagsPicked.cell.kvBankKind).toBe('recurrent');
+    expect(ringTagsPicked.cell.loopIteration).toBe(1);
+    expect(ringTagsPicked.cell.kvPolicy).toBe('last_loop');
+    expect(ringTagsPicked.cell.cacheRole).toBe('standard');
+
+    const ringSlotPicked = raycastPart(kvBase, 'swa_ring_slot_5', 0, 0);
+    expect(ringSlotPicked.cell.kvBankSlotId).toBe(8);
+    expect(ringSlotPicked.cell.kvBankKind).toBe('recurrent');
+    expect(ringSlotPicked.cell.loopIteration).toBe(1);
+    expect(ringSlotPicked.cell.kvPolicy).toBe('last_loop');
+    expect(ringSlotPicked.cell.cacheRole).toBe('standard');
+
+    // Prelude & Output Coda SWA ring provenance (loopSlot = 0)
+    const kvPreludeRing = buildDoryKvCompareScene(chunkedSession, {
+      kLoopsOverride: 4,
+      partitionMode: 'chunked',
+      physicalLayerIdx: 0,
+      loopIteration: 0,
+    });
+    const preRingSlot = raycastPart(kvPreludeRing, 'swa_ring_slot_0', 0, 0);
+    expect(preRingSlot.cell.kvBankSlotId).toBe(0);
+    expect(preRingSlot.cell.kvBankKind).toBe('input');
+    expect(preRingSlot.cell.loopIteration).toBe(0);
+
+    // 4. View 5 (kv_compare) L > cap_swa = 16: evicted non-resident rows masked (G = 1, R = 0) in per_loop_kv_k & last_loop_kv_k
+    const kvLong24 = buildDoryKvCompareScene(chunkedSession, {
+      kLoopsOverride: 2,
+      partitionMode: 'single_shot',
+      comparisonTokens: PROMPT_32.slice(0, 24),
+      physicalLayerIdx: 16,
+      loopIteration: 1,
+    });
+    for (const regionId of ['per_loop_kv_k', 'last_loop_kv_k'] as const) {
+      const rg = readAtlasRegionRG(kvLong24, regionId);
+      expect(rg.rows).toBe(24);
+      expect(rg.cols).toBe(16);
+      // Positions 0..7 were overwritten by positions 16..23 in the cap_swa = 16 ring -> G = 1, R = 0
+      for (let r = 0; r < 8; r += 1) {
+        for (let c = 0; c < 16; c += 1) {
+          expect(rg.g[r * 16 + c], `${regionId} evicted row ${r} col ${c} G`).toBe(1);
+          expect(rg.r[r * 16 + c], `${regionId} evicted row ${r} col ${c} R`).toBe(0);
+        }
+      }
+      // Positions 8..23 remain resident in the cap_swa = 16 ring -> G = 0
+      for (let r = 8; r < 24; r += 1) {
+        for (let c = 0; c < 16; c += 1) {
+          expect(rg.g[r * 16 + c], `${regionId} resident row ${r} col ${c} G`).toBe(0);
+        }
+      }
+    }
+    const evictedKeyPicked = raycastPart(kvLong24, 'per_loop_kv_k', 0, 0);
+    const evictedKeyPop = buildDoryKvCompareScene(chunkedSession, {
+      kLoopsOverride: 2,
+      partitionMode: 'single_shot',
+      comparisonTokens: PROMPT_32.slice(0, 24),
+      physicalLayerIdx: 16,
+      loopIteration: 1,
+      hoveredCell: evictedKeyPicked.cell,
+    });
+    expect(evictedKeyPop.activeCellPopover!.badge).toContain('EVICTED');
+    expect(evictedKeyPop.activeCellPopover!.valueText).toBe('evicted (non-resident)');
+
+    // 5. View 6 (self_spec): masked softmax popover returns '= 0.0000 (masked)', score returns '= -inf'
+    const specMaskedSession = createDorySession({
+      params: PARAMS,
+      ropeTables: ROPE_TABLES,
+      initialBranch: {
+        promptTokens: PROMPT_12,
+        executionMode: 'self_spec',
+        kvCacheMode: 'per_loop',
+        kLoops: 4,
+        speculativeGamma: 4,
+        sampling: { temperature: 1.0, topK: 0, topP: 1.0 },
+        seed: 0xd0415502,
+      },
+    });
+    const specMaskedRec = specMaskedSession.step();
+    const specBase = buildDorySelfSpecScene(specMaskedSession, {
+      selectedAttentionLayerIdx: 16,
+      recordId: specMaskedRec.recordId,
+    });
+    const verifyProbsBox = specBase.pickBoxes.find((pb) => pb.partId === 'spec_verify_attn_probs')!;
+    const lastKeyCol = (verifyProbsBox.gridCols ?? 1) - 1;
+    // Row 0 (earliest verify query) cannot see the last verify key (future key -> masked!)
+    const specMaskedProbCell = raycastPart(specBase, 'spec_verify_attn_probs', 0, lastKeyCol);
+    const specMaskedScoreCell = raycastPart(specBase, 'spec_verify_attn_scores', 0, lastKeyCol);
+    const specMaskedProbPop = buildDorySelfSpecScene(specMaskedSession, {
+      selectedAttentionLayerIdx: 16,
+      recordId: specMaskedRec.recordId,
+      hoveredCell: specMaskedProbCell.cell,
+    });
+    const specMaskedScorePop = buildDorySelfSpecScene(specMaskedSession, {
+      selectedAttentionLayerIdx: 16,
+      recordId: specMaskedRec.recordId,
+      hoveredCell: specMaskedScoreCell.cell,
+    });
+    expect(specMaskedProbPop.activeCellPopover!.valueText).toBe('= 0.0000 (masked)');
+    expect(specMaskedScorePop.activeCellPopover!.valueText).toBe('= -inf');
   });
 });
 

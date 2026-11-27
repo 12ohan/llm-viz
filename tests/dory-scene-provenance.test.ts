@@ -46,6 +46,13 @@ import {
   type DorySpatialScene,
 } from '../src/dory/scene/types';
 import {
+  DORY_PAPER_RESULTS_BADGE,
+  DORY_TOUR_ACT_DESCRIPTORS,
+  DORY_TOUR_MIN_BEATS_PER_ACT,
+  DORY_TOUR_SEED,
+  DORY_TOUR_TOTAL_ACTS,
+} from '../src/dory/story/types';
+import {
   DoryAtlasPacker,
   DoryDr20CausalMaskError,
   DoryFlatFlowBufferBuilder,
@@ -605,17 +612,39 @@ describe('DORY3 Step 0 — Frozen Spatial Types & Provenance Guards (DR20, DR21,
     expect(session.measureMemory()).toEqual(memBefore);
   });
 
-  it('enforces D4 zero Gate 4b/4c/sibling imports and zero Math.random() in src/dory/scene/*', () => {
+  it('enforces D4 zero Gate 4b/4c/sibling imports and zero Math.random() in src/dory/scene/* and src/dory/story/types.ts', () => {
     const forbiddenImportPatterns = [
       /from\s+['"][^'"]*(?:ui\/(?:controls|overlay|memoryChart)|scene\/(?:spine|sheetInspector|hybridPick|cutaways|embeddingCutaway|outputCutaway|gqaCutaway|mambaCutaway|moeCutaway|gqaSpatial|mambaSpatial|moeSpatial|accumulation)|model\/(?:spec|memory|state|rcPlayback)|math\/(?:gqaSim|mambaSim|moeSim|hybridFlow|incrementalDecode)|story\/walkthrough|src\/main|\.\.\/main)['"]/,
       /from\s+['"][^'"]*(?:twotower|diffusion|uni)(?:\/|['"])/,
+      /from\s+['"]node:/,
     ];
-    for (const relPath of ['src/dory/scene/types.ts', 'src/dory/scene/provenance.ts']) {
+    for (const relPath of [
+      'src/dory/scene/types.ts',
+      'src/dory/scene/provenance.ts',
+      'src/dory/story/types.ts',
+    ]) {
       const src = readFileSync(resolve(process.cwd(), relPath), 'utf-8');
       expect(src, `Math.random forbidden in ${relPath}`).not.toMatch(/Math\.random\s*\(/);
       for (const re of forbiddenImportPatterns) {
         expect(src, `D4 forbidden import in ${relPath}`).not.toMatch(re);
       }
     }
+
+    // Frozen DORY5 Step-0 4-act guided walkthrough & dispatcher defaults
+    expect(DORY_TOUR_TOTAL_ACTS).toBe(4);
+    expect(DORY_TOUR_MIN_BEATS_PER_ACT).toBeGreaterThanOrEqual(3);
+    expect(DORY_TOUR_SEED).toBe(0xd0415005);
+    expect(DORY_TOUR_ACT_DESCRIPTORS).toHaveLength(4);
+    expect(DORY_TOUR_ACT_DESCRIPTORS.map((a) => a.id)).toEqual(['act1', 'act2', 'act3', 'act4']);
+    expect(DORY_PAPER_RESULTS_BADGE).toContain('NOT MEASURED ON SYNTHETIC MINIATURE');
+    const coveredViews = new Set(DORY_TOUR_ACT_DESCRIPTORS.flatMap((a) => a.views));
+    for (const desc of DORY_SPATIAL_VIEW_MODES) {
+      expect(coveredViews.has(desc.id), `View '${desc.id}' covered by 4-act tour`).toBe(true);
+    }
+    expect(DEFAULT_DORY_SPATIAL_FOCUS_STATE.selfSpecAttentionLayerIdx).toBe(16);
+    expect(DEFAULT_DORY_SPATIAL_FOCUS_STATE.selectedCheckpointFormat).toBe('bf16');
+    expect(DEFAULT_DORY_SPATIAL_FOCUS_STATE.kvCompareChunkPartition).toBeNull();
+    expect(DEFAULT_DORY_SPATIAL_FOCUS_STATE.kvCompareKLoopsOverride).toBeNull();
+    expect(DEFAULT_DORY_SPATIAL_FOCUS_STATE.selectedVocabTokenId).toBeNull();
   });
 });

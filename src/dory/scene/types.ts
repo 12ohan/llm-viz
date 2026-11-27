@@ -773,6 +773,9 @@ export interface DorySelfSpecViewMetadata {
   readonly rolledBackPositions: number;
 }
 
+/** Canonical production checkpoint format identifiers (`Audit §3.2`, `0 B` diff safetensors). */
+export type DoryCheckpointFormatId = DoryCheckpointFormatSpec['id'];
+
 /** View 7 (`bookends`) untied bookends, 4-format readouts & read-only TBPTL descriptor. */
 export interface DoryBookendsLogitRow {
   readonly tokenId: number;
@@ -782,16 +785,46 @@ export interface DoryBookendsLogitRow {
   readonly effectiveLogitScale: number;
   readonly scaledLogit: number;
   readonly prob: number;
+  readonly isArgMax: boolean;
+  readonly isSampled: boolean;
+  readonly isSpecialToken: boolean;
 }
 
 export interface DoryBookendsViewMetadata {
   readonly readOnly: true;
   readonly hasGradients: false;
+  readonly zeroFakeQuantToggles: true;
   readonly tbptlBadgeLabel: typeof DORY_TBPTL_READONLY_BADGE;
   readonly untiedVerified: true;
+  readonly safetensorsZeroByteDiffVerified: true;
+  readonly selectedCheckpointFormat: DoryCheckpointFormatId;
+  readonly seqLen: number;
+  readonly startPos: number;
+  readonly selectedTokenOffset: number;
   readonly selectedTokenPos: number;
   readonly selectedTokenId: number;
   readonly selectedTokenText: string;
+  readonly selectedVocabTokenId: number;
+  readonly selectedVocabTokenText: string;
+  /** Verified unit-sphere L2 norm (`~1.0`) of selected embedding row (`DR5`). */
+  readonly embeddingRowL2Norm: number;
+  /** Verified unit-sphere L2 norm (`~1.0`) of selected untied `lm_head` row. */
+  readonly lmHeadRowL2Norm: number;
+  /** Constructive numerical check proving `backbone.embeddings.weight !== lm_head.weight` (`> 0`). */
+  readonly embeddingVsLmHeadMaxAbsDiff: number;
+  /** Family 5 active runtime multiplier `1 / sigma_0 = 1 / 0.0177 ≈ 56.497`. */
+  readonly logitScaleMultiplier: number;
+  /** `[min, max]` of FP32 effective `logit_scale / 0.0177` across all `V = 64` vocab entries. */
+  readonly logitScaleRange: readonly [number, number];
+  readonly argMaxTokenId: number;
+  readonly argMaxTokenText: string;
+  readonly sampledTokenId: number | null;
+  readonly sampledTokenText: string | null;
+  /** Strictly read-only TBPTL depth-1 invariants (Audit §12.1 View 7). */
+  readonly tbptlDepth: 1;
+  readonly tbptlStopGradientActive: true;
+  readonly tbptlEarlyExitLosses: 0;
+  readonly tbptlPreludeGradientViaFinalAnchorOnly: true;
   readonly topLogitRows: readonly DoryBookendsLogitRow[];
   readonly checkpointFormats: readonly DoryCheckpointFormatSpec[];
   readonly scalingDisclosure: readonly DoryScalingRatioEntry[];
@@ -989,14 +1022,16 @@ export interface DorySelfSpecSceneOptions {
 export interface DoryBookendsSceneOptions {
   /** Focused sequence position for embedding / LM-head inspection. */
   readonly selectedTokenPos?: number;
-  /** Selected production checkpoint row in the 4-format read-only table. */
-  readonly selectedCheckpointFormat?: 'bf16' | 'mxfp8' | 'nvfp4' | 'q5_k_m';
+  /** Focused vocabulary token ID (`0..V-1`) for untied `lm_head` & `logit_scale` inspection. */
+  readonly selectedVocabTokenId?: number | null;
+  /** Selected production checkpoint row in the 4-format read-only table (zero fake quant toggles). */
+  readonly selectedCheckpointFormat?: DoryCheckpointFormatId;
   readonly hoveredCell?: DoryPickIdentity | null;
   readonly recordId?: string;
 }
 
 // ============================================================================
-// FROZEN SCENE BUILDER SIGNATURES (DORY3 / DORY4 / DORY5 DISJOINT SLICES)
+// FROZEN SCENE BUILDER & DISPATCHER SIGNATURES (DORY3 / DORY4 / DORY5 SLICES)
 // ============================================================================
 // Canonical module exports:
 //   - View 1 (`src/dory/scene/macroScene.ts`):       `buildDoryMacroScene`
@@ -1006,6 +1041,9 @@ export interface DoryBookendsSceneOptions {
 //   - View 5 (`src/dory/scene/kvCompareScene.ts`):   `buildDoryKvCompareScene`
 //   - View 6 (`src/dory/scene/selfSpecScene.ts`):    `buildDorySelfSpecScene`
 //   - View 7 (`src/dory/scene/bookendsScene.ts`):    `buildDoryBookendsScene`
+//   - Dispatcher (`src/dory/scene/index.ts`):        `buildDorySpatialScene`, `DORY_SCENE_BUILDERS`,
+//                                                    `getDorySpatialViewDescriptor`,
+//                                                    `resolveDorySpatialFocus`, `focusStateToViewOptions`
 
 export type DorySceneBuilder<TOptions> = (
   sessionOrCtx: DorySession | DoryResolvedSessionContext,
@@ -1019,6 +1057,28 @@ export type DorySwigluSceneBuilder = DorySceneBuilder<DorySwigluSceneOptions>;
 export type DoryKvCompareSceneBuilder = DorySceneBuilder<DoryKvCompareSceneOptions>;
 export type DorySelfSpecSceneBuilder = DorySceneBuilder<DorySelfSpecSceneOptions>;
 export type DoryBookendsSceneBuilder = DorySceneBuilder<DoryBookendsSceneOptions>;
+
+/** Mapped view-mode -> view-specific scene options dictionary for type-safe dispatch (`DORY5`). */
+export interface DorySceneOptionsByView {
+  readonly macro: DoryMacroSceneOptions;
+  readonly hypersphere: DoryHypersphereSceneOptions;
+  readonly gqa_rope: DoryGqaRopeSceneOptions;
+  readonly swiglu: DorySwigluSceneOptions;
+  readonly kv_compare: DoryKvCompareSceneOptions;
+  readonly self_spec: DorySelfSpecSceneOptions;
+  readonly bookends: DoryBookendsSceneOptions;
+}
+
+/** Exhaustive 7-view scene builder registry exported by `src/dory/scene/index.ts`. */
+export interface DorySceneBuilderRegistry {
+  readonly macro: DoryMacroSceneBuilder;
+  readonly hypersphere: DoryHypersphereSceneBuilder;
+  readonly gqa_rope: DoryGqaRopeSceneBuilder;
+  readonly swiglu: DorySwigluSceneBuilder;
+  readonly kv_compare: DoryKvCompareSceneBuilder;
+  readonly self_spec: DorySelfSpecSceneBuilder;
+  readonly bookends: DoryBookendsSceneBuilder;
+}
 
 /** Unified focus state passed to `buildDorySpatialScene` across all 7 Dory spatial views. */
 export interface DorySpatialFocusState {
@@ -1039,8 +1099,13 @@ export interface DorySpatialFocusState {
   readonly swigluAccumReveal: number;
   readonly kvComparePartitionMode: DoryKvComparePartitionMode;
   readonly kvCompareLayerIdx: number;
+  readonly kvCompareChunkPartition?: readonly number[] | null;
+  readonly kvCompareKLoopsOverride?: number | null;
   readonly selectedVerifyOffset: number;
-  readonly selectedCheckpointFormat: 'bf16' | 'mxfp8' | 'nvfp4' | 'q5_k_m';
+  readonly selfSpecAttentionLayerIdx: number;
+  readonly selfSpecPreviewSampling?: Partial<DorySamplingConfig> | null;
+  readonly selectedCheckpointFormat: DoryCheckpointFormatId;
+  readonly selectedVocabTokenId?: number | null;
   readonly recordId?: string;
   readonly hoveredPartId: string | null;
   readonly hoveredCell: DoryPickIdentity | null;
@@ -1064,8 +1129,32 @@ export const DEFAULT_DORY_SPATIAL_FOCUS_STATE: DorySpatialFocusState = Object.fr
   swigluAccumReveal: 1.0,
   kvComparePartitionMode: 'chunked',
   kvCompareLayerIdx: 16,
+  kvCompareChunkPartition: null,
+  kvCompareKLoopsOverride: null,
   selectedVerifyOffset: 0,
+  selfSpecAttentionLayerIdx: 16,
+  selfSpecPreviewSampling: null,
   selectedCheckpointFormat: 'bf16',
+  selectedVocabTokenId: null,
   hoveredPartId: null,
   hoveredCell: null,
 });
+
+/** Canonical 7-view spatial scene dispatcher signature (`src/dory/scene/index.ts`). */
+export type DorySpatialSceneDispatcher = (
+  sessionOrCtx: DorySession | DoryResolvedSessionContext,
+  viewMode: DorySpatialViewMode,
+  focus?: Partial<DorySpatialFocusState>,
+) => DorySpatialScene;
+
+/** Frozen module export contract implemented by `src/dory/scene/index.ts` (Slice 5A). */
+export interface DorySceneIndexModuleContract {
+  readonly DORY_SCENE_BUILDERS: DorySceneBuilderRegistry;
+  getDorySpatialViewDescriptor(viewMode: DorySpatialViewMode): DorySpatialViewDescriptor;
+  resolveDorySpatialFocus(focus?: Partial<DorySpatialFocusState>): DorySpatialFocusState;
+  focusStateToViewOptions<V extends DorySpatialViewMode>(
+    viewMode: V,
+    focus: DorySpatialFocusState,
+  ): DorySceneOptionsByView[V];
+  buildDorySpatialScene: DorySpatialSceneDispatcher;
+}

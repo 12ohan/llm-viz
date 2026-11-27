@@ -540,7 +540,13 @@ function buildSelfSpecPopover(
         : isScores
           ? `d_h^-0.5 <sqk^2 * N(RoPE(Q[${qPos}])), N(RoPE(K[${kPos}]))>`
           : `Batched verify attention weight at (q=${qPos}, k=${kPos})`,
-      valueText: isMasked ? '= -inf' : isScores ? `= ${fmtSigned(val, 4)}` : `= ${val.toFixed(4)}`,
+      valueText: isMasked
+        ? isScores
+          ? '= -inf'
+          : '= 0.0000 (masked)'
+        : isScores
+          ? `= ${fmtSigned(val, 4)}`
+          : `= ${val.toFixed(4)}`,
     });
   }
 

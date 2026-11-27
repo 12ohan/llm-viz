@@ -429,23 +429,32 @@ function sliceHeadMatrix(flat: Float32Array, headIdx: number, rows: number, cols
   return out;
 }
 
-function extractBankKeyMatrix(bank: DoryKvBank, kvLen: number, absPositions: Int32Array): Float32Array {
+function extractBankKeyMatrix(
+  bank: DoryKvBank,
+  kvLen: number,
+  absPositions: Int32Array,
+): { readonly values: Float32Array; readonly masked: Uint8Array } {
   const kvDim = bank.kvDim;
-  const out = new Float32Array(kvLen * kvDim);
+  const values = new Float32Array(kvLen * kvDim);
+  const masked = new Uint8Array(kvLen * kvDim);
   const cap = bank.capacity;
   const isSwa = bank.attentionKind === 'sliding_attention';
   for (let i = 0; i < kvLen; i += 1) {
     const pos = absPositions[i]!;
     const slot = isSwa ? pos & (cap - 1) : pos;
+    const dstOff = i * kvDim;
     if (slot >= 0 && slot < cap && bank.absPosTag[slot] === pos) {
       const srcOff = slot * kvDim;
-      const dstOff = i * kvDim;
       for (let c = 0; c < kvDim; c += 1) {
-        out[dstOff + c] = bank.k[srcOff + c]!;
+        values[dstOff + c] = bank.k[srcOff + c]!;
+      }
+    } else {
+      for (let c = 0; c < kvDim; c += 1) {
+        masked[dstOff + c] = 1;
       }
     }
   }
-  return out;
+  return { values, masked };
 }
 
 interface PlacedSheetRecord {
@@ -598,7 +607,13 @@ function buildKvComparePopover(
         : isScores
           ? `d_h^-0.5 <sqk^2 * N(RoPE(Q[${qPos}])), N(RoPE(K[${kPos}]^(t${writer})))>`
           : `softmax(scores)[q=${qPos}, k=${kPos}] (writeKv=${String(attn.writeKv)})`,
-      valueText: isMasked ? '= -inf' : isScores ? `= ${fmtSigned(val, 4)}` : `= ${val.toFixed(4)}`,
+      valueText: isMasked
+        ? isScores
+          ? '= -inf'
+          : '= 0.0000 (masked)'
+        : isScores
+          ? `= ${fmtSigned(val, 4)}`
+          : `= ${val.toFixed(4)}`,
     });
   }
 
@@ -655,6 +670,26 @@ function buildKvComparePopover(
       badge: row === 0 ? 'THEOREM 1 (EMPTY CACHE = 0)' : 'THEOREM 3 (PARTITION-DEPENDENT)',
       equation: `max_v |last_loop(${modeLabel}) - per_loop| at pos ${col}`,
       valueText: `= ${val.toExponential(3)}`,
+    });
+  }
+
+  if (rec.partId === 'per_loop_kv_k' || rec.partId === 'last_loop_kv_k') {
+    const isLastLoop = rec.partId.startsWith('last_loop');
+    const attn = isLastLoop ? lastLoopAttn : perLoopAttn;
+    const kPos = attn.kvAbsPositions[row] ?? row;
+    return Object.freeze({
+      world,
+      tensorLabel: rec.label,
+      coordLabel: `absPos=${kPos}, kv_ch=${col}`,
+      badge: isMasked
+        ? 'EVICTED FROM cap_swa=16 RING (DR24)'
+        : isLastLoop
+          ? 'RESIDENT FINAL-LOOP KEY'
+          : 'RESIDENT PER-LOOP KEY',
+      equation: isMasked
+        ? `absPosTag[${kPos} & 15] !== ${kPos} (non-resident after L > cap_swa = 16 commit)`
+        : `k_cache[pos=${kPos}, ch=${col}] (post-RoPE L2Norm)`,
+      valueText: isMasked ? 'evicted (non-resident)' : `= ${fmtSigned(val, 4)}`,
     });
   }
 
@@ -906,11 +941,12 @@ export function buildDoryKvCompareScene(
   // Inspect SWA ring buffer (`cap_swa = 16`, `absPosTag`, `writerLoopTag`) on selected SWA layer or Phys L16
   const swaRingLayerIdx =
     selectedAttentionKind === 'sliding_attention' ? selectedPhysicalLayerIdx : 16;
-  const swaRingLoop =
+  const swaRingLookupLoop =
     getDoryPhysicalLayerSpec(swaRingLayerIdx).stage === 'recurrent'
       ? Math.max(1, selectedLoopIteration)
       : 0;
-  const swaRingBank = resolveKvBankForLayer(lastLoopActive.kvCache, swaRingLayerIdx, swaRingLoop);
+  const swaRingBank = resolveKvBankForLayer(lastLoopActive.kvCache, swaRingLayerIdx, swaRingLookupLoop);
+  const swaRingLoop = swaRingBank.loopSlot;
   const swaRingInfo = inspectSwaRingSlots(swaRingBank, promptLen, config.slidingWindow);
 
   // 4. Pack Live RG32F Atlas (128 x 128 = 128.00 KiB <= 256 KiB <= 512 KiB, 0 overlaps)
@@ -1013,14 +1049,16 @@ export function buildDoryKvCompareScene(
   const perLoopKvK = extractBankKeyMatrix(perLoopBank, kvLen, perLoopAttn.kvAbsPositions);
   const lastLoopKvK = extractBankKeyMatrix(lastLoopBank, kvLen, lastLoopAttn.kvAbsPositions);
 
-  const perLoopKvKSlice = atlasPacker.packMatrix('per_loop_kv_k', perLoopKvK, kvLen, kvDim, {
+  const perLoopKvKSlice = atlasPacker.packMatrix('per_loop_kv_k', perLoopKvK.values, kvLen, kvDim, {
     mode: 0,
+    masked: perLoopKvK.masked,
     minFloor: 0.25,
     physicalLayerIdx: selectedPhysicalLayerIdx,
     loopIteration: selectedLoopIteration,
   });
-  const lastLoopKvKSlice = atlasPacker.packMatrix('last_loop_kv_k', lastLoopKvK, kvLen, kvDim, {
+  const lastLoopKvKSlice = atlasPacker.packMatrix('last_loop_kv_k', lastLoopKvK.values, kvLen, kvDim, {
     mode: 0,
+    masked: lastLoopKvK.masked,
     minFloor: 0.25,
     physicalLayerIdx: selectedPhysicalLayerIdx,
     loopIteration: selectedLoopIteration,
@@ -1540,7 +1578,8 @@ export function buildDoryKvCompareScene(
     role: SHEET_ROLE_KV_K,
     highlight: SHEET_HL_NORMAL,
     slice: perLoopKvKSlice,
-    values: perLoopKvK,
+    values: perLoopKvK.values,
+    masked: perLoopKvK.masked,
     format: 'signed',
     colLabels: kvDimLabels,
     rowLabels: keyLabels,
@@ -1683,7 +1722,8 @@ export function buildDoryKvCompareScene(
     role: SHEET_ROLE_KV_K,
     highlight: SHEET_HL_BF16_GOLD,
     slice: lastLoopKvKSlice,
-    values: lastLoopKvK,
+    values: lastLoopKvK.values,
+    masked: lastLoopKvK.masked,
     format: 'signed',
     colLabels: kvDimLabels,
     rowLabels: keyLabels,
@@ -1766,6 +1806,8 @@ export function buildDoryKvCompareScene(
     colDimLabel: `cap_swa=${config.swaRingCapacity}`,
     rowDimLabel: '2',
     kvPolicy: 'last_loop',
+    kvBankSlotId: swaRingBank.bankSlotId,
+    kvBankKind: swaRingBank.bankKind,
     physicalLayerIdx: swaRingLayerIdx,
     loopIteration: swaRingLoop,
     includeInCellGrid: true,
@@ -1823,7 +1865,10 @@ export function buildDoryKvCompareScene(
           partId: `swa_ring_slot_${s}`,
           tensorKey: 'swa_ring_slot',
           absTokenPos: info.absPos >= 0 ? info.absPos : null,
+          kvBankSlotId: swaRingBank.bankSlotId,
+          kvBankKind: swaRingBank.bankKind,
           kvPolicy: 'last_loop',
+          cacheRole: 'standard',
           modelWeightId: params.modelWeightId,
           extraTags: {
             slot: s,
