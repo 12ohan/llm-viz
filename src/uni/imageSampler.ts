@@ -585,6 +585,8 @@ export interface UniPreparedGenerationPrefix {
   readonly prefixCache: UniKvCacheState;
   readonly perBranchEmbeds: readonly Float32Array[];
   readonly perBranchRouting: readonly Uint8Array[];
+  /** Compact `[cfgBatchSize][35]` prefill residual checkpoints for 0-ULP lazy reconstruction. */
+  readonly perBranchResiduals?: readonly (readonly (Float32Array | null)[])[];
   readonly sourceLetterbox?: UniLetterboxResult;
   readonly sourcePaddingMask?: UniSourcePaddingVqMask;
   readonly sourceVqCodes?: Int32Array;
@@ -623,6 +625,7 @@ export function prepareT2iPrefix(
   const perBranchEmbeds: Float32Array[] = [];
   const perBranchRouting: Uint8Array[] = [];
   const perRowNewKvs: (readonly (UniLayerKvSlice | null)[])[] = [];
+  const perBranchResiduals: (readonly (Float32Array | null)[])[] = [];
 
   for (let b = 0; b < cfgBatchSize; b++) {
     const emb = embedUniTextTokens(perBranchTokens[b], bundle.core);
@@ -641,6 +644,7 @@ export function prepareT2iPrefix(
     perBranchEmbeds.push(emb);
     perBranchRouting.push(routing);
     perRowNewKvs.push(fwd.newKvs);
+    perBranchResiduals.push(Object.freeze(fwd.residualCheckpoints.slice()));
   }
 
   const emptyCache = createEmptyUniKvCache({
@@ -657,6 +661,7 @@ export function prepareT2iPrefix(
     prefixCache,
     perBranchEmbeds: Object.freeze(perBranchEmbeds),
     perBranchRouting: Object.freeze(perBranchRouting),
+    perBranchResiduals: Object.freeze(perBranchResiduals),
     ...(cfgShortCircuitApplied ? { hfGuidanceZeroDriftNote: HF_GUIDANCE_ZERO_DRIFT_NOTE } : {}),
   };
 
@@ -757,6 +762,7 @@ export function prepareImageEditPrefix(
   const perBranchEmbeds: Float32Array[] = [emb0, emb1, emb2];
   const perBranchRouting: Uint8Array[] = [route0, route1, route2];
   const perRowNewKvs: (readonly (UniLayerKvSlice | null)[])[] = [];
+  const perBranchResiduals: (readonly (Float32Array | null)[])[] = [];
 
   for (let b = 0; b < 3; b++) {
     const fwd = runUniForwardPass(bundle.core, {
@@ -771,6 +777,7 @@ export function prepareImageEditPrefix(
       retainedTraceLayers: EMPTY_LAYER_SET,
     });
     perRowNewKvs.push(fwd.newKvs);
+    perBranchResiduals.push(Object.freeze(fwd.residualCheckpoints.slice()));
   }
 
   const emptyCache = createEmptyUniKvCache({
@@ -787,6 +794,7 @@ export function prepareImageEditPrefix(
     prefixCache,
     perBranchEmbeds: Object.freeze(perBranchEmbeds),
     perBranchRouting: Object.freeze(perBranchRouting),
+    perBranchResiduals: Object.freeze(perBranchResiduals),
     sourceLetterbox,
     sourcePaddingMask,
     sourceVqCodes,

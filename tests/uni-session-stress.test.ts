@@ -623,6 +623,142 @@ describe('UNI3 Slice 3C — Bounded 12 MiB UniSession, 0-ULP Lazy Reconstruction
     expect(audit.withinBudget).toBe(true);
   });
 
+  it('reconstructs exact mid-trajectory fork state for text_understanding and object_grounding without leaking later parent steps, and tallies causalContext pre-seed guard interventions', () => {
+    // 1. Mid-trajectory fork on text_understanding (run 2 full blocks = 8 tokens, then fork from
+    //    prefill AND from block-0's commit step; verify zero leakage from parent's block-1!)
+    const session = createUniSession(sharedBundle);
+    const parentText = session.startBranch({
+      taskMode: 'text_understanding',
+      label: 'parent-text',
+      blockLength: 4,
+      stepsPerBlock: 2,
+      maxNewTokens: 8,
+      causalContext: true,
+      temperature: 0,
+      seed: 4242,
+    });
+    const parentTextSteps = session.runBranchToCompletion(parentText.branchId, 20);
+    expect(parentTextSteps.length).toBeGreaterThanOrEqual(4); // 2 steps/block * 2 blocks
+
+    const prefillId = session.getBranch(parentText.branchId)!.recordIds[0];
+    // Fork from prefill AFTER parent already completed both blocks (parentInternal has block-1 tail!)
+    const forkFromPrefill = session.forkBranch(prefillId, { label: 'fork-text-prefill', seed: 4242 });
+    const forkPrefillSteps = session.runBranchToCompletion(forkFromPrefill.branchId, 20);
+    expect(forkPrefillSteps.length).toBe(parentTextSteps.length);
+    for (let i = 0; i < parentTextSteps.length; i++) {
+      assertBitExactFiniteArray(
+        forkPrefillSteps[i].textState!.tokenIds,
+        parentTextSteps[i].textState!.tokenIds,
+        `fork_text_prefill.step[${i}].tokens`,
+      );
+    }
+
+    // Fork from end of block 0 (step index 1, after parent already ran block 1!)
+    const block0EndRec = parentTextSteps[1];
+    const forkFromBlock0 = session.forkBranch(block0EndRec.recordId, {
+      label: 'fork-text-block0',
+      seed: 4242,
+    });
+    const forkBlock0Steps = session.runBranchToCompletion(forkFromBlock0.branchId, 20);
+    expect(forkBlock0Steps.length).toBe(parentTextSteps.length - 2);
+    for (let i = 0; i < forkBlock0Steps.length; i++) {
+      assertBitExactFiniteArray(
+        forkBlock0Steps[i].textState!.tokenIds,
+        parentTextSteps[i + 2].textState!.tokenIds,
+        `fork_text_block0.step[${i}].tokens`,
+      );
+    }
+
+    // 2. Mid-trajectory fork on object_grounding (2-step grounding: fork from prefill AND from step 1
+    //    after parent already finished step 2; verify zero leakage from parent's final suffix!)
+    const parentGround = session.startBranch({
+      taskMode: 'object_grounding',
+      label: 'parent-ground',
+      scenePresetId: 'harbor_panorama_16x8',
+      groundingTags: ['house', 'water'],
+      groundingSteps: 2,
+      enforceLocDomainGuard: true,
+      seed: 777,
+    });
+    const groundSteps = session.runBranchToCompletion(parentGround.branchId, 8);
+    expect(groundSteps.length).toBe(2);
+
+    const groundPrefillId = session.getBranch(parentGround.branchId)!.recordIds[0];
+    const forkGroundPrefill = session.forkBranch(groundPrefillId, { label: 'fork-ground-prefill' });
+    const forkGroundPrefillSteps = session.runBranchToCompletion(forkGroundPrefill.branchId, 8);
+    expect(forkGroundPrefillSteps.length).toBe(2);
+    assertBitExactFiniteArray(
+      forkGroundPrefillSteps[0].textState!.tokenIds,
+      groundSteps[0].textState!.tokenIds,
+      'fork_ground_prefill.step0',
+    );
+    assertBitExactFiniteArray(
+      forkGroundPrefillSteps[1].textState!.tokenIds,
+      groundSteps[1].textState!.tokenIds,
+      'fork_ground_prefill.step1',
+    );
+
+    const forkGroundMid = session.forkBranch(groundSteps[0].recordId, { label: 'fork-ground-mid' });
+    const forkGroundMidSteps = session.runBranchToCompletion(forkGroundMid.branchId, 8);
+    expect(forkGroundMidSteps.length).toBe(1);
+    assertBitExactFiniteArray(
+      forkGroundMidSteps[0].textState!.tokenIds,
+      groundSteps[1].textState!.tokenIds,
+      'fork_ground_mid.step1',
+    );
+
+    // 3. Preserve causalContext slot-0 pre-seed U21 guardInterventions on both B=1 (AR) and B=4
+    const d = sharedBundle.core.config.hiddenSize;
+    const probePrompt = [1, 10, 26, 27];
+    const probeFwd = runUniForwardPass(sharedBundle.core, {
+      tokenIds: probePrompt,
+      maskMode: 'causal',
+      useCache: false,
+      downstreamTarget: 'u',
+    });
+    const lastNorm = probeFwd.finalNorm!.subarray(3 * d, 4 * d);
+    const tweakedHead = new Float32Array(sharedBundle.core.diffusionHead.length);
+    for (let c = 0; c < d; c++) {
+      tweakedHead[25 * d + c] = lastNorm[c] * 25.0; // [MASK] raw top-1
+      tweakedHead[6 * d + c] = lastNorm[c] * 5.0;   // 'cat' fallback after U21 suppression
+    }
+    const guardBundle: uni.UniFullRuntimeBundle = {
+      ...sharedBundle,
+      core: { ...sharedBundle.core, diffusionHead: tweakedHead },
+    };
+    const guardSession = createUniSession(guardBundle);
+
+    const arBranch = guardSession.startBranch({
+      taskMode: 'text_understanding',
+      promptTokenIds: probePrompt,
+      blockLength: 1,
+      stepsPerBlock: 1,
+      maxNewTokens: 1,
+      causalContext: true,
+      suppressMaskLogit: true,
+      temperature: 0,
+    });
+    const arRec = guardSession.stepBranch(arBranch.branchId);
+    expect(arRec).not.toBeNull();
+    expect(arRec!.textState!.tokenIds[0]).toBe(6);
+    expect(arRec!.textState!.guardInterventions).toBeGreaterThanOrEqual(1);
+
+    const blockBranch = guardSession.startBranch({
+      taskMode: 'text_understanding',
+      promptTokenIds: probePrompt,
+      blockLength: 4,
+      stepsPerBlock: 2,
+      maxNewTokens: 4,
+      causalContext: true,
+      suppressMaskLogit: true,
+      temperature: 0,
+    });
+    const blockRec0 = guardSession.stepBranch(blockBranch.branchId);
+    expect(blockRec0).not.toBeNull();
+    expect(blockRec0!.textState!.tokenIds[0]).toBe(6);
+    expect(blockRec0!.textState!.guardInterventions).toBeGreaterThanOrEqual(1);
+  });
+
   it('exports all headless modules cleanly from src/uni/index.ts with zero Math.random() or forbidden imports', () => {
     // Verify key exports across all 19 UNI modules via the headless barrel
     expect(typeof uni.verifyUniLfsReconciliation).toBe('function');

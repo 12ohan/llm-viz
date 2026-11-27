@@ -389,6 +389,7 @@ interface InternalBranchState {
   treeState?: UniSemanticTreeState;
   nextRoundIndex: number;
   // Text / visual block-diffusion branch cursor
+  initialPromptLen: number;
   blockLength: number;
   stepsPerBlock: number;
   maxNewTokens: number;
@@ -400,10 +401,12 @@ interface InternalBranchState {
   currentBlockTokens?: Int32Array;
   currentBlockStep: number;
   currentBlockPastLen: number;
+  pendingPreSeedGuardInterventions: number;
   // Object grounding branch cursor
   groundingTags?: readonly string[];
   groundingSteps: 1 | 2 | 4;
   enforceLocDomainGuard: boolean;
+  initialGroundingSuffixTokens?: Int32Array;
   groundingSuffixTokens?: Int32Array;
   groundingSlotSuffixIndices?: Int32Array;
   groundingStepIndex: number;
@@ -418,6 +421,16 @@ interface InternalRecordMeta {
   readonly pastSeqLen: number;
   /** Whether `useCache` was true on this record's forward pass. */
   readonly usedCache: boolean;
+  /** For `text_block_step`: block denoising step count after this record (`0` if committed). */
+  readonly blockStepAfter?: number;
+  /** For `text_block_step`: true iff this step triggered a causal block commit. */
+  readonly committedOnStep?: boolean;
+  /** For `text_block_step`: exact KV cache seqLen immediately after commit (accounting for EOS/maxNewTokens crop). */
+  readonly committedCacheLen?: number;
+  /** For `text_block_step`: true iff EOS or maxNewTokens terminated the branch on this step. */
+  readonly finishedOnStep?: boolean;
+  /** For `grounding_step`: grounding step index after this step (`1..groundingSteps`). */
+  readonly groundingStepAfter?: number;
 }
 
 // ============================================================================
@@ -828,11 +841,19 @@ export class UniSession {
         sourceLetterbox = prepared.sourceLetterbox?.info;
       }
     } else {
-      // Understanding / grounding: share immutable slabs cropped to fork record's KV horizon
-      const forkCacheLen =
-        fromRecord.kind === 'prefill'
-          ? Math.min(parentBranch.prefixCache.seqLen, fromRecord.routing.length)
-          : Math.min(parentBranch.prefixCache.seqLen, fromMeta.pastSeqLen);
+      // Understanding / grounding: share immutable slabs cropped to exact fork record KV horizon
+      let forkCacheLen: number;
+      if (fromRecord.kind === 'prefill') {
+        forkCacheLen = Math.min(parentBranch.prefixCache.seqLen, fromRecord.routing.length);
+      } else if (
+        fromRecord.kind === 'text_block_step' &&
+        fromMeta.committedOnStep &&
+        fromMeta.committedCacheLen !== undefined
+      ) {
+        forkCacheLen = Math.min(parentBranch.prefixCache.seqLen, fromMeta.committedCacheLen);
+      } else {
+        forkCacheLen = Math.min(parentBranch.prefixCache.seqLen, fromMeta.pastSeqLen);
+      }
       prefixCache = cropUniKvCache(parentBranch.prefixCache, forkCacheLen);
     }
 
@@ -860,6 +881,129 @@ export class UniSession {
           lockedSourceCodes: parentInternal.lockSourcePaddingVq ? sourceVqCodes : undefined,
         });
         nextRoundIndex = 0;
+      }
+    }
+
+    // Reconstruct exact historical Understanding / Grounding cursor from `fromRecord`
+    // (never leaking later parent tokens, logits, or grounding steps!)
+    const vocabSize = this.bundle.core.config.vocabSize;
+    let forkGeneratedCount = 0;
+    let forkNextLogitsContext: Float32Array | undefined;
+    let forkCurrentBlockTokens: Int32Array | undefined;
+    let forkCurrentBlockStep = 0;
+    let forkCurrentBlockPastLen = prefixCache.seqLen;
+    let forkGroundingSuffixTokens: Int32Array | undefined;
+    let forkGroundingStepIndex = 0;
+    let forkFinished =
+      parentBranch.schedule !== undefined && nextRoundIndex >= parentBranch.schedule.totalRounds;
+
+    if (
+      parentBranch.taskMode === 'text_understanding' ||
+      parentBranch.taskMode === 'visual_understanding'
+    ) {
+      forkGeneratedCount = Math.max(0, prefixCache.seqLen - parentInternal.initialPromptLen);
+
+      if (fromRecord.kind === 'prefill') {
+        const head = this.reconstructStepHeadLogits(fromRecordId);
+        const logits = head.perBranchTextLogits[0];
+        if (logits) {
+          const seqLen = fromRecord.routing.length;
+          forkNextLogitsContext = new Float32Array(
+            logits.subarray((seqLen - 1) * vocabSize, seqLen * vocabSize),
+          );
+        }
+        forkFinished = parentInternal.maxNewTokens <= 0;
+      } else if (fromRecord.kind === 'text_block_step') {
+        if (fromMeta.committedOnStep) {
+          forkCurrentBlockTokens = undefined;
+          forkCurrentBlockStep = 0;
+          forkCurrentBlockPastLen = prefixCache.seqLen;
+          forkFinished =
+            Boolean(fromMeta.finishedOnStep) || forkGeneratedCount >= parentInternal.maxNewTokens;
+
+          if (fromRecord.maskMode === 'causal') {
+            // AR limit (B=1): `fromRecord` itself holds the causal commit residuals
+            const head = this.reconstructStepHeadLogits(fromRecordId);
+            const logits = head.perBranchTextLogits[0];
+            if (logits) {
+              const seqLen = fromRecord.routing.length;
+              forkNextLogitsContext = new Float32Array(
+                logits.subarray((seqLen - 1) * vocabSize, seqLen * vocabSize),
+              );
+            }
+          } else if (fromRecord.textState) {
+            // Recompute exact 0-ULP causal commit tail logits for `fromRecord`'s committed block
+            const blockTokens = fromRecord.textState.tokenIds;
+            const preCommitCache = cropUniKvCache(parentBranch.prefixCache, fromMeta.pastSeqLen);
+            const { pastKvs, pastRouting } = extractRowPastKvs(preCommitCache, 0);
+            const commitFwd = runUniForwardPass(this.bundle.core, {
+              tokenIds: blockTokens,
+              maskMode: 'causal',
+              useCache: true,
+              prefillMode: 'hf_faithful',
+              downstreamTarget: 'u',
+              pastKvs,
+              pastRouting,
+              computeTextHead: true,
+              computeGenHead: false,
+              retainedTraceLayers: EMPTY_TRACE_LAYERS,
+            });
+            const commitLogits = commitFwd.textLogits!;
+            const bLen = blockTokens.length;
+            forkNextLogitsContext = new Float32Array(
+              commitLogits.subarray((bLen - 1) * vocabSize, bLen * vocabSize),
+            );
+          }
+        } else {
+          // Mid-block denoising step: preserve partially unmasked block tokens & recover prior causal logits
+          forkCurrentBlockTokens = fromRecord.textState
+            ? new Int32Array(fromRecord.textState.tokenIds)
+            : undefined;
+          forkCurrentBlockStep = fromMeta.blockStepAfter ?? 1;
+          forkCurrentBlockPastLen = prefixCache.seqLen;
+          forkFinished = false;
+          forkNextLogitsContext = this.reconstructPriorCausalLogits(fromRecord, parentBranch);
+        }
+      }
+    } else if (parentBranch.taskMode === 'object_grounding') {
+      // Recover exact prefill slot-0 shifted logits from the grounding prefill record
+      const prefillId =
+        fromRecord.kind === 'prefill'
+          ? fromRecordId
+          : this.findBranchPrefillRecordId(fromRecord, parentBranch);
+      if (prefillId !== null) {
+        const prefillRec = this.recordsById.get(prefillId)!;
+        const head = this.reconstructStepHeadLogits(prefillId);
+        const logits = head.perBranchTextLogits[0];
+        if (logits) {
+          const seqLen = prefillRec.routing.length;
+          forkNextLogitsContext = new Float32Array(
+            logits.subarray((seqLen - 1) * vocabSize, seqLen * vocabSize),
+          );
+        }
+      }
+
+      if (fromRecord.kind === 'grounding_step' && fromRecord.textState) {
+        forkGroundingSuffixTokens = new Int32Array(fromRecord.textState.tokenIds);
+        forkGroundingStepIndex = fromMeta.groundingStepAfter ?? fromRecord.stepIndex;
+        let masksLeft = 0;
+        const slots = parentInternal.groundingSlotSuffixIndices;
+        if (slots) {
+          for (let k = 0; k < slots.length; k++) {
+            if (forkGroundingSuffixTokens[slots[k]] === UNI_MINI_MASK_TOKEN_ID) {
+              masksLeft += 1;
+            }
+          }
+        }
+        forkFinished =
+          masksLeft === 0 || forkGroundingStepIndex >= parentInternal.groundingSteps;
+      } else {
+        forkGroundingSuffixTokens =
+          parentInternal.initialGroundingSuffixTokens !== undefined
+            ? new Int32Array(parentInternal.initialGroundingSuffixTokens)
+            : undefined;
+        forkGroundingStepIndex = 0;
+        forkFinished = false;
       }
     }
 
@@ -906,33 +1050,29 @@ export class UniSession {
       rng: createXoshiro128ss(seed),
       treeState,
       nextRoundIndex,
+      initialPromptLen: parentInternal.initialPromptLen,
       blockLength: parentInternal.blockLength,
       stepsPerBlock: parentInternal.stepsPerBlock,
       maxNewTokens: parentInternal.maxNewTokens,
-      generatedCount: 0,
+      generatedCount: forkGeneratedCount,
       confidenceThreshold: parentInternal.confidenceThreshold,
       causalContext: parentInternal.causalContext,
       suppressMaskLogit: parentInternal.suppressMaskLogit,
-      nextLogitsContext:
-        parentInternal.nextLogitsContext !== undefined
-          ? new Float32Array(parentInternal.nextLogitsContext)
-          : undefined,
-      currentBlockTokens: undefined,
-      currentBlockStep: 0,
-      currentBlockPastLen: prefixCache.seqLen,
+      nextLogitsContext: forkNextLogitsContext,
+      currentBlockTokens: forkCurrentBlockTokens,
+      currentBlockStep: forkCurrentBlockStep,
+      currentBlockPastLen: forkCurrentBlockPastLen,
+      pendingPreSeedGuardInterventions: 0,
       groundingTags: parentInternal.groundingTags,
       groundingSteps: parentInternal.groundingSteps,
       enforceLocDomainGuard: parentInternal.enforceLocDomainGuard,
-      groundingSuffixTokens:
-        parentInternal.groundingSuffixTokens !== undefined
-          ? new Int32Array(parentInternal.groundingSuffixTokens)
-          : undefined,
+      initialGroundingSuffixTokens: parentInternal.initialGroundingSuffixTokens,
+      groundingSuffixTokens: forkGroundingSuffixTokens,
       groundingSlotSuffixIndices: parentInternal.groundingSlotSuffixIndices,
-      groundingStepIndex: 0,
+      groundingStepIndex: forkGroundingStepIndex,
       lastRecordId: fromRecordId,
       nextStepIndex: fromRecord.stepIndex + 1,
-      finished:
-        parentBranch.schedule !== undefined && nextRoundIndex >= parentBranch.schedule.totalRounds,
+      finished: forkFinished,
     };
 
     this.branchesById.set(branchId, forkedBranch);
@@ -1369,22 +1509,26 @@ export class UniSession {
         isEdit && params.lockSourcePaddingVq ? prepared.sourceVqCodes : undefined,
     });
 
-    // Capture exact compact prefill residuals for 0-ULP prefill lazy reconstruction
-    const prefillResiduals: (readonly (Float32Array | null)[])[] = [];
-    for (let b = 0; b < prepared.cfgBatchSize; b++) {
-      const fwd = runUniForwardPass(this.bundle.core, {
-        inputsEmbeds: prepared.perBranchEmbeds[b],
-        routing: prepared.perBranchRouting[b],
-        maskMode: 'causal',
-        useCache: true,
-        prefillMode: params.prefillMode,
-        downstreamTarget: 'g',
-        computeTextHead: false,
-        computeGenHead: false,
-        retainedTraceLayers: EMPTY_TRACE_LAYERS,
-      });
-      prefillResiduals.push(tightenResidualCheckpoints(fwd.residualCheckpoints));
-    }
+    // Reuse compact prefill residuals directly from `prepare*Prefix` (zero duplicate 34L passes)
+    const prefillResiduals: readonly (readonly (Float32Array | null)[])[] =
+      prepared.perBranchResiduals !== undefined
+        ? tightenPerBranchResiduals(prepared.perBranchResiduals)
+        : Object.freeze(
+            prepared.perBranchEmbeds.map((emb, b) => {
+              const fwd = runUniForwardPass(this.bundle.core, {
+                inputsEmbeds: emb,
+                routing: prepared.perBranchRouting[b],
+                maskMode: 'causal',
+                useCache: true,
+                prefillMode: params.prefillMode,
+                downstreamTarget: 'g',
+                computeTextHead: false,
+                computeGenHead: false,
+                retainedTraceLayers: EMPTY_TRACE_LAYERS,
+              });
+              return tightenResidualCheckpoints(fwd.residualCheckpoints);
+            }),
+          );
 
     const branch: UniSessionBranch = Object.freeze({
       branchId: params.branchId,
@@ -1429,6 +1573,7 @@ export class UniSession {
       rng: createXoshiro128ss(params.seed),
       treeState,
       nextRoundIndex: 0,
+      initialPromptLen: prepared.prefixLen,
       blockLength: 4,
       stepsPerBlock: 4,
       maxNewTokens: 0,
@@ -1438,6 +1583,7 @@ export class UniSession {
       suppressMaskLogit: true,
       currentBlockStep: 0,
       currentBlockPastLen: prepared.prefixLen,
+      pendingPreSeedGuardInterventions: 0,
       groundingSteps: 2,
       enforceLocDomainGuard: true,
       groundingStepIndex: 0,
@@ -1606,6 +1752,7 @@ export class UniSession {
       stratifiedSeed: params.stratifiedSeed,
       rng: createXoshiro128ss(params.seed),
       nextRoundIndex: 0,
+      initialPromptLen: promptLen,
       blockLength: params.blockLength,
       stepsPerBlock: params.stepsPerBlock,
       maxNewTokens: params.maxNewTokens,
@@ -1617,6 +1764,7 @@ export class UniSession {
       currentBlockTokens: undefined,
       currentBlockStep: 0,
       currentBlockPastLen: prefixCache.seqLen,
+      pendingPreSeedGuardInterventions: 0,
       groundingSteps: 2,
       enforceLocDomainGuard: true,
       groundingStepIndex: 0,
@@ -1829,6 +1977,7 @@ export class UniSession {
       stratifiedSeed: params.stratifiedSeed,
       rng: createXoshiro128ss(params.seed),
       nextRoundIndex: 0,
+      initialPromptLen: firstSlot,
       blockLength: 4,
       stepsPerBlock: 4,
       maxNewTokens: 0,
@@ -1839,9 +1988,11 @@ export class UniSession {
       nextLogitsContext: prevLogits,
       currentBlockStep: 0,
       currentBlockPastLen: prefixCache.seqLen,
+      pendingPreSeedGuardInterventions: 0,
       groundingTags: tags,
       groundingSteps: params.groundingSteps,
       enforceLocDomainGuard: params.enforceLocDomainGuard,
+      initialGroundingSuffixTokens: new Int32Array(suffixTokens),
       groundingSuffixTokens: suffixTokens,
       groundingSlotSuffixIndices: slotSuffixIndices,
       groundingStepIndex: 0,
@@ -1990,7 +2141,8 @@ export class UniSession {
       internal.currentBlockPastLen = branch.prefixCache.seqLen;
       internal.currentBlockStep = 0;
 
-      // Optional causalContext pre-seeding of slot 0
+      // Optional causalContext pre-seeding of slot 0 (preserving U21 guard intervention count!)
+      internal.pendingPreSeedGuardInterventions = 0;
       if (internal.causalContext && internal.nextLogitsContext) {
         const outcome0 = this.decodeTextSlotRow(
           internal.nextLogitsContext,
@@ -2000,6 +2152,9 @@ export class UniSession {
           true,
         );
         blockTokens[0] = outcome0.proposed;
+        if (outcome0.guardIntervened) {
+          internal.pendingPreSeedGuardInterventions += 1;
+        }
       }
       internal.currentBlockTokens = blockTokens;
     }
@@ -2033,7 +2188,16 @@ export class UniSession {
         retainedTraceLayers: EMPTY_TRACE_LAYERS,
       });
 
-      this.finalizeTextBlockCommit(branch, internal, blockTokens, commit.newKvs, commit.routing, commit.textLogits!);
+      const arGuardInterventions = internal.pendingPreSeedGuardInterventions;
+      internal.pendingPreSeedGuardInterventions = 0;
+      const committedCacheLen = this.finalizeTextBlockCommit(
+        branch,
+        internal,
+        blockTokens,
+        commit.newKvs,
+        commit.routing,
+        commit.textLogits!,
+      );
 
       return this.appendRecord(
         branch.branchId,
@@ -2051,10 +2215,17 @@ export class UniSession {
           textState: Object.freeze({
             tokenIds: new Int32Array(blockTokens),
             unmaskedOffsets: Object.freeze([0]),
-            guardInterventions: 0,
+            guardInterventions: arGuardInterventions,
           }),
         },
-        { pastSeqLen: pastLen, usedCache: true },
+        {
+          pastSeqLen: pastLen,
+          usedCache: true,
+          blockStepAfter: 0,
+          committedOnStep: true,
+          committedCacheLen,
+          finishedOnStep: internal.finished,
+        },
       );
     }
 
@@ -2086,7 +2257,8 @@ export class UniSession {
 
     const slotConfidences = new Float32Array(blockLength);
     const proposals = new Int32Array(blockLength);
-    let guardInterventions = 0;
+    let guardInterventions = internal.pendingPreSeedGuardInterventions;
+    internal.pendingPreSeedGuardInterventions = 0;
 
     for (let j = 0; j < blockLength; j++) {
       const isMasked = blockTokens[j] === UNI_MINI_MASK_TOKEN_ID;
@@ -2142,6 +2314,8 @@ export class UniSession {
         break;
       }
     }
+    let committedOnStep = false;
+    let committedCacheLen: number | undefined;
     if (!anyMaskLeft || internal.currentBlockStep >= internal.stepsPerBlock) {
       const commit = runUniForwardPass(core, {
         tokenIds: blockTokens,
@@ -2155,7 +2329,8 @@ export class UniSession {
         computeGenHead: false,
         retainedTraceLayers: EMPTY_TRACE_LAYERS,
       });
-      this.finalizeTextBlockCommit(
+      committedOnStep = true;
+      committedCacheLen = this.finalizeTextBlockCommit(
         branch,
         internal,
         blockTokens,
@@ -2184,7 +2359,14 @@ export class UniSession {
           guardInterventions,
         }),
       },
-      { pastSeqLen: pastLen, usedCache: false },
+      {
+        pastSeqLen: pastLen,
+        usedCache: false,
+        blockStepAfter: committedOnStep ? 0 : internal.currentBlockStep,
+        committedOnStep,
+        ...(committedCacheLen !== undefined ? { committedCacheLen } : {}),
+        finishedOnStep: internal.finished,
+      },
     );
   }
 
@@ -2195,7 +2377,7 @@ export class UniSession {
     commitKvs: readonly (UniLayerKvSlice | null)[],
     commitRouting: Uint8Array,
     commitLogits: Float32Array,
-  ): void {
+  ): number {
     const vocabSize = this.bundle.core.config.vocabSize;
     const blockLength = blockTokens.length;
     const prevLen = branch.prefixCache.seqLen;
@@ -2238,6 +2420,7 @@ export class UniSession {
     this.branchesById.set(branch.branchId, updatedBranch);
     internal.currentBlockTokens = undefined;
     internal.currentBlockStep = 0;
+    return updatedCache.seqLen;
   }
 
   private stepGroundingBranch(
@@ -2358,8 +2541,84 @@ export class UniSession {
           guardInterventions,
         }),
       },
-      { pastSeqLen: pastLen, usedCache: false },
+      { pastSeqLen: pastLen, usedCache: false, groundingStepAfter: internal.groundingStepIndex },
     );
+  }
+
+  /** Walk record ancestry to find the branch's prefill record ID (if still retained). */
+  private findBranchPrefillRecordId(
+    fromRecord: UniSessionRecord,
+    parentBranch: UniSessionBranch,
+  ): string | null {
+    let cursor: UniSessionRecord | undefined = fromRecord;
+    let hops = 0;
+    while (cursor && hops < 256) {
+      if (cursor.kind === 'prefill') {
+        return cursor.recordId;
+      }
+      cursor =
+        cursor.parentRecordId !== null
+          ? this.recordsById.get(cursor.parentRecordId)
+          : undefined;
+      hops += 1;
+    }
+    const firstId = parentBranch.recordIds[0];
+    if (firstId) {
+      const firstRec = this.recordsById.get(firstId);
+      if (firstRec && firstRec.kind === 'prefill') {
+        return firstRec.recordId;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Reconstruct the exact causal context tail logits (`[vocabSize]`) immediately preceding
+   * a mid-block `text_block_step` record `fromRecord` (never leaking later parent blocks).
+   */
+  private reconstructPriorCausalLogits(
+    fromRecord: UniSessionRecord,
+    parentBranch: UniSessionBranch,
+  ): Float32Array | undefined {
+    const vocabSize = this.bundle.core.config.vocabSize;
+    let cursorId = fromRecord.parentRecordId;
+    let hops = 0;
+    while (cursorId !== null && hops < 256) {
+      const rec = this.recordsById.get(cursorId);
+      const meta = this.recordInternals.get(cursorId);
+      if (!rec || !meta) break;
+      if (rec.kind === 'prefill' || (rec.kind === 'text_block_step' && rec.maskMode === 'causal')) {
+        const head = this.reconstructStepHeadLogits(rec.recordId);
+        const logits = head.perBranchTextLogits[0];
+        if (logits) {
+          const seqLen = rec.routing.length;
+          return new Float32Array(logits.subarray((seqLen - 1) * vocabSize, seqLen * vocabSize));
+        }
+      }
+      if (rec.kind === 'text_block_step' && meta.committedOnStep && rec.textState) {
+        const blockTokens = rec.textState.tokenIds;
+        const preCommitCache = cropUniKvCache(parentBranch.prefixCache, meta.pastSeqLen);
+        const { pastKvs, pastRouting } = extractRowPastKvs(preCommitCache, 0);
+        const commitFwd = runUniForwardPass(this.bundle.core, {
+          tokenIds: blockTokens,
+          maskMode: 'causal',
+          useCache: true,
+          prefillMode: 'hf_faithful',
+          downstreamTarget: 'u',
+          pastKvs,
+          pastRouting,
+          computeTextHead: true,
+          computeGenHead: false,
+          retainedTraceLayers: EMPTY_TRACE_LAYERS,
+        });
+        const commitLogits = commitFwd.textLogits!;
+        const bLen = blockTokens.length;
+        return new Float32Array(commitLogits.subarray((bLen - 1) * vocabSize, bLen * vocabSize));
+      }
+      cursorId = rec.parentRecordId;
+      hops += 1;
+    }
+    return undefined;
   }
 
   private decodeTextSlotRow(
