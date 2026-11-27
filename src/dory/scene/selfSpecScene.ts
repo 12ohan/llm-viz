@@ -111,6 +111,7 @@ import {
   type DoryCacheRole,
   type DoryForwardTrace,
   type DoryKvBank,
+  type DoryKvBankKind,
   type DoryKvCache,
   type DoryMiniConfig,
   type DorySelfSpecCycleResult,
@@ -626,12 +627,21 @@ export function buildDorySelfSpecScene(
   const selectedAttentionLayerIdx =
     clampedAttnLayer % 2 === 0 ? clampedAttnLayer : Math.max(0, clampedAttnLayer - 1);
   const attnSpec = getDoryPhysicalLayerSpec(selectedAttentionLayerIdx);
+  const selectedVerifyLoop =
+    attnSpec.stage === 'recurrent' ? DORY_SPEC_VERIFY_LOOPS : 0;
 
   const verifyAttn = extractVerifyAttentionTrace(
     cycleResult.verifyTrace,
     selectedAttentionLayerIdx,
     config,
   );
+  const verifyAttnBank = postStepKvCache.allBanks[verifyAttn.bankSlotId];
+  const verifyAttnCacheRole: DoryCacheRole =
+    verifyAttnBank !== undefined
+      ? resolveBankCacheRole(verifyAttnBank)
+      : attnSpec.stage === 'input'
+        ? 'spec_verify_reused'
+        : 'spec_verify_deep';
 
   // 2. Contract A 104-bank payload byte accounting (`245,760 + 20,480 = 266,240 B = 260 KiB`)
   const specMem = computeMiniKvCacheBytes(DORY_SPEC_VERIFY_LOOPS, 'per_loop', true, config);
@@ -712,6 +722,8 @@ export function buildDorySelfSpecScene(
   const swaRingLayerIdx =
     attnSpec.attentionKind === 'sliding_attention' ? selectedAttentionLayerIdx : 16;
   const swaRingBank = resolveContractABankForLayer(postStepKvCache, swaRingLayerIdx);
+  const swaRingLoop = swaRingBank.loopSlot;
+  const swaRingCacheRole = resolveBankCacheRole(swaRingBank);
   const maxStagedLen = cycleResult.startCommittedLen + cycleResult.verifiedPositions;
   const swaRingSlots = computeSpecSwaRingSlotStates(
     swaRingBank,
@@ -745,7 +757,7 @@ export function buildDorySelfSpecScene(
     {
       fixedScale: 1.0,
       physicalLayerIdx: selectedAttentionLayerIdx,
-      loopIteration: attnSpec.stage === 'recurrent' ? DORY_SPEC_VERIFY_LOOPS : 0,
+      loopIteration: selectedVerifyLoop,
     },
   );
   const verifyScoresSlice = atlasPacker.packCausalMatrix(
@@ -758,7 +770,7 @@ export function buildDorySelfSpecScene(
     {
       minFloor: 0.5,
       physicalLayerIdx: selectedAttentionLayerIdx,
-      loopIteration: attnSpec.stage === 'recurrent' ? DORY_SPEC_VERIFY_LOOPS : 0,
+      loopIteration: selectedVerifyLoop,
     },
   );
 
@@ -843,7 +855,7 @@ export function buildDorySelfSpecScene(
       mode: 0,
       minFloor: Math.max(4, maxStagedLen),
       physicalLayerIdx: swaRingLayerIdx,
-      loopIteration: 1,
+      loopIteration: swaRingLoop,
     },
   );
 
@@ -894,6 +906,8 @@ export function buildDorySelfSpecScene(
     readonly rowDimLabel: string;
     readonly physicalLayerIdx?: number | null;
     readonly loopIteration?: number | null;
+    readonly kvBankSlotId?: number | null;
+    readonly kvBankKind?: DoryKvBankKind | null;
     readonly cacheRole?: DoryCacheRole;
     readonly specOffset?: number | null;
     readonly includeInCellGrid?: boolean;
@@ -924,11 +938,13 @@ export function buildDorySelfSpecScene(
     const meta = encodeDoryPickMetadata({
       physicalLayerIdx:
         spec.physicalLayerIdx !== undefined ? spec.physicalLayerIdx : selectedAttentionLayerIdx,
-      loopIteration: spec.loopIteration !== undefined ? spec.loopIteration : DORY_SPEC_VERIFY_LOOPS,
+      loopIteration: spec.loopIteration !== undefined ? spec.loopIteration : selectedVerifyLoop,
       partId: spec.partId,
       tensorKey: spec.tensorKey,
       gridCols: spec.gridCols,
       gridRows: spec.gridRows,
+      kvBankSlotId: spec.kvBankSlotId ?? null,
+      kvBankKind: spec.kvBankKind ?? null,
       kvPolicy: 'per_loop',
       cacheRole: spec.cacheRole ?? 'spec_verify_deep',
       specOffset: spec.specOffset ?? null,
@@ -1487,8 +1503,10 @@ export function buildDorySelfSpecScene(
     colDimLabel: `K=${verifyCols}`,
     rowDimLabel: `m=${verifyRows}`,
     physicalLayerIdx: selectedAttentionLayerIdx,
-    loopIteration: attnSpec.stage === 'recurrent' ? DORY_SPEC_VERIFY_LOOPS : 0,
-    cacheRole: 'spec_verify_deep',
+    loopIteration: selectedVerifyLoop,
+    kvBankSlotId: verifyAttn.bankSlotId,
+    kvBankKind: verifyAttn.bankKind,
+    cacheRole: verifyAttnCacheRole,
     includeInCellGrid: true,
     extraTags: { dr20LiveGMask: true, attnKind: verifyAttn.attentionKind },
   });
@@ -1518,8 +1536,10 @@ export function buildDorySelfSpecScene(
     colDimLabel: `K=${verifyCols}`,
     rowDimLabel: `m=${verifyRows}`,
     physicalLayerIdx: selectedAttentionLayerIdx,
-    loopIteration: attnSpec.stage === 'recurrent' ? DORY_SPEC_VERIFY_LOOPS : 0,
-    cacheRole: 'spec_verify_deep',
+    loopIteration: selectedVerifyLoop,
+    kvBankSlotId: verifyAttn.bankSlotId,
+    kvBankKind: verifyAttn.bankKind,
+    cacheRole: verifyAttnCacheRole,
     includeInCellGrid: false,
     extraTags: { dr20LiveGMask: true, attnKind: verifyAttn.attentionKind },
   });
@@ -1554,7 +1574,10 @@ export function buildDorySelfSpecScene(
     colDimLabel: `cap_swa=${config.swaRingCapacity}`,
     rowDimLabel: '2',
     physicalLayerIdx: swaRingLayerIdx,
-    loopIteration: 1,
+    loopIteration: swaRingLoop,
+    kvBankSlotId: swaRingBank.bankSlotId,
+    kvBankKind: swaRingBank.bankKind,
+    cacheRole: swaRingCacheRole,
     includeInCellGrid: false,
   });
 
@@ -1622,12 +1645,14 @@ export function buildDorySelfSpecScene(
         0.38,
         encodeDoryPickMetadata({
           physicalLayerIdx: swaRingLayerIdx,
-          loopIteration: 1,
+          loopIteration: swaRingLoop,
           partId: `spec_swa_slot_${s}`,
           tensorKey: 'spec_swa_ring_slot',
           absTokenPos: slot.absPos,
+          kvBankSlotId: swaRingBank.bankSlotId,
+          kvBankKind: swaRingBank.bankKind,
           kvPolicy: 'per_loop',
-          cacheRole: 'spec_verify_reused',
+          cacheRole: swaRingCacheRole,
           modelWeightId: params.modelWeightId,
           extraTags: {
             slot: s,
@@ -1983,7 +2008,7 @@ export function buildDorySelfSpecScene(
     kvCacheMode: 'per_loop',
     executionMode: 'self_spec',
     physicalLayerIdx: selectedAttentionLayerIdx,
-    loopIteration: DORY_SPEC_VERIFY_LOOPS,
+    loopIteration: selectedVerifyLoop,
     solidData: packedSolids.data,
     solidCount: packedSolids.count,
     lineData: packedLines.data,

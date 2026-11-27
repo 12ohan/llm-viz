@@ -734,6 +734,11 @@ export function buildDoryKvCompareScene(
     partitionMode === 'single_shot',
     'kv_compare_per_loop_single',
   );
+  const captureLastLoopSingleShotTrace =
+    partitionMode === 'single_shot' ||
+    (partitionMode === 'chunked' && chunkedSchedule.length === 1) ||
+    (partitionMode === 'one_by_one' && promptLen === 1);
+
   const lastLoopSingleShot = executeIsolatedPartitionedRun(
     comparisonTokens,
     singleShotSchedule,
@@ -741,7 +746,7 @@ export function buildDoryKvCompareScene(
     kLoops,
     params,
     ropeTables,
-    partitionMode === 'single_shot',
+    captureLastLoopSingleShotTrace,
     'kv_compare_last_loop_single',
   );
 

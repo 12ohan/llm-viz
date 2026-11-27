@@ -1201,6 +1201,147 @@ describe('Gate 4 View 5 (kv_compare) — Isolated Dual-Session, DR17 Theorems 1�
     expect(buildDefaultKvChunkPartition(12)).toEqual([4, 8]);
     expect(() => buildDefaultKvChunkPartition(0)).toThrow(RangeError);
   });
+
+  it('handles promptLen === 1 across all 3 partition modes and explicit 1-chunk [promptLen] chunked partitions without null-trace dereference', () => {
+    // 1. Single-token session (`promptLen === 1`) across default, 'single_shot', 'chunked', and 'one_by_one'
+    const singleTokSession = createDorySession({
+      params: PARAMS,
+      ropeTables: ROPE_TABLES,
+      initialBranch: {
+        promptTokens: [1],
+        kLoops: 4,
+        kvCacheMode: 'per_loop',
+        executionMode: 'standard',
+      },
+    });
+    const rec1 = singleTokSession.getActiveRecord()!;
+    const snap1Before = singleTokSession.getSnapshot();
+    const mem1Before = singleTokSession.measureMemory();
+    const kv1Before = captureDeepKvSnapshot(singleTokSession.reconstructKvCacheAtRecord(rec1.recordId));
+
+    // Default options (`partitionMode` omitted -> 'chunked', `promptLen === 1`)
+    const defaultSingle = buildDoryKvCompareScene(singleTokSession);
+    assertGate4SceneHealth(
+      defaultSingle,
+      'kv_compare.promptLen1.default',
+      DORY_KV_COMPARE_ATLAS_BUDGET_BYTES,
+      4,
+    );
+    expect(defaultSingle.kvCompareMetadata!.promptLen).toBe(1);
+    expect(defaultSingle.kvCompareMetadata!.partitionMode).toBe('chunked');
+    expect(defaultSingle.kvCompareMetadata!.chunkPartition).toEqual([1]);
+
+    for (const partitionMode of ['single_shot', 'chunked', 'one_by_one'] as const) {
+      for (const layerIdx of [16, 22] as const) {
+        const sc = buildDoryKvCompareScene(singleTokSession, {
+          kLoopsOverride: 4,
+          partitionMode,
+          physicalLayerIdx: layerIdx,
+          loopIteration: 1,
+        });
+        assertGate4SceneHealth(
+          sc,
+          `kv_compare.promptLen1.${partitionMode}.p${layerIdx}`,
+          DORY_KV_COMPARE_ATLAS_BUDGET_BYTES,
+          4,
+        );
+        const meta = sc.kvCompareMetadata!;
+        expect(meta.promptLen).toBe(1);
+        expect(meta.partitionMode).toBe(partitionMode);
+        expect(meta.chunkPartition).toEqual([1]);
+        expect(meta.theorem1SingleShotMaxAbsDiff).toBeLessThanOrEqual(1e-6);
+        expect(meta.theorem3ChunkedVsPerLoopMaxAbsDiff).toBeLessThanOrEqual(1e-6);
+        expect(meta.theorem3ChunkedVsOneByOneMaxAbsDiff).toBeLessThanOrEqual(1e-6);
+        expect(meta.activePartitionVsPerLoopMaxAbsDiff).toBeLessThanOrEqual(1e-6);
+
+        const attnKind: DoryAttentionKind =
+          layerIdx === 16 ? 'sliding_attention' : 'full_attention';
+        for (const regionId of [
+          'per_loop_attn_probs',
+          'per_loop_attn_scores',
+          'last_loop_attn_probs',
+          'last_loop_attn_scores',
+        ] as const) {
+          const check = assertCausalMaskExactInAtlas({
+            scene: sc,
+            regionId,
+            seqLen: 1,
+            kvLen: 1,
+            startPos: 0,
+            kvAbsPositions: [0],
+            attentionKind: attnKind,
+            label: `kv_compare.promptLen1.${partitionMode}.p${layerIdx}.${regionId}`,
+          });
+          expect(check.visibleCount).toBe(1);
+          expect(check.maskedCount).toBe(0);
+        }
+      }
+    }
+    assertSessionZeroMutation(
+      singleTokSession,
+      rec1.recordId,
+      snap1Before,
+      mem1Before,
+      kv1Before,
+      'kv_compare.promptLen1',
+    );
+
+    // 2. Explicit 1-element chunkPartition: [promptLen] in 'chunked' mode for multi-token prompt (S = 12)
+    const multiTokSession = createDorySession({
+      params: PARAMS,
+      ropeTables: ROPE_TABLES,
+      initialBranch: {
+        promptTokens: PROMPT_12,
+        kLoops: 4,
+        kvCacheMode: 'per_loop',
+        executionMode: 'standard',
+      },
+    });
+    for (const layerIdx of [16, 22] as const) {
+      const scSingleChunk = buildDoryKvCompareScene(multiTokSession, {
+        kLoopsOverride: 4,
+        partitionMode: 'chunked',
+        chunkPartition: [PROMPT_12.length],
+        physicalLayerIdx: layerIdx,
+        loopIteration: 1,
+      });
+      assertGate4SceneHealth(
+        scSingleChunk,
+        `kv_compare.explicitSingleChunk.p${layerIdx}`,
+        DORY_KV_COMPARE_ATLAS_BUDGET_BYTES,
+        4,
+      );
+      const meta = scSingleChunk.kvCompareMetadata!;
+      expect(meta.promptLen).toBe(PROMPT_12.length);
+      expect(meta.partitionMode).toBe('chunked');
+      expect(meta.chunkPartition).toEqual([PROMPT_12.length]);
+      // Single-chunk [12] is empty-cache Theorem 1 (<= 1e-6 vs per_loop), while 1-by-1 still diverges > 1e-2
+      expect(meta.theorem1SingleShotMaxAbsDiff).toBeLessThanOrEqual(1e-6);
+      expect(meta.theorem3ChunkedVsPerLoopMaxAbsDiff).toBeLessThanOrEqual(1e-6);
+      expect(meta.activePartitionVsPerLoopMaxAbsDiff).toBeLessThanOrEqual(1e-6);
+      expect(meta.theorem3ChunkedVsOneByOneMaxAbsDiff).toBeGreaterThan(1e-2);
+
+      const attnKind: DoryAttentionKind =
+        layerIdx === 16 ? 'sliding_attention' : 'full_attention';
+      for (const regionId of [
+        'per_loop_attn_probs',
+        'per_loop_attn_scores',
+        'last_loop_attn_probs',
+        'last_loop_attn_scores',
+      ] as const) {
+        assertCausalMaskExactInAtlas({
+          scene: scSingleChunk,
+          regionId,
+          seqLen: PROMPT_12.length,
+          kvLen: PROMPT_12.length,
+          startPos: 0,
+          kvAbsPositions: Array.from({ length: PROMPT_12.length }, (_, i) => i),
+          attentionKind: attnKind,
+          label: `kv_compare.explicitSingleChunk.p${layerIdx}.${regionId}`,
+        });
+      }
+    }
+  });
 });
 
 // ============================================================================
@@ -1489,6 +1630,164 @@ describe('Gate 4 View 6 (self_spec) — Contract A 104-Bank Dual-Coda Provenance
 
     // Caller standard last_loop session remains 0-ULP untouched!
     assertSessionZeroMutation(stdSession, rec.recordId, snapBefore, memBefore, kvBefore, 'self_spec.preview');
+  });
+
+  it('derives exact D1/§6.3 loopIteration and Contract A Dual-Coda SWA ring provenance for Prelude (0), Recurrent (16), and Output Coda (56 & 70) layers', () => {
+    const specSession = createDorySession({
+      params: PARAMS,
+      ropeTables: ROPE_TABLES,
+      initialBranch: {
+        promptTokens: PROMPT_12,
+        executionMode: 'self_spec',
+        kvCacheMode: 'per_loop',
+        kLoops: 4,
+        speculativeGamma: 4,
+        sampling: { temperature: 1.0, topK: 0, topP: 1.0 },
+        seed: 0xd0415509,
+      },
+    });
+    const cycleRec = specSession.step();
+    expect(cycleRec.kind).toBe('spec_cycle');
+
+    const decodePart = (scene: DorySpatialScene, partId: string) => {
+      const box = scene.pickBoxes.find((pb) => pb.partId === partId);
+      expect(box, `Missing PickBox '${partId}' in self_spec`).toBeDefined();
+      const ray = makeDirectRayAtBox(box!, 0, 0, 4.0);
+      const hit = pickMacroBay(ray, [box!], []);
+      expect(hit, `Raycast missed '${partId}'`).not.toBeNull();
+      const dec = pickHitToDoryCell(hit, 'self_spec');
+      expect(dec, `Failed to decode '${partId}'`).not.toBeNull();
+      return dec!;
+    };
+
+    const cases = [
+      {
+        label: 'prelude_swa_p0',
+        selectedLayer: 0,
+        expectedStage: 'input' as const,
+        expectedPaired: 0,
+        expectedVerifyLoop: 0,
+        expectedVerifyBankKind: 'input' as const,
+        expectedVerifyBankSlot: 0,
+        expectedVerifyRole: 'spec_verify_reused' as const,
+        expectedRingLayer: 0,
+        expectedRingStage: 'input' as const,
+        expectedRingPaired: 0,
+        expectedRingLoop: 0,
+        expectedRingBankKind: 'input' as const,
+        expectedRingBankSlot: 0,
+        expectedRingRole: 'spec_verify_reused' as const,
+      },
+      {
+        label: 'recurrent_swa_p16',
+        selectedLayer: 16,
+        expectedStage: 'recurrent' as const,
+        expectedPaired: 8,
+        expectedVerifyLoop: 4,
+        expectedVerifyBankKind: 'recurrent' as const,
+        expectedVerifyBankSlot: 68,
+        expectedVerifyRole: 'spec_verify_deep' as const,
+        expectedRingLayer: 16,
+        expectedRingStage: 'recurrent' as const,
+        expectedRingPaired: 8,
+        expectedRingLoop: 1,
+        expectedRingBankKind: 'recurrent' as const,
+        expectedRingBankSlot: 8,
+        expectedRingRole: 'spec_verify_reused' as const,
+      },
+      {
+        label: 'output_coda_swa_p56',
+        selectedLayer: 56,
+        expectedStage: 'output' as const,
+        expectedPaired: 28,
+        expectedVerifyLoop: 0,
+        expectedVerifyBankKind: 'output_deep' as const,
+        expectedVerifyBankSlot: 88,
+        expectedVerifyRole: 'spec_verify_deep' as const,
+        expectedRingLayer: 56,
+        expectedRingStage: 'output' as const,
+        expectedRingPaired: 28,
+        expectedRingLoop: 0,
+        expectedRingBankKind: 'output_deep' as const,
+        expectedRingBankSlot: 88,
+        expectedRingRole: 'spec_verify_deep' as const,
+      },
+      {
+        label: 'output_coda_full_p70',
+        selectedLayer: 70,
+        expectedStage: 'output' as const,
+        expectedPaired: 35,
+        expectedVerifyLoop: 0,
+        expectedVerifyBankKind: 'output_deep' as const,
+        expectedVerifyBankSlot: 95,
+        expectedVerifyRole: 'spec_verify_deep' as const,
+        // Full attention falls back to Recurrent SWA L16 Loop-1 bank (`slot=8`, `reused`)
+        expectedRingLayer: 16,
+        expectedRingStage: 'recurrent' as const,
+        expectedRingPaired: 8,
+        expectedRingLoop: 1,
+        expectedRingBankKind: 'recurrent' as const,
+        expectedRingBankSlot: 8,
+        expectedRingRole: 'spec_verify_reused' as const,
+      },
+    ] as const;
+
+    for (const tc of cases) {
+      const sc = buildDorySelfSpecScene(specSession, {
+        selectedAttentionLayerIdx: tc.selectedLayer,
+        recordId: cycleRec.recordId,
+      });
+      assertGate4SceneHealth(sc, `self_spec.${tc.label}`, DORY_SELF_SPEC_ATLAS_BUDGET_BYTES, 2);
+
+      // 1. Top-level scene provenance matches D1 / §6.3 (loopIteration === 0 for non-recurrent stages)
+      expect(sc.physicalLayerIdx, `${tc.label}.physicalLayerIdx`).toBe(tc.selectedLayer);
+      expect(sc.loopIteration, `${tc.label}.loopIteration`).toBe(tc.expectedVerifyLoop);
+      expect(sc.selfSpecMetadata!.selectedAttentionLayerIdx).toBe(tc.selectedLayer);
+
+      // 2. Atlas region metadata carries exact stage-consistent physicalLayerIdx & loopIteration
+      const probsReg = sc.atlasRegions.find((r) => r.id === 'spec_verify_attn_probs')!;
+      const scoresReg = sc.atlasRegions.find((r) => r.id === 'spec_verify_attn_scores')!;
+      const ringReg = sc.atlasRegions.find((r) => r.id === 'spec_swa_ring_strip')!;
+      expect(probsReg.physicalLayerIdx).toBe(tc.selectedLayer);
+      expect(probsReg.loopIteration).toBe(tc.expectedVerifyLoop);
+      expect(scoresReg.physicalLayerIdx).toBe(tc.selectedLayer);
+      expect(scoresReg.loopIteration).toBe(tc.expectedVerifyLoop);
+      expect(ringReg.physicalLayerIdx).toBe(tc.expectedRingLayer);
+      expect(ringReg.loopIteration).toBe(tc.expectedRingLoop);
+
+      // 3. Batched verify attention plates decode with exact stage, loop, bank & Contract A cacheRole
+      for (const partId of ['spec_verify_attn_probs', 'spec_verify_attn_scores'] as const) {
+        const dec = decodePart(sc, partId);
+        expect(dec.stage, `${tc.label}.${partId}.stage`).toBe(tc.expectedStage);
+        expect(dec.physicalLayerIdx, `${tc.label}.${partId}.phys`).toBe(tc.selectedLayer);
+        expect(dec.pairedLayerIdx, `${tc.label}.${partId}.paired`).toBe(tc.expectedPaired);
+        expect(dec.loopIteration, `${tc.label}.${partId}.loop`).toBe(tc.expectedVerifyLoop);
+        expect(dec.kvBankKind, `${tc.label}.${partId}.bankKind`).toBe(tc.expectedVerifyBankKind);
+        expect(dec.kvBankSlotId, `${tc.label}.${partId}.bankSlot`).toBe(tc.expectedVerifyBankSlot);
+        expect(dec.cacheRole, `${tc.label}.${partId}.cacheRole`).toBe(tc.expectedVerifyRole);
+      }
+
+      // 4. SWA rollback ring strip & ALL 16 ring slots decode with exact swaRingBank loopSlot & cacheRole
+      const ringStripDec = decodePart(sc, 'spec_swa_ring_strip');
+      expect(ringStripDec.stage, `${tc.label}.ringStrip.stage`).toBe(tc.expectedRingStage);
+      expect(ringStripDec.physicalLayerIdx, `${tc.label}.ringStrip.phys`).toBe(tc.expectedRingLayer);
+      expect(ringStripDec.pairedLayerIdx, `${tc.label}.ringStrip.paired`).toBe(tc.expectedRingPaired);
+      expect(ringStripDec.loopIteration, `${tc.label}.ringStrip.loop`).toBe(tc.expectedRingLoop);
+      expect(ringStripDec.kvBankKind, `${tc.label}.ringStrip.bankKind`).toBe(tc.expectedRingBankKind);
+      expect(ringStripDec.kvBankSlotId, `${tc.label}.ringStrip.bankSlot`).toBe(tc.expectedRingBankSlot);
+      expect(ringStripDec.cacheRole, `${tc.label}.ringStrip.cacheRole`).toBe(tc.expectedRingRole);
+
+      for (let s = 0; s < DORY_MINI_CONFIG.swaRingCapacity; s += 1) {
+        const slotDec = decodePart(sc, `spec_swa_slot_${s}`);
+        expect(slotDec.stage, `${tc.label}.slot_${s}.stage`).toBe(tc.expectedRingStage);
+        expect(slotDec.physicalLayerIdx, `${tc.label}.slot_${s}.phys`).toBe(tc.expectedRingLayer);
+        expect(slotDec.pairedLayerIdx, `${tc.label}.slot_${s}.paired`).toBe(tc.expectedRingPaired);
+        expect(slotDec.loopIteration, `${tc.label}.slot_${s}.loop`).toBe(tc.expectedRingLoop);
+        expect(slotDec.kvBankKind, `${tc.label}.slot_${s}.bankKind`).toBe(tc.expectedRingBankKind);
+        expect(slotDec.kvBankSlotId, `${tc.label}.slot_${s}.bankSlot`).toBe(tc.expectedRingBankSlot);
+        expect(slotDec.cacheRole, `${tc.label}.slot_${s}.cacheRole`).toBe(tc.expectedRingRole);
+      }
+    }
   });
 });
 
