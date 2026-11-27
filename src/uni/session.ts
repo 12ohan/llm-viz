@@ -561,8 +561,18 @@ export class UniSession {
     return this.activeRecordId;
   }
 
-  getActiveInspection(): UniSessionActiveInspection | null {
+  private ensureActiveInspection(): UniSessionActiveInspection | null {
+    if (this.activeRecordId === null) {
+      return null;
+    }
+    if (this.activeInspection === null || this.activeInspection.recordId !== this.activeRecordId) {
+      return this.setActiveRecord(this.activeRecordId);
+    }
     return this.activeInspection;
+  }
+
+  getActiveInspection(): UniSessionActiveInspection | null {
+    return this.ensureActiveInspection();
   }
 
   getAllBranches(): readonly UniSessionBranch[] {
@@ -582,11 +592,12 @@ export class UniSession {
   }
 
   getSnapshot(): UniSessionSnapshot {
+    const activeInspection = this.ensureActiveInspection();
     return Object.freeze({
       activeBranchId: this.activeBranchId,
       activeRecordId: this.activeRecordId,
       branches: this.getAllBranches(),
-      activeInspection: this.activeInspection,
+      activeInspection,
       memoryAudit: this.auditMemory(),
     });
   }
@@ -596,6 +607,9 @@ export class UniSession {
   // --------------------------------------------------------------------------
 
   auditMemory(): UniSessionMemoryAudit {
+    // Always include the materialized active-record inspection in memory accounting.
+    this.ensureActiveInspection();
+
     const excluded = new Set<object>([
       this.bundle,
       this.bundle.core,
@@ -2435,8 +2449,10 @@ export class UniSession {
     internal.lastRecordId = recordId;
     internal.nextStepIndex = payload.stepIndex + 1;
 
-    // Refresh activeInspection exclusively for the newly appended active record
-    this.setActiveRecord(recordId);
+    // Evict previous activeInspection immediately; materialize lazily on inspection/snapshot/audit
+    this.activeInspection = null;
+    this.activeRecordId = recordId;
+    this.activeBranchId = branchId;
 
     return record;
   }
