@@ -22,6 +22,7 @@ import {
   sub3,
   type CameraSnapshot,
 } from '../../render/camera';
+import type { PickBox } from '../../render/pick';
 import type { LandmarkAnchor, Vec3 } from '../../render/primitives';
 import { localToWorldOnFrame, makeSheetFrame3D } from '../../render/sheetFrame';
 import {
@@ -234,76 +235,225 @@ function findWorldForPartId(scene: DorySpatialScene, partId: string | null): Vec
   return null;
 }
 
+/**
+ * Computes a deterministic identity key for a `DoryPickIdentity` covering view, part, tensor,
+ * layer/loop, head/plane/bank/spec indices, and cell `[row, col]`. Returns `null` when absent.
+ */
+export function computeDoryPickIdentityKey(
+  cell: DoryPickIdentity | null | undefined,
+): string | null {
+  if (!cell) return null;
+  return [
+    cell.viewMode,
+    cell.partId ?? '',
+    cell.tensorKey ?? '',
+    cell.physicalLayerIdx ?? '',
+    cell.loopIteration ?? '',
+    cell.qHeadIndex ?? '',
+    cell.kvHeadIndex ?? '',
+    cell.rotaryPlane ?? '',
+    cell.kvBankSlotId ?? '',
+    cell.specOffset ?? '',
+    cell.tokenIndex ?? '',
+    cell.absTokenPos ?? '',
+    cell.row ?? '',
+    cell.col ?? '',
+  ].join('|');
+}
+
+function findPickBoxForHoveredCell(
+  scene: DorySpatialScene,
+  hoveredCell: DoryPickIdentity,
+): PickBox | null {
+  let fallback: PickBox | null = null;
+  for (let i = 0; i < scene.pickBoxes.length; i += 1) {
+    const pb = scene.pickBoxes[i]!;
+    if (hoveredCell.partId !== null && pb.partId === hoveredCell.partId) {
+      if (hoveredCell.tensorKey === null || pb.tensorKey === hoveredCell.tensorKey) {
+        return pb;
+      }
+      if (fallback === null) fallback = pb;
+    }
+  }
+  return fallback;
+}
+
+function findWorldForHoveredCell(
+  scene: DorySpatialScene,
+  hoveredCell: DoryPickIdentity,
+): Vec3 | null {
+  const pb = findPickBoxForHoveredCell(scene, hoveredCell);
+  if (
+    pb?.frame &&
+    pb.gridCols !== undefined &&
+    pb.gridCols > 0 &&
+    pb.gridRows !== undefined &&
+    pb.gridRows > 0 &&
+    hoveredCell.col !== null &&
+    hoveredCell.row !== null
+  ) {
+    const col = clamp(Math.trunc(hoveredCell.col), 0, pb.gridCols - 1);
+    const row = clamp(Math.trunc(hoveredCell.row), 0, pb.gridRows - 1);
+    return localToWorldOnFrame(
+      pb.frame,
+      (col + 0.5) / pb.gridCols - 0.5,
+      0.5,
+      (row + 0.5) / pb.gridRows - 0.5,
+    );
+  }
+  return findWorldForPartId(scene, hoveredCell.partId);
+}
+
+function matchesBakedPopoverTarget(
+  scene: DorySpatialScene,
+  popover: CellPopoverSpec,
+  hoveredCell: DoryPickIdentity,
+  bakedPopoverCell?: DoryPickIdentity | null,
+): boolean {
+  if (bakedPopoverCell !== undefined) {
+    return (
+      bakedPopoverCell !== null &&
+      computeDoryPickIdentityKey(hoveredCell) === computeDoryPickIdentityKey(bakedPopoverCell)
+    );
+  }
+
+  // Fallback when standalone callers omit `bakedPopoverCell`: verify geometric correspondence
+  // between `popover.world` and the hovered cell / pick box so a stale baked popover never
+  // shadows a different hovered cell.
+  const pb = findPickBoxForHoveredCell(scene, hoveredCell);
+  if (
+    pb?.frame &&
+    pb.gridCols !== undefined &&
+    pb.gridCols > 0 &&
+    pb.gridRows !== undefined &&
+    pb.gridRows > 0 &&
+    hoveredCell.col !== null &&
+    hoveredCell.row !== null
+  ) {
+    const col = clamp(Math.trunc(hoveredCell.col), 0, pb.gridCols - 1);
+    const row = clamp(Math.trunc(hoveredCell.row), 0, pb.gridRows - 1);
+    const lx = (col + 0.5) / pb.gridCols - 0.5;
+    const lz = (row + 0.5) / pb.gridRows - 0.5;
+    const front = localToWorldOnFrame(pb.frame, lx, 0.5, lz);
+    const back = localToWorldOnFrame(pb.frame, lx, -0.5, lz);
+    const dFront = Math.hypot(
+      popover.world[0] - front[0],
+      popover.world[1] - front[1],
+      popover.world[2] - front[2],
+    );
+    const dBack = Math.hypot(
+      popover.world[0] - back[0],
+      popover.world[1] - back[1],
+      popover.world[2] - back[2],
+    );
+    return Math.min(dFront, dBack) <= 0.08;
+  }
+
+  if (pb) {
+    const [wx, wy, wz] = popover.world;
+    return (
+      wx >= pb.min[0] - 0.15 &&
+      wx <= pb.max[0] + 0.15 &&
+      wz >= pb.min[2] - 0.15 &&
+      wz <= pb.max[2] + 0.15 &&
+      wy >= pb.min[1] - 0.15 &&
+      wy <= pb.max[1] + 0.6
+    );
+  }
+
+  const world = findWorldForPartId(scene, hoveredCell.partId);
+  if (!world) return false;
+  return (
+    Math.hypot(
+      popover.world[0] - world[0],
+      popover.world[1] - world[1],
+      popover.world[2] - world[2],
+    ) <= 0.6
+  );
+}
+
 function synthesizeFallbackPopover(
   scene: DorySpatialScene,
   hoveredCell: DoryPickIdentity | null | undefined,
-  selectedPartId: string | null | undefined,
 ): CellPopoverSpec | null {
-  if (hoveredCell) {
-    const partId = hoveredCell.partId ?? selectedPartId ?? null;
-    const world = findWorldForPartId(scene, partId);
-    if (!world) return null;
+  if (!hoveredCell) return null;
+  const world = findWorldForHoveredCell(scene, hoveredCell);
+  if (!world) return null;
 
-    const coordParts: string[] = [];
-    if (hoveredCell.physicalLayerIdx !== null) {
-      const pairStr =
-        hoveredCell.pairedLayerIdx !== null ? ` (Pair L${hoveredCell.pairedLayerIdx})` : '';
-      coordParts.push(`Phys L${hoveredCell.physicalLayerIdx}${pairStr}`);
-    }
-    if (hoveredCell.loopIteration !== null) {
-      coordParts.push(
-        hoveredCell.loopIteration === 0 ? 'Stage 1x' : `Loop t=${hoveredCell.loopIteration}`,
-      );
-    }
-    if (hoveredCell.qHeadIndex !== null) coordParts.push(`Q${hoveredCell.qHeadIndex}`);
-    if (hoveredCell.kvHeadIndex !== null) coordParts.push(`KV${hoveredCell.kvHeadIndex}`);
-    if (hoveredCell.rotaryPlane !== null) coordParts.push(`Plane ${hoveredCell.rotaryPlane}`);
-    if (hoveredCell.kvBankSlotId !== null) {
-      coordParts.push(
-        hoveredCell.kvBankKind !== null
-          ? `Bank #${hoveredCell.kvBankSlotId} (${hoveredCell.kvBankKind})`
-          : `Bank #${hoveredCell.kvBankSlotId}`,
-      );
-    }
-    if (hoveredCell.row !== null && hoveredCell.col !== null) {
-      coordParts.push(`[${hoveredCell.row}, ${hoveredCell.col}]`);
-    } else if (hoveredCell.absTokenPos !== null) {
-      coordParts.push(`pos=${hoveredCell.absTokenPos}`);
-    }
-
-    const tensorLabel = hoveredCell.tensorKey ?? hoveredCell.partId ?? `Dory · ${hoveredCell.viewMode}`;
-    const coordLabel =
-      coordParts.length > 0 ? coordParts.join(' · ') : (hoveredCell.semanticTag ?? hoveredCell.viewMode);
-    const badge =
-      hoveredCell.kvPolicy !== null
-        ? `${hoveredCell.kvPolicy}${hoveredCell.cacheRole ? ` · ${hoveredCell.cacheRole}` : ''}`
-        : hoveredCell.stage !== null
-          ? hoveredCell.stage.toUpperCase()
-          : undefined;
-
-    return {
-      world,
-      tensorLabel,
-      coordLabel,
-      ...(badge !== undefined ? { badge } : {}),
-      equation: hoveredCell.semanticTag ?? `View: ${scene.viewMode}`,
-      valueText: hoveredCell.sublayerKind ?? 'active',
-    };
+  const coordParts: string[] = [];
+  if (hoveredCell.physicalLayerIdx !== null) {
+    const pairStr =
+      hoveredCell.pairedLayerIdx !== null ? ` (Pair L${hoveredCell.pairedLayerIdx})` : '';
+    coordParts.push(`Phys L${hoveredCell.physicalLayerIdx}${pairStr}`);
+  }
+  if (hoveredCell.loopIteration !== null) {
+    coordParts.push(
+      hoveredCell.loopIteration === 0 ? 'Stage 1x' : `Loop t=${hoveredCell.loopIteration}`,
+    );
+  }
+  if (hoveredCell.qHeadIndex !== null) coordParts.push(`Q${hoveredCell.qHeadIndex}`);
+  if (hoveredCell.kvHeadIndex !== null) coordParts.push(`KV${hoveredCell.kvHeadIndex}`);
+  if (hoveredCell.rotaryPlane !== null) coordParts.push(`Plane ${hoveredCell.rotaryPlane}`);
+  if (hoveredCell.kvBankSlotId !== null) {
+    coordParts.push(
+      hoveredCell.kvBankKind !== null
+        ? `Bank #${hoveredCell.kvBankSlotId} (${hoveredCell.kvBankKind})`
+        : `Bank #${hoveredCell.kvBankSlotId}`,
+    );
+  }
+  if (hoveredCell.row !== null && hoveredCell.col !== null) {
+    coordParts.push(`[${hoveredCell.row}, ${hoveredCell.col}]`);
+  } else if (hoveredCell.absTokenPos !== null) {
+    coordParts.push(`pos=${hoveredCell.absTokenPos}`);
   }
 
-  if (selectedPartId) {
-    const world = findWorldForPartId(scene, selectedPartId);
-    if (!world) return null;
-    return {
-      world,
-      tensorLabel: selectedPartId,
-      coordLabel: `View ${scene.viewMode} · k=${scene.kLoops} · ${scene.kvCacheMode}`,
-      equation: 'Selected 3D architecture element',
-      valueText: 'selected',
-    };
-  }
+  const tensorLabel = hoveredCell.tensorKey ?? hoveredCell.partId ?? `Dory · ${hoveredCell.viewMode}`;
+  const coordLabel =
+    coordParts.length > 0 ? coordParts.join(' · ') : (hoveredCell.semanticTag ?? hoveredCell.viewMode);
+  const badge =
+    hoveredCell.kvPolicy !== null
+      ? `${hoveredCell.kvPolicy}${hoveredCell.cacheRole ? ` · ${hoveredCell.cacheRole}` : ''}`
+      : hoveredCell.stage !== null
+        ? hoveredCell.stage.toUpperCase()
+        : undefined;
 
-  return null;
+  return {
+    world,
+    tensorLabel,
+    coordLabel,
+    ...(badge !== undefined ? { badge } : {}),
+    equation: hoveredCell.semanticTag ?? `View: ${scene.viewMode}`,
+    valueText: hoveredCell.sublayerKind ?? 'active',
+  };
+}
+
+/**
+ * Pure Node-testable popover resolver ensuring a scene-baked `scene.activeCellPopover` is ONLY
+ * displayed when `hoveredCell` matches the baked hover target — otherwise falling back to
+ * `synthesizeFallbackPopover` for a newly hovered cell and returning `null` (hiding cleanly)
+ * whenever `hoveredCell` is `null` (e.g., on `pointerleave` or hovering empty canvas space).
+ */
+export function resolveActiveDoryPopoverSpec(
+  scene: DorySpatialScene,
+  hoveredCell: DoryPickIdentity | null | undefined,
+  bakedPopoverCell?: DoryPickIdentity | null,
+): CellPopoverSpec | null {
+  if (hoveredCell === null) {
+    return null;
+  }
+  if (hoveredCell === undefined) {
+    if (bakedPopoverCell !== undefined) {
+      return null;
+    }
+    return scene.activeCellPopover ?? null;
+  }
+  if (
+    scene.activeCellPopover !== null &&
+    matchesBakedPopoverTarget(scene, scene.activeCellPopover, hoveredCell, bakedPopoverCell)
+  ) {
+    return scene.activeCellPopover;
+  }
+  return synthesizeFallbackPopover(scene, hoveredCell);
 }
 
 // ============================================================================
@@ -661,10 +811,12 @@ export class DorySpatialOverlay implements DorySpatialOverlayHandle {
     const monoFont = '600 9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
 
     // 1. Floating contextual cell popover (first priority so anchors/numbers route cleanly around it)
-    const activePopoverSpec =
-      scene.activeCellPopover ??
-      synthesizeFallbackPopover(scene, input.hoveredCell, input.selectedPartId);
-    const isHoverPopover = Boolean(scene.activeCellPopover || input.hoveredCell);
+    const activePopoverSpec = resolveActiveDoryPopoverSpec(
+      scene,
+      input.hoveredCell,
+      input.bakedPopoverCell,
+    );
+    const isHoverPopover = Boolean(activePopoverSpec);
     const popoverRect = this.renderCellPopover(
       activePopoverSpec,
       isHoverPopover,

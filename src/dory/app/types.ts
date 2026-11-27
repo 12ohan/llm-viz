@@ -201,6 +201,13 @@ export interface DorySpatialOverlayUpdateInput {
   readonly scene: DorySpatialScene;
   readonly snapshot: CameraSnapshot;
   readonly hoveredCell?: DoryPickIdentity | null;
+  /**
+   * Optional pick identity for which `scene.activeCellPopover` was baked during scene build.
+   * When provided, `scene.activeCellPopover` is only displayed while `hoveredCell` matches
+   * this baked target; otherwise the overlay synthesizes a popover for a newly hovered cell
+   * or hides cleanly when `hoveredCell` is `null`.
+   */
+  readonly bakedPopoverCell?: DoryPickIdentity | null;
   readonly selectedPartId?: string | null;
   readonly topInsetPx?: number;
   readonly bottomInsetPx?: number;

@@ -122,7 +122,7 @@ import {
   type DorySupportedLoopCount,
 } from '../types';
 import { createDoryChartsPanel } from './charts';
-import { createDorySpatialOverlay } from './spatialOverlay';
+import { computeDoryPickIdentityKey, createDorySpatialOverlay } from './spatialOverlay';
 import {
   buildDoryTimelineDockState,
   createDoryTimelineDock,
@@ -531,6 +531,34 @@ export function resolveDoryPickInteraction(
   return null;
 }
 
+export interface DoryActiveSessionConfig {
+  readonly kLoops: DorySupportedLoopCount;
+  readonly kvCacheMode: DoryKvCacheMode;
+  readonly executionMode: DoryExecutionMode;
+}
+
+/**
+ * Pure Node-testable helper resolving the authoritative active session configuration
+ * (`kLoops`, `kvCacheMode`, `executionMode`) from the active record/branch (matching
+ * `timelineDock.ts`), rather than reading synthesized preview overrides from `DorySpatialScene`
+ * (e.g., View 6 `self_spec` read-only preview on a standard session).
+ */
+export function resolveActiveDorySessionConfig(session: DorySession): DoryActiveSessionConfig {
+  const activeRecord = session.getActiveRecord();
+  const activeBranch =
+    activeRecord !== null ? session.getBranch(activeRecord.branchId) : session.getActiveBranch();
+  const kLoops = toSupportedLoopCount(
+    activeRecord?.kLoops ?? activeBranch?.config.kLoops ?? DORY_MINI_CONFIG.defaultRecurrentLoops,
+  );
+  const kvCacheMode: DoryKvCacheMode =
+    activeRecord?.kvCacheMode ??
+    activeBranch?.config.kvCacheMode ??
+    DORY_MINI_CONFIG.defaultKvCacheMode;
+  const executionMode: DoryExecutionMode =
+    activeRecord?.executionMode ?? activeBranch?.config.executionMode ?? 'standard';
+  return Object.freeze({ kLoops, kvCacheMode, executionMode });
+}
+
 // ============================================================================
 // APP UI CONSTANTS & DOM HELPERS
 // ============================================================================
@@ -762,13 +790,15 @@ export function createDorySpatialApp(
   };
 
   let hoveredCell: DoryPickIdentity | null = null;
+  let bakedPopoverCell: DoryPickIdentity | null = null;
   let selectedCell: DoryPickIdentity | null = null;
   let selectedPartId: string | null = null;
 
   let currentScene: DorySpatialScene = buildDorySpatialScene(freeSession, viewMode, focus);
+  const initSessionConfig = resolveActiveDorySessionConfig(freeSession);
   let currentReadouts: DoryArchReadoutsBundle = buildDoryArchReadouts({
-    activeKLoops: currentScene.kLoops,
-    activeKvCacheMode: currentScene.kvCacheMode,
+    activeKLoops: initSessionConfig.kLoops,
+    activeKvCacheMode: initSessionConfig.kvCacheMode,
     selectedCheckpointFormat: focus.selectedCheckpointFormat,
     liveSessionMemory: freeSession.measureMemory(),
     activeAtlasBytes: currentScene.valueAtlas?.data.byteLength ?? 0,
@@ -1374,6 +1404,7 @@ export function createDorySpatialApp(
       scene: currentScene,
       snapshot,
       hoveredCell,
+      bakedPopoverCell,
       selectedPartId,
       topInsetPx: 74,
       bottomInsetPx: hasVisibleCharts() ? 158 : 20,
@@ -1432,9 +1463,10 @@ export function createDorySpatialApp(
 
   function refreshReadoutsAndCharts(): void {
     const activeSess = getActiveSession();
+    const sessionConfig = resolveActiveDorySessionConfig(activeSess);
     currentReadouts = buildDoryArchReadouts({
-      activeKLoops: currentScene.kLoops,
-      activeKvCacheMode: currentScene.kvCacheMode,
+      activeKLoops: sessionConfig.kLoops,
+      activeKvCacheMode: sessionConfig.kvCacheMode,
       selectedCheckpointFormat: focus.selectedCheckpointFormat,
       liveSessionMemory: activeSess.measureMemory(),
       activeAtlasBytes: currentScene.valueAtlas?.data.byteLength ?? 0,
@@ -1465,8 +1497,9 @@ export function createDorySpatialApp(
       stageBadgesEl.appendChild(el('span', `dory-badge dory-badge--${b.tone}`, b.label));
     }
 
+    const sessionConfig = resolveActiveDorySessionConfig(getActiveSession());
     const showSpecBanner =
-      currentScene.viewMode === 'self_spec' || currentScene.executionMode === 'self_spec';
+      currentScene.viewMode === 'self_spec' || sessionConfig.executionMode === 'self_spec';
     const showReadOnlyBanner = currentScene.viewMode === 'bookends';
 
     selfSpecBanner.hidden = !showSpecBanner;
@@ -1520,6 +1553,7 @@ export function createDorySpatialApp(
       viewMode = tourState.currentBeat.viewMode;
       focus = tourState.focus;
       selectedPartId = tourState.currentBeat.highlightPartId ?? null;
+      bakedPopoverCell = null;
       currentScene = tour.buildBeatScene(tourState.beatIndex);
     } else {
       const activeRec = activeSess.getActiveRecord();
@@ -1536,6 +1570,7 @@ export function createDorySpatialApp(
         ...(activeRec !== null ? { recordId: activeRec.recordId } : {}),
       };
       focus = nextFocus;
+      bakedPopoverCell = hoveredCell;
       currentScene = buildDorySpatialScene(activeSess, viewMode, focus);
     }
 
@@ -2219,7 +2254,11 @@ export function createDorySpatialApp(
     if (slider.value !== nextVal) slider.value = nextVal;
   }
 
-  function renderViewControlsSection(container: HTMLElement, activeKLoops: number): () => void {
+  function renderViewControlsSection(
+    container: HTMLElement,
+    activeKLoops: number,
+    activeExecutionMode: DoryExecutionMode,
+  ): () => void {
     const tourLocked = tour.isActive();
     const sec = el('section', 'dory-inspector-section');
     const viewDesc = DORY_SPATIAL_VIEW_MODES.find((d) => d.id === viewMode);
@@ -2810,7 +2849,7 @@ export function createDorySpatialApp(
       attRow.appendChild(aChips);
       sec.appendChild(attRow);
 
-      if (!tourLocked && currentScene.executionMode !== 'self_spec') {
+      if (!tourLocked && activeExecutionMode !== 'self_spec') {
         const activateSpecBtn = el(
           'button',
           'dory-action-btn dory-action-btn--spec',
@@ -3295,9 +3334,10 @@ export function createDorySpatialApp(
     ledgerListWrap.innerHTML = '';
 
     const activeSess = getActiveSession();
+    const sessionConfig = resolveActiveDorySessionConfig(activeSess);
     const filtered = buildDoryArchReadouts({
-      activeKLoops: currentScene.kLoops,
-      activeKvCacheMode: currentScene.kvCacheMode,
+      activeKLoops: sessionConfig.kLoops,
+      activeKvCacheMode: sessionConfig.kvCacheMode,
       selectedCheckpointFormat: focus.selectedCheckpointFormat,
       liveSessionMemory: activeSess.measureMemory(),
       activeAtlasBytes: currentScene.valueAtlas?.data.byteLength ?? 0,
@@ -3420,14 +3460,19 @@ export function createDorySpatialApp(
         ledgerSearchInput = null;
       }
 
-      const activeK = currentScene.kLoops;
-      const nextControlsKey = `${viewMode}|${tour.isActive() ? '1' : '0'}|${activeK}|${currentScene.executionMode}`;
+      const sessionConfig = resolveActiveDorySessionConfig(getActiveSession());
+      const activeK = sessionConfig.kLoops;
+      const nextControlsKey = `${viewMode}|${tour.isActive() ? '1' : '0'}|${activeK}|${sessionConfig.executionMode}`;
       if (
         mountedControlsKey === null ||
         (!opts?.preserveViewControlsDom && mountedControlsKey !== nextControlsKey)
       ) {
         viewControlsSlot.innerHTML = '';
-        syncViewControlsInPlace = renderViewControlsSection(viewControlsSlot, activeK);
+        syncViewControlsInPlace = renderViewControlsSection(
+          viewControlsSlot,
+          activeK,
+          sessionConfig.executionMode,
+        );
         mountedControlsKey = nextControlsKey;
       } else if (syncViewControlsInPlace) {
         syncViewControlsInPlace();
@@ -3524,6 +3569,12 @@ export function createDorySpatialApp(
       lastPtrY = ev.clientY;
       if (Math.hypot(ev.clientX - dragStartX, ev.clientY - dragStartY) > 4) {
         pointerMoved = true;
+        if (hoveredCell !== null) {
+          hoveredCell = null;
+          if (inspectorTab === 'inspect') {
+            renderCellInspectOnly();
+          }
+        }
       }
       if (dragMode === 'orbit') {
         cameraPose = orbitCameraByCssDelta(cameraPose, dx, dy);
@@ -3535,12 +3586,8 @@ export function createDorySpatialApp(
     }
 
     const nextHover = pickAtClientPoint(ev.clientX, ev.clientY);
-    const prevKey = hoveredCell
-      ? `${hoveredCell.partId}:${hoveredCell.tensorKey}:${hoveredCell.row}:${hoveredCell.col}`
-      : 'none';
-    const nextKey = nextHover
-      ? `${nextHover.partId}:${nextHover.tensorKey}:${nextHover.row}:${nextHover.col}`
-      : 'none';
+    const prevKey = computeDoryPickIdentityKey(hoveredCell);
+    const nextKey = computeDoryPickIdentityKey(nextHover);
     if (prevKey !== nextKey) {
       hoveredCell = nextHover;
       if (inspectorTab === 'inspect') {
@@ -3567,7 +3614,8 @@ export function createDorySpatialApp(
     selectedPartId = picked?.partId ?? null;
 
     if (picked && !tour.isActive()) {
-      const patch = resolveDoryPickInteraction(viewMode, picked, currentScene.kLoops);
+      const sessionConfig = resolveActiveDorySessionConfig(getActiveSession());
+      const patch = resolveDoryPickInteraction(viewMode, picked, sessionConfig.kLoops);
       if (patch) {
         focus = { ...focus, ...patch };
         rebuildSceneAndRefresh({ preserveViewControlsDom: true });
@@ -3707,13 +3755,15 @@ export function createDorySpatialApp(
 
   function getDebugSnapshot(): DorySpatialDebugSnapshot {
     const activeSess = getActiveSession();
-    const activeBranch = activeSess.getActiveBranch();
     const activeRec = activeSess.getActiveRecord();
+    const activeBranch =
+      activeRec !== null ? activeSess.getBranch(activeRec.branchId) : activeSess.getActiveBranch();
     const audit = activeSess.measureMemory();
     const tourState = tour.getState();
-    const kLoops = currentScene.kLoops;
-    const kvMode = currentScene.kvCacheMode;
-    const execMode = currentScene.executionMode;
+    const sessionConfig = resolveActiveDorySessionConfig(activeSess);
+    const kLoops = sessionConfig.kLoops;
+    const kvMode = sessionConfig.kvCacheMode;
+    const execMode = sessionConfig.executionMode;
     const banks = computeKvBankCounts(kLoops, kvMode, execMode === 'self_spec');
 
     return Object.freeze({
@@ -3975,16 +4025,18 @@ export function createDorySpatialApp(
 
   function getState(): DoryAppControllerState {
     const activeSess = getActiveSession();
-    const activeBranch = activeSess.getActiveBranch();
     const activeRec = activeSess.getActiveRecord();
+    const activeBranch =
+      activeRec !== null ? activeSess.getBranch(activeRec.branchId) : activeSess.getActiveBranch();
     const tourState = tour.getState();
+    const sessionConfig = resolveActiveDorySessionConfig(activeSess);
     return Object.freeze({
       viewMode,
       promptPresetId,
-      kLoops: toSupportedLoopCount(currentScene.kLoops),
+      kLoops: sessionConfig.kLoops,
       allowExtrapolationDepths,
-      kvCacheMode: currentScene.kvCacheMode,
-      executionMode: currentScene.executionMode,
+      kvCacheMode: sessionConfig.kvCacheMode,
+      executionMode: sessionConfig.executionMode,
       sampling,
       inspectorTab,
       inspectorCollapsed,

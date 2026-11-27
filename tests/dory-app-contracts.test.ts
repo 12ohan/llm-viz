@@ -65,16 +65,20 @@ import {
 import {
   buildDorySwitcherEntries,
   createAtlasUploadTracker,
+  createDorySpatialApp,
   createIdleRafScheduler,
+  resolveActiveDorySessionConfig,
   resolveDoryGlobalKeyAction,
   resolveDoryPickInteraction,
 } from '../src/dory/app/spatialApp';
 import {
   computeDoryOverlayAxisHeaderBudget,
   computeDoryOverlayCellNumBudget,
+  computeDoryPickIdentityKey,
   createDorySpatialOverlay,
   DORY_MAX_OVERLAY_AXIS_HEADER_NODES,
   DORY_MAX_OVERLAY_CELL_NUM_NODES,
+  resolveActiveDoryPopoverSpec,
 } from '../src/dory/app/spatialOverlay';
 import {
   buildDoryTimelineDockState,
@@ -117,7 +121,13 @@ import {
   DORY_SPEC_CONTRACT_A_BADGE,
   type DorySession,
 } from '../src/dory/types';
-import { buildCameraSnapshot, fitOpBoundsCamera, makeViewportMetrics } from '../src/render/camera';
+import {
+  buildCameraSnapshot,
+  fitOpBoundsCamera,
+  makeViewportMetrics,
+  projectWorldToHostCss,
+} from '../src/render/camera';
+import { pickHitToDoryCell } from '../src/dory/scene/provenance';
 import { MODEL_REGISTRY, type ModelEntryMeta } from '../src/shared/modelRegistry';
 
 const SHARED_PARAMS = getDefaultDoryModelParameters();
@@ -274,6 +284,8 @@ function makePickIdentity(overrides: Partial<DoryPickIdentity> = {}): DoryPickId
 
 interface MockDomNode {
   tagName: string;
+  id: string;
+  href: string;
   type?: string;
   className: string;
   textContent: string;
@@ -286,12 +298,15 @@ interface MockDomNode {
   hidden: boolean;
   tabIndex: number;
   title: string;
+  clientWidth: number;
+  clientHeight: number;
   style: Record<string, string>;
   dataset: Record<string, string>;
   attributes: Record<string, string>;
   classes: Set<string>;
   children: MockDomNode[];
   parentNode: MockDomNode | null;
+  listeners: Map<string, Set<(...args: unknown[]) => void>>;
   classList: {
     toggle(cls: string, force?: boolean): boolean;
     add(...cls: string[]): void;
@@ -301,6 +316,19 @@ interface MockDomNode {
   setAttribute(k: string, v: string): void;
   getAttribute(k: string): string | null;
   addEventListener(type: string, fn: (...args: unknown[]) => void): void;
+  removeEventListener(type: string, fn: (...args: unknown[]) => void): void;
+  dispatchEvent(type: string, event?: Record<string, unknown>): void;
+  click(): void;
+  contains(target: unknown): boolean;
+  querySelectorAll(selector: string): MockDomNode[];
+  getBoundingClientRect(): {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+    width: number;
+    height: number;
+  };
   appendChild(child: MockDomNode): MockDomNode;
   append(...nodes: MockDomNode[]): void;
   removeChild(child: MockDomNode): MockDomNode;
@@ -316,15 +344,24 @@ function createMockDomHarness(): {
   readonly resetCounts: () => void;
   readonly findByTestId: (rootNode: MockDomNode, id: string) => MockDomNode | null;
   readonly stubGlobalDocument: () => void;
+  readonly stubGlobalWindow: (opts?: {
+    readonly width?: number;
+    readonly height?: number;
+    readonly onRaf?: (cb: (nowMs: number) => void) => number;
+    readonly onCancelRaf?: (h: number) => void;
+  }) => { readonly flushRaf: (nowMs?: number) => void };
 } {
   let createElementCount = 0;
   let createElementNsCount = 0;
 
   const buildNode = (tag: string): MockDomNode => {
     const classes = new Set<string>();
+    const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
     let rawInnerHtml = '';
     const node: MockDomNode = {
       tagName: tag.toUpperCase(),
+      id: '',
+      href: '',
       className: '',
       textContent: '',
       value: '',
@@ -336,12 +373,15 @@ function createMockDomHarness(): {
       hidden: false,
       tabIndex: 0,
       title: '',
+      clientWidth: 1280,
+      clientHeight: 720,
       style: {},
       dataset: {},
       attributes: {},
       classes,
       children: [],
       parentNode: null,
+      listeners,
       classList: {
         toggle(cls: string, force?: boolean): boolean {
           const next = force !== undefined ? force : !classes.has(cls);
@@ -365,8 +405,54 @@ function createMockDomHarness(): {
       getAttribute(k: string): string | null {
         return node.attributes[k] ?? null;
       },
-      addEventListener(): void {
-        // no-op in headless Node mock
+      addEventListener(type: string, fn: (...args: unknown[]) => void): void {
+        let set = listeners.get(type);
+        if (!set) {
+          set = new Set();
+          listeners.set(type, set);
+        }
+        set.add(fn);
+      },
+      removeEventListener(type: string, fn: (...args: unknown[]) => void): void {
+        listeners.get(type)?.delete(fn);
+      },
+      dispatchEvent(type: string, event: Record<string, unknown> = {}): void {
+        const set = listeners.get(type);
+        if (!set) return;
+        const payload = {
+          type,
+          target: node,
+          preventDefault: () => {},
+          stopPropagation: () => {},
+          ...event,
+        };
+        for (const fn of Array.from(set)) {
+          fn(payload);
+        }
+      },
+      click(): void {
+        if (node.disabled) return;
+        node.dispatchEvent('click');
+      },
+      contains(target: unknown): boolean {
+        if (target === node) return true;
+        for (const c of node.children) {
+          if (c.contains(target)) return true;
+        }
+        return false;
+      },
+      querySelectorAll(): MockDomNode[] {
+        return [];
+      },
+      getBoundingClientRect() {
+        return {
+          left: 0,
+          top: 0,
+          right: node.clientWidth,
+          bottom: node.clientHeight,
+          width: node.clientWidth,
+          height: node.clientHeight,
+        };
       },
       appendChild(child: MockDomNode): MockDomNode {
         child.parentNode = node;
@@ -421,6 +507,8 @@ function createMockDomHarness(): {
     stubGlobalDocument: () => {
       vi.stubGlobal('document', {
         activeElement: null,
+        addEventListener: () => {},
+        removeEventListener: () => {},
         createElement: (tag: string) => {
           createElementCount += 1;
           return buildNode(tag);
@@ -430,6 +518,41 @@ function createMockDomHarness(): {
           return buildNode(tag);
         },
       });
+    },
+    stubGlobalWindow: (opts) => {
+      let nextRafHandle = 1;
+      const rafQueue = new Map<number, (nowMs: number) => void>();
+      const reqRaf =
+        opts?.onRaf ??
+        ((cb: (nowMs: number) => void) => {
+          const h = nextRafHandle++;
+          rafQueue.set(h, cb);
+          return h;
+        });
+      const cancelRaf =
+        opts?.onCancelRaf ??
+        ((h: number) => {
+          rafQueue.delete(h);
+        });
+      vi.stubGlobal('requestAnimationFrame', reqRaf);
+      vi.stubGlobal('cancelAnimationFrame', cancelRaf);
+      vi.stubGlobal('window', {
+        innerWidth: opts?.width ?? 1280,
+        innerHeight: opts?.height ?? 720,
+        devicePixelRatio: 1,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        matchMedia: () => ({ matches: false }),
+      });
+      return {
+        flushRaf: (nowMs = 16) => {
+          const batch = Array.from(rafQueue.entries());
+          rafQueue.clear();
+          for (const [, cb] of batch) {
+            cb(nowMs);
+          }
+        },
+      };
     },
   };
 }
@@ -873,6 +996,111 @@ describe('spatialApp.ts pure Node state machines (idle-RAF, atlas dedup, switche
       ),
     ).toEqual({ selectedVocabTokenId: 12 });
   });
+
+  it('View 6 synthesized preview preserves active session telemetry in debug/getState and exposes reachable dory-activate-selfspec-btn', () => {
+    // 1. Pure helper matches active session config across standard, last_loop, and live self_spec
+    const stdSess = createSampleSession({ kLoops: 2, kvCacheMode: 'per_loop', executionMode: 'standard' });
+    expect(resolveActiveDorySessionConfig(stdSess)).toEqual({
+      kLoops: 2,
+      kvCacheMode: 'per_loop',
+      executionMode: 'standard',
+    });
+
+    const lastLoopSess = createSampleSession({ kLoops: 4, kvCacheMode: 'last_loop', executionMode: 'standard' });
+    expect(resolveActiveDorySessionConfig(lastLoopSess)).toEqual({
+      kLoops: 4,
+      kvCacheMode: 'last_loop',
+      executionMode: 'standard',
+    });
+
+    const specSess = createSampleSession({ executionMode: 'self_spec' });
+    expect(resolveActiveDorySessionConfig(specSess)).toEqual({
+      kLoops: 4,
+      kvCacheMode: 'per_loop',
+      executionMode: 'self_spec',
+    });
+
+    // 2. Full mocked-DOM app regression: viewing View 6 on a standard k=2 session MUST NOT pollute
+    //    window.__dorySpatialDebug / getState() and MUST render a working dory-activate-selfspec-btn
+    const harness = createMockDomHarness();
+    harness.stubGlobalDocument();
+    harness.stubGlobalWindow();
+
+    try {
+      const host = harness.makeNode('div');
+      const app = createDorySpatialApp({
+        host: host as unknown as HTMLElement,
+        initialViewMode: 'macro',
+        initialKLoops: 2,
+        initialKvCacheMode: 'per_loop',
+        initialExecutionMode: 'standard',
+        attachDebugHandle: true,
+      });
+
+      const initialBranchId = app.debug.activeBranchId!;
+      expect(initialBranchId).toBeTruthy();
+
+      // Switch to View 6 (`self_spec`) while session remains standard k=2 per_loop (56 banks)
+      const previewSnap = app.debug.setView('self_spec');
+      const previewScene = app.getCurrentScene();
+      const previewState = app.getState();
+
+      // View 6 renders its synthesized Contract A preview on the scene...
+      expect(previewScene.viewMode).toBe('self_spec');
+      expect(previewScene.selfSpecMetadata?.isSynthesizedPreview).toBe(true);
+      expect(previewScene.executionMode).toBe('self_spec');
+
+      // ...while debug snapshot & controller state faithfully report the active standard session!
+      expect(previewSnap.viewMode).toBe('self_spec');
+      expect(previewSnap.executionMode).toBe('standard');
+      expect(previewSnap.kLoops).toBe(2);
+      expect(previewSnap.kvCacheMode).toBe('per_loop');
+      expect(previewSnap.executedDepth).toBe(112);
+      expect(previewSnap.kvBankCount).toBe(56);
+
+      expect(previewState.executionMode).toBe('standard');
+      expect(previewState.kLoops).toBe(2);
+      expect(previewState.kvCacheMode).toBe('per_loop');
+
+      // Inspector MUST render the reachable 'Fork Live Contract A Session' button
+      const activateBtn = harness.findByTestId(host, 'dory-activate-selfspec-btn');
+      expect(activateBtn).not.toBeNull();
+      expect(activateBtn!.disabled).toBe(false);
+
+      // Clicking the button forks a live Contract A self_spec branch (k=4, per_loop, 104 banks)
+      activateBtn!.click();
+
+      const liveSnap = app.debug.getSnapshot();
+      const liveState = app.getState();
+      const liveScene = app.getCurrentScene();
+
+      expect(liveScene.selfSpecMetadata?.isSynthesizedPreview).toBe(false);
+      expect(liveSnap.executionMode).toBe('self_spec');
+      expect(liveSnap.kLoops).toBe(4);
+      expect(liveSnap.kvCacheMode).toBe('per_loop');
+      expect(liveSnap.executedDepth).toBe(192);
+      expect(liveSnap.kvBankCount).toBe(104);
+      expect(liveSnap.branchCount).toBe(2);
+
+      expect(liveState.executionMode).toBe('self_spec');
+      expect(liveState.kLoops).toBe(4);
+      expect(liveState.kvCacheMode).toBe('per_loop');
+
+      // Once live self_spec is active, the fork button is hidden cleanly via nextControlsKey rebuild
+      expect(harness.findByTestId(host, 'dory-activate-selfspec-btn')).toBeNull();
+
+      // Switching back to the original standard branch on View 6 restores standard telemetry & button
+      const backSnap = app.debug.switchBranch(initialBranchId);
+      expect(backSnap.executionMode).toBe('standard');
+      expect(backSnap.kLoops).toBe(2);
+      expect(backSnap.kvBankCount).toBe(56);
+      expect(harness.findByTestId(host, 'dory-activate-selfspec-btn')).not.toBeNull();
+
+      app.dispose();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 // ============================================================================
@@ -1006,6 +1234,205 @@ describe('spatialOverlay.ts contracts (<= 64 cell-num cap, <= 24 axis headers & 
       overlay.dispose();
       expect(harness.getCreateElementCount()).toBe(0);
       expect(harness.getCreateElementNsCount()).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('prevents stale baked activeCellPopover leak across View 3 click -> hover other cell -> pointerleave lifecycle', () => {
+    const harness = createMockDomHarness();
+    harness.stubGlobalDocument();
+    const win = harness.stubGlobalWindow({ width: 1280, height: 720 });
+
+    try {
+      // 1. Overlay-level mocked-DOM regression with a scene carrying a baked activeCellPopover
+      const session = createSampleSession({ kLoops: 2, steps: 2 });
+      const baseScene = buildDorySpatialScene(session, 'gqa_rope', {
+        ...DEFAULT_DORY_SPATIAL_FOCUS_STATE,
+        gqaLayerIdx: 16,
+      });
+
+      const scoreBox = baseScene.pickBoxes.find(
+        (pb) => pb.tensorKey === 'scores' && pb.partId !== undefined && pb.frame !== undefined,
+      )!;
+      const probBox = baseScene.pickBoxes.find(
+        (pb) => pb.tensorKey === 'probs' && pb.partId !== undefined && pb.frame !== undefined,
+      )!;
+      expect(scoreBox).toBeDefined();
+      expect(probBox).toBeDefined();
+
+      const cellA = pickHitToDoryCell(
+        {
+          bayId: scoreBox.bayId,
+          partId: scoreBox.partId,
+          headIndex: scoreBox.headIndex,
+          kvHeadIndex: scoreBox.kvHeadIndex,
+          groupIndex: scoreBox.groupIndex,
+          tensorKey: scoreBox.tensorKey,
+          tokenIndex: scoreBox.tokenIndex,
+          tapIndex: scoreBox.tapIndex,
+          stateTokenIndex: scoreBox.stateTokenIndex,
+          semanticTag: scoreBox.semanticTag,
+          hitRow: 0,
+          hitCol: 0,
+          t: 1,
+          point: scoreBox.frame!.center,
+          isFascia: false,
+        },
+        'gqa_rope',
+      )!;
+      const cellB = pickHitToDoryCell(
+        {
+          bayId: probBox.bayId,
+          partId: probBox.partId,
+          headIndex: probBox.headIndex,
+          kvHeadIndex: probBox.kvHeadIndex,
+          groupIndex: probBox.groupIndex,
+          tensorKey: probBox.tensorKey,
+          tokenIndex: probBox.tokenIndex,
+          tapIndex: probBox.tapIndex,
+          stateTokenIndex: probBox.stateTokenIndex,
+          semanticTag: probBox.semanticTag,
+          hitRow: 0,
+          hitCol: 0,
+          t: 1,
+          point: probBox.frame!.center,
+          isFascia: false,
+        },
+        'gqa_rope',
+      )!;
+      expect(computeDoryPickIdentityKey(cellA)).not.toBe(computeDoryPickIdentityKey(cellB));
+
+      // Build scene with cellA baked into scene.activeCellPopover (simulating click -> rebuildSceneAndRefresh)
+      const sceneBakedA = buildDorySpatialScene(session, 'gqa_rope', {
+        ...DEFAULT_DORY_SPATIAL_FOCUS_STATE,
+        gqaLayerIdx: 16,
+        hoveredCell: cellA,
+      });
+      expect(sceneBakedA.activeCellPopover).not.toBeNull();
+      const bakedLabelA = sceneBakedA.activeCellPopover!.tensorLabel;
+
+      // Pure resolver checks
+      expect(resolveActiveDoryPopoverSpec(sceneBakedA, cellA, cellA)).toBe(
+        sceneBakedA.activeCellPopover,
+      );
+      const specForB = resolveActiveDoryPopoverSpec(sceneBakedA, cellB, cellA);
+      expect(specForB).not.toBeNull();
+      expect(specForB).not.toBe(sceneBakedA.activeCellPopover);
+      expect(specForB!.tensorLabel).toBe(cellB.tensorKey ?? cellB.partId);
+      expect(resolveActiveDoryPopoverSpec(sceneBakedA, null, cellA)).toBeNull();
+      // Even without explicit bakedPopoverCell, mismatch on cellB & null hover are caught cleanly
+      const specForBNoHint = resolveActiveDoryPopoverSpec(sceneBakedA, cellB);
+      expect(specForBNoHint).not.toBeNull();
+      expect(specForBNoHint).not.toBe(sceneBakedA.activeCellPopover);
+      expect(resolveActiveDoryPopoverSpec(sceneBakedA, null)).toBeNull();
+
+      const ovHost = harness.makeNode('div');
+      const overlay = createDorySpatialOverlay(ovHost as unknown as HTMLElement);
+      const popoverEl = harness.findByTestId(ovHost, 'dory-cell-popover')!;
+      expect(popoverEl).not.toBeNull();
+
+      const metrics = makeViewportMetrics(0, 0, 1280, 720, 1, 0, 0);
+      const pose = fitOpBoundsCamera(sceneBakedA.cameraPreset.fitBounds, metrics, {
+        azimuthDeg: sceneBakedA.cameraPreset.azimuthDeg,
+        elevationDeg: sceneBakedA.cameraPreset.elevationDeg,
+        fillFraction: 0.82,
+      });
+      const snapshot = buildCameraSnapshot(pose, sceneBakedA.fitBounds, metrics);
+
+      harness.resetCounts();
+
+      // (a) Hover matches baked cellA -> displays baked activeCellPopover
+      const sA = overlay.update({
+        scene: sceneBakedA,
+        snapshot,
+        hoveredCell: cellA,
+        bakedPopoverCell: cellA,
+        selectedPartId: cellA.partId,
+      });
+      expect(sA.popoverVisible).toBe(true);
+      expect(popoverEl.style.display).toBe('flex');
+      expect(popoverEl.children[0]!.children[0]!.textContent).toBe(bakedLabelA);
+
+      // (b) Hover moves to cellB without rebuilding scene -> displays cellB fallback (NOT stale cellA!)
+      const sB = overlay.update({
+        scene: sceneBakedA,
+        snapshot,
+        hoveredCell: cellB,
+        bakedPopoverCell: cellA,
+        selectedPartId: cellA.partId,
+      });
+      expect(sB.popoverVisible).toBe(true);
+      expect(popoverEl.style.display).toBe('flex');
+      expect(popoverEl.children[0]!.children[0]!.textContent).toBe(cellB.tensorKey ?? cellB.partId);
+      expect(popoverEl.children[0]!.children[0]!.textContent).not.toBe(bakedLabelA);
+
+      // (c) Pointer leaves canvas (`hoveredCell: null`) while `selectedPartId` remains set -> hides cleanly!
+      const sLeave = overlay.update({
+        scene: sceneBakedA,
+        snapshot,
+        hoveredCell: null,
+        bakedPopoverCell: cellA,
+        selectedPartId: cellA.partId,
+      });
+      expect(sLeave.popoverVisible).toBe(false);
+      expect(popoverEl.style.display).toBe('none');
+
+      // Strictly 0 post-mount DOM allocations
+      expect(harness.getCreateElementCount()).toBe(0);
+      expect(harness.getCreateElementNsCount()).toBe(0);
+      overlay.dispose();
+
+      // 2. End-to-end mocked-DOM `createDorySpatialApp` pointer click -> hover other -> pointerleave on View 3
+      const appHost = harness.makeNode('div');
+      const app = createDorySpatialApp({
+        host: appHost as unknown as HTMLElement,
+        initialViewMode: 'gqa_rope',
+        attachDebugHandle: false,
+      });
+      const canvasEl = harness.findByTestId(appHost, 'dory-webgl-canvas')!;
+      const appPopoverEl = harness.findByTestId(appHost, 'dory-cell-popover')!;
+      const appScene = app.getCurrentScene();
+      const appPose = app.getCameraPose()!;
+      const appMetrics = makeViewportMetrics(0, 0, 1280, 720, 1, 0, 0);
+      const appSnap = buildCameraSnapshot(appPose, appScene.fitBounds, appMetrics);
+
+      // Find two visible pickable sheets on View 3 and project their centers into client CSS coords
+      const box1 = appScene.pickBoxes.find(
+        (pb) => pb.tensorKey === 'scores' && pb.frame !== undefined,
+      )!;
+      const box2 = appScene.pickBoxes.find(
+        (pb) => pb.tensorKey === 'probs' && pb.frame !== undefined,
+      )!;
+      const pt1 = projectWorldToHostCss(box1.frame!.center, appSnap);
+      const pt2 = projectWorldToHostCss(box2.frame!.center, appSnap);
+      expect(pt1.visible).toBe(true);
+      expect(pt2.visible).toBe(true);
+
+      // Hover box1, click box1 (triggers rebuildSceneAndRefresh baking currentScene.activeCellPopover)
+      canvasEl.dispatchEvent('pointermove', { clientX: pt1.x, clientY: pt1.y, button: 0, pointerId: 1 });
+      win.flushRaf(16);
+      canvasEl.dispatchEvent('pointerdown', { clientX: pt1.x, clientY: pt1.y, button: 0, pointerId: 1 });
+      canvasEl.dispatchEvent('pointerup', { clientX: pt1.x, clientY: pt1.y, button: 0, pointerId: 1 });
+      win.flushRaf(32);
+
+      const postClickScene = app.getCurrentScene();
+      expect(postClickScene.activeCellPopover).not.toBeNull();
+      expect(appPopoverEl.style.display).toBe('flex');
+      const clickedTensorLabel = appPopoverEl.children[0]!.children[0]!.textContent;
+
+      // Move pointer to box2 (without clicking) -> popover must update to box2, not stick on box1
+      canvasEl.dispatchEvent('pointermove', { clientX: pt2.x, clientY: pt2.y, button: 0, pointerId: 1 });
+      win.flushRaf(48);
+      expect(appPopoverEl.style.display).toBe('flex');
+      expect(appPopoverEl.children[0]!.children[0]!.textContent).not.toBe(clickedTensorLabel);
+
+      // Leave canvas -> popover MUST hide cleanly (display === 'none') even with baked activeCellPopover
+      canvasEl.dispatchEvent('pointerleave', { pointerId: 1 });
+      win.flushRaf(64);
+      expect(appPopoverEl.style.display).toBe('none');
+
+      app.dispose();
     } finally {
       vi.unstubAllGlobals();
     }
