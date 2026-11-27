@@ -8,7 +8,9 @@ import {
   SHEET_KIND_CAUSAL_SCORES,
   SHEET_KIND_CAUSAL_SOFTMAX,
 } from '../src/render/sheets';
+import { runUniForwardPass } from '../src/uni/forward';
 import { createDefaultUniRuntimeBundle } from '../src/uni/imageSampler';
+import { cropUniKvCache, extractRowPastKvs } from '../src/uni/kvCache';
 import {
   buildUniOutputEditScene,
   UNI_OUTPUT_EDIT_ATLAS_BUDGET_BYTES,
@@ -518,6 +520,80 @@ describe('UNI5 Views 5 (refinement) & 6 (output_edit)', () => {
       expect(cell!.row).toBe(2);
       expect(cell!.col).toBe(21);
       expect(cell!.branch).toBe('u');
+    });
+
+    it('resolves multi-block Understanding slot-0 shifted logits from preceding committed block causal tail (not prefill)', () => {
+      const session = new UniSession(sharedBundle);
+      const branch = session.startBranch({
+        taskMode: 'text_understanding',
+        blockLength: 4,
+        stepsPerBlock: 4,
+        maxNewTokens: 8,
+        confidenceThreshold: 1.0,
+      });
+
+      const prefillId = branch.recordIds[0]!;
+      // Step until Block #1 commits and Block #2 begins (with causalContext=true, slot 0 is
+      // pre-seeded so Block #1 commits after 3 steps; step until positionIds[0] advances)
+      const firstBlockStep = session.stepBranch(branch.branchId)!;
+      const block1StartPos = firstBlockStep.positionIds[0]!;
+      let prevRec = firstBlockStep;
+      let block2Step1 = firstBlockStep;
+      for (let i = 0; i < 8; i++) {
+        const nextRec = session.stepBranch(branch.branchId)!;
+        if (nextRec.positionIds[0]! > block1StartPos) {
+          block2Step1 = nextRec;
+          break;
+        }
+        prevRec = nextRec;
+      }
+      const block1Final = prevRec;
+      expect(block2Step1.kind).toBe('text_block_step');
+      expect(block2Step1.positionIds[0]!).toBeGreaterThan(block1Final.positionIds[0]!);
+
+      // Compute independent ground-truth causal tail logits from Block #1 commit vs prefill tail
+      const vocabSize = sharedBundle.core.config.vocabSize;
+      const prefillHead = session.reconstructStepHeadLogits(prefillId).perBranchTextLogits[0]!;
+      const prefillTail = prefillHead.subarray(prefillHead.length - vocabSize, prefillHead.length);
+
+      const updatedBranch = session.getBranch(branch.branchId)!;
+      const { pastKvs, pastRouting } = extractRowPastKvs(
+        cropUniKvCache(updatedBranch.prefixCache, block1StartPos),
+        0,
+      );
+      const block1Commit = runUniForwardPass(sharedBundle.core, {
+        tokenIds: block1Final.textState!.tokenIds,
+        maskMode: 'causal',
+        useCache: false,
+        prefillMode: 'hf_faithful',
+        downstreamTarget: 'u',
+        pastKvs,
+        pastRouting,
+        computeTextHead: true,
+        computeGenHead: false,
+        retainedTraceLayers: new Set(),
+      });
+      const block1Tail = block1Commit.textLogits!.subarray(
+        block1Commit.textLogits!.length - vocabSize,
+        block1Commit.textLogits!.length,
+      );
+
+      const scene = buildUniOutputEditScene(session, { recordId: block2Step1.recordId });
+      assertCleanAtlasAndU25(scene, 'output_edit', 128, 131_072);
+      const logitsPlate = readRegionTexels(scene, 'shifted_diffusion_logits');
+      const slot0Row = logitsPlate.rValues.subarray(0, vocabSize);
+
+      let maxErrVsBlock1Tail = 0;
+      let maxErrVsPrefillTail = 0;
+      for (let v = 0; v < vocabSize; v++) {
+        maxErrVsBlock1Tail = Math.max(maxErrVsBlock1Tail, Math.abs(slot0Row[v]! - block1Tail[v]!));
+        maxErrVsPrefillTail = Math.max(
+          maxErrVsPrefillTail,
+          Math.abs(slot0Row[v]! - prefillTail[v]!),
+        );
+      }
+      expect(maxErrVsBlock1Tail).toBe(0);
+      expect(maxErrVsPrefillTail).toBeGreaterThan(1e-3);
     });
 
     it('builds Object Grounding & Visual Understanding output_edit scenes with groundingBoxes (<LOC_0..16>) and explicit U27 badge', () => {

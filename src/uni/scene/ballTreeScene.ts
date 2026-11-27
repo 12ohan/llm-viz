@@ -1364,6 +1364,9 @@ export function buildUniBallTreeScene(
       frame,
     });
 
+    // On `ball_membership` (rows 0..8 = tree depths 0..8), omit static tapIndex/depth= so
+    // per-row inspection cleanly uses `cell.row` without stamping a fixed depth across all rows.
+    const isPerRowDepthPlate = spec.id === 'ball_membership';
     pickBoxes.push(
       packPickBoxFromFrame(frame, {
         bayId: 0,
@@ -1371,9 +1374,11 @@ export function buildUniBallTreeScene(
         tensorKey: spec.id,
         gridCols: sliceEntry.region.cols,
         gridRows: sliceEntry.region.rows,
-        tapIndex: activePolarity.level,
+        ...(isPerRowDepthPlate ? {} : { tapIndex: activePolarity.level }),
         towerRole: 'denoiser',
-        semanticTag: `branch=g;tapRole=tree;depth=${activePolarity.level};plate=${spec.id}`,
+        semanticTag: isPerRowDepthPlate
+          ? `branch=g;tapRole=tree;plate=${spec.id}`
+          : `branch=g;tapRole=tree;depth=${activePolarity.level};plate=${spec.id}`,
       }),
     );
 

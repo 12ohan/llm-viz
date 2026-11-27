@@ -376,13 +376,37 @@ describe('UNI5 Slice 5A · View 4 (ball_tree) — Codebook Geometry & Ball-Tree 
       const decoded = pickHitToUniCell(hit, 'ball_tree');
       expect(decoded).not.toBeNull();
       expect(decoded!.partId).toBe(plateId);
-      expect(decoded!.treeDepth).toBe(6);
+      if (plateId === 'ball_membership') {
+        // ball_membership omits static tapIndex/depth= so per-row depth inspection uses cell.row (0..8)
+        expect(plateBox!.tapIndex).toBeUndefined();
+        expect(decoded!.treeDepth).toBeNull();
+      } else {
+        expect(decoded!.treeDepth).toBe(6);
+      }
       expect(decoded!.row).not.toBeNull();
       expect(decoded!.col).not.toBeNull();
       expect(decoded!.row!).toBeGreaterThanOrEqual(0);
       expect(decoded!.row!).toBeLessThan(plateBox!.gridRows!);
       expect(decoded!.col!).toBeGreaterThanOrEqual(0);
       expect(decoded!.col!).toBeLessThan(plateBox!.gridCols!);
+    }
+
+    // Verify per-row depth raycast on ball_membership decodes distinct row indices cleanly
+    const memberBox = scene.pickBoxes.find((pb) => pb.partId === 'ball_membership')!;
+    const mCx = (memberBox.min[0] + memberBox.max[0]) * 0.5;
+    const mSpanZ = memberBox.max[2] - memberBox.min[2];
+    const gridRows = memberBox.gridRows!;
+    for (const targetDepthRow of [0, 3, 7]) {
+      const z = memberBox.min[2] + ((targetDepthRow + 0.5) / gridRows) * mSpanZ;
+      const rowHit = pickMacroBay(
+        { origin: [mCx, memberBox.max[1] + 5.0, z], direction: [0, -1, 0] },
+        scene.pickBoxes,
+        [],
+      );
+      expect(rowHit?.partId).toBe('ball_membership');
+      const rowDecoded = pickHitToUniCell(rowHit, 'ball_tree')!;
+      expect(rowDecoded.treeDepth).toBeNull();
+      expect(rowDecoded.row).toBe(targetDepthRow);
     }
   });
 });

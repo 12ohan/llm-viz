@@ -74,7 +74,8 @@ import {
   expandPackedImageHiddenStates,
   stripGenerationRowMarkers,
 } from '../codec';
-import { embedUniGenTokens, embedUniTextTokens } from '../forward';
+import { embedUniGenTokens, embedUniTextTokens, runUniForwardPass } from '../forward';
+import { cropUniKvCache, extractRowPastKvs } from '../kvCache';
 import {
   applyEditDualCfgLogits,
   applyT2iCfgLogits,
@@ -467,20 +468,14 @@ function buildGenerationOutputEditScene(
     const uncond = headLogits.perBranchGenLogits[0] ?? expandedLogits;
     const cond = headLogits.perBranchGenLogits[1] ?? expandedLogits;
     const guided = headLogits.guidedGenLogits ?? applyT2iCfgLogits(uncond, cond, wTxt);
-    mixerLegacyFull = applyEditDualCfgLogits(uncond, uncond, cond, 'legacy', wTxt, wImg);
-    mixerIndependentFull = applyEditDualCfgLogits(
-      uncond,
-      uncond,
-      cond,
-      'independent',
-      wTxt,
-      wImg > 0 ? wImg : 1.0,
-    );
+    // Exact T2I guidance (wImg = 0): legacy and independent both reduce to uncond + wTxt * (cond - uncond)
+    mixerLegacyFull = applyEditDualCfgLogits(uncond, uncond, cond, 'legacy', wTxt, 0);
+    mixerIndependentFull = applyEditDualCfgLogits(uncond, uncond, cond, 'independent', wTxt, 0);
     mixerIp2pFull = guided;
     mixerLabels = [
-      `T2I CFG · legacy (w=${wTxt})`,
-      `T2I CFG · independent (w=${wTxt})`,
-      `T2I CFG · Guided Output (w=${wTxt})`,
+      `T2I CFG · legacy (w_txt=${wTxt}, w_img=0)`,
+      `T2I CFG · independent (w_txt=${wTxt}, w_img=0)`,
+      `T2I CFG · Guided Output (w_txt=${wTxt})`,
     ];
   } else {
     mixerLegacyFull = expandedLogits;
@@ -1262,15 +1257,57 @@ function buildGenerationOutputEditScene(
 // UNDERSTANDING / GROUNDING PIPELINE SCENE
 // ============================================================================
 
+const EMPTY_TRACE_LAYERS: ReadonlySet<number> = new Set<number>();
+
 function resolveCausalTailLogits(
   ctx: UniResolvedSessionContext,
   vocabSize: number,
 ): Float32Array {
+  const curStartPos = ctx.record.positionIds[0] ?? 0;
   let cursorId = ctx.record.parentRecordId;
   let hops = 0;
   while (cursorId !== null && hops < 128) {
     const rec = ctx.session.getRecord(cursorId);
     if (!rec) break;
+    const recStartPos = rec.positionIds[0] ?? 0;
+    // Multi-block Understanding: when stepping back into the immediately preceding committed
+    // text_block_step (whose start position strictly precedes the active block), reconstruct
+    // that block's causal commit tail logits directly (even when its denoising record has
+    // maskMode === 'bidirectional'), matching UniSession.finalizeTextBlockCommit at 0 ULP.
+    if (
+      rec.kind === 'text_block_step' &&
+      rec.textState &&
+      recStartPos < curStartPos
+    ) {
+      if (rec.maskMode === 'causal') {
+        const head = ctx.session.reconstructStepHeadLogits(rec.recordId);
+        const logits = head.perBranchTextLogits[0];
+        if (logits && logits.length >= vocabSize) {
+          return new Float32Array(logits.subarray(logits.length - vocabSize, logits.length));
+        }
+      } else if (recStartPos <= ctx.branch.prefixCache.seqLen) {
+        const { pastKvs, pastRouting } = extractRowPastKvs(
+          cropUniKvCache(ctx.branch.prefixCache, recStartPos),
+          0,
+        );
+        const commit = runUniForwardPass(ctx.bundle.core, {
+          tokenIds: rec.textState.tokenIds,
+          maskMode: 'causal',
+          useCache: false,
+          prefillMode: 'hf_faithful',
+          downstreamTarget: 'u',
+          pastKvs,
+          pastRouting,
+          computeTextHead: true,
+          computeGenHead: false,
+          retainedTraceLayers: EMPTY_TRACE_LAYERS,
+        });
+        const logits = commit.textLogits;
+        if (logits && logits.length >= vocabSize) {
+          return new Float32Array(logits.subarray(logits.length - vocabSize, logits.length));
+        }
+      }
+    }
     if (rec.kind === 'prefill' || rec.maskMode === 'causal') {
       const head = ctx.session.reconstructStepHeadLogits(rec.recordId);
       const logits = head.perBranchTextLogits[0];
@@ -1450,26 +1487,14 @@ function buildUnderstandingOutputScene(
   }
 
   const shiftedLogits = new Float32Array(blockRows * vocabSize);
-  if (record.kind === 'prefill') {
-    shiftedLogits.set(prevLogits.subarray(0, vocabSize), 0);
-    const availRows = Math.floor(fwdLogits.length / vocabSize);
-    for (let j = 1; j < blockRows; j++) {
-      const srcRow = Math.min(j - 1, Math.max(0, availRows - 1));
-      shiftedLogits.set(
-        fwdLogits.subarray(srcRow * vocabSize, (srcRow + 1) * vocabSize),
-        j * vocabSize,
-      );
-    }
-  } else {
-    shiftedLogits.set(prevLogits.subarray(0, vocabSize), 0);
-    const availRows = Math.floor(fwdLogits.length / vocabSize);
-    for (let j = 1; j < blockRows; j++) {
-      const srcRow = Math.min(j - 1, Math.max(0, availRows - 1));
-      shiftedLogits.set(
-        fwdLogits.subarray(srcRow * vocabSize, (srcRow + 1) * vocabSize),
-        j * vocabSize,
-      );
-    }
+  shiftedLogits.set(prevLogits.subarray(0, vocabSize), 0);
+  const availRows = Math.floor(fwdLogits.length / vocabSize);
+  for (let j = 1; j < blockRows; j++) {
+    const srcRow = Math.min(j - 1, Math.max(0, availRows - 1));
+    shiftedLogits.set(
+      fwdLogits.subarray(srcRow * vocabSize, (srcRow + 1) * vocabSize),
+      j * vocabSize,
+    );
   }
 
   const shiftedProbs = softmaxRows(shiftedLogits, blockRows, vocabSize);

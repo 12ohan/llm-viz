@@ -49,3 +49,124 @@ export * from './ballTreeScene';
 export * from './refinementCanvasScene';
 export * from './outputEditScene';
 export * from './opdExplorerScene';
+
+import type { UniSession } from '../session';
+import { buildUniBallTreeScene } from './ballTreeScene';
+import { buildUniJointAttnScene } from './jointAttnCutaway';
+import { buildUniMacroScene } from './macroScene';
+import { buildUniOpdExplorerScene } from './opdExplorerScene';
+import { buildUniOutputEditScene } from './outputEditScene';
+import { buildUniRefinementCanvasScene } from './refinementCanvasScene';
+import {
+  DEFAULT_UNI_SPATIAL_FOCUS_STATE,
+  type UniSpatialFocusState,
+  type UniSpatialScene,
+  type UniSpatialViewMode,
+} from './types';
+import { buildUniVisualInputScene } from './visualInputScene';
+
+/**
+ * Unified typed scene dispatcher routing all 7 NLD-Uni spatial views (`macro`, `visual_input`,
+ * `joint_attn`, `ball_tree`, `refinement`, `output_edit`, `opd_readonly`) from a shared focus state.
+ *
+ * Views `macro`, `ball_tree`, and `opd_readonly` support `session === null`; session-backed views
+ * (`visual_input`, `joint_attn`, `refinement`, `output_edit`) require an active `UniSession`.
+ */
+export function buildUniSpatialScene(
+  viewMode: UniSpatialViewMode,
+  session: UniSession | null,
+  focusPatch?: Partial<UniSpatialFocusState>,
+): UniSpatialScene {
+  const focus: UniSpatialFocusState = focusPatch
+    ? { ...DEFAULT_UNI_SPATIAL_FOCUS_STATE, ...focusPatch }
+    : DEFAULT_UNI_SPATIAL_FOCUS_STATE;
+
+  switch (viewMode) {
+    case 'macro':
+      return buildUniMacroScene(session, {
+        ...(focus.executionViewId !== undefined ? { executionViewId: focus.executionViewId } : {}),
+        prefillMode: focus.prefillMode,
+        selectedLayerIndex: focus.selectedLayerIndex,
+        hoveredPartId: focus.hoveredPartId,
+        ...(focus.recordId !== undefined ? { recordId: focus.recordId } : {}),
+      });
+
+    case 'visual_input': {
+      if (!session) {
+        throw new RangeError('buildUniSpatialScene("visual_input") requires a live UniSession');
+      }
+      return buildUniVisualInputScene(session, {
+        ...(focus.scenePresetId !== undefined ? { scenePresetId: focus.scenePresetId } : {}),
+        ...(focus.gainPresetId !== undefined ? { gainPresetId: focus.gainPresetId } : {}),
+        ...(focus.includeDiscreteStream !== undefined
+          ? { includeDiscreteStream: focus.includeDiscreteStream }
+          : {}),
+        ...(focus.recordId !== undefined ? { recordId: focus.recordId } : {}),
+        hoveredCell: focus.hoveredCell,
+      });
+    }
+
+    case 'joint_attn': {
+      if (!session) {
+        throw new RangeError('buildUniSpatialScene("joint_attn") requires a live UniSession');
+      }
+      return buildUniJointAttnScene(session, {
+        layerIndex: focus.jointLayerIndex,
+        batchRow: focus.batchRow,
+        prefillMode: focus.prefillMode,
+        selectedQHead: focus.selectedQHead,
+        selectedTokenRow: focus.selectedTokenRow,
+        ...(focus.recordId !== undefined ? { recordId: focus.recordId } : {}),
+        hoveredCell: focus.hoveredCell,
+      });
+    }
+
+    case 'ball_tree':
+      return buildUniBallTreeScene(session, {
+        selectedCodeId: focus.selectedCodeId,
+        refinementSteps: focus.refinementSteps,
+        stageIndex: focus.stageIndex,
+        showProductionD17Comparison: focus.showProductionD17Comparison,
+        ...(focus.recordId !== undefined ? { recordId: focus.recordId } : {}),
+        hoveredCell: focus.hoveredCell,
+      });
+
+    case 'refinement': {
+      if (!session) {
+        throw new RangeError('buildUniSpatialScene("refinement") requires a live UniSession');
+      }
+      return buildUniRefinementCanvasScene(session, {
+        ...(focus.recordId !== undefined ? { recordId: focus.recordId } : {}),
+        selectedGridCell: focus.selectedGridCell,
+        showStratifiedOrder: focus.showStratifiedOrder,
+        cfgBranchRow: focus.cfgBranchRow,
+        hoveredCell: focus.hoveredCell,
+      });
+    }
+
+    case 'output_edit': {
+      if (!session) {
+        throw new RangeError('buildUniSpatialScene("output_edit") requires a live UniSession');
+      }
+      return buildUniOutputEditScene(session, {
+        ...(focus.recordId !== undefined ? { recordId: focus.recordId } : {}),
+        ...(focus.editGuidanceMode !== undefined
+          ? { editGuidanceMode: focus.editGuidanceMode }
+          : {}),
+        cropToSource: focus.cropToSource,
+        showPaddingLockOverlay: focus.showPaddingLockOverlay,
+        hoveredCell: focus.hoveredCell,
+      });
+    }
+
+    case 'opd_readonly':
+      return buildUniOpdExplorerScene(session, {
+        seed: focus.opdSeed,
+        r: focus.opdR,
+        steps: focus.opdSteps,
+        seqLen: focus.opdSeqLen,
+        selectedBay: focus.opdSelectedBay,
+        hoveredCell: focus.hoveredCell,
+      });
+  }
+}

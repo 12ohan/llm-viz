@@ -425,3 +425,60 @@ export interface UniOpdSceneOptions {
   readonly selectedBay?: UniOpdBayFocus;
   readonly hoveredCell?: UniPickIdentity | null;
 }
+
+/** Unified focus state passed to `buildUniSpatialScene` across all 7 NLD-Uni spatial views. */
+export interface UniSpatialFocusState {
+  readonly executionViewId?: UniExecutionViewId;
+  readonly prefillMode: UniElasticPrefillMode;
+  readonly selectedLayerIndex: number | null;
+  readonly jointLayerIndex: number;
+  readonly batchRow: number;
+  readonly selectedQHead: number;
+  readonly selectedTokenRow: number;
+  readonly scenePresetId?: UniScenePresetId;
+  readonly gainPresetId?: UniGainPresetId;
+  readonly includeDiscreteStream?: boolean;
+  readonly selectedCodeId: number;
+  readonly refinementSteps: UniRefinementStepPreset;
+  readonly stageIndex: number;
+  readonly showProductionD17Comparison: boolean;
+  readonly selectedGridCell: number | null;
+  readonly showStratifiedOrder: boolean;
+  readonly cfgBranchRow: number;
+  readonly editGuidanceMode?: UniEditGuidanceMode;
+  readonly cropToSource: boolean;
+  readonly showPaddingLockOverlay: boolean;
+  readonly opdSeed: number;
+  readonly opdR: number;
+  readonly opdSteps: number;
+  readonly opdSeqLen: number;
+  readonly opdSelectedBay: UniOpdBayFocus;
+  readonly recordId?: string;
+  readonly hoveredPartId: string | null;
+  readonly hoveredCell: UniPickIdentity | null;
+}
+
+export const DEFAULT_UNI_SPATIAL_FOCUS_STATE: UniSpatialFocusState = Object.freeze({
+  prefillMode: 'elastic_pruned',
+  selectedLayerIndex: 17,
+  jointLayerIndex: 17,
+  batchRow: 0,
+  selectedQHead: 0,
+  selectedTokenRow: 0,
+  selectedCodeId: 42,
+  refinementSteps: 4,
+  stageIndex: 2,
+  showProductionD17Comparison: true,
+  selectedGridCell: 0,
+  showStratifiedOrder: true,
+  cfgBranchRow: 0,
+  cropToSource: true,
+  showPaddingLockOverlay: true,
+  opdSeed: 0x4f504431,
+  opdR: 0.9,
+  opdSteps: 40,
+  opdSeqLen: 1024,
+  opdSelectedBay: 'both',
+  hoveredPartId: null,
+  hoveredCell: null,
+});
