@@ -25,7 +25,7 @@
 
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -603,15 +603,29 @@ describe('Dory1.0-4B Backbone — Independent PyTorch 2.15.0 Parity & DORY1 Gate
     const doryFiles = collectTsFilesRecursively(doryRoot);
     expect(doryFiles.length).toBeGreaterThanOrEqual(11);
 
-    const forbiddenImportPatterns = [
-      /from\s+['"][^'"]*(?:ui\/(?:controls|overlay|memoryChart)|scene\/(?:spine|sheetInspector)|model\/(?:spec|memory|state|rcPlayback)|math\/(?:gqaSim|mambaSim|moeSim|hybridFlow|incrementalDecode)|story\/walkthrough|src\/main|\.\.\/main)['"]/,
-      /from\s+['"][^'"]*(?:twotower|diffusion|uni)(?:\/|['"])/,
-    ];
+    const forbiddenResolvedRelRe =
+      /^src\/(?:ui\/(?:controls|overlay|memoryChart)|scene\/(?:spine|sheetInspector)|model\/(?:spec|memory|state|rcPlayback)|math\/(?:gqaSim|mambaSim|moeSim|hybridFlow|incrementalDecode)|story\/walkthrough|main|twotower(?:\/|$)|diffusion(?:\/|$)|uni(?:\/|$))(?:$|\.)/;
+    const importSpecRe = /\b(?:import|export)\s+(?:type\s+)?(?:[\s\S]*?\s+from\s+)?['"]([^'"]+)['"]/g;
+
     for (const filePath of doryFiles) {
       const src = readFileSync(filePath, 'utf-8');
       expect(src, `Math.random forbidden in ${filePath}`).not.toMatch(/Math\.random\s*\(/);
-      for (const re of forbiddenImportPatterns) {
-        expect(src, `D4 forbidden import in ${filePath}`).not.toMatch(re);
+      for (const match of src.matchAll(importSpecRe)) {
+        const spec = match[1]!;
+        if (!spec.startsWith('.')) {
+          expect(spec, `Forbidden bare/node specifier '${spec}' in ${filePath}`).not.toMatch(
+            /^node:|^(?:twotower|diffusion|uni)\b/,
+          );
+          continue;
+        }
+        const resolvedRel = relative(process.cwd(), resolve(dirname(filePath), spec)).replace(
+          /\\/g,
+          '/',
+        );
+        expect(
+          resolvedRel,
+          `D4 forbidden import '${spec}' -> '${resolvedRel}' in ${filePath}`,
+        ).not.toMatch(forbiddenResolvedRelRe);
       }
     }
   });

@@ -280,7 +280,7 @@ export function focusStateToViewOptions<V extends DorySpatialViewMode>(
     case 'bookends': {
       const opts: DoryBookendsSceneOptions = {
         ...(focus.selectedTokenOffset !== null
-          ? { selectedTokenPos: focus.selectedTokenOffset }
+          ? { selectedTokenOffset: focus.selectedTokenOffset }
           : {}),
         selectedVocabTokenId: focus.selectedVocabTokenId ?? null,
         selectedCheckpointFormat: focus.selectedCheckpointFormat,
@@ -329,17 +329,8 @@ export function buildDorySpatialScene(
       return buildDoryKvCompareScene(ctx, focusStateToViewOptions('kv_compare', resolvedFocus));
     case 'self_spec':
       return buildDorySelfSpecScene(ctx, focusStateToViewOptions('self_spec', resolvedFocus));
-    case 'bookends': {
-      const baseOpts = focusStateToViewOptions('bookends', resolvedFocus);
-      const bookendOpts: DoryBookendsSceneOptions =
-        resolvedFocus.selectedTokenOffset !== null
-          ? {
-              ...baseOpts,
-              selectedTokenPos: ctx.record.startPos + resolvedFocus.selectedTokenOffset,
-            }
-          : baseOpts;
-      return buildDoryBookendsScene(ctx, bookendOpts);
-    }
+    case 'bookends':
+      return buildDoryBookendsScene(ctx, focusStateToViewOptions('bookends', resolvedFocus));
     default: {
       const exhaustive: never = viewMode;
       throw new RangeError(`Unknown DorySpatialViewMode: '${String(exhaustive)}'.`);

@@ -241,9 +241,9 @@ export const DORY_TOUR_BEATS: readonly DoryTourBeatSpec[] = Object.freeze([
       selectedPhysicalLayerIdx: 0,
       selectedLoopIteration: 0,
       selectedCheckpointFormat: 'bf16',
-      hoveredPartId: 'bookend_embeddings',
+      hoveredPartId: 'bookend_embed_weight',
     },
-    highlightPartId: 'bookend_embeddings',
+    highlightPartId: 'bookend_embed_weight',
     cameraOverride: { azimuthDeg: -28, elevationDeg: 26 },
   }),
 
@@ -710,7 +710,7 @@ export const DORY_TOUR_BEATS: readonly DoryTourBeatSpec[] = Object.freeze([
       expectedCacheRole: 'spec_verify_deep',
     },
     focusPatch: {
-      selectedVerifyOffset: 0,
+      selectedVerifyOffset: 1,
       selfSpecAttentionLayerIdx: 16,
       selectedPhysicalLayerIdx: 56,
       selectedLoopIteration: 0,
@@ -755,9 +755,9 @@ export const DORY_TOUR_BEATS: readonly DoryTourBeatSpec[] = Object.freeze([
       selectedCheckpointFormat: 'nvfp4',
       selectedPhysicalLayerIdx: 70,
       selectedLoopIteration: 0,
-      hoveredPartId: 'bookend_lm_head',
+      hoveredPartId: 'bookend_ckpt_nvfp4',
     },
-    highlightPartId: 'bookend_lm_head',
+    highlightPartId: 'bookend_ckpt_nvfp4',
     cameraOverride: { azimuthDeg: -26, elevationDeg: 27 },
   }),
 
@@ -796,9 +796,9 @@ export const DORY_TOUR_BEATS: readonly DoryTourBeatSpec[] = Object.freeze([
       selectedCheckpointFormat: 'bf16',
       selectedPhysicalLayerIdx: 71,
       selectedLoopIteration: 0,
-      hoveredPartId: 'bookend_tbptl_readonly',
+      hoveredPartId: 'bookend_tbptl_stop_grad',
     },
-    highlightPartId: 'bookend_tbptl_readonly',
+    highlightPartId: 'bookend_tbptl_stop_grad',
     cameraOverride: { azimuthDeg: -28, elevationDeg: 26 },
   }),
 ]);
@@ -990,10 +990,28 @@ export function validateDoryExecutionCoord(
           `Coord #8 (writerLoop=${wl}) exceeds kLoops=${validKLoops} for recurrent p=${p}.`,
         );
       }
-      if (policyValid && co.policy === 'per_loop' && loopInt && t >= 1 && wl !== t) {
+      if (isAttn === false && loopInt && t >= 1 && wl !== t) {
         errors.push(
-          `Coord #8 (writerLoop=${wl}) must equal loopIteration=${t} under policy='per_loop' (p=${p}).`,
+          `Coord #8 (writerLoop=${wl}) must equal loopIteration=${t} for recurrent MLP sublayer p=${p}.`,
         );
+      } else if (isAttn === true && policyValid && loopInt && t >= 1) {
+        if (co.policy === 'per_loop' && wl !== t) {
+          errors.push(
+            `Coord #8 (writerLoop=${wl}) must equal loopIteration=${t} under policy='per_loop' (p=${p}).`,
+          );
+        } else if (co.policy === 'last_loop') {
+          if (validKLoops !== undefined) {
+            if (wl !== t && wl !== validKLoops) {
+              errors.push(
+                `Coord #8 (writerLoop=${wl}) must equal loopIteration=${t} or kLoops=${validKLoops} under policy='last_loop' for recurrent attention p=${p}.`,
+              );
+            }
+          } else if (wl < t) {
+            errors.push(
+              `Coord #8 (writerLoop=${wl}) cannot be less than loopIteration=${t} under policy='last_loop' for recurrent attention p=${p}.`,
+            );
+          }
+        }
       }
     }
 
@@ -1667,6 +1685,11 @@ function buildLiveBeatMetrics(args: {
       const cfArgMax = argmaxIndex(cf.scaledLogits, 0, config.vocabSize);
       const finalArgMax = argmaxIndex(record.lastTokenScaledLogits, 0, config.vocabSize);
 
+      const exitAnchorCos = m4?.anchorCosine ?? 0;
+      const exitAnchorAngleDeg =
+        (Math.acos(Math.max(-1, Math.min(1, exitAnchorCos))) * 180) / Math.PI;
+      const entryAnchorAngleDeg = m4?.entryAnchorJacobian.angleDegrees ?? 0;
+
       metrics.push(
         {
           label: '||u_1 = N(2x)||_2 -> ||s_4||_2',
@@ -1676,13 +1699,13 @@ function buildLiveBeatMetrics(args: {
         },
         {
           label: 'Anchor cos(s_4, x) & theta_4',
-          value: `${fmtSigned(m4?.anchorCosine ?? 0, 4)} (${(m4?.entryAnchorJacobian.angleDegrees ?? 0).toFixed(1)} deg)`,
+          value: `${fmtSigned(exitAnchorCos, 4)} (${exitAnchorAngleDeg.toFixed(1)} deg)`,
           tone: 'gold',
           discrepancyId: 'DR12',
         },
         {
           label: 'Local ||J_N||_2 (Boundary Only)',
-          value: `${(m4?.entryAnchorJacobian.epsStabilizedJacobianNorm ?? 0.5).toFixed(4)} (${m4?.entryAnchorJacobian.isLocalContractiveRegime ? '<1 local' : '>=1'})`,
+          value: `${(m4?.entryAnchorJacobian.epsStabilizedJacobianNorm ?? 0.5).toFixed(4)} @ theta_entry4=${entryAnchorAngleDeg.toFixed(1)} deg (${m4?.entryAnchorJacobian.isLocalContractiveRegime ? '<1 local' : '>=1'})`,
           tone: 'warn',
         },
         {
@@ -2375,7 +2398,7 @@ export function createDoryGuidedTour(options: DoryTourOptions = {}): DoryGuidedT
     ): DoryTourState {
       if (restoreState !== undefined) {
         savedRestoreState = cloneRestoreState(restoreState);
-      } else if (status === 'idle') {
+      } else if (status !== 'active') {
         savedRestoreState = null;
       }
       currentBeatIndex = clampBeatIndex(initialBeatIndex);

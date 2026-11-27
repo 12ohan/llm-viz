@@ -1020,7 +1020,9 @@ export interface DorySelfSpecSceneOptions {
 }
 
 export interface DoryBookendsSceneOptions {
-  /** Focused sequence position for embedding / LM-head inspection. */
+  /** Focused chunk-relative token offset (`0..seqLen - 1`) inside the target record (takes precedence over `selectedTokenPos`). */
+  readonly selectedTokenOffset?: number;
+  /** Focused absolute sequence position for embedding / LM-head inspection (used when `selectedTokenOffset` is omitted). */
   readonly selectedTokenPos?: number;
   /** Focused vocabulary token ID (`0..V-1`) for untied `lm_head` & `logit_scale` inspection. */
   readonly selectedVocabTokenId?: number | null;

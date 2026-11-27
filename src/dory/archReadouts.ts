@@ -148,6 +148,11 @@ const VALID_CHECKPOINT_IDS: ReadonlySet<DoryCheckpointFormatId> = new Set([
   'q5_k_m',
 ]);
 
+const VALID_KV_CACHE_MODES: ReadonlySet<DoryKvCacheMode> = new Set([
+  'per_loop',
+  'last_loop',
+]);
+
 // ============================================================================
 // DUAL SI / IEC BYTE FORMATTER
 // ============================================================================
@@ -516,12 +521,23 @@ export function verifyDoryProductionKvSInvariantRatio(
   readonly invariantVerified: boolean;
 } {
   const k = validateDoryRecurrentLoops(kLoops);
+  if (seqLengths.length === 0) {
+    throw new RangeError(
+      'verifyDoryProductionKvSInvariantRatio requires at least one sequence length >= 1.',
+    );
+  }
+
   const expectedRatio = (4 + 5 * k) / 9;
   let maxAbsDeviation = 0;
+  let checkedCount = 0;
 
   for (let i = 0; i < seqLengths.length; i += 1) {
     const s = seqLengths[i]!;
-    if (s < 1) continue;
+    if (!Number.isInteger(s) || s < 1) {
+      throw new RangeError(
+        `Invalid sequence length seqLengths[${i}]=${String(s)}: expected integer >= 1.`,
+      );
+    }
     const pl = computeProductionKvBytesBf16(s, k, 'per_loop');
     const ll = computeProductionKvBytesBf16(s, k, 'last_loop');
     const observed = pl.totalBytes / ll.totalBytes;
@@ -529,13 +545,14 @@ export function verifyDoryProductionKvSInvariantRatio(
     if (dev > maxAbsDeviation) {
       maxAbsDeviation = dev;
     }
+    checkedCount += 1;
   }
 
   return Object.freeze({
     kLoops: k,
     expectedRatio,
     maxAbsDeviation,
-    invariantVerified: maxAbsDeviation <= 1e-15,
+    invariantVerified: checkedCount > 0 && maxAbsDeviation <= 1e-15,
   });
 }
 
@@ -971,6 +988,13 @@ export function buildDoryArchReadouts(
   const activeKLoops = validateDoryRecurrentLoops(
     input.activeKLoops ?? DORY_PRODUCTION_SPEC.defaultRecurrentLoops,
   );
+  const activeKvCacheMode: DoryKvCacheMode =
+    input.activeKvCacheMode ?? DORY_PRODUCTION_SPEC.defaultKvCacheMode;
+  if (!VALID_KV_CACHE_MODES.has(activeKvCacheMode)) {
+    throw new RangeError(
+      `Invalid DoryKvCacheMode: ${String(activeKvCacheMode)}.`,
+    );
+  }
   const selectedCheckpointFormat: DoryCheckpointFormatId =
     input.selectedCheckpointFormat ?? 'bf16';
   if (!VALID_CHECKPOINT_IDS.has(selectedCheckpointFormat)) {
@@ -993,6 +1017,8 @@ export function buildDoryArchReadouts(
   return Object.freeze({
     readOnly: true,
     zeroFakeQuantToggles: true,
+    activeKLoops,
+    activeKvCacheMode,
     selectedCheckpointFormat,
     checkpoints,
     allSafetensorsZeroByteDiff: true,

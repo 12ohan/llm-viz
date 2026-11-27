@@ -37,7 +37,7 @@
  */
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { relative, resolve } from 'node:path';
+import { dirname, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { normalize3, sub3 } from '../src/render/camera';
@@ -678,8 +678,12 @@ describe('Gate 5 archReadouts.ts — Depth Scaling, Exact 1 -> 256K BF16 KV & S-
       }
     }
 
-    // Invalid k throws RangeError
+    // Invalid k or empty / < 1 seqLengths throw RangeError (guards against vacuous true!)
     expect(() => verifyDoryProductionKvSInvariantRatio(0)).toThrow(RangeError);
+    expect(() => verifyDoryProductionKvSInvariantRatio(4, [])).toThrow(RangeError);
+    expect(() => verifyDoryProductionKvSInvariantRatio(4, [0])).toThrow(RangeError);
+    expect(() => verifyDoryProductionKvSInvariantRatio(4, [-4, 0])).toThrow(RangeError);
+    expect(() => verifyDoryProductionKvSInvariantRatio(4, [1.5])).toThrow(RangeError);
     expect(() => buildDoryProductionKvCurve(-2, 'per_loop')).toThrow(RangeError);
     expect(() => buildDoryProductionKvCurve(2.5, 'last_loop')).toThrow(RangeError);
   });
@@ -815,15 +819,18 @@ describe('Gate 5 archReadouts.ts — D10 Memory Bounds, DR1–DR24 Filter & READ
     expect(specResult.discrepancyRefs).toContain('DR13');
     expect(specResult.discrepancyRefs).toContain('DR23');
 
-    // Full unified readouts bundle
+    // Full unified readouts bundle (validates & surfaces activeKLoops and activeKvCacheMode)
     const bundle = buildDoryArchReadouts({
       activeKLoops: 4,
+      activeKvCacheMode: 'last_loop',
       selectedCheckpointFormat: 'nvfp4',
       discrepancyFilter: { onlyBrowserGuards: true },
     });
     expect(bundle.readOnly).toBe(true);
     expect(bundle.zeroFakeQuantToggles).toBe(true);
     expect(bundle.allSafetensorsZeroByteDiff).toBe(true);
+    expect(bundle.activeKLoops).toBe(4);
+    expect(bundle.activeKvCacheMode).toBe('last_loop');
     expect(bundle.selectedCheckpointFormat).toBe('nvfp4');
     expect(bundle.activeSInvariantRatio).toBeCloseTo(24 / 9, 14);
     expect(bundle.swaKneeSlopeDropFactor).toBe(4);
@@ -836,6 +843,9 @@ describe('Gate 5 archReadouts.ts — D10 Memory Bounds, DR1–DR24 Filter & READ
 
     expect(() =>
       buildDoryArchReadouts({ selectedCheckpointFormat: 'fp3' as DoryCheckpointFormatId }),
+    ).toThrow(RangeError);
+    expect(() =>
+      buildDoryArchReadouts({ activeKvCacheMode: 'hybrid_invalid' as 'per_loop' }),
     ).toThrow(RangeError);
     expect(() => buildDoryArchReadouts({ activeKLoops: 0 })).toThrow(RangeError);
   });
@@ -1177,6 +1187,48 @@ describe('Gate 5 View 7 (bookendsScene.ts) — Untied Bookends, 4-Stage Pipeline
     const anchorGradHover = pickAndHover('bookend_tbptl_anchor_grad');
     expect(anchorGradHover.activeCellPopover!.badge).toBe(DORY_TBPTL_READONLY_BADGE);
     expect(anchorGradHover.activeCellPopover!.equation).toContain('+x');
+
+    // 7. Backbone bridge prism & exhaustive check across EVERY pickBox in View 7
+    const bridgeHover = pickAndHover('bookend_backbone_bridge');
+    expect(bridgeHover.activeCellPopover).not.toBeNull();
+    expect(bridgeHover.activeCellPopover!.badge).toContain('72 PHYSICAL SUBLAYERS');
+    expect(bridgeHover.activeCellPopover!.equation).toContain('112L');
+
+    for (const box of baseScene.pickBoxes) {
+      expect(box.partId, 'Every View 7 PickBox must declare a partId').toBeDefined();
+      const hoverScene = buildDoryBookendsScene(session, {
+        selectedCheckpointFormat: 'mxfp8',
+        hoveredCell: {
+          viewMode: 'bookends',
+          physicalLayerIdx: null,
+          pairedLayerIdx: null,
+          executedLayerIdx: null,
+          stage: 'bookend',
+          sublayerKind: null,
+          loopIteration: null,
+          partId: box.partId!,
+          tensorKey: box.tensorKey ?? null,
+          qHeadIndex: null,
+          kvHeadIndex: null,
+          rotaryPlane: null,
+          kvBankSlotId: null,
+          kvBankKind: null,
+          kvPolicy: null,
+          cacheRole: null,
+          specOffset: null,
+          tokenIndex: null,
+          absTokenPos: null,
+          row: 0,
+          col: 0,
+          modelWeightId: PARAMS.modelWeightId,
+          semanticTag: box.semanticTag ?? null,
+        },
+      });
+      expect(
+        hoverScene.activeCellPopover,
+        `View 7 PickBox '${box.partId}' must return a non-null hover popover`,
+      ).not.toBeNull();
+    }
   });
 });
 
@@ -1249,6 +1301,8 @@ describe('Gate 5 Unified 7-View Dispatcher (`src/dory/scene/index.ts`) — build
     expect(focusStateToViewOptions('kv_compare', customFocus).partitionMode).toBe('one_by_one');
     expect(focusStateToViewOptions('self_spec', customFocus).selectedVerifyOffset).toBe(1);
     expect(focusStateToViewOptions('bookends', customFocus).selectedCheckpointFormat).toBe('nvfp4');
+    expect(focusStateToViewOptions('bookends', customFocus).selectedTokenOffset).toBe(3);
+    expect(focusStateToViewOptions('bookends', customFocus).selectedTokenPos).toBeUndefined();
     expect(() =>
       focusStateToViewOptions('bogus' as DorySpatialViewMode, customFocus),
     ).toThrow(RangeError);
@@ -1344,13 +1398,33 @@ describe('Gate 5 Unified 7-View Dispatcher (`src/dory/scene/index.ts`) — build
       }
     }
 
-    // Verify bookends selectedTokenOffset -> ctx.record.startPos + offset translation on decode step
+    // Verify bookends selectedTokenOffset matches identically via BOTH buildDorySpatialScene AND
+    // direct DORY_SCENE_BUILDERS.bookends(ctx, focusStateToViewOptions('bookends', focus)) on
+    // non-zero startPos records (decode_step AND multi-token chunk / spec_cycle!)
     const decodeBookends = buildDorySpatialScene(stdSession, 'bookends', {
       selectedTokenOffset: 0,
       recordId: decodeRec.recordId,
     });
     expect(decodeBookends.bookendsMetadata!.selectedTokenPos).toBe(decodeRec.startPos);
     expect(decodeBookends.bookendsMetadata!.selectedTokenOffset).toBe(0);
+
+    const lastLoopChunkRec = lastLoopSession.getActiveRecord()!; // chunk [4..11], startPos = 4, seqLen = 8
+    expect(lastLoopChunkRec.startPos).toBe(4);
+    const chunkFocus = resolveDorySpatialFocus({
+      selectedTokenOffset: 3,
+      recordId: lastLoopChunkRec.recordId,
+    });
+    const chunkCtx = resolveDorySessionContext(lastLoopSession, lastLoopChunkRec.recordId);
+    const viaDispatcher = buildDorySpatialScene(chunkCtx, 'bookends', chunkFocus);
+    const viaDirectBuilder = DORY_SCENE_BUILDERS.bookends(
+      chunkCtx,
+      focusStateToViewOptions('bookends', chunkFocus),
+    );
+    expect(viaDispatcher.bookendsMetadata!.selectedTokenOffset).toBe(3);
+    expect(viaDispatcher.bookendsMetadata!.selectedTokenPos).toBe(7);
+    expect(viaDirectBuilder.bookendsMetadata!.selectedTokenOffset).toBe(3);
+    expect(viaDirectBuilder.bookendsMetadata!.selectedTokenPos).toBe(7);
+    expect(viaDirectBuilder.atlasKey).toBe(viaDispatcher.atlasKey);
 
     // Invalid viewMode throws RangeError
     expect(() =>
@@ -1480,6 +1554,20 @@ describe('Gate 5 4-Act Guided Walkthrough (`src/dory/story/walkthrough.ts`) — 
       expect(scene.viewMode).toBe(beat.viewMode);
       expect(scene.modelWeightId).toBe(PARAMS.modelWeightId);
       assertGate5SceneHealth(scene, `tour.beat[${i}].${beat.beatId}`);
+
+      // Every beat's highlightPartId (and hoveredPartId) must resolve to an actual PickBox in scene.pickBoxes
+      if (beat.highlightPartId !== null) {
+        expect(
+          scene.pickBoxes.some((pb) => pb.partId === beat.highlightPartId),
+          `Beat #${i} (${beat.beatId}) highlightPartId='${beat.highlightPartId}' missing from scene.pickBoxes`,
+        ).toBe(true);
+      }
+      if (beat.focus.hoveredPartId !== null) {
+        expect(
+          scene.pickBoxes.some((pb) => pb.partId === beat.focus.hoveredPartId),
+          `Beat #${i} (${beat.beatId}) focus.hoveredPartId='${beat.focus.hoveredPartId}' missing from scene.pickBoxes`,
+        ).toBe(true);
+      }
     }
 
     const elapsedMs = performance.now() - startMs;
@@ -1525,6 +1613,18 @@ describe('Gate 5 4-Act Guided Walkthrough (`src/dory/story/walkthrough.ts`) — 
       allBeats[7]!.provenanceBadges.some((b) => b.label === DORY_COUNTERFACTUAL_CODA_BADGE),
     ).toBe(true);
     expect(scenes[7]!.hypersphereMetadata!.counterfactualCoda?.readOnlyZeroKvMutation).toBe(true);
+    // Beat 7 anchor exit angle theta_4 matches arccos(cos(s_4, x)), while Jacobian labels entry theta_entry4
+    const beat7Loop4 = scenes[7]!.hypersphereMetadata!.loopMetrics8d[3]!;
+    const expectedExitTheta4Deg =
+      (Math.acos(Math.max(-1, Math.min(1, beat7Loop4.anchorCosine))) * 180) / Math.PI;
+    const beat7AnchorMetric = allBeats[7]!.liveMetrics.find((m) =>
+      m.label.includes('cos(s_4, x)'),
+    )!;
+    const beat7JacMetric = allBeats[7]!.liveMetrics.find((m) => m.label.includes('||J_N||_2'))!;
+    expect(beat7AnchorMetric.value).toContain(`${expectedExitTheta4Deg.toFixed(1)} deg`);
+    expect(beat7JacMetric.value).toContain(
+      `theta_entry4=${beat7Loop4.entryAnchorJacobian.angleDegrees.toFixed(1)} deg`,
+    );
     expect(allBeats[8]!.coord.cacheOwnership.policy).toBe('last_loop');
     expect(allBeats[8]!.coord.loopIteration).toBe(1);
     expect(allBeats[8]!.coord.cacheOwnership.writerLoop).toBe(4);
@@ -1538,6 +1638,13 @@ describe('Gate 5 4-Act Guided Walkthrough (`src/dory/story/walkthrough.ts`) — 
     expect(scenes[10]!.selfSpecMetadata!.totalBankCount).toBe(DORY_SPEC_CONTRACT_A_BANK_COUNT);
     expect(allBeats[11]!.coord.cacheOwnership.bankKind).toBe('output_deep');
     expect(allBeats[11]!.coord.cacheOwnership.role).toBe('spec_verify_deep');
+    expect(allBeats[11]!.focus.selectedVerifyOffset).toBe(1);
+    expect(scenes[11]!.selfSpecMetadata!.selectedVerifyOffset).toBe(1);
+    expect(scenes[11]!.selfSpecMetadata!.positionBars[1]!.absPos).toBe(allBeats[11]!.coord.absTokenPos);
+    expect(scenes[11]!.selfSpecMetadata!.positionBars[1]!.accepted).toBe(false);
+    expect(allBeats[0]!.highlightPartId).toBe('bookend_embed_weight');
+    expect(allBeats[12]!.highlightPartId).toBe('bookend_ckpt_nvfp4');
+    expect(allBeats[13]!.highlightPartId).toBe('bookend_tbptl_stop_grad');
     expect(scenes[12]!.bookendsMetadata!.selectedCheckpointFormat).toBe('nvfp4');
     expect(scenes[12]!.bookendsMetadata!.safetensorsZeroByteDiffVerified).toBe(true);
     expect(scenes[13]!.bookendsMetadata!.readOnly).toBe(true);
@@ -1662,6 +1769,106 @@ describe('Gate 5 4-Act Guided Walkthrough (`src/dory/story/walkthrough.ts`) — 
         4,
       ).valid,
     ).toBe(false);
+
+    // 8d. last_loop recurrent attention requires writerLoop === loopIteration || writerLoop === kLoops
+    const lastLoopAttnValidT = validateDoryExecutionCoord(
+      {
+        ...validCoord,
+        physicalLayerIdx: 16,
+        executedLayerIdx: 16,
+        loopIteration: 1,
+        cacheOwnership: {
+          policy: 'last_loop',
+          bankKind: 'recurrent',
+          bankSlotId: 8,
+          writerLoop: 1,
+          role: 'standard',
+        },
+      },
+      PARAMS.modelWeightId,
+      4,
+    );
+    expect(lastLoopAttnValidT.valid).toBe(true);
+
+    const lastLoopAttnValidK = validateDoryExecutionCoord(
+      {
+        ...validCoord,
+        physicalLayerIdx: 16,
+        executedLayerIdx: 16,
+        loopIteration: 1,
+        cacheOwnership: {
+          policy: 'last_loop',
+          bankKind: 'recurrent',
+          bankSlotId: 8,
+          writerLoop: 4,
+          role: 'standard',
+        },
+      },
+      PARAMS.modelWeightId,
+      4,
+    );
+    expect(lastLoopAttnValidK.valid).toBe(true);
+
+    // Intermediate writerLoop (2 when t=1, k=4) must fail under last_loop!
+    expect(
+      validateDoryExecutionCoord(
+        {
+          ...validCoord,
+          physicalLayerIdx: 16,
+          executedLayerIdx: 16,
+          loopIteration: 1,
+          cacheOwnership: {
+            policy: 'last_loop',
+            bankKind: 'recurrent',
+            bankSlotId: 8,
+            writerLoop: 2,
+            role: 'standard',
+          },
+        },
+        PARAMS.modelWeightId,
+        4,
+      ).valid,
+    ).toBe(false);
+
+    // 8e. Recurrent MLP requires writerLoop === loopIteration even under last_loop!
+    expect(
+      validateDoryExecutionCoord(
+        {
+          ...validCoord,
+          physicalLayerIdx: 17,
+          executedLayerIdx: 17,
+          loopIteration: 1,
+          cacheOwnership: {
+            policy: 'last_loop',
+            bankKind: 'recurrent',
+            bankSlotId: -1,
+            writerLoop: 4,
+            role: 'standard',
+          },
+        },
+        PARAMS.modelWeightId,
+        4,
+      ).valid,
+    ).toBe(false);
+    expect(
+      validateDoryExecutionCoord(
+        {
+          ...validCoord,
+          physicalLayerIdx: 17,
+          executedLayerIdx: 17,
+          loopIteration: 1,
+          cacheOwnership: {
+            policy: 'last_loop',
+            bankKind: 'recurrent',
+            bankSlotId: -1,
+            writerLoop: 1,
+            role: 'standard',
+          },
+        },
+        PARAMS.modelWeightId,
+        4,
+      ).valid,
+    ).toBe(true);
   });
 
   it('supports start, goToBeat, nextBeat, prevBeat, goToAct, boundary clamping & immutable restoreState on exit', () => {
@@ -1758,6 +1965,13 @@ describe('Gate 5 4-Act Guided Walkthrough (`src/dory/story/walkthrough.ts`) — 
     expect(restored!.cameraPose!.target).toEqual([1, 2, 3]);
     expect(restored!.inspectorTab).toBe('readouts');
     expect(restored!.inspectorOpen).toBe(true);
+
+    // Re-entering tour after exit() without passing restoreState must clear stale savedRestoreState
+    tour.start(undefined, 2);
+    expect(tour.getStatus()).toBe('active');
+    expect(tour.getCurrentBeatIndex()).toBe(2);
+    expect(tour.getRestoreState()).toBeNull();
+    expect(tour.exit()).toBeNull();
   });
 
   it('leaves a populated multi-branch external Free-Explore DorySession byte-for-byte untouched across the entire 4-act walkthrough', () => {
@@ -1946,25 +2160,37 @@ describe('Gate 5 D4 Architectural Boundary Isolation & Clean-Room Static Guard',
       expect(relPaths, `Expected DORY5 module '${required}'`).toContain(required);
     }
 
-    const forbiddenImportPatterns: readonly RegExp[] = [
-      // Gate 4b & Gate 4c Nano exclusive UI & non-hybrid core modules
-      /from\s+['"][^'"]*(?:ui\/(?:controls|overlay|memoryChart)|scene\/(?:spine|sheetInspector|hybridPick|cutaways|embeddingCutaway|outputCutaway|gqaCutaway|mambaCutaway|moeCutaway|gqaSpatial|mambaSpatial|moeSpatial|accumulation)|model\/(?:spec|memory|state|rcPlayback)|math\/(?:gqaSim|mambaSim|moeSim|hybridFlow|incrementalDecode)|src\/story\/walkthrough|\.\.\/story\/walkthrough|\.\.\/\.\.\/story\/walkthrough|src\/main|\.\.\/main)['"]/,
-      // Sibling apps (twotower, diffusion, uni)
-      /from\s+['"][^'"]*(?:twotower|diffusion|uni)(?:\/|['"])/,
-      // Node built-ins forbidden in browser bundles
-      /from\s+['"]node:/,
-    ];
+    const forbiddenResolvedRelRe =
+      /^src\/(?:ui\/(?:controls|overlay|memoryChart)|scene\/(?:spine|sheetInspector|hybridPick|cutaways|embeddingCutaway|outputCutaway|gqaCutaway|mambaCutaway|moeCutaway|gqaSpatial|mambaSpatial|moeSpatial|accumulation)|model\/(?:spec|memory|state|rcPlayback)|math\/(?:gqaSim|mambaSim|moeSim|hybridFlow|incrementalDecode)|story\/walkthrough|main|twotower(?:\/|$)|diffusion(?:\/|$)|uni(?:\/|$))(?:$|\.)/;
+
+    const importSpecRe = /\b(?:import|export)\s+(?:type\s+)?(?:[\s\S]*?\s+from\s+)?['"]([^'"]+)['"]/g;
 
     for (const fullPath of allDoryTsFiles) {
       const relPath = relative(process.cwd(), fullPath).replace(/\\/g, '/');
       const src = readFileSync(fullPath, 'utf-8');
 
       expect(src, `Math.random() forbidden in ${relPath}`).not.toMatch(/Math\.random\s*\(/);
-      for (const re of forbiddenImportPatterns) {
-        expect(src, `D4 forbidden import in ${relPath}`).not.toMatch(re);
+      expect(src, `node: built-in forbidden in ${relPath}`).not.toMatch(/from\s+['"]node:/);
+
+      for (const match of src.matchAll(importSpecRe)) {
+        const spec = match[1]!;
+        if (!spec.startsWith('.')) {
+          expect(spec, `Forbidden bare/node specifier '${spec}' in ${relPath}`).not.toMatch(
+            /^node:|^(?:twotower|diffusion|uni)\b/,
+          );
+          continue;
+        }
+        const resolvedRel = relative(process.cwd(), resolve(dirname(fullPath), spec)).replace(
+          /\\/g,
+          '/',
+        );
+        expect(
+          resolvedRel,
+          `D4 forbidden import '${spec}' -> '${resolvedRel}' in ${relPath}`,
+        ).not.toMatch(forbiddenResolvedRelRe);
       }
 
-      // Headless modules (outside future src/dory/app/) must also contain zero DOM/WebGL globals
+      // Headless modules (outside src/dory/app/) must also contain zero DOM/WebGL globals
       if (!relPath.startsWith('src/dory/app/')) {
         expect(src, `DOM/WebGL globals forbidden in headless ${relPath}`).not.toMatch(
           /\b(?:document\s*\.|window\s*\.|globalThis\s*\.\s*(?:document|window)|typeof\s+(?:document|window)\b|WebGL2RenderingContext|HTMLCanvasElement|HTMLElement)\b/,

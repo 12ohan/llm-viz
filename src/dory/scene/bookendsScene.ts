@@ -94,6 +94,7 @@ import {
   DORY_CHECKPOINT_FORMATS,
   DORY_PRODUCTION_SPEC,
   DORY_SCALING_DISCLOSURE,
+  computeEffectivePairedDepth,
   computeExecutedDepth,
   decodeDoryToken,
 } from '../spec';
@@ -331,6 +332,7 @@ interface PlacedBookendSheet {
 
 function buildBookendsHoveredPopover(
   hovered: DoryPickIdentity | null | undefined,
+  ctx: DoryResolvedSessionContext,
   sheetsByPartId: ReadonlyMap<string, PlacedBookendSheet>,
   checkpointRows: readonly DoryCheckpointFormatReadoutRow[],
   checkpointCenters: ReadonlyMap<DoryCheckpointFormatId, readonly [number, number, number]>,
@@ -344,6 +346,20 @@ function buildBookendsHoveredPopover(
   tokenLabels: readonly string[],
 ): CellPopoverSpec | null {
   if (!hovered || !hovered.partId) return null;
+
+  // Hovering the central 72-sublayer looped backbone bridge prism
+  if (hovered.partId === 'bookend_backbone_bridge') {
+    const executedDepth = computeExecutedDepth(ctx.kLoops, params.config);
+    const effectivePaired = computeEffectivePairedDepth(ctx.kLoops, params.config);
+    return Object.freeze({
+      world: Object.freeze([-4.8, 0.72, -1.4] as const),
+      tensorLabel: `Looped Backbone Bridge (k=${ctx.kLoops} -> ${executedDepth}L executed)`,
+      coordLabel: `16 Prelude + ${ctx.kLoops}x40 Shared Core + 16 Coda · ${effectivePaired} paired · ${ctx.kvCacheMode}`,
+      badge: '72 PHYSICAL SUBLAYERS · 0 LOOP ADAPTERS (D1)',
+      equation: `D_sub(${ctx.kLoops}) = 32 + 40*${ctx.kLoops} = ${executedDepth}L · u_t = N(s_{t-1} + x) · ${ctx.executionMode}`,
+      valueText: `pos ${metadata.selectedTokenPos} "${metadata.selectedTokenText}"`,
+    });
+  }
 
   // Hovering a 4-checkpoint production pedestal (strictly read-only, zero fake quant toggles)
   const ckptMatch = /^bookend_ckpt_(bf16|mxfp8|nvfp4|q5_k_m)$/.exec(hovered.partId);
@@ -554,9 +570,11 @@ export function buildDoryBookendsScene(
   const bookendTensors = resolveBookendsTensors(ctx, reconstructed, trace);
   const defaultTokenOffset = ctx.resolveDefaultTokenOffset();
   const selectedTokenOffset =
-    options.selectedTokenPos !== undefined && Number.isFinite(options.selectedTokenPos)
-      ? clampInt(Math.trunc(options.selectedTokenPos) - trace.startPos, 0, Math.max(0, seqLen - 1))
-      : defaultTokenOffset;
+    options.selectedTokenOffset !== undefined && Number.isFinite(options.selectedTokenOffset)
+      ? clampInt(Math.trunc(options.selectedTokenOffset), 0, Math.max(0, seqLen - 1))
+      : options.selectedTokenPos !== undefined && Number.isFinite(options.selectedTokenPos)
+        ? clampInt(Math.trunc(options.selectedTokenPos) - trace.startPos, 0, Math.max(0, seqLen - 1))
+        : defaultTokenOffset;
   const selectedTokenPos = trace.startPos + selectedTokenOffset;
   const selectedTokenId = clampInt(
     bookendTensors.tokens[selectedTokenOffset] ?? 0,
@@ -2046,6 +2064,7 @@ export function buildDoryBookendsScene(
   // Active cell popover
   const activeCellPopover = buildBookendsHoveredPopover(
     options.hoveredCell,
+    ctx,
     sheetsByPartId,
     checkpointRows,
     checkpointCenters,

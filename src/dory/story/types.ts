@@ -543,6 +543,8 @@ export interface DoryArchReadoutsInput {
 export interface DoryArchReadoutsBundle {
   readonly readOnly: true;
   readonly zeroFakeQuantToggles: true;
+  readonly activeKLoops: number;
+  readonly activeKvCacheMode: DoryKvCacheMode;
   readonly selectedCheckpointFormat: DoryCheckpointFormatId;
   readonly checkpoints: readonly DoryCheckpointFormatReadoutRow[];
   /** True iff all 3 safetensors checkpoints reconcile to exact `0 B` diff against HF LFS sizes. */
