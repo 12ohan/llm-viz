@@ -560,7 +560,40 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     toggleInspectorCollapsed();
   });
 
-  topActions.append(tourLaunchBtn, resetCamBtn, inspectorToggleBtn);
+  const baseUrl = (import.meta.env.BASE_URL || '../').replace(/\/?$/, '/');
+
+  const navToNanoLink = el('a', 'uni-top-link');
+  navToNanoLink.href = baseUrl;
+  navToNanoLink.dataset.testid = 'nav-to-nano';
+  navToNanoLink.title = 'Open Nemotron 3 Nano 30B-A3B architecture visualizer';
+  const navNanoArrow = el('span', undefined, '↗');
+  navNanoArrow.setAttribute('aria-hidden', 'true');
+  navToNanoLink.append(document.createTextNode('Nano '), navNanoArrow);
+
+  const navToTwoTowerLink = el('a', 'uni-top-link');
+  navToTwoTowerLink.href = `${baseUrl}twotower/`;
+  navToTwoTowerLink.dataset.testid = 'nav-to-twotower';
+  navToTwoTowerLink.title = 'Open Nemotron-Labs-TwoTower dual-tower diffusion visualizer';
+  const navTwoTowerArrow = el('span', undefined, '↗');
+  navTwoTowerArrow.setAttribute('aria-hidden', 'true');
+  navToTwoTowerLink.append(document.createTextNode('TwoTower '), navTwoTowerArrow);
+
+  const navToDiffusionLink = el('a', 'uni-top-link');
+  navToDiffusionLink.href = `${baseUrl}diffusion/`;
+  navToDiffusionLink.dataset.testid = 'nav-to-diffusion';
+  navToDiffusionLink.title = 'Open Nemotron-Labs-Diffusion-14B interactive 3D architecture visualizer';
+  const navDiffusionArrow = el('span', undefined, '↗');
+  navDiffusionArrow.setAttribute('aria-hidden', 'true');
+  navToDiffusionLink.append(document.createTextNode('Diffusion '), navDiffusionArrow);
+
+  topActions.append(
+    tourLaunchBtn,
+    resetCamBtn,
+    inspectorToggleBtn,
+    navToNanoLink,
+    navToTwoTowerLink,
+    navToDiffusionLink,
+  );
   topbar.append(brand, viewTablist, topActions);
 
   // Main Workspace
@@ -1016,6 +1049,9 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     const isOpd = currentScene.viewMode === 'opd_readonly';
     opdReadOnlyBanner.hidden = !isOpd;
     tourHud.classList.toggle('has-opd-banner', isOpd);
+    const tourActiveNow = tour.isActive();
+    stageTitleCard.classList.toggle('is-tour-active', tourActiveNow);
+    rgbInsetHost.classList.toggle('is-tour-active', tourActiveNow);
   }
 
   function syncTopViewTabs(): void {
@@ -1429,6 +1465,8 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
     const restored = tour.exit();
     tourHud.hidden = true;
     tourHud.classList.remove('has-opd-banner');
+    stageTitleCard.classList.remove('is-tour-active');
+    rgbInsetHost.classList.remove('is-tour-active');
     if (focusWasInTour && typeof tourLaunchBtn.focus === 'function') {
       tourLaunchBtn.focus();
     }
@@ -2217,7 +2255,15 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
           ? `${d5.elasticPrunedLayersExecuted} / 34`
           : `${d5.hfFaithfulLayersExecuted} / 34`,
       );
-      addKvRow(grid, 'Wasted Prefix KV', `${(d5.wastedPrefixKvFraction * 100).toFixed(1)}%`);
+      addKvRow(
+        grid,
+        'Wasted Prefix KV',
+        isWaste
+          ? `${(d5.wastedPrefixKvFraction * 100).toFixed(1)}% (${formatSiIecBytes(d5.prodSavedPrefixKvBytes)})`
+          : d5.wastedPrefixKvFraction > 0
+            ? `0.0% (saves ${(d5.wastedPrefixKvFraction * 100).toFixed(1)}% vs HF)`
+            : '0.0%',
+      );
       addKvRow(
         grid,
         'Prod Prefix KV',

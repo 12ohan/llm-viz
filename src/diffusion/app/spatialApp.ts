@@ -551,12 +551,21 @@ export function mountDiffusionSpatialApp(root: HTMLElement): DiffusionSpatialApp
   navTwoTowerArrow.setAttribute('aria-hidden', 'true');
   navToTwoTowerLink.append(document.createTextNode('TwoTower '), navTwoTowerArrow);
 
+  const navToUniLink = el('a', 'df-top-link');
+  navToUniLink.href = `${baseUrl}uni/`;
+  navToUniLink.dataset.testid = 'nav-to-uni';
+  navToUniLink.title = 'Open Nemotron-Labs-Diffusion-Uni multimodal architecture visualizer';
+  const navUniArrow = el('span', undefined, '↗');
+  navUniArrow.setAttribute('aria-hidden', 'true');
+  navToUniLink.append(document.createTextNode('Uni '), navUniArrow);
+
   topActions.append(
     tourToggleBtn,
     inspectorToggleBtn,
     resetCamBtn,
     navToNanoLink,
     navToTwoTowerLink,
+    navToUniLink,
   );
   topbar.append(brand, viewNav, topActions);
   shell.appendChild(topbar);

@@ -265,6 +265,35 @@ input {
   border-color: var(--uni-oxide);
 }
 
+.uni-top-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 27px;
+  padding: 0 8px;
+  border-radius: var(--uni-radius-sm);
+  border: 1px solid var(--uni-border);
+  background: var(--uni-bg-surface);
+  color: var(--uni-ink-secondary);
+  font-family: var(--uni-font-sans);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.uni-top-link:hover {
+  background: var(--uni-bg-hover);
+  border-color: var(--uni-border-strong);
+  color: var(--uni-ink);
+}
+
+.uni-top-link:focus-visible {
+  outline: 2px solid var(--uni-u-indigo);
+  outline-offset: 2px;
+}
+
 /* ============================================================================
  * WORKSPACE: FULL-BLEED VIEWPORT + TIMELINE DOCK + COLLAPSIBLE INSPECTOR
  * ============================================================================ */
@@ -353,6 +382,10 @@ input {
   backdrop-filter: blur(6px);
   border: 1px solid var(--uni-border);
   box-shadow: var(--uni-shadow-sm);
+}
+
+.uni-stage-title-card.is-tour-active {
+  max-width: min(420px, calc(100% - 438px));
 }
 
 .uni-stage-title {
@@ -447,6 +480,12 @@ input {
   font-weight: 700;
   letter-spacing: 0.03em;
   box-shadow: var(--uni-shadow-sm);
+}
+
+.uni-opd-readonly-banner[hidden],
+.uni-webgl-fallback[hidden],
+.uni-tour-equation[hidden] {
+  display: none;
 }
 
 /* ============================================================================
@@ -766,6 +805,26 @@ input {
   color: var(--uni-g-teal);
 }
 
+.uni-rgb-inset-host.is-tour-active .uni-pixel-card {
+  padding: 5px 7px;
+  gap: 3px;
+  max-width: 196px;
+}
+
+.uni-rgb-inset-host.is-tour-active .uni-pixel-canvas-wrap {
+  padding: 3px;
+}
+
+.uni-rgb-inset-host.is-tour-active .uni-pixel-canvas {
+  max-width: 88px;
+  max-height: 88px;
+}
+
+.uni-rgb-inset-host.is-tour-active .uni-pixel-caption-text {
+  font-size: 9.5px;
+  line-height: 1.22;
+}
+
 /* ============================================================================
  * 28-BEAT GUIDED TOUR HUD CARD
  * ============================================================================ */
@@ -774,8 +833,10 @@ input {
   position: absolute;
   top: 10px;
   right: 12px;
-  width: min(440px, calc(100% - 24px));
-  padding: 12px 14px;
+  width: min(410px, calc(100% - 24px));
+  max-height: calc(100% - 236px);
+  overflow-y: auto;
+  padding: 9px 12px;
   border-radius: var(--uni-radius-lg);
   background: rgba(255, 255, 255, 0.97);
   backdrop-filter: blur(8px);
@@ -784,11 +845,12 @@ input {
   z-index: 22;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 5px;
 }
 
 .uni-tour-hud.has-opd-banner {
   top: 52px;
+  max-height: calc(100% - 66px);
 }
 
 .uni-tour-hud[hidden] {
@@ -858,35 +920,38 @@ input {
 
 .uni-tour-title {
   margin: 0;
-  font-size: 14px;
+  font-size: 13px;
+  line-height: 1.25;
   font-weight: 700;
   color: var(--uni-ink);
 }
 
 .uni-tour-takeaway {
   margin: 0;
-  font-size: 12px;
+  font-size: 11.5px;
+  line-height: 1.3;
   font-weight: 600;
   color: var(--uni-g-teal);
 }
 
 .uni-tour-narrative {
   margin: 0;
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--uni-ink-secondary);
-  line-height: 1.45;
-  max-height: 116px;
+  line-height: 1.38;
+  max-height: 92px;
   overflow-y: auto;
 }
 
 .uni-tour-equation {
-  padding: 6px 8px;
+  padding: 4px 7px;
   border-radius: var(--uni-radius-sm);
   background: var(--uni-bg-surface);
   border: 1px solid var(--uni-border);
   font-family: var(--uni-font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--uni-ink);
+  white-space: nowrap;
   overflow-x: auto;
 }
 
@@ -1175,6 +1240,12 @@ input {
   gap: 12px;
 }
 
+.uni-inspector-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .uni-inspector-section {
   display: flex;
   flex-direction: column;
@@ -1424,9 +1495,68 @@ input {
   }
 }
 
-@media (max-width: 1120px) {
+@media (max-width: 1480px) {
   .uni-brand-sub {
     display: none;
+  }
+  .uni-brand {
+    gap: 6px;
+  }
+  .uni-brand-title {
+    font-size: 12px;
+  }
+  .uni-topbar {
+    gap: 6px;
+    padding: 6px 10px;
+  }
+  .uni-view-tablist {
+    gap: 2px;
+    min-width: 0;
+  }
+  .uni-view-tab {
+    padding: 4px 5.5px;
+    font-size: 10.5px;
+    gap: 3px;
+  }
+  .uni-topbar-actions {
+    gap: 4px;
+  }
+  .uni-action-btn {
+    padding: 4px 6.5px;
+    font-size: 10.5px;
+  }
+  .uni-top-link {
+    height: 24px;
+    padding: 0 5.5px;
+    font-size: 10.5px;
+  }
+}
+
+@media (max-width: 1360px) {
+  .uni-brand {
+    gap: 6px;
+  }
+  .uni-brand-title {
+    display: none;
+  }
+  .uni-view-tab {
+    padding: 4px 6px;
+    font-size: 11px;
+    gap: 3px;
+  }
+  .uni-action-btn {
+    padding: 4px 7px;
+    font-size: 11px;
+  }
+  .uni-top-link {
+    padding: 0 6.5px;
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 1120px) {
+  .uni-topbar {
+    flex-wrap: wrap;
   }
   .uni-inspector-drawer {
     flex-basis: 316px;

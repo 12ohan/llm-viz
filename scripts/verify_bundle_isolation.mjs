@@ -1,31 +1,32 @@
 #!/usr/bin/env node
 /**
- * Automated 3-Way Nano / TwoTower / Diffusion Bundle-Isolation & Payload-Budget Gate
+ * Automated 4-Way Nano / TwoTower / Diffusion / Uni Bundle-Isolation & Payload-Budget Gate
  * (`scripts/verify_bundle_isolation.mjs`)
  *
- * Enforces all 7 hard gates over a built 3-entry Vite MPA output directory (default `dist`,
+ * Enforces all 7 hard gates over a built 4-entry Vite MPA output directory (default `dist`,
  * or `--dir <path>`):
- *   1. All 3 entry HTML files exist: `index.html` (Nano), `twotower/index.html` (TwoTower),
- *      and `diffusion/index.html` (Diffusion).
+ *   1. All 4 entry HTML files exist: `index.html` (Nano), `twotower/index.html` (TwoTower),
+ *      `diffusion/index.html` (Diffusion), and `uni/index.html` (Uni).
  *   2. Parse all `<script src>`, `<link rel="modulepreload" href>`, and `<link rel="stylesheet" href>`
- *      references from all 3 entry HTML files under root (`/`) or subpath (`/llm-viz/`) base paths
+ *      references from all 4 entry HTML files under root (`/`) or subpath (`/llm-viz/`) base paths
  *      and verify base-path consistency.
  *   3. Recursively walk every static ES `import` / `export ... from` edge (plus literal dynamic
- *      `import(...)` edges) inside every JS chunk reachable from all 3 entries via TypeScript AST.
- *   4. Strict 3-Way Source-Map Mutual Isolation Gate: read `.map` `sources` for EVERY JS chunk
- *      reachable from each entry and FAIL if:
- *        - Nano `.map` sources reference `src/twotower/` (`twotower/`) OR `src/diffusion/` (`diffusion/`),
- *        - TwoTower `.map` sources reference `src/diffusion/` (`diffusion/`), or
- *        - Diffusion `.map` sources reference `src/twotower/` (`twotower/`).
- *   5. Strict 3-Way Payload Marker Mutual Isolation Gate: scan every JS/CSS file in each entry's
- *      transitive graph and FAIL if:
- *        - Nano JS/CSS contains any `FORBIDDEN_TWOTOWER_MARKERS` OR `FORBIDDEN_DIFFUSION_MARKERS`,
- *        - TwoTower JS/CSS contains any `FORBIDDEN_DIFFUSION_MARKERS`, or
- *        - Diffusion JS/CSS contains any `FORBIDDEN_TWOTOWER_MARKERS`.
- *   6. Positive Presence Gate: confirm TwoTower's transitive JS sourcemaps include `src/twotower/`
- *      sources AND Diffusion's transitive JS sourcemaps include `src/diffusion/` sources.
- *   7. Nano Payload Budget Gate: compute exact raw & gzip (level 9) byte totals for Nano,
- *      TwoTower, Diffusion, and shared chunks; FAIL if Nano transitive JS+CSS gzip exceeds
+ *      `import(...)` edges) inside every JS chunk reachable from all 4 entries via TypeScript AST.
+ *   4. Strict 4-Way Source-Map Mutual Isolation Gate + D4 Controls Gate: read `.map` `sources` for
+ *      EVERY JS chunk reachable from each entry and FAIL if:
+ *        - Any of the 12 directional pairs `(fromEntry, targetEntry)` (`from !== target`) leaks
+ *          target-exclusive sources (`NANO_ONLY_SOURCE_RE`, `TWOTOWER_SOURCE_RE`,
+ *          `DIFFUSION_SOURCE_RE`, `UNI_SOURCE_RE`), OR
+ *        - Uni `.map` sources reference `src/ui/controls.ts` (`CONTROLS_SOURCE_RE`, Locked Decision D4).
+ *   5. Strict 4-Way Payload Marker Mutual Isolation Gate: scan every JS/CSS file in each entry's
+ *      transitive graph across all 12 directional pairs (`from !== target`) and FAIL if any entry's
+ *      JS/CSS contains forbidden markers belonging to another entry (`FORBIDDEN_NANO_MARKERS`,
+ *      `FORBIDDEN_TWOTOWER_MARKERS`, `FORBIDDEN_DIFFUSION_MARKERS`, `FORBIDDEN_UNI_MARKERS`).
+ *   6. Positive Presence Gate: confirm Nano sourcemaps include Nano-exclusive sources (`src/main.ts`),
+ *      TwoTower sourcemaps include `src/twotower/` sources, Diffusion sourcemaps include
+ *      `src/diffusion/` sources, AND Uni sourcemaps include `src/uni/` sources.
+ *   7. 4-Way Payload Budget Gate: compute exact raw & gzip (level 9) byte totals for Nano,
+ *      TwoTower, Diffusion, Uni, and shared chunks; FAIL if Nano transitive JS+CSS gzip exceeds
  *      `215 * 1024` bytes (`215.00 KiB` / `220,160 B`).
  *
  * Uses Node.js built-ins (`node:fs`, `node:path`, `node:zlib`) plus the devDependency TypeScript
@@ -38,6 +39,14 @@ import { gzipSync } from 'node:zlib';
 import ts from 'typescript';
 
 const NANO_GZIP_BUDGET_BYTES = 215 * 1024; // 215.00 KiB = 220,160 B
+
+const FORBIDDEN_NANO_MARKERS = Object.freeze([
+  '3D WebGL2 Canvas Unavailable',
+  'Required stage DOM elements are missing',
+  'Mamba-2 fixed floor',
+  'mem-drawer-card',
+  'memory-probe-stats',
+]);
 
 const FORBIDDEN_TWOTOWER_MARKERS = Object.freeze([
   'NemotronHTwoTowerForCausalLM',
@@ -57,8 +66,69 @@ const FORBIDDEN_DIFFUSION_MARKERS = Object.freeze([
   'DIFFUSION_DYADIC_YARN_INV_FREQ',
 ]);
 
+const FORBIDDEN_UNI_MARKERS = Object.freeze([
+  'UNI_MINI_CONFIG',
+  'UniSession',
+  'buildUniSpatialScene',
+  'UNI_DISCREPANCY_LEDGER',
+  'PackedLinearImageCodec',
+  'UNI_DYADIC_YARN_INV_FREQ',
+  'buildUniOpdExplorerScene',
+]);
+
+const NANO_ONLY_SOURCE_RE =
+  /(?:^|\/)src\/(?:main\.ts|ui\/memoryChart\.ts)$|^(?:main\.ts|ui\/memoryChart\.ts)$/i;
 const TWOTOWER_SOURCE_RE = /(?:^|\/)(?:src\/)?twotower\//i;
 const DIFFUSION_SOURCE_RE = /(?:^|\/)(?:src\/)?diffusion\//i;
+const UNI_SOURCE_RE = /(?:^|\/)(?:src\/)?uni\//i;
+const CONTROLS_SOURCE_RE = /(?:^|\/)(?:src\/)?ui\/controls(?:\.ts)?$/i;
+
+const ENTRIES = Object.freeze([
+  {
+    key: 'nano',
+    label: 'Nano',
+    shortCode: 'n',
+    camelKey: 'nano',
+    pascalKey: 'Nano',
+    htmlRelPath: 'index.html',
+    sourceRe: NANO_ONLY_SOURCE_RE,
+    sourceDesc: 'Nano-exclusive ("src/main.ts", "src/ui/memoryChart.ts")',
+    markers: FORBIDDEN_NANO_MARKERS,
+  },
+  {
+    key: 'twotower',
+    label: 'TwoTower',
+    shortCode: 'tt',
+    camelKey: 'twoTower',
+    pascalKey: 'TwoTower',
+    htmlRelPath: 'twotower/index.html',
+    sourceRe: TWOTOWER_SOURCE_RE,
+    sourceDesc: '"src/twotower/"',
+    markers: FORBIDDEN_TWOTOWER_MARKERS,
+  },
+  {
+    key: 'diffusion',
+    label: 'Diffusion',
+    shortCode: 'df',
+    camelKey: 'diffusion',
+    pascalKey: 'Diffusion',
+    htmlRelPath: 'diffusion/index.html',
+    sourceRe: DIFFUSION_SOURCE_RE,
+    sourceDesc: '"src/diffusion/"',
+    markers: FORBIDDEN_DIFFUSION_MARKERS,
+  },
+  {
+    key: 'uni',
+    label: 'Uni',
+    shortCode: 'uni',
+    camelKey: 'uni',
+    pascalKey: 'Uni',
+    htmlRelPath: 'uni/index.html',
+    sourceRe: UNI_SOURCE_RE,
+    sourceDesc: '"src/uni/"',
+    markers: FORBIDDEN_UNI_MARKERS,
+  },
+]);
 
 function toPosix(p) {
   return p.split(sep).join('/');
@@ -440,17 +510,12 @@ function fmtKiB(bytes) {
   return `${(bytes / 1024).toFixed(2)} KiB`;
 }
 
-function classifyAssetScope(inNano, inTwoTower, inDiffusion) {
-  const count = (inNano ? 1 : 0) + (inTwoTower ? 1 : 0) + (inDiffusion ? 1 : 0);
-  if (count === 3) return 'shared(all3)';
-  if (count === 2) {
-    if (inNano && inTwoTower) return 'shared(n+tt)';
-    if (inNano && inDiffusion) return 'shared(n+df)';
-    return 'shared(tt+df)';
+function classifyAssetScope(memberships) {
+  if (memberships.length === ENTRIES.length) return 'shared(all4)';
+  if (memberships.length >= 2) {
+    return `shared(${memberships.map((e) => e.shortCode).join('+')})`;
   }
-  if (inNano) return 'nano-only';
-  if (inTwoTower) return 'twotower-only';
-  return 'diffusion-only';
+  return `${memberships[0].key}-only`;
 }
 
 function main() {
@@ -458,32 +523,32 @@ function main() {
   const repoRoot = process.cwd();
   const violations = [];
 
-  // Gate 1: All 3 entry HTML files must exist.
-  const nanoHtmlPath = resolve(outDir, 'index.html');
-  const twoTowerHtmlPath = resolve(outDir, 'twotower/index.html');
-  const diffusionHtmlPath = resolve(outDir, 'diffusion/index.html');
-  if (!existsSync(nanoHtmlPath)) {
-    violations.push(`Gate 1 [Missing Entry]: Nano entry HTML not found at "${nanoHtmlPath}"`);
-  }
-  if (!existsSync(twoTowerHtmlPath)) {
-    violations.push(
-      `Gate 1 [Missing Entry]: TwoTower entry HTML not found at "${twoTowerHtmlPath}"`,
-    );
-  }
-  if (!existsSync(diffusionHtmlPath)) {
-    violations.push(
-      `Gate 1 [Missing Entry]: Diffusion entry HTML not found at "${diffusionHtmlPath}"`,
-    );
+  // Gate 1: All 4 entry HTML files must exist.
+  const entryHtmlPaths = Object.create(null);
+  for (const entry of ENTRIES) {
+    const htmlPath = resolve(outDir, entry.htmlRelPath);
+    entryHtmlPaths[entry.key] = htmlPath;
+    if (!existsSync(htmlPath)) {
+      violations.push(
+        `Gate 1 [Missing Entry]: ${entry.label} entry HTML not found at "${htmlPath}"`,
+      );
+    }
   }
   if (violations.length > 0) {
     reportAndExit(violations, null);
   }
 
-  // Gates 2 & 3: Parse HTML refs and recursively walk static ES import/export graphs for all 3 entries.
+  // Gates 2 & 3: Parse HTML refs and recursively walk static ES import/export graphs for all 4 entries.
   const detectedBasePrefixes = new Set();
-  const nanoGraph = walkEntryGraph('nano', nanoHtmlPath, outDir, detectedBasePrefixes);
-  const twoTowerGraph = walkEntryGraph('twotower', twoTowerHtmlPath, outDir, detectedBasePrefixes);
-  const diffusionGraph = walkEntryGraph('diffusion', diffusionHtmlPath, outDir, detectedBasePrefixes);
+  const graphs = Object.create(null);
+  for (const entry of ENTRIES) {
+    graphs[entry.key] = walkEntryGraph(
+      entry.key,
+      entryHtmlPaths[entry.key],
+      outDir,
+      detectedBasePrefixes,
+    );
+  }
 
   if (detectedBasePrefixes.size > 1) {
     violations.push(
@@ -491,157 +556,123 @@ function main() {
     );
   }
 
-  // Gate 4: Strict 3-Way Source-Map Mutual Isolation Gate.
+  // Gate 4: Strict 4-Way Source-Map Mutual Isolation Gate (all 12 directional pairs) + D4 Controls Gate.
   const sourcemapCache = new Map();
-  const nanoTwoTowerSourcemapLeaks = scanEntrySourcemaps(
-    nanoGraph.jsChunks,
-    TWOTOWER_SOURCE_RE,
-    outDir,
-    repoRoot,
-    sourcemapCache,
-  );
-  const nanoDiffusionSourcemapLeaks = scanEntrySourcemaps(
-    nanoGraph.jsChunks,
-    DIFFUSION_SOURCE_RE,
-    outDir,
-    repoRoot,
-    sourcemapCache,
-  );
-  const twoTowerDiffusionSourcemapLeaks = scanEntrySourcemaps(
-    twoTowerGraph.jsChunks,
-    DIFFUSION_SOURCE_RE,
-    outDir,
-    repoRoot,
-    sourcemapCache,
-  );
-  const diffusionTwoTowerSourcemapLeaks = scanEntrySourcemaps(
-    diffusionGraph.jsChunks,
-    TWOTOWER_SOURCE_RE,
-    outDir,
-    repoRoot,
-    sourcemapCache,
-  );
+  const sourcemapLeaksByPair = Object.create(null);
+  const sourcemapLeaksFlat = Object.create(null);
+  const entrySourcemapLeakTotals = Object.create(null);
+  let totalSourcemapLeaks = 0;
 
-  for (const leak of nanoTwoTowerSourcemapLeaks) {
-    violations.push(
-      `Gate 4 [Source-Map Leak]: Nano chunk "${leak.chunk}" includes TwoTower source "${leak.source}"`,
-    );
+  for (const fromEntry of ENTRIES) {
+    let entryTotal = 0;
+    for (const targetEntry of ENTRIES) {
+      if (fromEntry.key === targetEntry.key) continue;
+      const leaks = scanEntrySourcemaps(
+        graphs[fromEntry.key].jsChunks,
+        targetEntry.sourceRe,
+        outDir,
+        repoRoot,
+        sourcemapCache,
+      );
+      const pairKey = `${fromEntry.key}<-${targetEntry.key}`;
+      const flatKey = `${fromEntry.camelKey}${targetEntry.pascalKey}SourcemapLeaks`;
+      sourcemapLeaksByPair[pairKey] = leaks.length;
+      sourcemapLeaksFlat[flatKey] = leaks.length;
+      entryTotal += leaks.length;
+      totalSourcemapLeaks += leaks.length;
+      for (const leak of leaks) {
+        violations.push(
+          `Gate 4 [Source-Map Leak]: ${fromEntry.label} chunk "${leak.chunk}" includes ${targetEntry.label} source "${leak.source}"`,
+        );
+      }
+    }
+    entrySourcemapLeakTotals[fromEntry.key] = entryTotal;
   }
-  for (const leak of nanoDiffusionSourcemapLeaks) {
+
+  // Locked Decision D4: Uni's transitive JS sourcemaps must contain zero src/ui/controls.ts references.
+  const uniControlsSourcemapLeaks = scanEntrySourcemaps(
+    graphs.uni.jsChunks,
+    CONTROLS_SOURCE_RE,
+    outDir,
+    repoRoot,
+    sourcemapCache,
+  );
+  for (const leak of uniControlsSourcemapLeaks) {
     violations.push(
-      `Gate 4 [Source-Map Leak]: Nano chunk "${leak.chunk}" includes Diffusion source "${leak.source}"`,
-    );
-  }
-  for (const leak of twoTowerDiffusionSourcemapLeaks) {
-    violations.push(
-      `Gate 4 [Source-Map Leak]: TwoTower chunk "${leak.chunk}" includes Diffusion source "${leak.source}"`,
-    );
-  }
-  for (const leak of diffusionTwoTowerSourcemapLeaks) {
-    violations.push(
-      `Gate 4 [Source-Map Leak]: Diffusion chunk "${leak.chunk}" includes TwoTower source "${leak.source}"`,
+      `Gate 4 [D4 Controls Leak]: Uni chunk "${leak.chunk}" includes forbidden Nano controls source "${leak.source}"`,
     );
   }
 
-  // Gate 5: Strict 3-Way Payload Marker Mutual Isolation Gate.
+  // Gate 5: Strict 4-Way Payload Marker Mutual Isolation Gate (all 12 directional pairs).
   const contentCache = new Map();
-  const nanoTwoTowerMarkerHits = scanEntryMarkers(
-    nanoGraph.allAssets,
-    FORBIDDEN_TWOTOWER_MARKERS,
-    outDir,
-    contentCache,
-  );
-  const nanoDiffusionMarkerHits = scanEntryMarkers(
-    nanoGraph.allAssets,
-    FORBIDDEN_DIFFUSION_MARKERS,
-    outDir,
-    contentCache,
-  );
-  const twoTowerDiffusionMarkerHits = scanEntryMarkers(
-    twoTowerGraph.allAssets,
-    FORBIDDEN_DIFFUSION_MARKERS,
-    outDir,
-    contentCache,
-  );
-  const diffusionTwoTowerMarkerHits = scanEntryMarkers(
-    diffusionGraph.allAssets,
-    FORBIDDEN_TWOTOWER_MARKERS,
-    outDir,
-    contentCache,
-  );
+  const markerHitsByPair = Object.create(null);
+  const markerHitsFlat = Object.create(null);
+  const entryMarkerHitTotals = Object.create(null);
+  let totalForbiddenMarkerHits = 0;
 
-  for (const hit of nanoTwoTowerMarkerHits) {
-    violations.push(
-      `Gate 5 [Payload Marker Leak]: Nano asset "${hit.asset}" contains forbidden TwoTower marker "${hit.marker}"`,
-    );
-  }
-  for (const hit of nanoDiffusionMarkerHits) {
-    violations.push(
-      `Gate 5 [Payload Marker Leak]: Nano asset "${hit.asset}" contains forbidden Diffusion marker "${hit.marker}"`,
-    );
-  }
-  for (const hit of twoTowerDiffusionMarkerHits) {
-    violations.push(
-      `Gate 5 [Payload Marker Leak]: TwoTower asset "${hit.asset}" contains forbidden Diffusion marker "${hit.marker}"`,
-    );
-  }
-  for (const hit of diffusionTwoTowerMarkerHits) {
-    violations.push(
-      `Gate 5 [Payload Marker Leak]: Diffusion asset "${hit.asset}" contains forbidden TwoTower marker "${hit.marker}"`,
-    );
+  for (const fromEntry of ENTRIES) {
+    let entryTotal = 0;
+    for (const targetEntry of ENTRIES) {
+      if (fromEntry.key === targetEntry.key) continue;
+      const hits = scanEntryMarkers(
+        graphs[fromEntry.key].allAssets,
+        targetEntry.markers,
+        outDir,
+        contentCache,
+      );
+      const pairKey = `${fromEntry.key}<-${targetEntry.key}`;
+      const flatKey = `${fromEntry.camelKey}${targetEntry.pascalKey}MarkerHits`;
+      markerHitsByPair[pairKey] = hits.length;
+      markerHitsFlat[flatKey] = hits.length;
+      entryTotal += hits.length;
+      totalForbiddenMarkerHits += hits.length;
+      for (const hit of hits) {
+        violations.push(
+          `Gate 5 [Payload Marker Leak]: ${fromEntry.label} asset "${hit.asset}" contains forbidden ${targetEntry.label} marker "${hit.marker}"`,
+        );
+      }
+    }
+    entryMarkerHitTotals[fromEntry.key] = entryTotal;
   }
 
-  // Gate 6: Positive Presence Gate for TwoTower and Diffusion (proves sourcemaps are real and audited).
-  const twoTowerConfirmedSources = scanEntrySourcemaps(
-    twoTowerGraph.jsChunks,
-    TWOTOWER_SOURCE_RE,
-    outDir,
-    repoRoot,
-    sourcemapCache,
-  );
-  const diffusionConfirmedSources = scanEntrySourcemaps(
-    diffusionGraph.jsChunks,
-    DIFFUSION_SOURCE_RE,
-    outDir,
-    repoRoot,
-    sourcemapCache,
-  );
-
-  if (twoTowerConfirmedSources.length === 0) {
-    violations.push(
-      'Gate 6 [Positive Presence]: TwoTower transitive JS sourcemaps contain zero "src/twotower/" sources',
+  // Gate 6: Positive Presence Gate across all 4 entries (proves sourcemaps are real and audited).
+  const confirmedSources = Object.create(null);
+  for (const entry of ENTRIES) {
+    const matches = scanEntrySourcemaps(
+      graphs[entry.key].jsChunks,
+      entry.sourceRe,
+      outDir,
+      repoRoot,
+      sourcemapCache,
     );
-  }
-  if (diffusionConfirmedSources.length === 0) {
-    violations.push(
-      'Gate 6 [Positive Presence]: Diffusion transitive JS sourcemaps contain zero "src/diffusion/" sources',
-    );
+    confirmedSources[entry.key] = matches;
+    if (matches.length === 0) {
+      violations.push(
+        `Gate 6 [Positive Presence]: ${entry.label} transitive JS sourcemaps contain zero ${entry.sourceDesc} sources`,
+      );
+    }
   }
 
-  // Gate 7: Exact Raw & Gzip (level 9) Payload Budget Accounting across all 3 entries.
-  const nanoAssetSet = new Set(nanoGraph.allAssets);
-  const twoTowerAssetSet = new Set(twoTowerGraph.allAssets);
-  const diffusionAssetSet = new Set(diffusionGraph.allAssets);
-  const unionAssetPaths = [
-    ...new Set([...nanoGraph.allAssets, ...twoTowerGraph.allAssets, ...diffusionGraph.allAssets]),
-  ].sort();
+  // Gate 7: Exact Raw & Gzip (level 9) Payload Budget Accounting across all 4 entries.
+  const assetSets = Object.create(null);
+  const unionSet = new Set();
+  for (const entry of ENTRIES) {
+    assetSets[entry.key] = new Set(graphs[entry.key].allAssets);
+    for (const p of graphs[entry.key].allAssets) {
+      unionSet.add(p);
+    }
+  }
+  const unionAssetPaths = [...unionSet].sort();
 
-  const sharedAssetPaths = unionAssetPaths.filter((p) => {
-    const memberships =
-      (nanoAssetSet.has(p) ? 1 : 0) +
-      (twoTowerAssetSet.has(p) ? 1 : 0) +
-      (diffusionAssetSet.has(p) ? 1 : 0);
-    return memberships >= 2;
-  });
-  const nanoOnlyAssetPaths = [...nanoAssetSet]
-    .filter((p) => !twoTowerAssetSet.has(p) && !diffusionAssetSet.has(p))
-    .sort();
-  const twoTowerOnlyAssetPaths = [...twoTowerAssetSet]
-    .filter((p) => !nanoAssetSet.has(p) && !diffusionAssetSet.has(p))
-    .sort();
-  const diffusionOnlyAssetPaths = [...diffusionAssetSet]
-    .filter((p) => !nanoAssetSet.has(p) && !twoTowerAssetSet.has(p))
-    .sort();
+  const membershipsFor = (p) => ENTRIES.filter((entry) => assetSets[entry.key].has(p));
+
+  const sharedAssetPaths = unionAssetPaths.filter((p) => membershipsFor(p).length >= 2);
+  const onlyAssetPaths = Object.create(null);
+  for (const entry of ENTRIES) {
+    onlyAssetPaths[entry.key] = [...assetSets[entry.key]]
+      .filter((p) => membershipsFor(p).length === 1)
+      .sort();
+  }
 
   const sizeCache = new Map();
   const getSize = (p) => {
@@ -651,41 +682,31 @@ function main() {
     return sizeCache.get(p);
   };
 
-  const nanoAssetsSized = nanoGraph.allAssets.map(getSize);
-  const twoTowerAssetsSized = twoTowerGraph.allAssets.map(getSize);
-  const diffusionAssetsSized = diffusionGraph.allAssets.map(getSize);
+  const entryAssetsSized = Object.create(null);
+  const entryOnlySized = Object.create(null);
+  const entryTotals = Object.create(null);
+  const entryOnlyTotals = Object.create(null);
+  const htmlEntrySizes = Object.create(null);
+
+  for (const entry of ENTRIES) {
+    entryAssetsSized[entry.key] = graphs[entry.key].allAssets.map(getSize);
+    entryOnlySized[entry.key] = onlyAssetPaths[entry.key].map(getSize);
+    entryTotals[entry.key] = sumSizes(entryAssetsSized[entry.key]);
+    entryOnlyTotals[entry.key] = sumSizes(entryOnlySized[entry.key]);
+    htmlEntrySizes[entry.key] = measureFileSizes(entryHtmlPaths[entry.key], outDir);
+  }
+
   const sharedAssetsSized = sharedAssetPaths.map((p) => ({
-    scope: classifyAssetScope(
-      nanoAssetSet.has(p),
-      twoTowerAssetSet.has(p),
-      diffusionAssetSet.has(p),
-    ),
+    scope: classifyAssetScope(membershipsFor(p)),
     ...getSize(p),
   }));
-  const nanoOnlySized = nanoOnlyAssetPaths.map(getSize);
-  const twoTowerOnlySized = twoTowerOnlyAssetPaths.map(getSize);
-  const diffusionOnlySized = diffusionOnlyAssetPaths.map(getSize);
   const allAssetsTable = unionAssetPaths.map((p) => ({
-    scope: classifyAssetScope(
-      nanoAssetSet.has(p),
-      twoTowerAssetSet.has(p),
-      diffusionAssetSet.has(p),
-    ),
+    scope: classifyAssetScope(membershipsFor(p)),
     ...getSize(p),
   }));
-
-  const nanoHtmlSize = measureFileSizes(nanoHtmlPath, outDir);
-  const twoTowerHtmlSize = measureFileSizes(twoTowerHtmlPath, outDir);
-  const diffusionHtmlSize = measureFileSizes(diffusionHtmlPath, outDir);
-
-  const nanoTotals = sumSizes(nanoAssetsSized);
-  const twoTowerTotals = sumSizes(twoTowerAssetsSized);
-  const diffusionTotals = sumSizes(diffusionAssetsSized);
   const sharedTotals = sumSizes(sharedAssetsSized);
-  const nanoOnlyTotals = sumSizes(nanoOnlySized);
-  const twoTowerOnlyTotals = sumSizes(twoTowerOnlySized);
-  const diffusionOnlyTotals = sumSizes(diffusionOnlySized);
 
+  const nanoTotals = entryTotals.nano;
   const nanoGzipHeadroomBytes = NANO_GZIP_BUDGET_BYTES - nanoTotals.gzipBytes;
 
   if (nanoTotals.gzipBytes > NANO_GZIP_BUDGET_BYTES) {
@@ -694,65 +715,72 @@ function main() {
     );
   }
 
-  const nanoSourcemapLeaksTotal =
-    nanoTwoTowerSourcemapLeaks.length + nanoDiffusionSourcemapLeaks.length;
-  const nanoMarkerHitsTotal = nanoTwoTowerMarkerHits.length + nanoDiffusionMarkerHits.length;
-
   const report = {
     status: violations.length === 0 ? 'PASS' : 'FAIL',
     outDir: toPosix(relative(repoRoot, outDir)) || outDirInput,
     detectedBasePath: [...detectedBasePrefixes][0] ?? '/',
     gates: {
       entriesExist: true,
-      nanoTransitiveJsCount: nanoGraph.jsChunks.length,
-      nanoTransitiveCssCount: nanoGraph.cssAssets.length,
-      nanoImportEdgeCount: nanoGraph.edges.length,
-      twoTowerTransitiveJsCount: twoTowerGraph.jsChunks.length,
-      twoTowerTransitiveCssCount: twoTowerGraph.cssAssets.length,
-      twoTowerImportEdgeCount: twoTowerGraph.edges.length,
-      diffusionTransitiveJsCount: diffusionGraph.jsChunks.length,
-      diffusionTransitiveCssCount: diffusionGraph.cssAssets.length,
-      diffusionImportEdgeCount: diffusionGraph.edges.length,
-      nanoSourcemapLeaks: nanoSourcemapLeaksTotal,
-      nanoTwoTowerSourcemapLeaks: nanoTwoTowerSourcemapLeaks.length,
-      nanoDiffusionSourcemapLeaks: nanoDiffusionSourcemapLeaks.length,
-      twoTowerDiffusionSourcemapLeaks: twoTowerDiffusionSourcemapLeaks.length,
-      diffusionTwoTowerSourcemapLeaks: diffusionTwoTowerSourcemapLeaks.length,
-      nanoForbiddenMarkerHits: nanoMarkerHitsTotal,
-      nanoTwoTowerMarkerHits: nanoTwoTowerMarkerHits.length,
-      nanoDiffusionMarkerHits: nanoDiffusionMarkerHits.length,
-      twoTowerDiffusionMarkerHits: twoTowerDiffusionMarkerHits.length,
-      diffusionTwoTowerMarkerHits: diffusionTwoTowerMarkerHits.length,
-      twoTowerPositiveSourceCount: twoTowerConfirmedSources.length,
-      diffusionPositiveSourceCount: diffusionConfirmedSources.length,
+      nanoTransitiveJsCount: graphs.nano.jsChunks.length,
+      nanoTransitiveCssCount: graphs.nano.cssAssets.length,
+      nanoImportEdgeCount: graphs.nano.edges.length,
+      twoTowerTransitiveJsCount: graphs.twotower.jsChunks.length,
+      twoTowerTransitiveCssCount: graphs.twotower.cssAssets.length,
+      twoTowerImportEdgeCount: graphs.twotower.edges.length,
+      diffusionTransitiveJsCount: graphs.diffusion.jsChunks.length,
+      diffusionTransitiveCssCount: graphs.diffusion.cssAssets.length,
+      diffusionImportEdgeCount: graphs.diffusion.edges.length,
+      uniTransitiveJsCount: graphs.uni.jsChunks.length,
+      uniTransitiveCssCount: graphs.uni.cssAssets.length,
+      uniImportEdgeCount: graphs.uni.edges.length,
+      totalSourcemapLeaks,
+      nanoSourcemapLeaks: entrySourcemapLeakTotals.nano,
+      twoTowerSourcemapLeaks: entrySourcemapLeakTotals.twotower,
+      diffusionSourcemapLeaks: entrySourcemapLeakTotals.diffusion,
+      uniSourcemapLeaks: entrySourcemapLeakTotals.uni,
+      uniControlsSourcemapLeaks: uniControlsSourcemapLeaks.length,
+      sourcemapLeaksByPair,
+      ...sourcemapLeaksFlat,
+      totalForbiddenMarkerHits,
+      nanoForbiddenMarkerHits: entryMarkerHitTotals.nano,
+      twoTowerForbiddenMarkerHits: entryMarkerHitTotals.twotower,
+      diffusionForbiddenMarkerHits: entryMarkerHitTotals.diffusion,
+      uniForbiddenMarkerHits: entryMarkerHitTotals.uni,
+      markerHitsByPair,
+      ...markerHitsFlat,
+      nanoPositiveSourceCount: confirmedSources.nano.length,
+      twoTowerPositiveSourceCount: confirmedSources.twotower.length,
+      diffusionPositiveSourceCount: confirmedSources.diffusion.length,
+      uniPositiveSourceCount: confirmedSources.uni.length,
       nanoGzipBudgetBytes: NANO_GZIP_BUDGET_BYTES,
       nanoGzipBytes: nanoTotals.gzipBytes,
       nanoGzipHeadroomBytes,
       nanoGzipWithinBudget: nanoTotals.gzipBytes <= NANO_GZIP_BUDGET_BYTES,
     },
     totals: {
-      nanoTransitiveAssets: nanoTotals,
-      nanoOnlyAssets: nanoOnlyTotals,
-      twoTowerTransitiveAssets: twoTowerTotals,
-      twoTowerOnlyAssets: twoTowerOnlyTotals,
-      diffusionTransitiveAssets: diffusionTotals,
-      diffusionOnlyAssets: diffusionOnlyTotals,
+      nanoTransitiveAssets: entryTotals.nano,
+      nanoOnlyAssets: entryOnlyTotals.nano,
+      twoTowerTransitiveAssets: entryTotals.twotower,
+      twoTowerOnlyAssets: entryOnlyTotals.twotower,
+      diffusionTransitiveAssets: entryTotals.diffusion,
+      diffusionOnlyAssets: entryOnlyTotals.diffusion,
+      uniTransitiveAssets: entryTotals.uni,
+      uniOnlyAssets: entryOnlyTotals.uni,
       sharedAssets: sharedTotals,
-      htmlEntries: {
-        nano: nanoHtmlSize,
-        twotower: twoTowerHtmlSize,
-        diffusion: diffusionHtmlSize,
-      },
+      htmlEntries: htmlEntrySizes,
     },
     chunks: {
-      nano: nanoAssetsSized,
-      twotower: twoTowerAssetsSized,
-      diffusion: diffusionAssetsSized,
+      nano: entryAssetsSized.nano,
+      twotower: entryAssetsSized.twotower,
+      diffusion: entryAssetsSized.diffusion,
+      uni: entryAssetsSized.uni,
       shared: sharedAssetsSized,
       all: allAssetsTable,
     },
-    twoTowerConfirmedSources: twoTowerConfirmedSources.map((s) => s.source),
-    diffusionConfirmedSources: diffusionConfirmedSources.map((s) => s.source),
+    nanoConfirmedSources: confirmedSources.nano.map((s) => s.source),
+    twoTowerConfirmedSources: confirmedSources.twotower.map((s) => s.source),
+    diffusionConfirmedSources: confirmedSources.diffusion.map((s) => s.source),
+    uniConfirmedSources: confirmedSources.uni.map((s) => s.source),
     violations,
   };
 
@@ -765,11 +793,17 @@ function main() {
   }
 }
 
+function formatPairBreakdown(byPair, fromEntry) {
+  return ENTRIES.filter((e) => e.key !== fromEntry.key)
+    .map((target) => `${target.shortCode}=${byPair[`${fromEntry.key}<-${target.key}`]}`)
+    .join(', ');
+}
+
 function printHumanSummary(report) {
   const { gates, totals, chunks } = report;
   const headroomSign = gates.nanoGzipHeadroomBytes >= 0 ? '+' : '-';
   const absHeadroom = Math.abs(gates.nanoGzipHeadroomBytes);
-  console.log('=== 3-Way Nano / TwoTower / Diffusion Bundle Isolation Audit ===');
+  console.log('=== 4-Way Nano / TwoTower / Diffusion / Uni Bundle Isolation Audit ===');
   console.log(`Output dir        : ${report.outDir}`);
   console.log(`Detected base     : ${report.detectedBasePath}`);
   console.log(
@@ -782,22 +816,25 @@ function printHumanSummary(report) {
     `Diffusion graph   : ${gates.diffusionTransitiveJsCount} JS, ${gates.diffusionTransitiveCssCount} CSS | raw ${totals.diffusionTransitiveAssets.rawBytes.toLocaleString('en-US')} B (${fmtKiB(totals.diffusionTransitiveAssets.rawBytes)}) | gzip ${totals.diffusionTransitiveAssets.gzipBytes.toLocaleString('en-US')} B (${fmtKiB(totals.diffusionTransitiveAssets.gzipBytes)})`,
   );
   console.log(
+    `Uni graph         : ${gates.uniTransitiveJsCount} JS, ${gates.uniTransitiveCssCount} CSS | raw ${totals.uniTransitiveAssets.rawBytes.toLocaleString('en-US')} B (${fmtKiB(totals.uniTransitiveAssets.rawBytes)}) | gzip ${totals.uniTransitiveAssets.gzipBytes.toLocaleString('en-US')} B (${fmtKiB(totals.uniTransitiveAssets.gzipBytes)})`,
+  );
+  console.log(
     `Shared chunks     : ${chunks.shared.length} file(s) | raw ${totals.sharedAssets.rawBytes.toLocaleString('en-US')} B (${fmtKiB(totals.sharedAssets.rawBytes)}) | gzip ${totals.sharedAssets.gzipBytes.toLocaleString('en-US')} B (${fmtKiB(totals.sharedAssets.gzipBytes)})`,
   );
   console.log(
-    `Source-map leaks  : nano=${gates.nanoSourcemapLeaks} (tt=${gates.nanoTwoTowerSourcemapLeaks}, df=${gates.nanoDiffusionSourcemapLeaks}), twotower<-df=${gates.twoTowerDiffusionSourcemapLeaks}, diffusion<-tt=${gates.diffusionTwoTowerSourcemapLeaks}`,
+    `Source-map leaks  : total=${gates.totalSourcemapLeaks} | nano(${formatPairBreakdown(gates.sourcemapLeaksByPair, ENTRIES[0])}), tt(${formatPairBreakdown(gates.sourcemapLeaksByPair, ENTRIES[1])}), df(${formatPairBreakdown(gates.sourcemapLeaksByPair, ENTRIES[2])}), uni(${formatPairBreakdown(gates.sourcemapLeaksByPair, ENTRIES[3])}), d4:uni<-controls=${gates.uniControlsSourcemapLeaks}`,
   );
   console.log(
-    `Marker leaks      : nano=${gates.nanoForbiddenMarkerHits} (tt=${gates.nanoTwoTowerMarkerHits}, df=${gates.nanoDiffusionMarkerHits}), twotower<-df=${gates.twoTowerDiffusionMarkerHits}, diffusion<-tt=${gates.diffusionTwoTowerMarkerHits}`,
+    `Marker leaks      : total=${gates.totalForbiddenMarkerHits} | nano(${formatPairBreakdown(gates.markerHitsByPair, ENTRIES[0])}), tt(${formatPairBreakdown(gates.markerHitsByPair, ENTRIES[1])}), df(${formatPairBreakdown(gates.markerHitsByPair, ENTRIES[2])}), uni(${formatPairBreakdown(gates.markerHitsByPair, ENTRIES[3])})`,
   );
   console.log(
-    `Positive presence : twoTowerSources=${gates.twoTowerPositiveSourceCount}, diffusionSources=${gates.diffusionPositiveSourceCount}`,
+    `Positive presence : nanoSources=${gates.nanoPositiveSourceCount}, twoTowerSources=${gates.twoTowerPositiveSourceCount}, diffusionSources=${gates.diffusionPositiveSourceCount}, uniSources=${gates.uniPositiveSourceCount}`,
   );
 
-  console.log('\nScope           Kind   Raw (B)    Gzip (B)   Asset');
-  console.log('--------------  -----  ---------  ---------  ----------------------------------------');
+  console.log('\nScope               Kind   Raw (B)    Gzip (B)   Asset');
+  console.log('------------------  -----  ---------  ---------  ----------------------------------------');
   for (const r of chunks.all) {
-    const scope = r.scope.padEnd(14);
+    const scope = r.scope.padEnd(18);
     const kind = r.kind.padEnd(5);
     const raw = String(r.rawBytes).padStart(9);
     const gz = String(r.gzipBytes).padStart(9);

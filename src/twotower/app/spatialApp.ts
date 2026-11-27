@@ -1321,6 +1321,14 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   navDiffusionArrow.setAttribute('aria-hidden', 'true');
   navToDiffusionLink.append(document.createTextNode('Diffusion '), navDiffusionArrow);
 
+  const navToUniLink = el('a', 'sp-top-link');
+  navToUniLink.href = `${baseUrl}uni/`;
+  navToUniLink.dataset.testid = 'nav-to-uni';
+  navToUniLink.title = 'Open Nemotron-Labs-Diffusion-Uni multimodal architecture visualizer';
+  const navUniArrow = el('span', undefined, '↗');
+  navUniArrow.setAttribute('aria-hidden', 'true');
+  navToUniLink.append(document.createTextNode('Uni '), navUniArrow);
+
   topActions.append(
     btnTourToggle,
     btnResetCamera,
@@ -1328,6 +1336,7 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
     btnToggleMobileInspector,
     navToNanoLink,
     navToDiffusionLink,
+    navToUniLink,
   );
   topbar.append(brand, tablist, topActions);
 
