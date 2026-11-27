@@ -248,6 +248,8 @@ export function getAppCanvasLocator(page: Page, appId: ModelEntryId): Locator {
       return page.getByTestId('diffusion-canvas');
     case 'uni':
       return page.getByTestId('uni-webgl-canvas');
+    case 'dory':
+      return page.getByTestId('dory-webgl-canvas');
   }
 }
 
@@ -294,13 +296,29 @@ export async function waitForAppSettled(page: Page, appId: ModelEntryId): Promis
     await waitFrames(page, 1);
     return;
   }
+  if (appId === 'uni') {
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() => {
+            const dbg = (
+              window as unknown as { __uniSpatialDebug?: { readonly rafActive?: boolean } }
+            ).__uniSpatialDebug;
+            return dbg ? !dbg.rafActive : false;
+          }),
+        { timeout: 6000 },
+      )
+      .toBe(true);
+    await waitFrames(page, 1);
+    return;
+  }
   await expect
     .poll(
       () =>
         page.evaluate(() => {
           const dbg = (
-            window as unknown as { __uniSpatialDebug?: { readonly rafActive?: boolean } }
-          ).__uniSpatialDebug;
+            window as unknown as { __dorySpatialDebug?: { readonly rafActive?: boolean } }
+          ).__dorySpatialDebug;
           return dbg ? !dbg.rafActive : false;
         }),
       { timeout: 6000 },
@@ -332,6 +350,16 @@ export async function getAppGlErrorCount(page: Page, appId: ModelEntryId): Promi
             __uniSpatialDebug?: { getSnapshot: () => { glErrorCount: number } };
           }
         ).__uniSpatialDebug?.getSnapshot().glErrorCount ?? -1,
+    );
+  }
+  if (appId === 'dory') {
+    return page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __dorySpatialDebug?: { getSnapshot: () => { glErrorCount: number } };
+          }
+        ).__dorySpatialDebug?.getSnapshot().glErrorCount ?? -1,
     );
   }
   return 0;
