@@ -1,6 +1,6 @@
-import { inflateSync } from 'node:zlib';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { PAGES_BASE_URL, ROOT_BASE_URL } from '../../playwright.config';
+import { assertCanvasNonBlank, waitFrames } from './helpers';
 
 interface WebGL2Telemetry {
   hasWebGL2: boolean;
@@ -257,145 +257,14 @@ async function installWebGL2Telemetry(page: Page): Promise<void> {
   });
 }
 
-async function waitFrames(page: Page, count = 3): Promise<void> {
-  await page.evaluate(
-    (n) =>
-      new Promise<void>((resolve) => {
-        let remaining = n;
-        const tick = () => {
-          remaining -= 1;
-          if (remaining <= 0) resolve();
-          else requestAnimationFrame(tick);
-        };
-        requestAnimationFrame(tick);
-      }),
-    count,
-  );
-}
-
-/**
- * Pure-Node PNG RGBA pixel variance inspector (zero external image deps).
- * Decodes standard 8-bit RGB/RGBA PNGs produced by Playwright's `locator.screenshot()`
- * and checks that rendered pixels are genuinely non-uniform (not blank / single clear color).
- */
-function analyzePngColorVariety(png: Buffer): {
-  width: number;
-  height: number;
-  distinctBuckets: number;
-  nonBackgroundRatio: number;
-} {
-  const PNG_SIG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-  if (png.length < 33 || !png.subarray(0, 8).equals(PNG_SIG)) {
-    throw new Error('Invalid PNG buffer');
-  }
-
-  let width = 0;
-  let height = 0;
-  let bitDepth = 0;
-  let colorType = 0;
-  const idatChunks: Buffer[] = [];
-
-  let offset = 8;
-  while (offset + 12 <= png.length) {
-    const len = png.readUInt32BE(offset);
-    const type = png.subarray(offset + 4, offset + 8).toString('ascii');
-    const dataStart = offset + 8;
-    const dataEnd = dataStart + len;
-    if (dataEnd > png.length) break;
-
-    if (type === 'IHDR') {
-      width = png.readUInt32BE(dataStart);
-      height = png.readUInt32BE(dataStart + 4);
-      bitDepth = png[dataStart + 8];
-      colorType = png[dataStart + 9];
-    } else if (type === 'IDAT') {
-      idatChunks.push(png.subarray(dataStart, dataEnd));
-    } else if (type === 'IEND') {
-      break;
-    }
-    offset = dataEnd + 4;
-  }
-
-  if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6)) {
-    throw new Error(`Unsupported PNG format: bitDepth=${bitDepth} colorType=${colorType}`);
-  }
-
-  const bpp = colorType === 6 ? 4 : 3;
-  const stride = width * bpp;
-  const raw = inflateSync(Buffer.concat(idatChunks));
-  const recon = Buffer.alloc(height * stride);
-
-  const paeth = (a: number, b: number, c: number): number => {
-    const p = a + b - c;
-    const pa = Math.abs(p - a);
-    const pb = Math.abs(p - b);
-    const pc = Math.abs(p - c);
-    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
-  };
-
-  for (let y = 0; y < height; y++) {
-    const filter = raw[y * (stride + 1)];
-    const srcRow = y * (stride + 1) + 1;
-    const dstRow = y * stride;
-    for (let x = 0; x < stride; x++) {
-      const val = raw[srcRow + x];
-      const a = x >= bpp ? recon[dstRow + x - bpp] : 0;
-      const b = y > 0 ? recon[dstRow - stride + x] : 0;
-      const c = y > 0 && x >= bpp ? recon[dstRow - stride + x - bpp] : 0;
-      let out = val;
-      if (filter === 1) out = (val + a) & 0xff;
-      else if (filter === 2) out = (val + b) & 0xff;
-      else if (filter === 3) out = (val + ((a + b) >> 1)) & 0xff;
-      else if (filter === 4) out = (val + paeth(a, b, c)) & 0xff;
-      recon[dstRow + x] = out;
-    }
-  }
-
-  // Sample every 4th pixel for fast, deterministic color distribution analysis
-  const buckets = new Set<number>();
-  let sampled = 0;
-  let nonBg = 0;
-  // Studio white clear color is ~#F8F9FB (248, 249, 251)
-  const bgR = recon[0];
-  const bgG = recon[1];
-  const bgB = recon[2];
-
-  for (let y = 0; y < height; y += 4) {
-    const rowOff = y * stride;
-    for (let x = 0; x < width; x += 4) {
-      const i = rowOff + x * bpp;
-      const r = recon[i];
-      const g = recon[i + 1];
-      const b = recon[i + 2];
-      sampled += 1;
-      buckets.add(((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4));
-      if (Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB) > 24) {
-        nonBg += 1;
-      }
-    }
-  }
-
-  return {
-    width,
-    height,
-    distinctBuckets: buckets.size,
-    nonBackgroundRatio: sampled > 0 ? nonBg / sampled : 0,
-  };
-}
-
 async function assertCanvasRenderedNonBlank(canvas: Locator, label: string): Promise<void> {
-  const png = await canvas.screenshot({ animations: 'allow' });
-  const stats = analyzePngColorVariety(png);
-  expect(stats.width, `${label}: canvas PNG width`).toBeGreaterThan(100);
-  expect(stats.height, `${label}: canvas PNG height`).toBeGreaterThan(100);
-  expect(
-    stats.distinctBuckets,
-    `${label}: expected non-uniform WebGL2 pixels (buckets=${stats.distinctBuckets})`,
-  ).toBeGreaterThanOrEqual(8);
-  expect(
-    stats.nonBackgroundRatio,
-    `${label}: expected visible 3D geometry above background (ratio=${stats.nonBackgroundRatio.toFixed(4)})`,
-  ).toBeGreaterThan(0.015);
+  await assertCanvasNonBlank(canvas, label, {
+    minWidth: 101,
+    minHeight: 101,
+    minBuckets: 8,
+    minNonBgRatio: 0.015,
+    bgTolerance: 24,
+  });
 }
 
 async function getTelemetry(page: Page): Promise<WebGL2Telemetry> {

@@ -90,7 +90,7 @@ Installed only during local development and CI (`.npmrc` sets `save-exact=true`)
 
 | Package | Exact Pinned Version (`package.json`) | License | Usage |
 | --- | --- | --- | --- |
-| `@playwright/test` | `1.65.1` | Apache-2.0 | Headless Chromium WebGL2 E2E smoke suite (`tests/e2e/smoke.spec.ts`, `tests/e2e/twotower-smoke.spec.ts`, `tests/e2e/diffusion-smoke.spec.ts`, `tests/e2e/uni-smoke.spec.ts`); downloads Chromium binary strictly for test execution |
+| `@playwright/test` | `1.65.1` | Apache-2.0 | Headless Chromium WebGL2 E2E smoke suite (`tests/e2e/smoke.spec.ts`, `tests/e2e/twotower-smoke.spec.ts`, `tests/e2e/diffusion-smoke.spec.ts`, `tests/e2e/uni-smoke.spec.ts`, `tests/e2e/navigation.spec.ts`); downloads Chromium binary strictly for test execution |
 | `@types/node` | `22.20.5` | MIT | Node.js type definitions for build, isolation-gate, and test tooling |
 | `typescript` | `5.9.3` | Apache-2.0 | Static type checker (`tsc --noEmit`) and ECMAScript AST parser inside `scripts/verify_bundle_isolation.mjs` |
 | `vite` | `8.3.8` | MIT | Dev server, SSR module loader for offline parameter export, Topology A multi-entry static production bundler |

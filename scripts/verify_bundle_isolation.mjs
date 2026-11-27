@@ -1,33 +1,33 @@
 #!/usr/bin/env node
 /**
- * Automated 4-Way Nano / TwoTower / Diffusion / Uni Bundle-Isolation & Payload-Budget Gate
+ * Automated N-Way Bundle-Isolation, Architectural-Boundary & Payload-Budget Gate
  * (`scripts/verify_bundle_isolation.mjs`)
  *
- * Enforces all 7 hard gates over a built 4-entry Vite MPA output directory (default `dist`,
- * or `--dir <path>`):
- *   1. All 4 entry HTML files exist: `index.html` (Nano), `twotower/index.html` (TwoTower),
- *      `diffusion/index.html` (Diffusion), and `uni/index.html` (Uni).
+ * Scales dynamically with `ENTRIES` (currently 4: Nano, TwoTower, Diffusion, Uni; ready for 5–6+
+ * entries by appending to `ENTRIES`). Enforces all 7 hard gates over a built Vite MPA output
+ * directory (default `dist`, or `--dir <path>`):
+ *   1. All entry HTML files exist.
  *   2. Parse all `<script src>`, `<link rel="modulepreload" href>`, and `<link rel="stylesheet" href>`
- *      references from all 4 entry HTML files under root (`/`) or subpath (`/llm-viz/`) base paths
+ *      references from all entry HTML files under root (`/`) or subpath (`/llm-viz/`) base paths
  *      and verify base-path consistency.
  *   3. Recursively walk every static ES `import` / `export ... from` edge (plus literal dynamic
- *      `import(...)` edges) inside every JS chunk reachable from all 4 entries via TypeScript AST.
- *   4. Strict 4-Way Source-Map Mutual Isolation Gate + D4 Controls Gate: read `.map` `sources` for
- *      EVERY JS chunk reachable from each entry and FAIL if:
- *        - Any of the 12 directional pairs `(fromEntry, targetEntry)` (`from !== target`) leaks
- *          target-exclusive sources (`NANO_ONLY_SOURCE_RE`, `TWOTOWER_SOURCE_RE`,
- *          `DIFFUSION_SOURCE_RE`, `UNI_SOURCE_RE`), OR
- *        - Uni `.map` sources reference `src/ui/controls.ts` (`CONTROLS_SOURCE_RE`, Locked Decision D4).
- *   5. Strict 4-Way Payload Marker Mutual Isolation Gate: scan every JS/CSS file in each entry's
- *      transitive graph across all 12 directional pairs (`from !== target`) and FAIL if any entry's
- *      JS/CSS contains forbidden markers belonging to another entry (`FORBIDDEN_NANO_MARKERS`,
- *      `FORBIDDEN_TWOTOWER_MARKERS`, `FORBIDDEN_DIFFUSION_MARKERS`, `FORBIDDEN_UNI_MARKERS`).
- *   6. Positive Presence Gate: confirm Nano sourcemaps include Nano-exclusive sources (`src/main.ts`),
- *      TwoTower sourcemaps include `src/twotower/` sources, Diffusion sourcemaps include
- *      `src/diffusion/` sources, AND Uni sourcemaps include `src/uni/` sources.
- *   7. 4-Way Payload Budget Gate: compute exact raw & gzip (level 9) byte totals for Nano,
- *      TwoTower, Diffusion, Uni, and shared chunks; FAIL if Nano transitive JS+CSS gzip exceeds
- *      `215 * 1024` bytes (`215.00 KiB` / `220,160 B`).
+ *      `import(...)` edges) inside every JS chunk reachable from all entries via TypeScript AST.
+ *   4. Strict N-Way Source-Map Mutual Isolation & Architectural Boundary Gate: read `.map` `sources`
+ *      for EVERY JS chunk reachable from each entry and FAIL if:
+ *        - Any directional pair `(fromEntry, targetEntry)` (`from !== target`) leaks target-exclusive
+ *          sources, OR
+ *        - Any non-Nano entry (`entry.key !== 'nano'`) references Nano UI/controller/walkthrough
+ *          modules (`src/main.ts`, `src/ui/{controls,overlay,memoryChart}.ts`,
+ *          `src/story/walkthrough.ts`, `src/model/rcPlayback.ts`,
+ *          `src/scene/{gqaCutaway,mambaCutaway}.ts`), OR
+ *        - Any non-hybrid entry (`usesNanoHybridMath === false`) references Nano/TwoTower hybrid
+ *          spine, math, or cutaway modules.
+ *   5. Strict N-Way Payload Marker Mutual Isolation Gate across all directional pairs.
+ *   6. Positive Presence Gate: confirm every entry's transitive JS sourcemaps include its own
+ *      exclusive sources.
+ *   7. N-Way Payload Budget Gate: compute exact raw & gzip (level 9) byte totals for every entry
+ *      and shared chunks; FAIL if Nano transitive JS+CSS gzip exceeds `215 * 1024` bytes
+ *      (`215.00 KiB` / `220,160 B`).
  *
  * Uses Node.js built-ins (`node:fs`, `node:path`, `node:zlib`) plus the devDependency TypeScript
  * parser (`typescript`) for exact ECMAScript AST import/export edge discovery across minified chunks.
@@ -83,6 +83,14 @@ const DIFFUSION_SOURCE_RE = /(?:^|\/)(?:src\/)?diffusion\//i;
 const UNI_SOURCE_RE = /(?:^|\/)(?:src\/)?uni\//i;
 const CONTROLS_SOURCE_RE = /(?:^|\/)(?:src\/)?ui\/controls(?:\.ts)?$/i;
 
+// Gate 4b: Nano UI, controller, walkthrough, and exclusive cutaway modules forbidden in EVERY non-Nano entry.
+const NANO_UI_EXCLUSIVE_SOURCE_RE =
+  /^(?:src\/)?(?:main\.ts|ui\/(?:controls|overlay|memoryChart)\.ts|story\/walkthrough\.ts|model\/rcPlayback\.ts|scene\/(?:gqaCutaway|mambaCutaway)\.ts)$/i;
+
+// Gate 4c: Nano/TwoTower 52L hybrid core modules forbidden in EVERY non-hybrid entry (Diffusion, Uni, Models #5/#6).
+const NANO_HYBRID_CORE_SOURCE_RE =
+  /^(?:src\/)?(?:scene\/(?:spine|hybridPick|embeddingCutaway|outputCutaway|moeCutaway|gqaSpatial|mambaSpatial|moeSpatial|accumulation)\.ts|math\/(?:gqaSim|mambaSim|moeSim|hybridFlow|incrementalDecode)\.ts|model\/(?:spec|memory|state)\.ts)$/i;
+
 const ENTRIES = Object.freeze([
   {
     key: 'nano',
@@ -91,6 +99,7 @@ const ENTRIES = Object.freeze([
     camelKey: 'nano',
     pascalKey: 'Nano',
     htmlRelPath: 'index.html',
+    usesNanoHybridMath: true,
     sourceRe: NANO_ONLY_SOURCE_RE,
     sourceDesc: 'Nano-exclusive ("src/main.ts", "src/ui/memoryChart.ts")',
     markers: FORBIDDEN_NANO_MARKERS,
@@ -102,6 +111,7 @@ const ENTRIES = Object.freeze([
     camelKey: 'twoTower',
     pascalKey: 'TwoTower',
     htmlRelPath: 'twotower/index.html',
+    usesNanoHybridMath: true,
     sourceRe: TWOTOWER_SOURCE_RE,
     sourceDesc: '"src/twotower/"',
     markers: FORBIDDEN_TWOTOWER_MARKERS,
@@ -113,6 +123,7 @@ const ENTRIES = Object.freeze([
     camelKey: 'diffusion',
     pascalKey: 'Diffusion',
     htmlRelPath: 'diffusion/index.html',
+    usesNanoHybridMath: false,
     sourceRe: DIFFUSION_SOURCE_RE,
     sourceDesc: '"src/diffusion/"',
     markers: FORBIDDEN_DIFFUSION_MARKERS,
@@ -124,6 +135,7 @@ const ENTRIES = Object.freeze([
     camelKey: 'uni',
     pascalKey: 'Uni',
     htmlRelPath: 'uni/index.html',
+    usesNanoHybridMath: false,
     sourceRe: UNI_SOURCE_RE,
     sourceDesc: '"src/uni/"',
     markers: FORBIDDEN_UNI_MARKERS,
@@ -511,7 +523,7 @@ function fmtKiB(bytes) {
 }
 
 function classifyAssetScope(memberships) {
-  if (memberships.length === ENTRIES.length) return 'shared(all4)';
+  if (memberships.length === ENTRIES.length) return `shared(all${ENTRIES.length})`;
   if (memberships.length >= 2) {
     return `shared(${memberships.map((e) => e.shortCode).join('+')})`;
   }
@@ -523,7 +535,7 @@ function main() {
   const repoRoot = process.cwd();
   const violations = [];
 
-  // Gate 1: All 4 entry HTML files must exist.
+  // Gate 1: All configured entry HTML files must exist.
   const entryHtmlPaths = Object.create(null);
   for (const entry of ENTRIES) {
     const htmlPath = resolve(outDir, entry.htmlRelPath);
@@ -538,7 +550,7 @@ function main() {
     reportAndExit(violations, null);
   }
 
-  // Gates 2 & 3: Parse HTML refs and recursively walk static ES import/export graphs for all 4 entries.
+  // Gates 2 & 3: Parse HTML refs and recursively walk static ES import/export graphs for all entries.
   const detectedBasePrefixes = new Set();
   const graphs = Object.create(null);
   for (const entry of ENTRIES) {
@@ -556,7 +568,7 @@ function main() {
     );
   }
 
-  // Gate 4: Strict 4-Way Source-Map Mutual Isolation Gate (all 12 directional pairs) + D4 Controls Gate.
+  // Gate 4a: Strict N-Way Source-Map Mutual Isolation Gate across all N*(N-1) directional pairs.
   const sourcemapCache = new Map();
   const sourcemapLeaksByPair = Object.create(null);
   const sourcemapLeaksFlat = Object.create(null);
@@ -589,21 +601,61 @@ function main() {
     entrySourcemapLeakTotals[fromEntry.key] = entryTotal;
   }
 
-  // Locked Decision D4: Uni's transitive JS sourcemaps must contain zero src/ui/controls.ts references.
-  const uniControlsSourcemapLeaks = scanEntrySourcemaps(
-    graphs.uni.jsChunks,
-    CONTROLS_SOURCE_RE,
-    outDir,
-    repoRoot,
-    sourcemapCache,
-  );
-  for (const leak of uniControlsSourcemapLeaks) {
-    violations.push(
-      `Gate 4 [D4 Controls Leak]: Uni chunk "${leak.chunk}" includes forbidden Nano controls source "${leak.source}"`,
+  // Gate 4b: Every non-Nano entry must have 0 references to Nano UI/controller/walkthrough/cutaway-exclusive sources
+  // (generalizes Locked Decision D4 across TwoTower, Diffusion, Uni, and future Models #5/#6).
+  const nanoUiBoundaryLeaksByEntry = Object.create(null);
+  let totalNanoUiBoundaryLeaks = 0;
+  for (const entry of ENTRIES) {
+    if (entry.key === 'nano') continue;
+    const leaks = scanEntrySourcemaps(
+      graphs[entry.key].jsChunks,
+      NANO_UI_EXCLUSIVE_SOURCE_RE,
+      outDir,
+      repoRoot,
+      sourcemapCache,
     );
+    nanoUiBoundaryLeaksByEntry[entry.key] = leaks.length;
+    totalNanoUiBoundaryLeaks += leaks.length;
+    for (const leak of leaks) {
+      violations.push(
+        `Gate 4b [Nano UI Boundary Leak]: ${entry.label} chunk "${leak.chunk}" includes forbidden Nano UI/controller source "${leak.source}"`,
+      );
+    }
   }
 
-  // Gate 5: Strict 4-Way Payload Marker Mutual Isolation Gate (all 12 directional pairs).
+  // Gate 4c: Every non-hybrid entry (usesNanoHybridMath === false) must have 0 references to Nano/TwoTower hybrid core modules.
+  const nonHybridCoreLeaksByEntry = Object.create(null);
+  let totalNonHybridCoreLeaks = 0;
+  for (const entry of ENTRIES) {
+    if (entry.usesNanoHybridMath) continue;
+    const leaks = scanEntrySourcemaps(
+      graphs[entry.key].jsChunks,
+      NANO_HYBRID_CORE_SOURCE_RE,
+      outDir,
+      repoRoot,
+      sourcemapCache,
+    );
+    nonHybridCoreLeaksByEntry[entry.key] = leaks.length;
+    totalNonHybridCoreLeaks += leaks.length;
+    for (const leak of leaks) {
+      violations.push(
+        `Gate 4c [Non-Hybrid Core Leak]: ${entry.label} chunk "${leak.chunk}" includes forbidden Nano/TwoTower hybrid source "${leak.source}"`,
+      );
+    }
+  }
+
+  // Preserved legacy D4 counter for backwards-compatible JSON reporting.
+  const uniControlsSourcemapLeaks = graphs.uni
+    ? scanEntrySourcemaps(
+        graphs.uni.jsChunks,
+        CONTROLS_SOURCE_RE,
+        outDir,
+        repoRoot,
+        sourcemapCache,
+      ).length
+    : 0;
+
+  // Gate 5: Strict N-Way Payload Marker Mutual Isolation Gate across all directional pairs.
   const contentCache = new Map();
   const markerHitsByPair = Object.create(null);
   const markerHitsFlat = Object.create(null);
@@ -635,7 +687,7 @@ function main() {
     entryMarkerHitTotals[fromEntry.key] = entryTotal;
   }
 
-  // Gate 6: Positive Presence Gate across all 4 entries (proves sourcemaps are real and audited).
+  // Gate 6: Positive Presence Gate across all entries (proves sourcemaps are real and audited).
   const confirmedSources = Object.create(null);
   for (const entry of ENTRIES) {
     const matches = scanEntrySourcemaps(
@@ -653,7 +705,7 @@ function main() {
     }
   }
 
-  // Gate 7: Exact Raw & Gzip (level 9) Payload Budget Accounting across all 4 entries.
+  // Gate 7: Exact Raw & Gzip (level 9) Payload Budget Accounting across all entries.
   const assetSets = Object.create(null);
   const unionSet = new Set();
   for (const entry of ENTRIES) {
@@ -715,72 +767,68 @@ function main() {
     );
   }
 
+  const perEntryGateCounts = Object.create(null);
+  const perEntrySourcemapTotals = Object.create(null);
+  const perEntryMarkerTotals = Object.create(null);
+  const perEntryPositiveCounts = Object.create(null);
+  const perEntryTotals = Object.create(null);
+  const perEntryChunks = Object.create(null);
+  const perEntryConfirmedSources = Object.create(null);
+
+  for (const entry of ENTRIES) {
+    perEntryGateCounts[`${entry.camelKey}TransitiveJsCount`] = graphs[entry.key].jsChunks.length;
+    perEntryGateCounts[`${entry.camelKey}TransitiveCssCount`] = graphs[entry.key].cssAssets.length;
+    perEntryGateCounts[`${entry.camelKey}ImportEdgeCount`] = graphs[entry.key].edges.length;
+    perEntrySourcemapTotals[`${entry.camelKey}SourcemapLeaks`] = entrySourcemapLeakTotals[entry.key];
+    perEntryMarkerTotals[`${entry.camelKey}ForbiddenMarkerHits`] = entryMarkerHitTotals[entry.key];
+    perEntryPositiveCounts[`${entry.camelKey}PositiveSourceCount`] =
+      confirmedSources[entry.key].length;
+    perEntryTotals[`${entry.camelKey}TransitiveAssets`] = entryTotals[entry.key];
+    perEntryTotals[`${entry.camelKey}OnlyAssets`] = entryOnlyTotals[entry.key];
+    perEntryChunks[entry.key] = entryAssetsSized[entry.key];
+    perEntryConfirmedSources[`${entry.camelKey}ConfirmedSources`] = confirmedSources[entry.key].map(
+      (s) => s.source,
+    );
+  }
+
   const report = {
     status: violations.length === 0 ? 'PASS' : 'FAIL',
+    entryCount: ENTRIES.length,
     outDir: toPosix(relative(repoRoot, outDir)) || outDirInput,
     detectedBasePath: [...detectedBasePrefixes][0] ?? '/',
     gates: {
       entriesExist: true,
-      nanoTransitiveJsCount: graphs.nano.jsChunks.length,
-      nanoTransitiveCssCount: graphs.nano.cssAssets.length,
-      nanoImportEdgeCount: graphs.nano.edges.length,
-      twoTowerTransitiveJsCount: graphs.twotower.jsChunks.length,
-      twoTowerTransitiveCssCount: graphs.twotower.cssAssets.length,
-      twoTowerImportEdgeCount: graphs.twotower.edges.length,
-      diffusionTransitiveJsCount: graphs.diffusion.jsChunks.length,
-      diffusionTransitiveCssCount: graphs.diffusion.cssAssets.length,
-      diffusionImportEdgeCount: graphs.diffusion.edges.length,
-      uniTransitiveJsCount: graphs.uni.jsChunks.length,
-      uniTransitiveCssCount: graphs.uni.cssAssets.length,
-      uniImportEdgeCount: graphs.uni.edges.length,
+      ...perEntryGateCounts,
       totalSourcemapLeaks,
-      nanoSourcemapLeaks: entrySourcemapLeakTotals.nano,
-      twoTowerSourcemapLeaks: entrySourcemapLeakTotals.twotower,
-      diffusionSourcemapLeaks: entrySourcemapLeakTotals.diffusion,
-      uniSourcemapLeaks: entrySourcemapLeakTotals.uni,
-      uniControlsSourcemapLeaks: uniControlsSourcemapLeaks.length,
+      ...perEntrySourcemapTotals,
+      uniControlsSourcemapLeaks,
+      totalNanoUiBoundaryLeaks,
+      nanoUiBoundaryLeaksByEntry,
+      totalNonHybridCoreLeaks,
+      nonHybridCoreLeaksByEntry,
       sourcemapLeaksByPair,
       ...sourcemapLeaksFlat,
       totalForbiddenMarkerHits,
-      nanoForbiddenMarkerHits: entryMarkerHitTotals.nano,
-      twoTowerForbiddenMarkerHits: entryMarkerHitTotals.twotower,
-      diffusionForbiddenMarkerHits: entryMarkerHitTotals.diffusion,
-      uniForbiddenMarkerHits: entryMarkerHitTotals.uni,
+      ...perEntryMarkerTotals,
       markerHitsByPair,
       ...markerHitsFlat,
-      nanoPositiveSourceCount: confirmedSources.nano.length,
-      twoTowerPositiveSourceCount: confirmedSources.twotower.length,
-      diffusionPositiveSourceCount: confirmedSources.diffusion.length,
-      uniPositiveSourceCount: confirmedSources.uni.length,
+      ...perEntryPositiveCounts,
       nanoGzipBudgetBytes: NANO_GZIP_BUDGET_BYTES,
       nanoGzipBytes: nanoTotals.gzipBytes,
       nanoGzipHeadroomBytes,
       nanoGzipWithinBudget: nanoTotals.gzipBytes <= NANO_GZIP_BUDGET_BYTES,
     },
     totals: {
-      nanoTransitiveAssets: entryTotals.nano,
-      nanoOnlyAssets: entryOnlyTotals.nano,
-      twoTowerTransitiveAssets: entryTotals.twotower,
-      twoTowerOnlyAssets: entryOnlyTotals.twotower,
-      diffusionTransitiveAssets: entryTotals.diffusion,
-      diffusionOnlyAssets: entryOnlyTotals.diffusion,
-      uniTransitiveAssets: entryTotals.uni,
-      uniOnlyAssets: entryOnlyTotals.uni,
+      ...perEntryTotals,
       sharedAssets: sharedTotals,
       htmlEntries: htmlEntrySizes,
     },
     chunks: {
-      nano: entryAssetsSized.nano,
-      twotower: entryAssetsSized.twotower,
-      diffusion: entryAssetsSized.diffusion,
-      uni: entryAssetsSized.uni,
+      ...perEntryChunks,
       shared: sharedAssetsSized,
       all: allAssetsTable,
     },
-    nanoConfirmedSources: confirmedSources.nano.map((s) => s.source),
-    twoTowerConfirmedSources: confirmedSources.twotower.map((s) => s.source),
-    diffusionConfirmedSources: confirmedSources.diffusion.map((s) => s.source),
-    uniConfirmedSources: confirmedSources.uni.map((s) => s.source),
+    ...perEntryConfirmedSources,
     violations,
   };
 
@@ -799,36 +847,48 @@ function formatPairBreakdown(byPair, fromEntry) {
     .join(', ');
 }
 
+function formatMapBreakdown(mapObj) {
+  return Object.entries(mapObj)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(', ');
+}
+
 function printHumanSummary(report) {
   const { gates, totals, chunks } = report;
   const headroomSign = gates.nanoGzipHeadroomBytes >= 0 ? '+' : '-';
   const absHeadroom = Math.abs(gates.nanoGzipHeadroomBytes);
-  console.log('=== 4-Way Nano / TwoTower / Diffusion / Uni Bundle Isolation Audit ===');
+  console.log(
+    `=== ${ENTRIES.length}-Way ${ENTRIES.map((e) => e.label).join(' / ')} Bundle Isolation Audit ===`,
+  );
   console.log(`Output dir        : ${report.outDir}`);
   console.log(`Detected base     : ${report.detectedBasePath}`);
-  console.log(
-    `Nano graph        : ${gates.nanoTransitiveJsCount} JS, ${gates.nanoTransitiveCssCount} CSS | raw ${totals.nanoTransitiveAssets.rawBytes.toLocaleString('en-US')} B (${fmtKiB(totals.nanoTransitiveAssets.rawBytes)}) | gzip ${totals.nanoTransitiveAssets.gzipBytes.toLocaleString('en-US')} B (${fmtKiB(totals.nanoTransitiveAssets.gzipBytes)}) / budget ${fmtKiB(gates.nanoGzipBudgetBytes)} (headroom ${headroomSign}${absHeadroom.toLocaleString('en-US')} B / ${headroomSign}${fmtKiB(absHeadroom)})`,
-  );
-  console.log(
-    `TwoTower graph    : ${gates.twoTowerTransitiveJsCount} JS, ${gates.twoTowerTransitiveCssCount} CSS | raw ${totals.twoTowerTransitiveAssets.rawBytes.toLocaleString('en-US')} B (${fmtKiB(totals.twoTowerTransitiveAssets.rawBytes)}) | gzip ${totals.twoTowerTransitiveAssets.gzipBytes.toLocaleString('en-US')} B (${fmtKiB(totals.twoTowerTransitiveAssets.gzipBytes)})`,
-  );
-  console.log(
-    `Diffusion graph   : ${gates.diffusionTransitiveJsCount} JS, ${gates.diffusionTransitiveCssCount} CSS | raw ${totals.diffusionTransitiveAssets.rawBytes.toLocaleString('en-US')} B (${fmtKiB(totals.diffusionTransitiveAssets.rawBytes)}) | gzip ${totals.diffusionTransitiveAssets.gzipBytes.toLocaleString('en-US')} B (${fmtKiB(totals.diffusionTransitiveAssets.gzipBytes)})`,
-  );
-  console.log(
-    `Uni graph         : ${gates.uniTransitiveJsCount} JS, ${gates.uniTransitiveCssCount} CSS | raw ${totals.uniTransitiveAssets.rawBytes.toLocaleString('en-US')} B (${fmtKiB(totals.uniTransitiveAssets.rawBytes)}) | gzip ${totals.uniTransitiveAssets.gzipBytes.toLocaleString('en-US')} B (${fmtKiB(totals.uniTransitiveAssets.gzipBytes)})`,
-  );
+  for (const entry of ENTRIES) {
+    const jsCount = gates[`${entry.camelKey}TransitiveJsCount`];
+    const cssCount = gates[`${entry.camelKey}TransitiveCssCount`];
+    const assetTotals = totals[`${entry.camelKey}TransitiveAssets`];
+    const labelCol = `${entry.label} graph`.padEnd(18);
+    const budgetSuffix =
+      entry.key === 'nano'
+        ? ` / budget ${fmtKiB(gates.nanoGzipBudgetBytes)} (headroom ${headroomSign}${absHeadroom.toLocaleString('en-US')} B / ${headroomSign}${fmtKiB(absHeadroom)})`
+        : '';
+    console.log(
+      `${labelCol}: ${jsCount} JS, ${cssCount} CSS | raw ${assetTotals.rawBytes.toLocaleString('en-US')} B (${fmtKiB(assetTotals.rawBytes)}) | gzip ${assetTotals.gzipBytes.toLocaleString('en-US')} B (${fmtKiB(assetTotals.gzipBytes)})${budgetSuffix}`,
+    );
+  }
   console.log(
     `Shared chunks     : ${chunks.shared.length} file(s) | raw ${totals.sharedAssets.rawBytes.toLocaleString('en-US')} B (${fmtKiB(totals.sharedAssets.rawBytes)}) | gzip ${totals.sharedAssets.gzipBytes.toLocaleString('en-US')} B (${fmtKiB(totals.sharedAssets.gzipBytes)})`,
   );
   console.log(
-    `Source-map leaks  : total=${gates.totalSourcemapLeaks} | nano(${formatPairBreakdown(gates.sourcemapLeaksByPair, ENTRIES[0])}), tt(${formatPairBreakdown(gates.sourcemapLeaksByPair, ENTRIES[1])}), df(${formatPairBreakdown(gates.sourcemapLeaksByPair, ENTRIES[2])}), uni(${formatPairBreakdown(gates.sourcemapLeaksByPair, ENTRIES[3])}), d4:uni<-controls=${gates.uniControlsSourcemapLeaks}`,
+    `Source-map leaks  : total=${gates.totalSourcemapLeaks} | ${ENTRIES.map((e) => `${e.shortCode}(${formatPairBreakdown(gates.sourcemapLeaksByPair, e)})`).join(', ')}`,
   );
   console.log(
-    `Marker leaks      : total=${gates.totalForbiddenMarkerHits} | nano(${formatPairBreakdown(gates.markerHitsByPair, ENTRIES[0])}), tt(${formatPairBreakdown(gates.markerHitsByPair, ENTRIES[1])}), df(${formatPairBreakdown(gates.markerHitsByPair, ENTRIES[2])}), uni(${formatPairBreakdown(gates.markerHitsByPair, ENTRIES[3])})`,
+    `Boundary gates    : nanoUI=${gates.totalNanoUiBoundaryLeaks} (${formatMapBreakdown(gates.nanoUiBoundaryLeaksByEntry)}) | nonHybridCore=${gates.totalNonHybridCoreLeaks} (${formatMapBreakdown(gates.nonHybridCoreLeaksByEntry)})`,
   );
   console.log(
-    `Positive presence : nanoSources=${gates.nanoPositiveSourceCount}, twoTowerSources=${gates.twoTowerPositiveSourceCount}, diffusionSources=${gates.diffusionPositiveSourceCount}, uniSources=${gates.uniPositiveSourceCount}`,
+    `Marker leaks      : total=${gates.totalForbiddenMarkerHits} | ${ENTRIES.map((e) => `${e.shortCode}(${formatPairBreakdown(gates.markerHitsByPair, e)})`).join(', ')}`,
+  );
+  console.log(
+    `Positive presence : ${ENTRIES.map((e) => `${e.camelKey}Sources=${gates[`${e.camelKey}PositiveSourceCount`]}`).join(', ')}`,
   );
 
   console.log('\nScope               Kind   Raw (B)    Gzip (B)   Asset');

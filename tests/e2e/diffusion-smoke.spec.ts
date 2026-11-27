@@ -1,7 +1,13 @@
-import { inflateSync } from 'node:zlib';
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { PAGES_BASE_URL, ROOT_BASE_URL } from '../../playwright.config';
 import type { DiffusionSpatialDebugHandle } from '../../src/diffusion/app/spatialApp';
+import {
+  assertCanvasNonBlank,
+  assertCleanUiStrings,
+  attachRuntimeGuards,
+  waitForAppSettled,
+  waitFrames,
+} from './helpers';
 
 declare global {
   interface Window {
@@ -9,112 +15,7 @@ declare global {
   }
 }
 
-interface RuntimeGuards {
-  readonly pageErrors: string[];
-  readonly consoleErrors: string[];
-  readonly failedRequests: string[];
-  readonly httpErrorResponses: string[];
-  readonly loadedJsAssets: string[];
-  readonly loadedCssAssets: string[];
-  assertClean: () => void;
-}
-
-function attachRuntimeGuards(page: Page): RuntimeGuards {
-  const pageErrors: string[] = [];
-  const consoleErrors: string[] = [];
-  const failedRequests: string[] = [];
-  const httpErrorResponses: string[] = [];
-  const loadedJsAssets: string[] = [];
-  const loadedCssAssets: string[] = [];
-
-  page.on('pageerror', (err) => {
-    pageErrors.push(err.stack ?? err.message);
-  });
-  page.on('console', (msg) => {
-    if (msg.type() === 'error') {
-      consoleErrors.push(msg.text());
-    }
-  });
-  page.on('requestfailed', (req) => {
-    failedRequests.push(`${req.method()} ${req.url()} (${req.failure()?.errorText ?? 'failed'})`);
-  });
-  page.on('response', (res) => {
-    const status = res.status();
-    const url = res.url();
-    if (status >= 400) {
-      httpErrorResponses.push(`${status} ${url}`);
-    } else if (status === 200) {
-      const cleanUrl = url.split('?')[0];
-      if (cleanUrl.endsWith('.js')) loadedJsAssets.push(url);
-      if (cleanUrl.endsWith('.css')) loadedCssAssets.push(url);
-    }
-  });
-
-  return {
-    pageErrors,
-    consoleErrors,
-    failedRequests,
-    httpErrorResponses,
-    loadedJsAssets,
-    loadedCssAssets,
-    assertClean: () => {
-      expect(pageErrors, `Uncaught page errors: ${pageErrors.join('\n')}`).toEqual([]);
-      expect(consoleErrors, `Console errors: ${consoleErrors.join('\n')}`).toEqual([]);
-      expect(failedRequests, `Failed network requests: ${failedRequests.join('\n')}`).toEqual([]);
-      expect(httpErrorResponses, `HTTP >= 400 responses: ${httpErrorResponses.join('\n')}`).toEqual(
-        [],
-      );
-    },
-  };
-}
-
-async function waitFrames(page: Page, count = 4): Promise<void> {
-  await page.evaluate(
-    (n) =>
-      new Promise<void>((resolve) => {
-        let remaining = n;
-        const tick = () => {
-          remaining -= 1;
-          if (remaining <= 0) resolve();
-          else requestAnimationFrame(tick);
-        };
-        requestAnimationFrame(tick);
-      }),
-    count,
-  );
-}
-
-async function waitForDiffusionSettled(page: Page): Promise<void> {
-  await expect
-    .poll(
-      () =>
-        page.evaluate(() => {
-          const dbg = window.__diffusionSpatialDebug;
-          return dbg ? !dbg.rafActive && dbg.frameCount > 0 : false;
-        }),
-      { timeout: 6000 },
-    )
-    .toBe(true);
-  await waitFrames(page, 1);
-}
-
-async function waitForTwoTowerSettled(page: Page): Promise<void> {
-  await expect
-    .poll(
-      () =>
-        page.evaluate(() => {
-          const tel = (
-            window as unknown as { __TWOTOWER_TELEMETRY__?: { readonly rafActive?: boolean } }
-          ).__TWOTOWER_TELEMETRY__;
-          return tel?.rafActive;
-        }),
-      {
-        timeout: 6000,
-      },
-    )
-    .toBe(false);
-  await waitFrames(page, 1);
-}
+const waitForDiffusionSettled = (page: Page) => waitForAppSettled(page, 'diffusion');
 
 async function getDiffusionDebug(page: Page): Promise<DiffusionSpatialDebugHandle> {
   const snapshot = await page.evaluate(() => {
@@ -149,133 +50,6 @@ async function getDiffusionDebug(page: Page): Promise<DiffusionSpatialDebugHandl
   });
   expect(snapshot, 'window.__diffusionSpatialDebug must be populated').not.toBeNull();
   return snapshot!;
-}
-
-/** Pure-Node PNG RGBA pixel variance inspector (zero external image deps). */
-function analyzePngColorVariety(png: Buffer): {
-  width: number;
-  height: number;
-  distinctBuckets: number;
-  nonBackgroundRatio: number;
-} {
-  const PNG_SIG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-  if (png.length < 33 || !png.subarray(0, 8).equals(PNG_SIG)) {
-    throw new Error('Invalid PNG buffer');
-  }
-
-  let width = 0;
-  let height = 0;
-  let bitDepth = 0;
-  let colorType = 0;
-  const idatChunks: Buffer[] = [];
-
-  let offset = 8;
-  while (offset + 12 <= png.length) {
-    const len = png.readUInt32BE(offset);
-    const type = png.subarray(offset + 4, offset + 8).toString('ascii');
-    const dataStart = offset + 8;
-    const dataEnd = dataStart + len;
-    if (dataEnd > png.length) break;
-
-    if (type === 'IHDR') {
-      width = png.readUInt32BE(dataStart);
-      height = png.readUInt32BE(dataStart + 4);
-      bitDepth = png[dataStart + 8];
-      colorType = png[dataStart + 9];
-    } else if (type === 'IDAT') {
-      idatChunks.push(png.subarray(dataStart, dataEnd));
-    } else if (type === 'IEND') {
-      break;
-    }
-    offset = dataEnd + 4;
-  }
-
-  if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6)) {
-    throw new Error(`Unsupported PNG format: bitDepth=${bitDepth} colorType=${colorType}`);
-  }
-
-  const bpp = colorType === 6 ? 4 : 3;
-  const stride = width * bpp;
-  const raw = inflateSync(Buffer.concat(idatChunks));
-  const recon = Buffer.alloc(height * stride);
-
-  const paeth = (a: number, b: number, c: number): number => {
-    const p = a + b - c;
-    const pa = Math.abs(p - a);
-    const pb = Math.abs(p - b);
-    const pc = Math.abs(p - c);
-    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
-  };
-
-  for (let y = 0; y < height; y++) {
-    const filter = raw[y * (stride + 1)];
-    const srcRow = y * (stride + 1) + 1;
-    const dstRow = y * stride;
-    for (let x = 0; x < stride; x++) {
-      const val = raw[srcRow + x];
-      const a = x >= bpp ? recon[dstRow + x - bpp] : 0;
-      const b = y > 0 ? recon[dstRow - stride + x] : 0;
-      const c = y > 0 && x >= bpp ? recon[dstRow - stride + x - bpp] : 0;
-      let out = val;
-      if (filter === 1) out = (val + a) & 0xff;
-      else if (filter === 2) out = (val + b) & 0xff;
-      else if (filter === 3) out = (val + ((a + b) >> 1)) & 0xff;
-      else if (filter === 4) out = (val + paeth(a, b, c)) & 0xff;
-      recon[dstRow + x] = out;
-    }
-  }
-
-  const buckets = new Set<number>();
-  let sampled = 0;
-  let nonBg = 0;
-  const bgR = recon[0];
-  const bgG = recon[1];
-  const bgB = recon[2];
-
-  for (let y = 0; y < height; y += 4) {
-    const rowOff = y * stride;
-    for (let x = 0; x < width; x += 4) {
-      const i = rowOff + x * bpp;
-      const r = recon[i];
-      const g = recon[i + 1];
-      const b = recon[i + 2];
-      sampled += 1;
-      buckets.add(((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4));
-      if (Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB) > 20) {
-        nonBg += 1;
-      }
-    }
-  }
-
-  return {
-    width,
-    height,
-    distinctBuckets: buckets.size,
-    nonBackgroundRatio: sampled > 0 ? nonBg / sampled : 0,
-  };
-}
-
-async function assertCanvasNonBlank(canvas: Locator, label: string): Promise<void> {
-  const png = await canvas.screenshot({ animations: 'allow' });
-  const stats = analyzePngColorVariety(png);
-  expect(stats.width, `${label}: canvas PNG width`).toBeGreaterThan(200);
-  expect(stats.height, `${label}: canvas PNG height`).toBeGreaterThan(150);
-  expect(
-    stats.distinctBuckets,
-    `${label}: expected non-uniform WebGL2 pixels (buckets=${stats.distinctBuckets})`,
-  ).toBeGreaterThanOrEqual(8);
-  expect(
-    stats.nonBackgroundRatio,
-    `${label}: expected visible 3D geometry above background (ratio=${stats.nonBackgroundRatio.toFixed(4)})`,
-  ).toBeGreaterThan(0.01);
-}
-
-function assertCleanUiStrings(text: string | null, context: string): void {
-  const safe = text ?? '';
-  expect(safe, `${context}: must never render "Infinity"`).not.toMatch(/Infinity/i);
-  expect(safe, `${context}: must never render "∞"`).not.toContain('∞');
-  expect(safe, `${context}: must never render "NaN"`).not.toMatch(/\bNaN\b/);
-  expect(safe, `${context}: must never render "undefined"`).not.toMatch(/\bundefined\b/);
 }
 
 const ALL_SPATIAL_VIEWS = [
@@ -638,30 +412,11 @@ test.describe('Nemotron-Labs-Diffusion-14B · Full Chromium WebGL2 E2E Suite', (
     guards.assertClean();
   });
 
-  test('5. GitHub Pages Subpath /llm-viz/diffusion/ Parity & Full 3-Way Reciprocal Navigation (Click & Enter) on / and /llm-viz/', async ({
+  test('5. GitHub Pages Subpath /llm-viz/diffusion/ Parity (HTTP 200 Assets, RoPE GQA, Tour & Architecture)', async ({
     page,
   }) => {
     const guards = attachRuntimeGuards(page);
 
-    async function navViaSwitcher(
-      targetTestId: string,
-      expectedUrl: string,
-      mode: 'click' | 'keyboard',
-    ): Promise<void> {
-      const trigger = page.getByTestId('model-switcher-trigger');
-      await expect(trigger).toBeVisible();
-      await trigger.click();
-      const link = page.getByTestId(targetTestId);
-      await expect(link).toBeVisible();
-      if (mode === 'keyboard') {
-        await link.focus();
-        await Promise.all([page.waitForURL(expectedUrl), page.keyboard.press('Enter')]);
-      } else {
-        await Promise.all([page.waitForURL(expectedUrl), link.click()]);
-      }
-    }
-
-    // 1. Subpath /llm-viz/diffusion/ parity
     await page.goto(`${PAGES_BASE_URL}diffusion/`, { waitUntil: 'networkidle' });
     await waitForDiffusionSettled(page);
 
@@ -669,6 +424,10 @@ test.describe('Nemotron-Labs-Diffusion-14B · Full Chromium WebGL2 E2E Suite', (
     const subpathCss = guards.loadedCssAssets.filter((u) => u.includes('/llm-viz/assets/'));
     expect(subpathJs.length, 'Expected /llm-viz/assets/*.js HTTP 200').toBeGreaterThan(0);
     expect(subpathCss.length, 'Expected /llm-viz/assets/*.css HTTP 200').toBeGreaterThan(0);
+
+    await expect(page.getByTestId('nav-to-nano')).toHaveAttribute('href', '/llm-viz/');
+    await expect(page.getByTestId('nav-to-twotower')).toHaveAttribute('href', '/llm-viz/twotower/');
+    await expect(page.getByTestId('nav-to-uni')).toHaveAttribute('href', '/llm-viz/uni/');
 
     const diffCanvas = page.getByTestId('diffusion-canvas');
     await expect(diffCanvas).toBeVisible();
@@ -689,77 +448,6 @@ test.describe('Nemotron-Labs-Diffusion-14B · Full Chromium WebGL2 E2E Suite', (
     await page.getByTestId('diffusion-inspector-tab-architecture').click();
     await expect(page.getByTestId('diffusion-inspector-panel')).toContainText('25.16 GiB');
     expect((await getDiffusionDebug(page)).glErrorCount).toBe(0);
-
-    // 2. Root `/` 3-way navigation cycle via click: Nano -> Diffusion -> TwoTower -> Diffusion -> Nano
-    await page.goto(`${ROOT_BASE_URL}/`, { waitUntil: 'networkidle' });
-    await waitFrames(page, 4);
-    await expect(page.getByTestId('gl-canvas')).toBeVisible();
-
-    await navViaSwitcher('nav-to-diffusion', `${ROOT_BASE_URL}/diffusion/`, 'click');
-    await waitForDiffusionSettled(page);
-    await assertCanvasNonBlank(diffCanvas, 'Root Nano -> Diffusion');
-
-    await navViaSwitcher('nav-to-twotower', `${ROOT_BASE_URL}/twotower/`, 'click');
-    await waitForTwoTowerSettled(page);
-    await expect(page.getByTestId('twotower-canvas')).toBeVisible();
-
-    await navViaSwitcher('nav-to-diffusion', `${ROOT_BASE_URL}/diffusion/`, 'click');
-    await waitForDiffusionSettled(page);
-    await assertCanvasNonBlank(diffCanvas, 'Root TwoTower -> Diffusion');
-
-    await navViaSwitcher('nav-to-nano', `${ROOT_BASE_URL}/`, 'click');
-    await waitFrames(page, 4);
-    await expect(page.getByTestId('gl-canvas')).toBeVisible();
-
-    // Root `/` keyboard Enter: Nano -> Diffusion -> Nano & TwoTower -> Diffusion -> TwoTower
-    await navViaSwitcher('nav-to-diffusion', `${ROOT_BASE_URL}/diffusion/`, 'keyboard');
-    await waitForDiffusionSettled(page);
-
-    await navViaSwitcher('nav-to-nano', `${ROOT_BASE_URL}/`, 'keyboard');
-    await waitFrames(page, 4);
-
-    await page.goto(`${ROOT_BASE_URL}/twotower/`, { waitUntil: 'networkidle' });
-    await waitForTwoTowerSettled(page);
-    await navViaSwitcher('nav-to-diffusion', `${ROOT_BASE_URL}/diffusion/`, 'keyboard');
-    await waitForDiffusionSettled(page);
-
-    await navViaSwitcher('nav-to-twotower', `${ROOT_BASE_URL}/twotower/`, 'keyboard');
-    await waitForTwoTowerSettled(page);
-
-    // 3. Subpath `/llm-viz/` 3-way navigation cycle via click & Enter
-    await page.goto(PAGES_BASE_URL, { waitUntil: 'networkidle' });
-    await waitFrames(page, 4);
-    await expect(page.getByTestId('gl-canvas')).toBeVisible();
-
-    await navViaSwitcher('nav-to-diffusion', `${PAGES_BASE_URL}diffusion/`, 'click');
-    await waitForDiffusionSettled(page);
-    await assertCanvasNonBlank(diffCanvas, 'Subpath Nano -> Diffusion');
-
-    await navViaSwitcher('nav-to-twotower', `${PAGES_BASE_URL}twotower/`, 'click');
-    await waitForTwoTowerSettled(page);
-    await expect(page.getByTestId('twotower-canvas')).toBeVisible();
-
-    await navViaSwitcher('nav-to-diffusion', `${PAGES_BASE_URL}diffusion/`, 'click');
-    await waitForDiffusionSettled(page);
-
-    await navViaSwitcher('nav-to-nano', PAGES_BASE_URL, 'click');
-    await waitFrames(page, 4);
-    await expect(page.getByTestId('gl-canvas')).toBeVisible();
-
-    // Subpath `/llm-viz/` keyboard Enter: Nano -> Diffusion -> Nano & TwoTower -> Diffusion -> TwoTower
-    await navViaSwitcher('nav-to-diffusion', `${PAGES_BASE_URL}diffusion/`, 'keyboard');
-    await waitForDiffusionSettled(page);
-
-    await navViaSwitcher('nav-to-nano', PAGES_BASE_URL, 'keyboard');
-    await waitFrames(page, 4);
-
-    await page.goto(`${PAGES_BASE_URL}twotower/`, { waitUntil: 'networkidle' });
-    await waitForTwoTowerSettled(page);
-    await navViaSwitcher('nav-to-diffusion', `${PAGES_BASE_URL}diffusion/`, 'keyboard');
-    await waitForDiffusionSettled(page);
-
-    await navViaSwitcher('nav-to-twotower', `${PAGES_BASE_URL}twotower/`, 'keyboard');
-    await waitForTwoTowerSettled(page);
 
     guards.assertClean();
   });

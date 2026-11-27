@@ -1,4 +1,3 @@
-import { inflateSync } from 'node:zlib';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { PAGES_BASE_URL, ROOT_BASE_URL } from '../../playwright.config';
 import type {
@@ -6,6 +5,14 @@ import type {
   TwoTowerSpatialDebugHandle,
   TwoTowerTelemetrySnapshot,
 } from '../../src/twotower/app/spatialApp';
+import {
+  assertCanvasNonBlank as assertSharedCanvasNonBlank,
+  assertNoInfinityOrNaNText,
+  assertNoInfinityText,
+  attachRuntimeGuards,
+  waitForAppSettled,
+  waitFrames,
+} from './helpers';
 
 declare global {
   interface Window {
@@ -15,225 +22,20 @@ declare global {
   }
 }
 
-interface RuntimeGuards {
-  readonly pageErrors: string[];
-  readonly consoleErrors: string[];
-  readonly failedRequests: string[];
-  readonly httpErrorResponses: string[];
-  readonly loadedJsAssets: string[];
-  readonly loadedCssAssets: string[];
-  assertClean: () => void;
-}
+const waitForTwoTowerSettled = (page: Page) => waitForAppSettled(page, 'twotower');
 
-function attachRuntimeGuards(page: Page): RuntimeGuards {
-  const pageErrors: string[] = [];
-  const consoleErrors: string[] = [];
-  const failedRequests: string[] = [];
-  const httpErrorResponses: string[] = [];
-  const loadedJsAssets: string[] = [];
-  const loadedCssAssets: string[] = [];
-
-  page.on('pageerror', (err) => {
-    pageErrors.push(err.stack ?? err.message);
+const assertCanvasNonBlank = (canvas: Locator, label: string) =>
+  assertSharedCanvasNonBlank(canvas, label, {
+    minWidth: 201,
+    minHeight: 201,
+    minBuckets: 8,
+    minNonBgRatio: 0.012,
   });
-  page.on('console', (msg) => {
-    if (msg.type() === 'error') {
-      consoleErrors.push(msg.text());
-    }
-  });
-  page.on('requestfailed', (req) => {
-    failedRequests.push(`${req.method()} ${req.url()} (${req.failure()?.errorText ?? 'failed'})`);
-  });
-  page.on('response', (res) => {
-    const status = res.status();
-    const url = res.url();
-    if (status >= 400) {
-      httpErrorResponses.push(`${status} ${url}`);
-    } else if (status === 200) {
-      const cleanUrl = url.split('?')[0];
-      if (cleanUrl.endsWith('.js')) loadedJsAssets.push(url);
-      if (cleanUrl.endsWith('.css')) loadedCssAssets.push(url);
-    }
-  });
-
-  return {
-    pageErrors,
-    consoleErrors,
-    failedRequests,
-    httpErrorResponses,
-    loadedJsAssets,
-    loadedCssAssets,
-    assertClean: () => {
-      expect(pageErrors, `Uncaught page errors: ${pageErrors.join('\n')}`).toEqual([]);
-      expect(consoleErrors, `Console errors: ${consoleErrors.join('\n')}`).toEqual([]);
-      expect(failedRequests, `Failed network requests: ${failedRequests.join('\n')}`).toEqual([]);
-      expect(httpErrorResponses, `HTTP >= 400 responses: ${httpErrorResponses.join('\n')}`).toEqual(
-        [],
-      );
-    },
-  };
-}
-
-async function waitFrames(page: Page, count = 4): Promise<void> {
-  await page.evaluate(
-    (n) =>
-      new Promise<void>((resolve) => {
-        let remaining = n;
-        const tick = () => {
-          remaining -= 1;
-          if (remaining <= 0) resolve();
-          else requestAnimationFrame(tick);
-        };
-        requestAnimationFrame(tick);
-      }),
-    count,
-  );
-}
-
-async function waitForTwoTowerSettled(page: Page): Promise<void> {
-  await expect
-    .poll(() => page.evaluate(() => window.__TWOTOWER_TELEMETRY__?.rafActive), {
-      timeout: 5000,
-    })
-    .toBe(false);
-  await waitFrames(page, 1);
-}
-
-/** Pure-Node PNG RGBA pixel variance inspector (zero external image deps). */
-function analyzePngColorVariety(png: Buffer): {
-  width: number;
-  height: number;
-  distinctBuckets: number;
-  nonBackgroundRatio: number;
-} {
-  const PNG_SIG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-  if (png.length < 33 || !png.subarray(0, 8).equals(PNG_SIG)) {
-    throw new Error('Invalid PNG buffer');
-  }
-
-  let width = 0;
-  let height = 0;
-  let bitDepth = 0;
-  let colorType = 0;
-  const idatChunks: Buffer[] = [];
-
-  let offset = 8;
-  while (offset + 12 <= png.length) {
-    const len = png.readUInt32BE(offset);
-    const type = png.subarray(offset + 4, offset + 8).toString('ascii');
-    const dataStart = offset + 8;
-    const dataEnd = dataStart + len;
-    if (dataEnd > png.length) break;
-
-    if (type === 'IHDR') {
-      width = png.readUInt32BE(dataStart);
-      height = png.readUInt32BE(dataStart + 4);
-      bitDepth = png[dataStart + 8];
-      colorType = png[dataStart + 9];
-    } else if (type === 'IDAT') {
-      idatChunks.push(png.subarray(dataStart, dataEnd));
-    } else if (type === 'IEND') {
-      break;
-    }
-    offset = dataEnd + 4;
-  }
-
-  if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6)) {
-    throw new Error(`Unsupported PNG format: bitDepth=${bitDepth} colorType=${colorType}`);
-  }
-
-  const bpp = colorType === 6 ? 4 : 3;
-  const stride = width * bpp;
-  const raw = inflateSync(Buffer.concat(idatChunks));
-  const recon = Buffer.alloc(height * stride);
-
-  const paeth = (a: number, b: number, c: number): number => {
-    const p = a + b - c;
-    const pa = Math.abs(p - a);
-    const pb = Math.abs(p - b);
-    const pc = Math.abs(p - c);
-    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
-  };
-
-  for (let y = 0; y < height; y++) {
-    const filter = raw[y * (stride + 1)];
-    const srcRow = y * (stride + 1) + 1;
-    const dstRow = y * stride;
-    for (let x = 0; x < stride; x++) {
-      const val = raw[srcRow + x];
-      const a = x >= bpp ? recon[dstRow + x - bpp] : 0;
-      const b = y > 0 ? recon[dstRow - stride + x] : 0;
-      const c = y > 0 && x >= bpp ? recon[dstRow - stride + x - bpp] : 0;
-      let out = val;
-      if (filter === 1) out = (val + a) & 0xff;
-      else if (filter === 2) out = (val + b) & 0xff;
-      else if (filter === 3) out = (val + ((a + b) >> 1)) & 0xff;
-      else if (filter === 4) out = (val + paeth(a, b, c)) & 0xff;
-      recon[dstRow + x] = out;
-    }
-  }
-
-  const buckets = new Set<number>();
-  let sampled = 0;
-  let nonBg = 0;
-  const bgR = recon[0];
-  const bgG = recon[1];
-  const bgB = recon[2];
-
-  for (let y = 0; y < height; y += 4) {
-    const rowOff = y * stride;
-    for (let x = 0; x < width; x += 4) {
-      const i = rowOff + x * bpp;
-      const r = recon[i];
-      const g = recon[i + 1];
-      const b = recon[i + 2];
-      sampled += 1;
-      buckets.add(((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4));
-      if (Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB) > 20) {
-        nonBg += 1;
-      }
-    }
-  }
-
-  return {
-    width,
-    height,
-    distinctBuckets: buckets.size,
-    nonBackgroundRatio: sampled > 0 ? nonBg / sampled : 0,
-  };
-}
-
-async function assertCanvasNonBlank(canvas: Locator, label: string): Promise<void> {
-  const png = await canvas.screenshot({ animations: 'allow' });
-  const stats = analyzePngColorVariety(png);
-  expect(stats.width, `${label}: canvas PNG width`).toBeGreaterThan(200);
-  expect(stats.height, `${label}: canvas PNG height`).toBeGreaterThan(200);
-  expect(
-    stats.distinctBuckets,
-    `${label}: expected non-uniform WebGL2 pixels (buckets=${stats.distinctBuckets})`,
-  ).toBeGreaterThanOrEqual(8);
-  expect(
-    stats.nonBackgroundRatio,
-    `${label}: expected visible 3D geometry above studio-white background (ratio=${stats.nonBackgroundRatio.toFixed(4)})`,
-  ).toBeGreaterThan(0.012);
-}
 
 async function getTelemetry(page: Page): Promise<TwoTowerTelemetrySnapshot> {
   const tel = await page.evaluate(() => window.__TWOTOWER_TELEMETRY__);
   expect(tel, 'window.__TWOTOWER_TELEMETRY__ must be populated').toBeDefined();
   return tel!;
-}
-
-function assertNoInfinityText(text: string | null, context: string): void {
-  const safe = text ?? '';
-  expect(safe, `${context}: must never render "Infinity"`).not.toMatch(/Infinity/i);
-  expect(safe, `${context}: must never render "∞"`).not.toContain('∞');
-}
-
-function assertNoInfinityOrNaNText(text: string | null, context: string): void {
-  assertNoInfinityText(text, context);
-  const safe = text ?? '';
-  expect(safe, `${context}: must never render "NaN"`).not.toMatch(/\bNaN\b/);
 }
 
 test.describe('Nemotron-Labs-TwoTower Stage TT3 · Interactive WebGL2 Spatial Smoke Suite', () => {
@@ -1268,86 +1070,6 @@ test.describe('Nemotron-Labs-TwoTower Stage TT4 · Walkthrough, Timeline, Sample
       page.getByTestId('twotower-canvas'),
       'Subpath /llm-viz/twotower/ post-tour WebGL2 frame',
     );
-    guards.assertClean();
-  });
-
-  test('12. Reciprocal Cross-App Navigation (Nano <-> TwoTower via Click & Enter at Root / and Subpath /llm-viz/)', async ({
-    page,
-  }) => {
-    const guards = attachRuntimeGuards(page);
-
-    async function navViaSwitcher(
-      targetTestId: string,
-      expectedHref: string,
-      expectedUrl: string,
-      mode: 'click' | 'keyboard',
-    ): Promise<void> {
-      const trigger = page.getByTestId('model-switcher-trigger');
-      await expect(trigger).toBeVisible();
-      await trigger.click();
-      const link = page.getByTestId(targetTestId);
-      await expect(link).toBeVisible();
-      await expect(link).toHaveAttribute('href', expectedHref);
-      if (mode === 'keyboard') {
-        await link.focus();
-        await expect(link).toBeFocused();
-        await Promise.all([page.waitForURL(expectedUrl), page.keyboard.press('Enter')]);
-      } else {
-        await Promise.all([page.waitForURL(expectedUrl), link.click()]);
-      }
-    }
-
-    // 1. Root `/` -> `/twotower/` -> `/` via pointer click
-    await page.goto(`${ROOT_BASE_URL}/`, { waitUntil: 'networkidle' });
-    await waitFrames(page, 4);
-    await expect(page.getByTestId('gl-canvas')).toBeVisible();
-
-    await navViaSwitcher('nav-to-twotower', '/twotower/', `${ROOT_BASE_URL}/twotower/`, 'click');
-    await waitForTwoTowerSettled(page);
-    await expect(page.getByTestId('twotower-canvas')).toBeVisible();
-    await assertCanvasNonBlank(
-      page.getByTestId('twotower-canvas'),
-      'Root Nano -> TwoTower click navigation',
-    );
-    expect((await getTelemetry(page)).glErrorCount).toBe(0);
-
-    await navViaSwitcher('nav-to-nano', '/', `${ROOT_BASE_URL}/`, 'click');
-    await waitFrames(page, 4);
-    await expect(page.getByTestId('gl-canvas')).toBeVisible();
-
-    // 2. Root `/` -> `/twotower/` -> `/` via native keyboard Enter
-    await navViaSwitcher('nav-to-twotower', '/twotower/', `${ROOT_BASE_URL}/twotower/`, 'keyboard');
-    await waitForTwoTowerSettled(page);
-    await expect(page.getByTestId('twotower-canvas')).toBeVisible();
-    expect((await getTelemetry(page)).glErrorCount).toBe(0);
-
-    await navViaSwitcher('nav-to-nano', '/', `${ROOT_BASE_URL}/`, 'keyboard');
-    await waitFrames(page, 4);
-    await expect(page.getByTestId('gl-canvas')).toBeVisible();
-
-    // 3. GitHub Pages Subpath `/llm-viz/` -> `/llm-viz/twotower/` -> `/llm-viz/` via Enter & click
-    await page.goto(PAGES_BASE_URL, { waitUntil: 'networkidle' });
-    await waitFrames(page, 4);
-    await expect(page.getByTestId('gl-canvas')).toBeVisible();
-
-    await navViaSwitcher(
-      'nav-to-twotower',
-      '/llm-viz/twotower/',
-      `${PAGES_BASE_URL}twotower/`,
-      'keyboard',
-    );
-    await waitForTwoTowerSettled(page);
-    await expect(page.getByTestId('twotower-canvas')).toBeVisible();
-    await assertCanvasNonBlank(
-      page.getByTestId('twotower-canvas'),
-      'Subpath /llm-viz/ -> /llm-viz/twotower/ Enter navigation',
-    );
-    expect((await getTelemetry(page)).glErrorCount).toBe(0);
-
-    await navViaSwitcher('nav-to-nano', '/llm-viz/', PAGES_BASE_URL, 'click');
-    await waitFrames(page, 4);
-    await expect(page.getByTestId('gl-canvas')).toBeVisible();
-
     guards.assertClean();
   });
 });

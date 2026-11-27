@@ -9,7 +9,7 @@ A zero-runtime-dependency WebGL2 multi-page application (MPA) hosting **four iso
 | **Nemotron-Labs-Diffusion-14B** | `/diffusion/` (`diffusion/index.html`) | <https://12ohan.github.io/llm-viz/diffusion/> | **`diffusion-v1.0.0`** (released & live) | Single `40`-layer homogeneous Ministral 3 dense decoder (`25.16 GiB` BF16 backbone + `180.00 MiB` FP32 draft-only `o_proj` LoRA), dyadic YaRN RoPE + Llama-4 `p = 16` scaling, 7 spatial views, 5-tab Mask Explorer, 4 live modes (`AR`, `DLM Causal/Bidir`, `Linear Spec`, `Spec + LoRA`), unified timeline, 3-tab Inspector (`D1–D24`), 4-act / 26-beat tour. |
 | **Nemotron-Labs-Diffusion-Uni (NLD-Uni)** | `/uni/` (`uni/index.html`) | <https://12ohan.github.io/llm-viz/uni/> | **`uni-v1.0.0`** (released & live) | Unified multimodal `18.27B` Elastic-MoT (`34L`: `18` Joint `L0..17` + `16` Split `L18..33` parallel `U`/`G` towers, RADIO-H + Emu3 IBQ + `2×2` Packed Codec), 7 spatial views + 2D RGB canvas insets, live `D5` (`HF-Faithful` vs. `Elastic-Pruned`) toggle, 256-code PCA ball-tree (`U26` `D = 17` mismatch), Dual-CFG editing (`U18` border-lock), `<LOC_0..16>` grounding (`U27`), Read-Only OPD (`U28`), 3-tab Inspector (`U1–U30`), 5-act / 28-beat tour. |
 
-All four apps compile as an isolated **Topology A 4-entry Vite MPA** enforced by an automated 7-gate 4-way mutual bundle-isolation check (`npm run verify:isolation`, covering all 12 directional pairs plus Uni's `D4` zero-`src/ui/controls.ts` gate) so TwoTower, Diffusion, and Uni code never leak into Nano's `/` bundle (and never cross-import each other), connected by **quiet, base-path-aware 4-way reciprocal navigation** (`Nano ↗`, `TwoTower ↗`, `Diffusion ↗`, `Uni ↗`) across both root `/` and GitHub Pages `/llm-viz/`.
+All four apps compile as an isolated **Topology A N-entry Vite MPA** enforced by an automated 7-gate N-way mutual bundle-isolation & architectural-boundary check (`npm run verify:isolation`, covering all `12` directional pairs plus strict non-Nano UI and non-hybrid core boundary gates) so apps never leak into Nano's `/` bundle or cross-import each other, connected by a **compact, base-path-aware multi-model top-bar switcher** (`Models (4) ▾`, `src/shared/modelRegistry.ts` + `src/shared/modelSwitcher.ts`) across both root `/` and GitHub Pages `/llm-viz/`.
 
 > [!IMPORTANT]
 > **3-Tier Epistemic Sourcing Disclosure (Applies to All Four Applications)**
@@ -115,10 +115,10 @@ npm run dev
 # 3. Strict TypeScript check
 npm run typecheck
 
-# 4. Run full Vitest unit, contract & PyTorch-parity suite across all 4 apps (627 tests / 75 files; zero Python needed)
+# 4. Run full Vitest unit, contract & PyTorch-parity suite across all 4 apps (631 tests / 76 files; zero Python needed)
 npm test
 
-# 5. Production build for root path (`/`, `/twotower/`, `/diffusion/`, `/uni/`) + 4-way isolation check
+# 5. Production build for root path (`/`, `/twotower/`, `/diffusion/`, `/uni/`) + N-way isolation & boundary check
 npm run build
 npm run verify:isolation
 
@@ -126,18 +126,18 @@ npm run verify:isolation
 VITE_BASE_PATH=/llm-viz/ npm run build
 npm run verify:isolation
 
-# 7. Run Playwright Chromium WebGL2 E2E smoke suite across all 4 apps & both base paths (34 tests / 4 files)
+# 7. Run Playwright Chromium WebGL2 E2E smoke suite across all 4 apps & both base paths (36 tests / 5 files)
 #    (first time: npx playwright install chromium)
 npm run test:e2e
 ```
 
 **Measured 4-Way Production Bundle Sizes (`npm run verify:isolation`, enforced on both `/` and `/llm-viz/`):**
 
-- **Nano transitive JS+CSS (`4` JS, `1` CSS):** **`209.35 KiB`** (`214,375 B`) gzip (`765,603 B` raw) vs. `215.00 KiB` (`220,160 B`) hard cap (**`+5.65 KiB` / `+5,785 B` headroom**, `0` leaks across all 12 directional pairs).
-- **TwoTower transitive JS+CSS (`3` JS, `1` CSS):** **`318.40 KiB`** (`326,045 B` root) / **`318.41 KiB`** (`326,056 B` `/llm-viz/`) gzip (`1,149,920 B` / `1,149,928 B` raw, `22` `src/twotower/*` sources, `0` leaks).
-- **Diffusion transitive JS+CSS (`4` JS, `1` CSS):** **`294.82 KiB`** (`301,892 B` root / `301,900 B` `/llm-viz/`) gzip (`1,025,690 B` / `1,025,698 B` raw, `31` `src/diffusion/*` sources, `0` leaks).
-- **NLD-Uni transitive JS+CSS (`2` JS, `1` CSS):** **`188.96 KiB`** (`193,495 B` root) / **`188.97 KiB`** (`193,502 B` `/llm-viz/`) gzip (`661,685 B` / `661,693 B` raw, `37` `src/uni/*` sources, `0` leaks, Locked Decision **`D4`** **`0`** `src/ui/controls.ts` sourcemap references).
-- **Shared Chunks (`3` JS):** `assets/atlasPacker-*.js` (`shared(all4)`, `50,302 B` gzip) + `assets/controls-*.js` (`shared(n+df)`, `54,829 B` gzip) + `assets/overlay-*.js` (`shared(n+tt+df)`, `80,754 B` gzip) = **`181.53 KiB`** (`185,885 B` gzip / `634,667 B` raw).
+- **Nano transitive JS+CSS (`4` JS, `2` CSS):** **`211.63 KiB`** (`216,711 B` root) / **`211.64 KiB`** (`216,724 B` `/llm-viz/`) gzip (`773,248 B` / `773,256 B` raw) vs. `215.00 KiB` (`220,160 B`) hard cap (**`+3.37 KiB` / `+3,449 B` headroom**, `0` leaks across all 12 directional pairs).
+- **TwoTower transitive JS+CSS (`4` JS, `2` CSS):** **`313.48 KiB`** (`321,001 B` root) / **`313.49 KiB`** (`321,010 B` `/llm-viz/`) gzip (`1,128,268 B` / `1,128,276 B` raw, `22` `src/twotower/*` sources, `0` leaks, `nanoUI=0`).
+- **Diffusion transitive JS+CSS (`3` JS, `2` CSS):** **`143.41 KiB`** (`146,853 B` root) / **`143.42 KiB`** (`146,861 B` `/llm-viz/`) gzip (`491,090 B` / `491,098 B` raw, `31` `src/diffusion/*` sources, `0` leaks, `nanoUI=0`, `nonHybridCore=0`).
+- **NLD-Uni transitive JS+CSS (`2` JS, `2` CSS):** **`165.40 KiB`** (`169,367 B` root) / **`165.41 KiB`** (`169,376 B` `/llm-viz/`) gzip (`577,806 B` / `577,814 B` raw, `36` `src/uni/*` sources, `0` leaks, `nanoUI=0`, `nonHybridCore=0`).
+- **Shared Chunks (`3` JS + `1` CSS):** `assets/atlasPacker-*.js` (`shared(all4)`, `25,561 B` gzip) + `assets/atlasPacker-*.css` (`shared(all4)`, `1,178 B` gzip) + `assets/moeCutaway-*.js` (`shared(n+tt)`, `95,178 B` gzip) + `assets/overlayLayout-*.js` (`shared(n+tt+df)`, `4,379 B` gzip) = **`123.34 KiB`** (`126,296 B` gzip / `423,152 B` raw).
 
 ---
 

@@ -6,7 +6,7 @@ All notable changes to the **Nemotron 3 Nano, Nemotron-Labs-TwoTower, Nemotron-L
 > - **Nemotron 3 Nano `v1.0.0`** — Finalized and preserved ([Live Demo](https://12ohan.github.io/llm-viz/)).
 > - **Nemotron-Labs-TwoTower `twotower-v1.0.0`** — Released on `2026-11-25` ([Live Demo](https://12ohan.github.io/llm-viz/twotower/); see [`docs/RELEASE_NOTES_TWOTOWER_v1.0.0.md`](docs/RELEASE_NOTES_TWOTOWER_v1.0.0.md)).
 > - **Nemotron-Labs-Diffusion-14B `diffusion-v1.0.0`** — Released on `2026-11-26` ([Live Demo](https://12ohan.github.io/llm-viz/diffusion/); see [`docs/DIFFUSION_ARCHITECTURE.md`](docs/DIFFUSION_ARCHITECTURE.md) & [`docs/DIFFUSION_USER_GUIDE.md`](docs/DIFFUSION_USER_GUIDE.md)).
-> - **Nemotron-Labs-Diffusion-Uni `uni-v1.0.0`** — Released on `2026-11-27` ([Live Demo](https://12ohan.github.io/llm-viz/uni/)). Combined 4-app suite: `627` Vitest tests (`75` files: `236` Nano + `133` TwoTower + `70` Diffusion + `188` Uni), `34` Playwright Chromium WebGL2 E2E tests (`4` files), `11` independent PyTorch `2.15.0` parity fixtures, 7-gate 4-way bundle isolation (`0` leaks across all 12 directional pairs), and zero browser runtime dependencies.
+> - **Nemotron-Labs-Diffusion-Uni `uni-v1.0.0`** — Released on `2026-11-27` ([Live Demo](https://12ohan.github.io/llm-viz/uni/)). Combined 4-app suite: `631` Vitest tests (`76` files: `236` Nano + `133` TwoTower + `70` Diffusion + `188` Uni + `4` shared switcher contracts), `36` Playwright Chromium WebGL2 E2E tests (`5` files), `11` independent PyTorch `2.15.0` parity fixtures, 7-gate N-way bundle isolation & architectural-boundary checks (`0` leaks across all 12 directional pairs), and zero browser runtime dependencies.
 
 ## [uni-v1.0.0] — 2026-11-27
 

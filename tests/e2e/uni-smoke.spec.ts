@@ -1,8 +1,14 @@
-import { inflateSync } from 'node:zlib';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { PAGES_BASE_URL, ROOT_BASE_URL } from '../../playwright.config';
 import type { UniSpatialDebugHandle, UniSpatialDebugSnapshot } from '../../src/uni/app/types';
 import type { UniSpatialViewMode } from '../../src/uni/scene/types';
+import {
+  assertCanvasNonBlank,
+  assertCleanUiStrings,
+  attachRuntimeGuards,
+  waitForAppSettled,
+  waitFrames,
+} from './helpers';
 
 declare global {
   interface Window {
@@ -13,16 +19,6 @@ declare global {
   }
 }
 
-interface RuntimeGuards {
-  readonly pageErrors: string[];
-  readonly consoleErrors: string[];
-  readonly failedRequests: string[];
-  readonly httpErrorResponses: string[];
-  readonly loadedJsAssets: string[];
-  readonly loadedCssAssets: string[];
-  assertClean: () => void;
-}
-
 interface RectBox {
   readonly x: number;
   readonly y: number;
@@ -30,118 +26,7 @@ interface RectBox {
   readonly height: number;
 }
 
-function attachRuntimeGuards(page: Page): RuntimeGuards {
-  const pageErrors: string[] = [];
-  const consoleErrors: string[] = [];
-  const failedRequests: string[] = [];
-  const httpErrorResponses: string[] = [];
-  const loadedJsAssets: string[] = [];
-  const loadedCssAssets: string[] = [];
-
-  page.on('pageerror', (err) => {
-    pageErrors.push(err.stack ?? err.message);
-  });
-  page.on('console', (msg) => {
-    if (msg.type() === 'error') {
-      consoleErrors.push(msg.text());
-    }
-  });
-  page.on('requestfailed', (req) => {
-    failedRequests.push(`${req.method()} ${req.url()} (${req.failure()?.errorText ?? 'failed'})`);
-  });
-  page.on('response', (res) => {
-    const status = res.status();
-    const url = res.url();
-    if (status >= 400) {
-      httpErrorResponses.push(`${status} ${url}`);
-    } else if (status === 200) {
-      const cleanUrl = url.split('?')[0];
-      if (cleanUrl.endsWith('.js')) loadedJsAssets.push(url);
-      if (cleanUrl.endsWith('.css')) loadedCssAssets.push(url);
-    }
-  });
-
-  return {
-    pageErrors,
-    consoleErrors,
-    failedRequests,
-    httpErrorResponses,
-    loadedJsAssets,
-    loadedCssAssets,
-    assertClean: () => {
-      expect(pageErrors, `Uncaught page errors: ${pageErrors.join('\n')}`).toEqual([]);
-      expect(consoleErrors, `Console errors: ${consoleErrors.join('\n')}`).toEqual([]);
-      expect(failedRequests, `Failed network requests: ${failedRequests.join('\n')}`).toEqual([]);
-      expect(httpErrorResponses, `HTTP >= 400 responses: ${httpErrorResponses.join('\n')}`).toEqual(
-        [],
-      );
-    },
-  };
-}
-
-async function waitFrames(page: Page, count = 4): Promise<void> {
-  await page.evaluate(
-    (n) =>
-      new Promise<void>((resolve) => {
-        let remaining = n;
-        const tick = () => {
-          remaining -= 1;
-          if (remaining <= 0) resolve();
-          else requestAnimationFrame(tick);
-        };
-        requestAnimationFrame(tick);
-      }),
-    count,
-  );
-}
-
-async function waitForUniSettled(page: Page): Promise<void> {
-  await expect
-    .poll(
-      () =>
-        page.evaluate(() => {
-          const dbg = window.__uniSpatialDebug;
-          return dbg ? !dbg.rafActive : false;
-        }),
-      { timeout: 6000 },
-    )
-    .toBe(true);
-  await waitFrames(page, 1);
-}
-
-async function waitForTwoTowerSettled(page: Page): Promise<void> {
-  await expect
-    .poll(
-      () =>
-        page.evaluate(() => {
-          const tel = (
-            window as unknown as { __TWOTOWER_TELEMETRY__?: { readonly rafActive?: boolean } }
-          ).__TWOTOWER_TELEMETRY__;
-          return tel?.rafActive;
-        }),
-      { timeout: 6000 },
-    )
-    .toBe(false);
-  await waitFrames(page, 1);
-}
-
-async function waitForDiffusionSettled(page: Page): Promise<void> {
-  await expect
-    .poll(
-      () =>
-        page.evaluate(() => {
-          const dbg = (
-            window as unknown as {
-              __diffusionSpatialDebug?: { readonly rafActive?: boolean; readonly frameCount?: number };
-            }
-          ).__diffusionSpatialDebug;
-          return dbg ? !dbg.rafActive && (dbg.frameCount ?? 0) > 0 : false;
-        }),
-      { timeout: 6000 },
-    )
-    .toBe(true);
-  await waitFrames(page, 1);
-}
+const waitForUniSettled = (page: Page) => waitForAppSettled(page, 'uni');
 
 async function getUniDebug(page: Page): Promise<UniSpatialDebugSnapshot> {
   const snapshot = await page.evaluate(() => {
@@ -152,149 +37,13 @@ async function getUniDebug(page: Page): Promise<UniSpatialDebugSnapshot> {
   return snapshot!;
 }
 
-/** Pure-Node PNG RGBA pixel variance inspector (zero external image deps). */
-function analyzePngColorVariety(png: Buffer): {
-  width: number;
-  height: number;
-  distinctBuckets: number;
-  nonBackgroundRatio: number;
-} {
-  const PNG_SIG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-  if (png.length < 33 || !png.subarray(0, 8).equals(PNG_SIG)) {
-    throw new Error('Invalid PNG buffer');
-  }
-
-  let width = 0;
-  let height = 0;
-  let bitDepth = 0;
-  let colorType = 0;
-  const idatChunks: Buffer[] = [];
-
-  let offset = 8;
-  while (offset + 12 <= png.length) {
-    const len = png.readUInt32BE(offset);
-    const type = png.subarray(offset + 4, offset + 8).toString('ascii');
-    const dataStart = offset + 8;
-    const dataEnd = dataStart + len;
-    if (dataEnd > png.length) break;
-
-    if (type === 'IHDR') {
-      width = png.readUInt32BE(dataStart);
-      height = png.readUInt32BE(dataStart + 4);
-      bitDepth = png[dataStart + 8];
-      colorType = png[dataStart + 9];
-    } else if (type === 'IDAT') {
-      idatChunks.push(png.subarray(dataStart, dataEnd));
-    } else if (type === 'IEND') {
-      break;
-    }
-    offset = dataEnd + 4;
-  }
-
-  if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6)) {
-    throw new Error(`Unsupported PNG format: bitDepth=${bitDepth} colorType=${colorType}`);
-  }
-
-  const bpp = colorType === 6 ? 4 : 3;
-  const stride = width * bpp;
-  const raw = inflateSync(Buffer.concat(idatChunks));
-  const recon = Buffer.alloc(height * stride);
-
-  const paeth = (a: number, b: number, c: number): number => {
-    const p = a + b - c;
-    const pa = Math.abs(p - a);
-    const pb = Math.abs(p - b);
-    const pc = Math.abs(p - c);
-    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
-  };
-
-  for (let y = 0; y < height; y++) {
-    const filter = raw[y * (stride + 1)];
-    const srcRow = y * (stride + 1) + 1;
-    const dstRow = y * stride;
-    for (let x = 0; x < stride; x++) {
-      const val = raw[srcRow + x];
-      const a = x >= bpp ? recon[dstRow + x - bpp] : 0;
-      const b = y > 0 ? recon[dstRow - stride + x] : 0;
-      const c = y > 0 && x >= bpp ? recon[dstRow - stride + x - bpp] : 0;
-      let out = val;
-      if (filter === 1) out = (val + a) & 0xff;
-      else if (filter === 2) out = (val + b) & 0xff;
-      else if (filter === 3) out = (val + ((a + b) >> 1)) & 0xff;
-      else if (filter === 4) out = (val + paeth(a, b, c)) & 0xff;
-      recon[dstRow + x] = out;
-    }
-  }
-
-  const buckets = new Set<number>();
-  let sampled = 0;
-  let nonBg = 0;
-  const bgR = recon[0];
-  const bgG = recon[1];
-  const bgB = recon[2];
-  const stepY = height > 96 ? 4 : 2;
-  const stepX = width > 96 ? 4 : 2;
-
-  for (let y = 0; y < height; y += stepY) {
-    const rowOff = y * stride;
-    for (let x = 0; x < width; x += stepX) {
-      const i = rowOff + x * bpp;
-      const r = recon[i];
-      const g = recon[i + 1];
-      const b = recon[i + 2];
-      sampled += 1;
-      buckets.add(((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4));
-      if (Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB) > 20) {
-        nonBg += 1;
-      }
-    }
-  }
-
-  return {
-    width,
-    height,
-    distinctBuckets: buckets.size,
-    nonBackgroundRatio: sampled > 0 ? nonBg / sampled : 0,
-  };
-}
-
-async function assertCanvasNonBlank(canvas: Locator, label: string): Promise<void> {
-  const png = await canvas.screenshot({ animations: 'allow' });
-  const stats = analyzePngColorVariety(png);
-  expect(stats.width, `${label}: canvas PNG width`).toBeGreaterThan(200);
-  expect(stats.height, `${label}: canvas PNG height`).toBeGreaterThan(150);
-  expect(
-    stats.distinctBuckets,
-    `${label}: expected non-uniform WebGL2 pixels (buckets=${stats.distinctBuckets})`,
-  ).toBeGreaterThanOrEqual(8);
-  expect(
-    stats.nonBackgroundRatio,
-    `${label}: expected visible 3D geometry above background (ratio=${stats.nonBackgroundRatio.toFixed(4)})`,
-  ).toBeGreaterThan(0.01);
-}
-
-async function assertRgbCanvasNonBlank(canvas: Locator, label: string): Promise<void> {
-  const png = await canvas.screenshot({ animations: 'allow' });
-  const stats = analyzePngColorVariety(png);
-  expect(stats.width, `${label}: RGB inset width`).toBeGreaterThanOrEqual(32);
-  expect(stats.height, `${label}: RGB inset height`).toBeGreaterThanOrEqual(24);
-  expect(
-    stats.distinctBuckets,
-    `${label}: expected non-uniform RGB inset pixels (buckets=${stats.distinctBuckets})`,
-  ).toBeGreaterThanOrEqual(3);
-  expect(
-    stats.nonBackgroundRatio,
-    `${label}: expected visible RGB inset variation (ratio=${stats.nonBackgroundRatio.toFixed(4)})`,
-  ).toBeGreaterThan(0.01);
-}
-
-function assertCleanUiStrings(text: string | null, context: string): void {
-  const safe = text ?? '';
-  expect(safe, `${context}: must never render "Infinity"`).not.toMatch(/Infinity/i);
-  expect(safe, `${context}: must never render "∞"`).not.toContain('∞');
-  expect(safe, `${context}: must never render "NaN"`).not.toMatch(/\bNaN\b/);
-  expect(safe, `${context}: must never render "undefined"`).not.toMatch(/\bundefined\b/);
-}
+const assertRgbCanvasNonBlank = (canvas: Locator, label: string) =>
+  assertCanvasNonBlank(canvas, label, {
+    minWidth: 32,
+    minHeight: 24,
+    minBuckets: 3,
+    minNonBgRatio: 0.01,
+  });
 
 function assertNoBoundingBoxOverlap(
   a: RectBox,
@@ -954,58 +703,12 @@ test.describe('Nemotron-Labs-Diffusion-Uni · Full Chromium WebGL2 E2E Suite', (
     guards.assertClean();
   });
 
-  test('8. 4-Way Reciprocal Navigation on Root / and GitHub Pages Subpath /llm-viz/', async ({
+  test('8. GitHub Pages Subpath /llm-viz/uni/ Parity (HTTP 200 Assets, WebGL2 Render & Base-Path Switcher Links)', async ({
     page,
   }) => {
     const guards = attachRuntimeGuards(page);
     const uniCanvas = page.getByTestId('uni-webgl-canvas');
 
-    async function navViaSwitcher(targetTestId: string, expectedUrl: string): Promise<void> {
-      const trigger = page.getByTestId('model-switcher-trigger');
-      await expect(trigger).toBeVisible();
-      await trigger.click();
-      const link = page.getByTestId(targetTestId);
-      await expect(link).toBeVisible();
-      await Promise.all([page.waitForURL(expectedUrl), link.click()]);
-    }
-
-    // --- A. Root `/` 4-way reciprocal hops ---
-    // Nano (`/`) -> Uni (`/uni/`)
-    await page.goto(`${ROOT_BASE_URL}/`, { waitUntil: 'networkidle' });
-    await waitFrames(page, 4);
-    await expect(page.getByTestId('gl-canvas')).toBeVisible();
-
-    await navViaSwitcher('nav-to-uni', `${ROOT_BASE_URL}/uni/`);
-    await waitForUniSettled(page);
-    await assertCanvasNonBlank(uniCanvas, 'Root Nano -> Uni');
-    expect((await getUniDebug(page)).glErrorCount).toBe(0);
-
-    // Uni (`/uni/`) -> TwoTower (`/twotower/`) -> Uni (`/uni/`)
-    await navViaSwitcher('nav-to-twotower', `${ROOT_BASE_URL}/twotower/`);
-    await waitForTwoTowerSettled(page);
-    await expect(page.getByTestId('twotower-canvas')).toBeVisible();
-
-    await navViaSwitcher('nav-to-uni', `${ROOT_BASE_URL}/uni/`);
-    await waitForUniSettled(page);
-    await assertCanvasNonBlank(uniCanvas, 'Root TwoTower -> Uni');
-    expect((await getUniDebug(page)).glErrorCount).toBe(0);
-
-    // Uni (`/uni/`) -> Diffusion (`/diffusion/`) -> Uni (`/uni/`)
-    await navViaSwitcher('nav-to-diffusion', `${ROOT_BASE_URL}/diffusion/`);
-    await waitForDiffusionSettled(page);
-    await expect(page.getByTestId('diffusion-canvas')).toBeVisible();
-
-    await navViaSwitcher('nav-to-uni', `${ROOT_BASE_URL}/uni/`);
-    await waitForUniSettled(page);
-    await assertCanvasNonBlank(uniCanvas, 'Root Diffusion -> Uni');
-    expect((await getUniDebug(page)).glErrorCount).toBe(0);
-
-    // Uni (`/uni/`) -> Nano (`/`)
-    await navViaSwitcher('nav-to-nano', `${ROOT_BASE_URL}/`);
-    await waitFrames(page, 4);
-    await expect(page.getByTestId('gl-canvas')).toBeVisible();
-
-    // --- B. GitHub Pages subpath `/llm-viz/` parity & 4-way links ---
     await page.goto(`${PAGES_BASE_URL}uni/`, { waitUntil: 'networkidle' });
     await waitForUniSettled(page);
 
@@ -1023,30 +726,15 @@ test.describe('Nemotron-Labs-Diffusion-Uni · Full Chromium WebGL2 E2E Suite', (
       'href',
       '/llm-viz/diffusion/',
     );
+    await expect(page.getByTestId('nav-to-uni')).toHaveAttribute('aria-current', 'page');
 
-    // Subpath reciprocal hops: Uni -> Nano -> Uni -> TwoTower -> Uni -> Diffusion -> Uni
-    await navViaSwitcher('nav-to-nano', PAGES_BASE_URL);
-    await waitFrames(page, 4);
-    await expect(page.getByTestId('gl-canvas')).toBeVisible();
-
-    await navViaSwitcher('nav-to-uni', `${PAGES_BASE_URL}uni/`);
+    // Interactive view switch + D5 prefill toggle under /llm-viz/ subpath
+    await page.getByTestId('uni-view-tab-joint_attn').click();
     await waitForUniSettled(page);
-    await assertCanvasNonBlank(uniCanvas, 'Subpath Nano -> Uni');
-
-    await navViaSwitcher('nav-to-twotower', `${PAGES_BASE_URL}twotower/`);
-    await waitForTwoTowerSettled(page);
-    await expect(page.getByTestId('twotower-canvas')).toBeVisible();
-
-    await navViaSwitcher('nav-to-uni', `${PAGES_BASE_URL}uni/`);
+    await assertCanvasNonBlank(uniCanvas, 'Subpath /llm-viz/uni/ Joint Attn');
+    await page.getByTestId('uni-dock-prefill-hf_faithful').click();
     await waitForUniSettled(page);
-
-    await navViaSwitcher('nav-to-diffusion', `${PAGES_BASE_URL}diffusion/`);
-    await waitForDiffusionSettled(page);
-    await expect(page.getByTestId('diffusion-canvas')).toBeVisible();
-
-    await navViaSwitcher('nav-to-uni', `${PAGES_BASE_URL}uni/`);
-    await waitForUniSettled(page);
-    await assertCanvasNonBlank(uniCanvas, 'Subpath Diffusion -> Uni');
+    expect((await getUniDebug(page)).prefillMode).toBe('hf_faithful');
     expect((await getUniDebug(page)).glErrorCount).toBe(0);
 
     guards.assertClean();

@@ -27,7 +27,7 @@ npm ci
 # 2. Strict TypeScript verification
 npm run typecheck
 
-# 3. Full Vitest unit, contract & PyTorch-parity suite (627 tests across 75 files; zero Python needed)
+# 3. Full Vitest unit, contract & PyTorch-parity suite (631 tests across 76 files; zero Python needed)
 npm test
 
 # 4. (Optional) Regenerate independent PyTorch 2.15.0 parity fixtures
@@ -62,9 +62,9 @@ npm run test:e2e
 
 ---
 
-## 2. Vitest Unit, Contract & PyTorch `2.15.0` Parity Suite (`627` Tests Across `75` Files)
+## 2. Vitest Unit, Contract & PyTorch `2.15.0` Parity Suite (`631` Tests Across `76` Files)
 
-The Node regression suite runs `75` test files (`33` Nano files + `13` TwoTower files + `11` Diffusion files + `18` NLD-Uni files) totaling **`627` tests** (`236` Nano + `133` TwoTower + `70` Diffusion + `188` NLD-Uni):
+The Node regression suite runs `76` test files (`33` Nano files + `13` TwoTower files + `11` Diffusion files + `18` NLD-Uni files + `1` shared navigation switcher contract file `tests/navigation-switcher-contract.test.ts` [`4` tests]) totaling **`631` tests** (`236` Nano + `133` TwoTower + `70` Diffusion + `188` NLD-Uni + `4` shared switcher):
 
 ### A. Nano `v1.0.0` Core Suite (`236` Tests Across `33` Files)
 
@@ -141,9 +141,9 @@ TypeScript accumulates inner dot products in JS `float64` prior to `Math.fround`
 
 ---
 
-## 3. Topology A 4-Way Multi-Entry MPA Build & Bundle-Isolation Gate
+## 3. Topology A N-Way Multi-Entry MPA Build & Bundle-Isolation Gate
 
-Run the automated 7-gate 4-way verifier (`scripts/verify_bundle_isolation.mjs`) against **both** root (`/`) and GitHub Pages (`/llm-viz/`) builds:
+Run the automated 7-gate N-way verifier (`scripts/verify_bundle_isolation.mjs`) against **both** root (`/`) and GitHub Pages (`/llm-viz/`) builds:
 
 ```bash
 # Root build (`/` + `/twotower/` + `/diffusion/` + `/uni/`)
@@ -155,24 +155,24 @@ VITE_BASE_PATH=/llm-viz/ npx vite build --outDir test-results/dist-pages
 node scripts/verify_bundle_isolation.mjs --dir test-results/dist-pages
 ```
 
-Enforced hard gates across all 4 entries (non-zero exit on any failure):
+Enforced hard gates across all configured entries (non-zero exit on any failure):
 
 1. All 4 HTML entries exist: `index.html` (Nano), `twotower/index.html` (TwoTower), `diffusion/index.html` (Diffusion), and `uni/index.html` (Uni).
 2. Every `<script src>`, `<link rel="modulepreload" href>`, and `<link rel="stylesheet" href>` resolves cleanly under `/` or `/llm-viz/`.
-3. TypeScript ECMAScript AST walks every transitive static `import`/`export ... from` and literal dynamic `import(...)` edge across all 4 graphs.
-4. Strict 4-way sourcemap mutual isolation across all `12` directional pairs plus Uni's `D4` zero-`src/ui/controls.ts` gate.
-5. Strict 4-way payload marker mutual isolation across all `12` directional pairs.
-6. Positive presence: Nano, TwoTower (`22`), Diffusion (`31`), and Uni (`37`) transitive JS sourcemaps positively contain their own exclusive sources (`0` runtime dependencies).
+3. TypeScript ECMAScript AST walks every transitive static `import`/`export ... from` and literal dynamic `import(...)` edge across all graphs.
+4. Strict N-way sourcemap mutual isolation across all `12` directional pairs plus **Gate 4b** (zero Nano UI/controller/walkthrough/cutaway-exclusive sources in any non-Nano entry, generalizing `D4`) and **Gate 4c** (zero Nano/TwoTower hybrid core sources in any non-hybrid entry such as Diffusion or Uni).
+5. Strict N-way payload marker mutual isolation across all `12` directional pairs.
+6. Positive presence: Nano (`2`), TwoTower (`22`), Diffusion (`31`), and Uni (`36`) transitive JS sourcemaps positively contain their own exclusive sources (`0` runtime dependencies).
 7. Nano payload budget gate (`<= 215.00 KiB` / `220,160 B` gzip, verified on both `/` and `/llm-viz/`):
-   - **Nano (4 JS, 1 CSS):** `765,603 B` (`747.66 KiB`) raw | **`214,375 B` (`209.35 KiB`)** gzip (**`+5.65 KiB` / `+5,785 B` headroom**, `0` leaks).
-   - **TwoTower (3 JS, 1 CSS):** `1,149,920 B` (`/`) / `1,149,928 B` (`/llm-viz/`) raw | **`326,045 B` (`318.40 KiB`)** `/` / **`326,056 B` (`318.41 KiB`)** `/llm-viz/` gzip (`22` `src/twotower/*` sources, `0` leaks).
-   - **Diffusion (4 JS, 1 CSS):** `1,025,690 B` (`/`) / `1,025,698 B` (`/llm-viz/`) raw | **`301,892 B` (`294.82 KiB`)** `/` / **`301,900 B` (`294.82 KiB`)** `/llm-viz/` gzip (`31` `src/diffusion/*` sources, `0` leaks).
-   - **NLD-Uni (2 JS, 1 CSS):** `661,685 B` (`/`) / `661,693 B` (`/llm-viz/`) raw | **`193,495 B` (`188.96 KiB`)** `/` / **`193,502 B` (`188.97 KiB`)** `/llm-viz/` gzip (`37` `src/uni/*` sources, `0` leaks).
-   - **Shared Chunks (3 JS):** `assets/atlasPacker-*.js` (`shared(all4)`, `50,302 B` gzip) + `assets/controls-*.js` (`shared(n+df)`, `54,829 B` gzip) + `assets/overlay-*.js` (`shared(n+tt+df)`, `80,754 B` gzip) = `634,667 B` (`619.79 KiB`) raw / **`185,885 B` (`181.53 KiB`)** gzip.
+   - **Nano (4 JS, 2 CSS):** `773,248 B` (`/`) / `773,256 B` (`/llm-viz/`) raw | **`216,711 B` (`211.63 KiB`)** `/` / **`216,724 B` (`211.64 KiB`)** `/llm-viz/` gzip (**`+3.37 KiB` / `+3,449 B` headroom**, `0` leaks).
+   - **TwoTower (4 JS, 2 CSS):** `1,128,268 B` (`/`) / `1,128,276 B` (`/llm-viz/`) raw | **`321,001 B` (`313.48 KiB`)** `/` / **`321,010 B` (`313.49 KiB`)** `/llm-viz/` gzip (`22` `src/twotower/*` sources, `0` leaks, `nanoUI=0`).
+   - **Diffusion (3 JS, 2 CSS):** `491,090 B` (`/`) / `491,098 B` (`/llm-viz/`) raw | **`146,853 B` (`143.41 KiB`)** `/` / **`146,861 B` (`143.42 KiB`)** `/llm-viz/` gzip (`31` `src/diffusion/*` sources, `0` leaks, `nanoUI=0`, `nonHybridCore=0`).
+   - **NLD-Uni (2 JS, 2 CSS):** `577,806 B` (`/`) / `577,814 B` (`/llm-viz/`) raw | **`169,367 B` (`165.40 KiB`)** `/` / **`169,376 B` (`165.41 KiB`)** `/llm-viz/` gzip (`36` `src/uni/*` sources, `0` leaks, `nanoUI=0`, `nonHybridCore=0`).
+   - **Shared Chunks (3 JS, 1 CSS):** `assets/atlasPacker-*.js` (`shared(all4)`, `25,561 B` gzip) + `assets/atlasPacker-*.css` (`shared(all4)`, `1,178 B` gzip) + `assets/moeCutaway-*.js` (`shared(n+tt)`, `95,178 B` gzip) + `assets/overlayLayout-*.js` (`shared(n+tt+df)`, `4,379 B` gzip) = `423,152 B` (`413.23 KiB`) raw / **`126,296 B` (`123.34 KiB`)** gzip.
 
 ---
 
-## 4. Playwright / Chromium WebGL2 E2E Smoke Suite (`34` Tests Across `4` Files)
+## 4. Playwright / Chromium WebGL2 E2E Smoke Suite (`36` Tests Across `5` Files)
 
 `playwright.config.ts` starts two isolated preview servers (`127.0.0.1:4173` for root `/` and `127.0.0.1:4174/llm-viz/` for GitHub Pages subpath) and runs all four E2E suites:
 
@@ -219,7 +219,7 @@ npx vite preview --outDir dist --base / --port 4173 --strictPort --host 127.0.0.
 > **Application-Side JS Callback Time vs. Full GPU Execution Latency**
 > Measurements captured with `performance.now()` around `drawFrame()` (`lastFrameMs` / `JS cb`) quantify **application-side main-thread CPU processing and WebGL command submission time** — they do **NOT** measure full asynchronous GPU rasterization, fragment shading, or display compositor latency. Observed smoothness during active camera flies or replay is tracked separately via continuous **observed RAF interval cadence (`RAF Δ`)**, measured strictly between consecutive animating frames (excluding idle-sleep pauses).
 
-### Covered E2E Scenarios (`34` Tests Across `4` Files)
+### Covered E2E Scenarios (`36` Tests Across `5` Files, Shared Helpers in `tests/e2e/helpers.ts`)
 
 #### Nano E2E Suite (`tests/e2e/smoke.spec.ts` — `9` Tests, hardened with observable `waitForProjectedOverlaySettled`)
 1. **52-Layer Tower Boot** — Clean initial WebGL2 frame, zero console/page errors, `#webgl-fallback` hidden.
@@ -232,8 +232,8 @@ npx vite preview --outDir dist --base / --port 4173 --strictPort --host 127.0.0.
 8. **Responsive Viewports** — `1440×900`, `1024×800`, and mobile `390×844` layout containment.
 9. **GitHub Pages `/llm-viz/` Subpath Build** — HTTP `200` assets, zero `404`s, functional cutaways.
 
-#### TwoTower E2E Suite (`tests/e2e/twotower-smoke.spec.ts` — `12` Tests)
-1. **Root `/twotower/` Dual-Tower Macro Boot** — Non-blank WebGL2 render, epistemic pill, linker channels, 10-axis bay picking, and quiet reciprocal navigation.
+#### TwoTower E2E Suite (`tests/e2e/twotower-smoke.spec.ts` — `11` Tests)
+1. **Root `/twotower/` Dual-Tower Macro Boot** — Non-blank WebGL2 render, epistemic pill, linker channels, 10-axis bay picking, and switcher contract.
 2. **Full Diffusion Lifecycle & All 7 Spatial Views** — `Init` → `Refine` → `Commit Conf` → `Commit → Context`, `128×128` GQA, Mamba Conv1D replacement, MoE partial-denom guard, Output zero-`Infinity`.
 3. **AR, Mock-AR (`BYPASSED`), Rewind, Branch Fork & Synced Workbench Drawer (`W`)**.
 4. **Reduced-Motion, Idle-RAF Gating, Native `Space`/`Enter` & Narrow `1024×800` Layout**.
@@ -244,24 +244,28 @@ npx vite preview --outDir dist --base / --port 4173 --strictPort --host 127.0.0.
 9. **Production Architecture & 3-Regime Context-Length Scaling Tab (`63.19B` / `126.37 GB` / `117.69 GiB`, 4-Way Caches, Ledger, SVG Chart)**.
 10. **Keyboard Navigation (`T`/Arrows/`Esc`/`W`/`Tab`), Reduced-Motion Instant Transitions, Zero Geometry Rebuilds on Orbit & Idle RAF Sleep**.
 11. **GitHub Pages `/llm-viz/twotower/` Subpath Parity (Tour, Timeline, Sampler & Architecture)**.
-12. **Reciprocal Cross-App Navigation (`Nano ↔ TwoTower` via Click & `Enter`) at Both Root `/` and Subpath `/llm-viz/`**.
 
 #### Diffusion-14B E2E Suite (`tests/e2e/diffusion-smoke.spec.ts` — `5` Tests)
 1. **Root `/diffusion/` Boot, All 7 Spatial Views, 5 Mask Tabs & 2D RoPE Phasor Inset** — Verifies non-blank WebGL2 and `glErrorCount === 0` across all 7 views (`macro`, `gqa_rope`, `swiglu`, `mask_explorer`, `spec_verify`, `embedding`, `output`), scrubs `p = 17` across the `p = 16` Llama-4 boundary (`1.0693`), switches rotary planes `0..3`, and sweeps all 5 Mask Explorer tabs.
 2. **All 4 Live Execution Modes, Graceful Re-Prefill Flow & Unified Timeline Branching** — Steps in `ar` and `dlm_causal`, triggers `KvProvenanceMismatchError` re-prefill banner on `dlm_bidir`, confirms re-prefill, rewinds via timeline click, forks `linear_spec` and `linear_spec_lora` (`loraActiveOnDraft === true`), and verifies non-blank `spec_verify`.
 3. **Guided 4-Act / 26-Beat Tour, Exact Free-Explore Restoration, 3-Tab Inspector & WAI-ARIA + Idle-RAF** — Visits Acts 1–4, asserts exact Free-Explore restoration on exit, inspects `Inspect`, `Architecture` (`25.16 GiB`, `180.00 MiB`, `16,384`, `12.00 MiB`), and `Ledger (D1–D24)` + `D19` search with zero `Infinity`/`NaN`/`undefined`, checks roving `tabindex` (`Home`/`ArrowRight`/`End`) + `Escape`, and verifies strict idle-RAF sleep (`frameDelta === 0`, `rafActive === false`).
-4. **Responsive Viewports (`1440×900`, `1024×800`, `390×844`)** — Verifies non-blank WebGL2, accessible controls/nav links, zero horizontal overflow, and `glErrorCount === 0` across all 3 viewports.
-5. **GitHub Pages Subpath `/llm-viz/diffusion/` Parity & Full 3-Way Reciprocal Navigation (`Nano ↔ TwoTower ↔ Diffusion` via Click & `Enter`)** — Verifies `/llm-viz/diffusion/` HTTP `200` assets and full 3-way click + `Enter` navigation cycles on both `/` and `/llm-viz/`.
+4. **Responsive Viewports (`1440×900`, `1024×800`, `390×844`)** — Verifies non-blank WebGL2, accessible controls/switcher, zero horizontal overflow, and `glErrorCount === 0` across all 3 viewports.
+5. **GitHub Pages Subpath `/llm-viz/diffusion/` Parity** — Verifies `/llm-viz/diffusion/` HTTP `200` assets, Macro & RoPE GQA render, Tour, Architecture tab, and subpath switcher hrefs.
 
 #### NLD-Uni E2E Suite (`tests/e2e/uni-smoke.spec.ts` — `8` Tests)
-1. **Root `/uni/` Boot, All 7 Spatial Views & Dedicated 2D RGB Canvas Insets** — Verifies non-blank WebGL2, `glErrorCount === 0`, and non-blank 2D RGB canvas insets across `Macro 34L`, `Visual Input`, `Joint / Split`, `Ball-Tree`, `Refinement`, `Output & Edit`, and `OPD (Read-Only)`.
-2. **Live `D5` Elastic Prefill Toggle (`HF-Faithful` vs. `Elastic-Pruned`) & Joint/Split Layer Sweep** — Verifies `L17 | L18` boundary and zero wasted KV in `Elastic-Pruned`.
-3. **Dual-CFG Image Editing (`legacy` / `independent` / `ip2p`), `U18` Border-Lock & 2D Grounding (`<LOC_0..16>`)** — Verifies mode switches, panorama crop-back, and `U27` hazard readout.
-4. **Ball-Tree (`U26` `D = 17` Mismatch) & Refinement Quadtree Timeline Execution / Branching** — Verifies non-destructive scrubbing, auto-forking, and `<= 12.00 MiB` budget meter.
-5. **Read-Only OPD Quarantined Explorer (`U28`) & 3-Tab Inspector (`Inspect | Architecture | Ledger U1–U30`)** — Verifies `READ-ONLY · NO GRADIENTS` banner, searchable ledger, and zero `NaN`/`Infinity`.
-6. **WAI-ARIA Roving `tabindex`, Idle-RAF Gating & Responsive Viewports (`1440×900`, `1024×800`, `390×844`)** — Verifies keyboard nav, `rafActive === false` sleep, and zero horizontal overflow.
-7. **Isolated 5-Act / 28-Beat Guided Tour, Dock/Inspector Locking, Ledger Ref Chips & Free-Explore Restoration** — Verifies tour controls lock, `Escape` deferral inside ledger search, and exact Free-Explore restoration on exit.
-8. **4-Way Reciprocal Navigation on Root `/` and GitHub Pages Subpath `/llm-viz/`** — Verifies `/llm-viz/uni/` HTTP `200` assets and 4-way navigation hops across both `/` and `/llm-viz/`.
+1. **Root `/uni/` Boot, Zero GL Errors & Idle-RAF Settled** — Verifies clean boot, non-blank Macro render, `<= 64` overlay pool, memory budget, and idle-RAF sleep.
+2. **All 7 Spatial Views + `RG32F` Atlas Upload Deduplication** — Sweeps all 7 views (`macro` through `opd_readonly`) and verifies zero spurious atlas re-uploads on hover/orbit/round-trip.
+3. **Live `D5` Prefill Toggle (`hf_faithful` vs. `elastic_pruned`) in Views 1 & 3** — Verifies dock & inspector toggles across `Macro` and `Joint / Split`.
+4. **View 4 `U26` `D = 17` Mismatch Panel & View 7 `READ-ONLY · NO GRADIENTS` Banner** — Verifies mismatch and quarantined OPD diagnostics.
+5. **2D RGB Canvas Pixel Insets on Views 2, 5 & 6 + `U18` Lock & `<LOC_*>` Grounding Pills** — Verifies non-blank 2D RGB insets, `image_edit` border locks, and `object_grounding` pills.
+6. **In-Place Slider DOM Identity & Hover Controls-Slot Preservation** — Verifies sliders preserve DOM nodes/focus on input and hover never replaces controls slot.
+7. **28-Beat Guided Tour + `1280×800` Zero-Overlap Layout + `Escape` Deferral + Free-Explore Restoration** — Verifies tour lock, ledger ref chips, `Escape` deferral inside search, and Free-Explore restoration.
+8. **GitHub Pages Subpath `/llm-viz/uni/` Parity** — Verifies `/llm-viz/uni/` HTTP `200` assets, WebGL2 render, `D5` toggle, and subpath switcher hrefs.
+
+#### Unified Multi-Model Switcher & Containment E2E Suite (`tests/e2e/navigation.spec.ts` — `3` Tests)
+1. **Root `/` N-Way Switcher Navigation (Click & Keyboard `ArrowDown`/`Enter`)** — Full cycle across all 4 apps verifying non-blank WebGL2 canvases and `glErrorCount === 0`.
+2. **GitHub Pages `/llm-viz/` Subpath N-Way Switcher Navigation (Click & Keyboard)** — Full cycle verifying `/llm-viz/assets/*` HTTP `200`, subpath hrefs, non-blank WebGL2, and `glErrorCount === 0`.
+3. **4 Apps × 4 Viewports Popover Non-Clipping (`1440×900`, `1280×800`, `1024×800`, `390×844`)** — Verifies the top-bar model switcher popover never clips horizontally or vertically, introduces `0` horizontal overflow, marks `aria-current="page"`, and restores focus on `Escape` across all 16 app × viewport combinations.
 
 ---
 
