@@ -44,7 +44,7 @@ jobs:
           VITE_BASE_PATH: /llm-viz/
         run: npm run build
 
-      - name: Verify 3-way Nano / TwoTower / Diffusion bundle isolation
+      - name: Verify MPA bundle isolation & Nano payload budget
         run: npm run verify:isolation
 
       - name: Configure GitHub Pages

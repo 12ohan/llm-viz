@@ -1,10 +1,11 @@
 # Third-Party Notices & Attribution
 
-This document records the verified provenance, licenses, and applicable obligations for upstream projects, architectural references, and development tooling associated with all three interactive WebGL2 applications in this repository:
+This document records the verified provenance, licenses, and applicable obligations for upstream projects, architectural references, and development tooling associated with all four interactive WebGL2 applications in this repository:
 
 - **Nemotron 3 Nano 30B-A3B** (`/` · `v1.0.0`)
 - **Nemotron-Labs-TwoTower 30B-A3B** (`/twotower/` · `twotower-v1.0.0`)
 - **Nemotron-Labs-Diffusion-14B** (`/diffusion/` · `diffusion-v1.0.0`)
+- **Nemotron-Labs-Diffusion-Uni (NLD-Uni)** (`/uni/` · `uni-v1.0.0`)
 
 ---
 
@@ -18,14 +19,14 @@ This document records the verified provenance, licenses, and applicable obligati
   `Copyright (c) 2023-2026 Brendan Bycroft`
 - **Fork Contributions:**
   `Copyright (c) 2026 Rohan Master`
-- **Scope & Distinction:** This repository descends from `bbycroft/llm-viz` and adapts its interactive architectural walkthrough idiom and adaptive screen-space (`fwidth()`) cell-grid LOD principle (credited in `src/render/sheets.ts`). All Nemotron 3 Nano, Nemotron-Labs-TwoTower, and Nemotron-Labs-Diffusion-14B browser application modules (`src/`), unit/parity/E2E test suites (`tests/`), isolation gates (`scripts/verify_bundle_isolation.mjs`), and reference verification scripts (`scripts/reference/`) were newly authored; legacy `bbycroft/llm-viz` source files and `public/` assets were removed prior to `v1.0.0`.
+- **Scope & Distinction:** This repository descends from `bbycroft/llm-viz` and adapts its interactive architectural walkthrough idiom and adaptive screen-space (`fwidth()`) cell-grid LOD principle (credited in `src/render/sheets.ts`). All Nemotron 3 Nano, Nemotron-Labs-TwoTower, Nemotron-Labs-Diffusion-14B, and Nemotron-Labs-Diffusion-Uni browser application modules (`src/`), unit/parity/E2E test suites (`tests/`), isolation gates (`scripts/verify_bundle_isolation.mjs`), and reference verification scripts (`scripts/reference/`) were newly authored; legacy `bbycroft/llm-viz` source files and `public/` assets were removed prior to `v1.0.0`.
 - **Applicable Obligation:** Retain the upstream MIT copyright notice and permission notice in [`LICENSE`](LICENSE) and in copies or substantial portions of the Software.
 
 ---
 
 ## 2. Referenced Architectural Equations & Pinned Public Metadata (Not Redistributed Artifacts)
 
-All three interactive explainers ground their layer topologies, tensor dimensions, memory formulas, and precision policies in publicly published research papers and Hugging Face model metadata. All mathematical forward passes are **clean-room first-principles implementations** — zero proprietary, AGPL, or upstream model source files are copied into this repository.
+All four interactive explainers ground their layer topologies, tensor dimensions, memory formulas, and precision policies in publicly published research papers and Hugging Face model metadata. All mathematical forward passes are **clean-room first-principles implementations** — zero proprietary, AGPL, or upstream model source files are copied into this repository.
 
 ### A. Nemotron 3 Nano 30B-A3B (`/` Entry)
 
@@ -49,14 +50,21 @@ All three interactive explainers ground their layer topologies, tensor dimension
 2. **Pinned Public Checkpoint & GitHub Metadata:**
    - **Canonical Checkpoint:** Hugging Face [`nvidia/Nemotron-Labs-Diffusion-14B`](https://huggingface.co/nvidia/Nemotron-Labs-Diffusion-14B/tree/f8c3e2c078e193599b8882d965b1001c456ba738) pinned at revision `f8c3e2c078e193599b8882d965b1001c456ba738`, reconciled with `0 B` diff across all `13` LFS safetensors files in the 7-repo family (`14B`, `14B-Base`, `8B`, `8B-Base`, `3B`, `3B-Base`, `VLM-8B`) plus 3 `linear_spec_lora` adapters (`src/diffusion/spec.ts`).
    - **Reference GitHub Repository:** [`NVlabs/Nemotron-Labs-Diffusion`](https://github.com/NVlabs/Nemotron-Labs-Diffusion/tree/2aabcf75ecf70264d4047ff090d842450853f2e4) pinned at commit `2aabcf75ecf70264d4047ff090d842450853f2e4` (code license: **Apache License 2.0**; weights license: **NVIDIA Open Model License**, Oct 24, 2025).
-   - **Out-of-Scope Sister Repository:** [`NVlabs/Nemotron-Labs-Diffusion-Uni`](https://github.com/NVlabs/Nemotron-Labs-Diffusion-Uni) (`16916949402ca738dcc74a7a37e0c43facafe347`, [`arXiv:2610.36466`](https://arxiv.org/abs/2610.36466)) is explicitly out of scope.
 3. **Clean-Room Mathematical Reference:** Ministral 3 (`Ministral3Model`) 40-layer dense decoder equations, YaRN RoPE (`truncate=True`), Llama-4 query attention temperature scaling (`beta=0.1, orig=16384`), Dense SwiGLU, BD3-LM / block-diffusion / linear speculative verification masks, Sampler A / Sampler B rules, and draft-only PEFT `o_proj` LoRA (`r=128, α=512, scale=4.0`) are implemented strictly clean-room in TypeScript (`src/diffusion/`) and verified offline against `scripts/reference/generate_diffusion_pytorch_fixtures.py` and `scripts/reference/generate_diffusion_trajectory_fixtures.py` (`torch==2.15.0`). **Zero upstream NVIDIA Python source files, weights, LoRA safetensors, or tokenizers are copied or redistributed.**
+
+### D. Nemotron-Labs-Diffusion-Uni / NLD-Uni (`/uni/` Entry)
+
+1. **Technical Paper:** NVIDIA Nemotron Labs, *Nemotron-Labs-Diffusion-Uni*, [`arXiv:2610.36466v1`](https://arxiv.org/abs/2610.36466).
+2. **Pinned Public Checkpoint & GitHub Metadata:**
+   - **Canonical Checkpoint:** Hugging Face [`nvidia/NLD-Uni`](https://huggingface.co/nvidia/NLD-Uni/tree/5db755a2eb0ab84654e3dcf80c7d0245bfe36a50) pinned at revision `5db755a2eb0ab84654e3dcf80c7d0245bfe36a50`, reconciled with `0 B` diff across all `8` safetensors shards (`1,557` tensors = `18,267,552,262` params = `36,535,104,542 B` payload, `src/uni/spec.ts`).
+   - **Reference GitHub Repository:** [`NVlabs/Nemotron-Labs-Diffusion-Uni`](https://github.com/NVlabs/Nemotron-Labs-Diffusion-Uni/tree/16916949402ca738dcc74a7a37e0c43facafe347) pinned at commit `16916949402ca738dcc74a7a37e0c43facafe347` (code license: **Apache License 2.0**; weights license: **NVIDIA Open Model License**).
+3. **Clean-Room Mathematical Reference:** Twin 34-layer Elastic Mixture-of-Transformers (`18` Joint `L0..17` + `16` Split `L18..33` parallel Understanding `U` and Generation `G` towers), continuous `RADIO-H` ViT + `2×2` SquaredReLU projector, discrete `Emu3` IBQ VQ-VAE + `2×2` `PackedLinearImageCodec`, 1D dyadic YaRN RoPE + Llama-4 query temperature scaling + additive 2D `SinCos-G` coordinates, `BalancedSemanticTree` hierarchical ball-tree discrete diffusion, stratified quadtree refinement, Dual-CFG image editing (`legacy` / `independent` / `ip2p`), FLARE shifted-logit understanding, `<LOC_0..16>` 2D grounding, and read-only forward-only OPD diagnostic reference are implemented strictly clean-room in TypeScript (`src/uni/`) and verified offline against `scripts/reference/generate_uni_{backbone,multimodal,diffusion}_pytorch_fixtures.py` (`torch==2.15.0`). **Zero upstream remote source lines, checkpoint weights, tokenizer files, or `pca_tree.pt` binaries are copied or redistributed.**
 
 > **No NVIDIA Model Artifacts Redistributed**
 >
-> **NO NVIDIA model weights, checkpoints, safetensors shards, LoRA adapters, tokenizers, vocabulary files, upstream `modeling_nemotron_h.py` / `modeling_nemotron_twotower.py` / `modeling_nemotron_labs_diffusion.py` / `modeling_ministral.py` source files, private research datasets, or NVIDIA Open Model License artifacts are redistributed in this repository or in any built `dist/` bundle.**
+> **NO NVIDIA model weights, checkpoints, safetensors shards, LoRA adapters, `pca_tree.pt` binaries, tokenizers, vocabulary files, upstream `modeling_*.py` source files, private research datasets, or NVIDIA Open Model License artifacts are redistributed in this repository or in any built `dist/` bundle.**
 >
-> All three browser simulators and offline PyTorch parity generators are clean-room implementations driven solely by deterministic synthetic miniature Float32/Float64 weights (**Nano:** `d = 8`, `V_mini = 32`, `299,192` Float32s; **TwoTower:** `d = 8`, `V_mini = 34`, `600,120` Float32s; **Diffusion:** `d = 8`, `V_mini = 36`, `271,304` Float32s [`229,064` backbone + `42,240` LoRA] generated via deterministic seeded PRNGs) while presenting pinned production architectural metadata.
+> All four browser simulators and offline PyTorch parity generators are clean-room implementations driven solely by deterministic synthetic miniature Float32/Float64 weights (**Nano:** `d = 8`, `V_mini = 32`, `299,192` Float32s; **TwoTower:** `d = 8`, `V_mini = 34`, `600,120` Float32s; **Diffusion:** `d = 8`, `V_mini = 36`, `271,304` Float32s [`229,064` backbone + `42,240` LoRA]; **NLD-Uni:** `d = 8`, `V_txt = 64` [`+17 <LOC_0..16>` bins], `V_vq = 256` [`D = 8` synthetic ball-tree], `766` tensors = `191,235` Float32s = `764,940 B` + `3,068 B` tree = `768,008 B`, generated via deterministic seeded PRNGs) while presenting pinned production architectural metadata.
 
 **Trademark Notice:** NVIDIA and Nemotron are trademarks or registered trademarks of NVIDIA Corporation. This project is an independent educational visualization and is not affiliated with, sponsored by, or endorsed by NVIDIA Corporation.
 
@@ -64,9 +72,9 @@ All three interactive explainers ground their layer topologies, tensor dimension
 
 ## 3. Development-Only Offline Parity, Build & Test Tooling
 
-### Browser Runtime Bundles (`dist/`, `dist/twotower/` & `dist/diffusion/`)
+### Browser Runtime Bundles (`dist/`, `dist/twotower/`, `dist/diffusion/` & `dist/uni/`)
 
-All three compiled browser applications have **zero third-party runtime dependencies** (`dependencies` is omitted/empty in `package.json`; all `73/73` non-root entries in `package-lock.json` are `dev: true`). All WebGL2 rendering, math simulation, layout, timeline/sampler/tour logic, and SVG/DOM charting run exclusively from first-party TypeScript and CSS modules.
+All four compiled browser applications have **zero third-party runtime dependencies** (`dependencies` is omitted/empty in `package.json`; all `73/73` non-root entries in `package-lock.json` are `dev: true`). All WebGL2 rendering, math simulation, layout, timeline/sampler/tour logic, and SVG/DOM charting run exclusively from first-party TypeScript and CSS modules.
 
 ### Offline PyTorch Reference Parity Tooling (`scripts/reference/`)
 
@@ -74,7 +82,7 @@ Used strictly offline by developers to regenerate and cross-check the checked-in
 
 | Package | Pinned Version | License | Usage |
 | --- | --- | --- | --- |
-| PyTorch (`torch`) | `2.15.0` | BSD-3-Clause | Offline clean-room reference execution in `scripts/reference/generate_pytorch_parity_fixtures.py` (Nano), `scripts/reference/generate_twotower_pytorch_fixtures.py` (TwoTower Categories 1–8), `scripts/reference/generate_diffusion_pytorch_fixtures.py` (Diffusion Categories 1–6), and `scripts/reference/generate_diffusion_trajectory_fixtures.py` (Diffusion Categories 7–11) (`requirements-ref.txt`, PEP 723 metadata) |
+| PyTorch (`torch`) | `2.15.0` | BSD-3-Clause | Offline clean-room reference execution in `scripts/reference/generate_pytorch_parity_fixtures.py` (Nano), `scripts/reference/generate_twotower_pytorch_fixtures.py` (TwoTower Categories 1–8), `scripts/reference/generate_diffusion_pytorch_fixtures.py` & `scripts/reference/generate_diffusion_trajectory_fixtures.py` (Diffusion Categories 1–11), and `scripts/reference/generate_uni_backbone_pytorch_fixtures.py`, `scripts/reference/generate_uni_multimodal_pytorch_fixtures.py`, & `scripts/reference/generate_uni_diffusion_pytorch_fixtures.py` (NLD-Uni backbone, multimodal understanding & discrete diffusion) (`requirements-ref.txt`, PEP 723 metadata) |
 
 ### Direct npm `devDependencies` (Exact `package.json` Pins — Build, Type-Check & Test Only)
 
@@ -82,7 +90,7 @@ Installed only during local development and CI (`.npmrc` sets `save-exact=true`)
 
 | Package | Exact Pinned Version (`package.json`) | License | Usage |
 | --- | --- | --- | --- |
-| `@playwright/test` | `1.65.1` | Apache-2.0 | Headless Chromium WebGL2 E2E smoke suite (`tests/e2e/smoke.spec.ts`, `tests/e2e/twotower-smoke.spec.ts`, `tests/e2e/diffusion-smoke.spec.ts`); downloads Chromium binary strictly for test execution |
+| `@playwright/test` | `1.65.1` | Apache-2.0 | Headless Chromium WebGL2 E2E smoke suite (`tests/e2e/smoke.spec.ts`, `tests/e2e/twotower-smoke.spec.ts`, `tests/e2e/diffusion-smoke.spec.ts`, `tests/e2e/uni-smoke.spec.ts`); downloads Chromium binary strictly for test execution |
 | `@types/node` | `22.20.5` | MIT | Node.js type definitions for build, isolation-gate, and test tooling |
 | `typescript` | `5.9.3` | Apache-2.0 | Static type checker (`tsc --noEmit`) and ECMAScript AST parser inside `scripts/verify_bundle_isolation.mjs` |
 | `vite` | `8.3.8` | MIT | Dev server, SSR module loader for offline parameter export, Topology A multi-entry static production bundler |

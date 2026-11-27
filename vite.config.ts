@@ -23,6 +23,9 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: true,
+    // TwoTower's self-contained single-chunk bundle is ~655 kB raw (~185 KiB gz, 0 runtime deps);
+    // raising the advisory limit suppresses spurious Vite 8 >500 kB chunk warnings without adding waterfalls.
+    chunkSizeWarningLimit: 700,
     rollupOptions: {
       input: {
         nano: resolve(__dirname, 'index.html'),
@@ -33,7 +36,7 @@ export default defineConfig({
     },
   },
   test: {
-    include: ['tests/*.test.ts'],
+    include: ['tests/**/*.test.ts'],
     exclude: ['tests/e2e/**', '**/node_modules/**', '**/dist/**'],
     environment: 'node',
     testTimeout: 15_000,

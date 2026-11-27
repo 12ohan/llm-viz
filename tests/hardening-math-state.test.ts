@@ -63,7 +63,10 @@ describe('Stage 1a Pre-Release Hardening: Math & State Contracts (RB-7, PR-4..PR
     const tsconfig = JSON.parse(readFileSync(resolve(REPO_ROOT, 'tsconfig.json'), 'utf-8')) as {
       include: string[];
     };
-    expect(tsconfig.include).toContain('src/math/**/*.ts');
+    expect(
+      tsconfig.include.includes('src/**/*.ts') || tsconfig.include.includes('src/math/**/*.ts'),
+    ).toBe(true);
+    expect(tsconfig.include).toContain('playwright.config.ts');
 
     const allSrcTs = listTsFilesRecursive(resolve(REPO_ROOT, 'src')).map((abs) =>
       abs.slice(REPO_ROOT.length + 1).replace(/\\/g, '/'),

@@ -491,7 +491,7 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
   const brand = el('div', 'uni-brand');
   brand.append(
     el('span', 'uni-brand-mark', 'NLD-UNI'),
-    el('span', 'uni-brand-title', 'Nemotron-Labs-Diffusion-Uni'),
+    el('h1', 'uni-brand-title', 'Nemotron-Labs-Diffusion-Uni'),
     el('span', 'uni-brand-sub', '18.27B Elastic-MoT · 34L (18J + 16S)'),
   );
 
@@ -616,7 +616,7 @@ export function createUniSpatialApp(root: HTMLElement): UniSpatialAppInstance {
   const stageHud = el('div', 'uni-stage-hud');
   const stageHudRow = el('div', 'uni-stage-hud-row');
   const stageTitleCard = el('div', 'uni-stage-title-card');
-  const stageTitleEl = el('h1', 'uni-stage-title');
+  const stageTitleEl = el('h2', 'uni-stage-title');
   const stageSubtitleEl = el('p', 'uni-stage-subtitle');
   const stageBadgesEl = el('div', 'uni-badge-strip');
   stageTitleCard.append(stageTitleEl, stageSubtitleEl, stageBadgesEl);

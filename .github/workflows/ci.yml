@@ -4,13 +4,10 @@ on:
   pull_request:
     branches:
       - main
-      - feat/twotower
-      - feat/diffusion
   push:
     branches:
       - main
-      - feat/twotower
-      - feat/diffusion
+      - 'feat/**'
   workflow_dispatch:
 
 permissions:
@@ -45,13 +42,12 @@ jobs:
       - name: Run unit tests
         run: npm test
 
-      - name: Build production bundle
-        run: npm run build
+      - name: Build production bundle (/) & verify MPA bundle isolation
+        run: |
+          npm run build
+          npm run verify:isolation
 
-      - name: Verify 3-way Nano / TwoTower / Diffusion bundle isolation
-        run: npm run verify:isolation
-
-      - name: Build GitHub Pages subpath bundle (/llm-viz/) & verify 3-way isolation
+      - name: Build GitHub Pages subpath bundle (/llm-viz/) & verify MPA isolation
         env:
           VITE_BASE_PATH: /llm-viz/
         run: |
@@ -62,6 +58,8 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Run Playwright Chromium WebGL2 smoke suite (root & /llm-viz/)
+        env:
+          PLAYWRIGHT_SKIP_BUILD: '1'
         run: npm run test:e2e
 
       - name: Upload Playwright HTML report on failure

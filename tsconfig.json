@@ -22,18 +22,10 @@
     ]
   },
   "include": [
-    "src/main.ts",
-    "src/math/**/*.ts",
-    "src/model/**/*.ts",
-    "src/render/**/*.ts",
-    "src/scene/**/*.ts",
-    "src/ui/**/*.ts",
-    "src/story/**/*.ts",
-    "src/twotower/**/*.ts",
-    "src/diffusion/**/*.ts",
-    "src/uni/**/*.ts",
+    "src/**/*.ts",
     "tests/**/*.ts",
-    "vite.config.ts"
+    "vite.config.ts",
+    "playwright.config.ts"
   ],
   "exclude": [
     "node_modules",

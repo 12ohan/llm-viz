@@ -1,10 +1,11 @@
-# Verification & Reproducibility Runbook — Nemotron 3 Nano, TwoTower & Diffusion-14B
+# Verification & Reproducibility Runbook — Nemotron 3 Nano, TwoTower, Diffusion-14B & NLD-Uni
 
-This runbook documents how to reproduce and verify mathematical parity, unit/contract invariants, 3-way Topology A MPA bundle isolation, real-browser WebGL2 rendering (software SwiftShader and hardware Metal/GPU), accessibility, static artifact checksums, and CI/Pages workflows across all three applications:
+This runbook documents how to reproduce and verify mathematical parity, unit/contract invariants, 4-way Topology A MPA bundle isolation, real-browser WebGL2 rendering (software SwiftShader and hardware Metal/GPU), accessibility, static artifact checksums, and CI/Pages workflows across all four applications:
 
 - **Nemotron 3 Nano 30B-A3B** (`/` & `/llm-viz/` · `v1.0.0` preserved)
 - **Nemotron-Labs-TwoTower 30B-A3B** (`/twotower/` & `/llm-viz/twotower/` · `twotower-v1.0.0`)
-- **Nemotron-Labs-Diffusion-14B** (`/diffusion/` & `/llm-viz/diffusion/` · `feat/diffusion`)
+- **Nemotron-Labs-Diffusion-14B** (`/diffusion/` & `/llm-viz/diffusion/` · `diffusion-v1.0.0`)
+- **Nemotron-Labs-Diffusion-Uni (NLD-Uni)** (`/uni/` & `/llm-viz/uni/` · `uni-v1.0.0`)
 
 ---
 
@@ -26,11 +27,11 @@ npm ci
 # 2. Strict TypeScript verification
 npm run typecheck
 
-# 3. Full Vitest unit, contract & PyTorch-parity suite (439 tests across 57 files; zero Python needed)
+# 3. Full Vitest unit, contract & PyTorch-parity suite (627 tests across 75 files; zero Python needed)
 npm test
 
 # 4. (Optional) Regenerate independent PyTorch 2.15.0 parity fixtures
-#    (Nano, TwoTower Categories 1-8, Diffusion Categories 1-11)
+#    (Nano, TwoTower Categories 1-8, Diffusion Categories 1-11, NLD-Uni Backbone/Multimodal/Diffusion)
 node scripts/reference/export_52layer_params.mjs /tmp/nemotron-viz-ref-params
 uv run scripts/reference/generate_pytorch_parity_fixtures.py \
   --model-manifest /tmp/nemotron-viz-ref-params/model_52layer_manifest.json
@@ -39,26 +40,31 @@ uv run scripts/reference/generate_twotower_pytorch_fixtures.py
 node scripts/reference/export_diffusion_params.mjs
 uv run scripts/reference/generate_diffusion_pytorch_fixtures.py
 uv run scripts/reference/generate_diffusion_trajectory_fixtures.py
+node scripts/reference/export_uni_params.mjs
+uv run scripts/reference/generate_uni_backbone_pytorch_fixtures.py
+node scripts/reference/export_uni_multimodal_params.mjs
+uv run scripts/reference/generate_uni_multimodal_pytorch_fixtures.py
+uv run scripts/reference/generate_uni_diffusion_pytorch_fixtures.py
 npm test
 
-# 5. Root production build (`/` + `/twotower/` + `/diffusion/`) & 3-way isolation check
+# 5. Root production build (`/` + `/twotower/` + `/diffusion/` + `/uni/`) & 4-way isolation check
 VITE_BASE_PATH=/ npm run build
 npm run verify:isolation
 
-# 6. GitHub Pages subpath build (`/llm-viz/` + `/llm-viz/twotower/` + `/llm-viz/diffusion/`) & 3-way isolation check
+# 6. GitHub Pages subpath build (`/llm-viz/` + `/llm-viz/twotower/` + `/llm-viz/diffusion/` + `/llm-viz/uni/`) & 4-way isolation check
 VITE_BASE_PATH=/llm-viz/ npx vite build --outDir test-results/dist-pages
 node scripts/verify_bundle_isolation.mjs --dir test-results/dist-pages
 
-# 7. Real Chromium WebGL2 E2E smoke suite across all 3 apps & both base paths
+# 7. Real Chromium WebGL2 E2E smoke suite across all 4 apps & both base paths
 #    (first time: npx playwright install chromium)
 npm run test:e2e
 ```
 
 ---
 
-## 2. Vitest Unit, Contract & PyTorch `2.15.0` Parity Suite (`439` Tests Across `57` Files)
+## 2. Vitest Unit, Contract & PyTorch `2.15.0` Parity Suite (`627` Tests Across `75` Files)
 
-The Node regression suite runs `57` test files (`33` Nano files + `13` TwoTower files + `11` Diffusion files) totaling **`439` tests** (`236` Nano + `133` TwoTower + `70` Diffusion):
+The Node regression suite runs `75` test files (`33` Nano files + `13` TwoTower files + `11` Diffusion files + `18` NLD-Uni files) totaling **`627` tests** (`236` Nano + `133` TwoTower + `70` Diffusion + `188` NLD-Uni):
 
 ### A. Nano `v1.0.0` Core Suite (`236` Tests Across `33` Files)
 
@@ -105,9 +111,19 @@ The Node regression suite runs `57` test files (`33` Nano files + `13` TwoTower 
 | **Unified Timeline View-Model & WAI-ARIA A11y** | `diffusion-timeline-a11y.test.ts` (`6` tests) | Tri-mode timeline (`prefill`, `ar_step`, `dlm_block`, `spec_cycle`), `12.00 MiB` budget meter, roving `tabindex` (`Home`/`End`/`ArrowRight`), `shouldDeferGlobalShortcut` deferral, `Escape` precedence, reduced-motion helper. |
 | **3-Way Navigation & Release Metadata Contract** | `diffusion-navigation-contract.test.ts` (`4` tests) | Base-path-safe `nav-to-diffusion` (`%BASE_URL%diffusion/`) in `index.html` and `src/twotower/app/spatialApp.ts`, `nav-to-nano` / `nav-to-twotower` in `src/diffusion/app/spatialApp.ts`, clean `diffusion/index.html`, zero cross-app imports or markers. |
 
+### D. Nemotron-Labs-Diffusion-Uni (`uni-v1.0.0`) Suite (`188` Tests Across `18` Files)
+
+| Category | Test Files | Verified Properties |
+| --- | --- | --- |
+| **Spec, 0 B 8-Shard Inventory & `U1–U30`** | `uni-spec.test.ts` (`16` tests) | Pinned `nvidia/NLD-Uni` (`5db755a2`), `0 B` reconciliation across `8` safetensors shards (`1,557` tensors = `18,267,552,262` params = `36,535,104,542 B`), `U1–U30` ledger, `D1–D5` locked decisions, and 4-tier context honesty (`U3`). |
+| **34L Elastic-MoT Backbone & PyTorch `2.15.0` Parity** | `uni-backbone-math.test.ts` (`14`), `uni-pytorch-backbone-parity.test.ts` (`9`) | `18` Joint `L0..17` + `16` Split `L18..33` twin `U`/`G` towers (`0` shared learned weights), 1D dyadic YaRN + Llama-4 `p = 16` + 2D `SinCos-G`, `D5` `HF-Faithful` vs. `Elastic-Pruned` `0`-ULP Stage-2 equivalence, and PyTorch `2.15.0` parity (`pytorch-uni-backbone.json`). |
+| **Multimodal Vision, VQ-VAE, Codec & Understanding Parity** | `uni-vision.test.ts` (`16`), `uni-vq-codec.test.ts` (`9`), `uni-understanding-parity.test.ts` (`13`) | `RADIO-H` + `2×2` SquaredReLU projector, `Emu3` IBQ + `2×2` `PackedLinearImageCodec`, FLARE shifted-logit understanding, `<LOC_0..16>` 2D grounding (`U27`), and PyTorch `2.15.0` parity (`pytorch-uni-multimodal.json`). |
+| **Semantic Ball-Tree, Diffusion & OPD Parity** | `uni-semantic-tree.test.ts` (`19`), `uni-diffusion-parity.test.ts` (`11`), `uni-opd-readouts.test.ts` (`10`) | `BalancedSemanticTree` (`D = 8` mini / `U26` `D = 17` floor-rounding mismatch), stratified quadtree refinement, Dual-CFG edit (`legacy`/`independent`/`ip2p`, `U18` border-lock), Read-Only OPD (`U28`), and PyTorch `2.15.0` parity (`pytorch-uni-diffusion.json`). |
+| **Session Stress, All 7 Spatial Scenes, Tour & App Contracts** | `uni-session-stress.test.ts` (`7`), `uni-macro-scene.test.ts` (`7`), `uni-visual-input-scene.test.ts` (`7`), `uni-joint-attn-scene.test.ts` (`6`), `uni-ball-tree-scene.test.ts` (`5`), `uni-refinement-edit-scene.test.ts` (`9`), `uni-opd-scene.test.ts` (`6`), `uni-walkthrough.test.ts` (`5`), `uni-app-contracts.test.ts` (`19`) | `<= 12.00 MiB` `Set<ArrayBufferLike>` session budget, all 7 WebGL2 scenes + 2D RGB canvas insets, 5-act / 28-beat isolated tour, WAI-ARIA helpers, zero-idle-RAF, and `D4` isolation contracts. |
+
 ### Independent PyTorch `2.15.0` Parity Tolerances
 
-TypeScript accumulates inner dot products in JS `float64` prior to `Math.fround` writes while PyTorch `torch.float32` accumulates in `float32` BLAS/SIMD. All `8` checked-in SHA-256-verified independent PyTorch `2.15.0` reference fixtures (`tests/fixtures/*.json`) pass under Vitest:
+TypeScript accumulates inner dot products in JS `float64` prior to `Math.fround` writes while PyTorch `torch.float32` accumulates in `float32` BLAS/SIMD. All `11` checked-in SHA-256-verified independent PyTorch `2.15.0` reference fixtures (`tests/fixtures/*.json`) pass under Vitest:
 
 | Fixture File | Scope | Observed / Enforced Max Absolute Tolerance |
 | --- | --- | --- |
@@ -119,48 +135,52 @@ TypeScript accumulates inner dot products in JS `float64` prior to `Math.fround`
 | `tests/fixtures/pytorch-twotower-trajectory-parity.json` | TwoTower Categories 6–8: 2-block diffusion trajectory, AR vs. Mock-AR, MDLM/SUBS & Gumbel-max | Caches / residuals / probs: **`<= 2e-5`** · Logits: **`<= 5e-5`** · Sampler log-probs & probs: **`<= 1e-5`** · Identity AR vs. Mock-AR: **`0` ULP** |
 | `tests/fixtures/pytorch-diffusion-blocks-parity.json` | Diffusion Categories 1–6 (`271,304` Float32s, dyadic YaRN `inv_freq`, Llama-4 `1.0 → 1.06931472`, 5-mode masks + `M_OBC` `Δp >= 1`, `32Q/8KV` GQA + LoRA, Dense SwiGLU, 40L forward) | `inv_freq`: **`0`-ULP exact dyadic** · `cat1_params_lfs` / `cat3_masks`: **`0.000e+0`** · `cat2_rope_cos_sin_llama4`: **`5.960e-8`** · `cat2_rope_qk_rot`: **`2.865e-7`** · `cat4_gqa_lora`: **`1.907e-6`** · `cat5_swiglu`: **`3.576e-7`** · `cat6_40layer_resid_norm_probs`: **`1.013e-6`** · `cat6_40layer_logits`: **`1.073e-6`** · Exact 5-mode masks & Top-5 rankings |
 | `tests/fixtures/pytorch-diffusion-trajectories-parity.json` | Diffusion Categories 7–11 (cached AR vs. full 40L, Sampler A & B, speculative KV rollback & `D19` EOS crop, `0`-ULP verify LoRA-OFF, stochastic verification) | `cat7_logits_vs_pytorch`: **`2.384e-6`** · `cat7_probs_kv_vs_pytorch`: **`2.623e-6`** · `cat7_ts_incremental_vs_full`: **`0.000e+0`** · `cat8_probs_conf`: **`2.384e-7`** · `cat9_cropped_kv_vs_pytorch`: **`2.503e-6`** · `cat10_verify_logits_vs_pytorch`: **`1.825e-6`** · `cat10_draft_logits_vs_pytorch`: **`2.198e-6`** · `cat11_stochastic_logits_vs_pytorch`: **`1.550e-6`** · Exact greedy `AR == LinearSpec == LinearSpecLoRA` · `0`-ULP verify LoRA-OFF & prefix immutability |
+| `tests/fixtures/pytorch-uni-backbone.json` | NLD-Uni 34L Elastic-MoT backbone (18 Joint + 16 Split, 1D dyadic YaRN + Llama-4 `p = 16` + 2D `SinCos-G`, `D5` `HF-Faithful` vs. `Elastic-Pruned`) | Dyadic YaRN `inv_freq`: **`0`-ULP** · Backbone logits/residuals/KV: **`<= 5e-5`** · `D5` Stage-2 equivalence: **`0` ULP** |
+| `tests/fixtures/pytorch-uni-multimodal.json` | NLD-Uni Multimodal Understanding (`RADIO-H`, `Emu3` IBQ, `2×2` `PackedLinearImageCodec`, FLARE shifted-logit understanding, `<LOC_0..16>` grounding) | Patch/codebook/codec projections & logits: **`<= 5e-5`** · Argmax VQ codes & `<LOC_*>` tokens: **exact match** |
+| `tests/fixtures/pytorch-uni-diffusion.json` | NLD-Uni Discrete Diffusion (`BalancedSemanticTree`, stratified quadtree refinement, Dual-CFG edit `legacy`/`independent`/`ip2p`, Read-Only OPD `tail_kl`) | Tree/CFG logits & probs: **`<= 5e-5`** · Selected codes, `U18` border-lock & OPD buckets: **exact match** |
 
 ---
 
-## 3. Topology A 3-Way Multi-Entry MPA Build & Bundle-Isolation Gate
+## 3. Topology A 4-Way Multi-Entry MPA Build & Bundle-Isolation Gate
 
-Run the automated 7-gate 3-way verifier (`scripts/verify_bundle_isolation.mjs`) against **both** root (`/`) and GitHub Pages (`/llm-viz/`) builds:
+Run the automated 7-gate 4-way verifier (`scripts/verify_bundle_isolation.mjs`) against **both** root (`/`) and GitHub Pages (`/llm-viz/`) builds:
 
 ```bash
-# Root build (`/` + `/twotower/` + `/diffusion/`)
+# Root build (`/` + `/twotower/` + `/diffusion/` + `/uni/`)
 VITE_BASE_PATH=/ npm run build
 npm run verify:isolation
 
-# GitHub Pages subpath build (`/llm-viz/` + `/llm-viz/twotower/` + `/llm-viz/diffusion/`)
+# GitHub Pages subpath build (`/llm-viz/` + `/llm-viz/twotower/` + `/llm-viz/diffusion/` + `/llm-viz/uni/`)
 VITE_BASE_PATH=/llm-viz/ npx vite build --outDir test-results/dist-pages
 node scripts/verify_bundle_isolation.mjs --dir test-results/dist-pages
 ```
 
-Enforced hard gates across all 3 entries (non-zero exit on any failure):
+Enforced hard gates across all 4 entries (non-zero exit on any failure):
 
-1. All 3 HTML entries exist: `index.html` (Nano), `twotower/index.html` (TwoTower), and `diffusion/index.html` (Diffusion).
+1. All 4 HTML entries exist: `index.html` (Nano), `twotower/index.html` (TwoTower), `diffusion/index.html` (Diffusion), and `uni/index.html` (Uni).
 2. Every `<script src>`, `<link rel="modulepreload" href>`, and `<link rel="stylesheet" href>` resolves cleanly under `/` or `/llm-viz/`.
-3. TypeScript ECMAScript AST walks every transitive static `import`/`export ... from` and literal dynamic `import(...)` edge across all 3 graphs.
-4. Strict 3-way sourcemap mutual isolation: zero `.map` sources in Nano reference `src/twotower/` or `src/diffusion/`, zero TwoTower `.map` sources reference `src/diffusion/`, and zero Diffusion `.map` sources reference `src/twotower/`.
-5. Strict 3-way payload marker mutual isolation: zero TwoTower or Diffusion markers appear in Nano JS/CSS, zero Diffusion markers in TwoTower JS/CSS, and zero TwoTower markers in Diffusion JS/CSS.
-6. Positive presence: TwoTower's transitive JS sourcemaps positively contain `22` `src/twotower/*` sources, and Diffusion's transitive JS sourcemaps positively contain `31` `src/diffusion/*` sources (`0` runtime dependencies).
+3. TypeScript ECMAScript AST walks every transitive static `import`/`export ... from` and literal dynamic `import(...)` edge across all 4 graphs.
+4. Strict 4-way sourcemap mutual isolation across all `12` directional pairs plus Uni's `D4` zero-`src/ui/controls.ts` gate.
+5. Strict 4-way payload marker mutual isolation across all `12` directional pairs.
+6. Positive presence: Nano, TwoTower (`22`), Diffusion (`31`), and Uni (`37`) transitive JS sourcemaps positively contain their own exclusive sources (`0` runtime dependencies).
 7. Nano payload budget gate (`<= 215.00 KiB` / `220,160 B` gzip, verified on both `/` and `/llm-viz/`):
-   - **Nano (3 JS, 1 CSS):** `765,400 B` (`747.46 KiB`) raw | **`213,671 B` (`208.66 KiB`)** gzip (**`+6.34 KiB` / `6,489 B` headroom**, `0` leaks, `0 B` Nano JS/CSS added for quiet `Diffusion ↗` HTML link).
-   - **TwoTower (2 JS, 1 CSS):** `1,149,770 B` (`/`) / `1,149,778 B` (`/llm-viz/`) raw | **`325,423 B` (`317.80 KiB`)** `/` / **`325,434 B` (`317.81 KiB`)** `/llm-viz/` gzip (`22` `src/twotower/*` sources, `0` leaks).
-   - **Diffusion (3 JS, 1 CSS):** `1,025,187 B` (`/`) / `1,025,195 B` (`/llm-viz/`) raw | **`301,052 B` (`294.00 KiB`)** `/` / **`301,056 B` (`294.00 KiB`)** `/llm-viz/` gzip (`31` `src/diffusion/*` sources, `0` leaks).
-   - **Shared Chunks (2 JS):** `assets/controls-*.js` (`shared(n+df)`, `191,477 B` raw / `54,838 B` gzip) + `assets/overlay-*.js` (`shared(all3)`, `442,996 B` raw / `130,321 B` gzip) = `634,473 B` (`619.60 KiB`) raw / **`185,159 B` (`180.82 KiB`)** gzip.
+   - **Nano (4 JS, 1 CSS):** `765,603 B` (`747.66 KiB`) raw | **`214,375 B` (`209.35 KiB`)** gzip (**`+5.65 KiB` / `+5,785 B` headroom**, `0` leaks).
+   - **TwoTower (3 JS, 1 CSS):** `1,149,920 B` (`/`) / `1,149,928 B` (`/llm-viz/`) raw | **`326,045 B` (`318.40 KiB`)** `/` / **`326,056 B` (`318.41 KiB`)** `/llm-viz/` gzip (`22` `src/twotower/*` sources, `0` leaks).
+   - **Diffusion (4 JS, 1 CSS):** `1,025,690 B` (`/`) / `1,025,698 B` (`/llm-viz/`) raw | **`301,892 B` (`294.82 KiB`)** `/` / **`301,900 B` (`294.82 KiB`)** `/llm-viz/` gzip (`31` `src/diffusion/*` sources, `0` leaks).
+   - **NLD-Uni (2 JS, 1 CSS):** `661,685 B` (`/`) / `661,693 B` (`/llm-viz/`) raw | **`193,495 B` (`188.96 KiB`)** `/` / **`193,502 B` (`188.97 KiB`)** `/llm-viz/` gzip (`37` `src/uni/*` sources, `0` leaks).
+   - **Shared Chunks (3 JS):** `assets/atlasPacker-*.js` (`shared(all4)`, `50,302 B` gzip) + `assets/controls-*.js` (`shared(n+df)`, `54,829 B` gzip) + `assets/overlay-*.js` (`shared(n+tt+df)`, `80,754 B` gzip) = `634,667 B` (`619.79 KiB`) raw / **`185,885 B` (`181.53 KiB`)** gzip.
 
 ---
 
-## 4. Playwright / Chromium WebGL2 E2E Smoke Suite (`26` Tests Across `3` Files)
+## 4. Playwright / Chromium WebGL2 E2E Smoke Suite (`34` Tests Across `4` Files)
 
-`playwright.config.ts` starts two isolated preview servers (`127.0.0.1:4173` for root `/` and `127.0.0.1:4174/llm-viz/` for GitHub Pages subpath) and runs all three E2E suites:
+`playwright.config.ts` starts two isolated preview servers (`127.0.0.1:4173` for root `/` and `127.0.0.1:4174/llm-viz/` for GitHub Pages subpath) and runs all four E2E suites:
 
 ```bash
 # First-time local browser setup
 npx playwright install chromium
 
-# Run all Nano + TwoTower + Diffusion WebGL2 E2E tests (SwiftShader headless Chromium)
+# Run all Nano + TwoTower + Diffusion + NLD-Uni WebGL2 E2E tests (SwiftShader headless Chromium)
 npm run test:e2e
 ```
 
@@ -199,7 +219,7 @@ npx vite preview --outDir dist --base / --port 4173 --strictPort --host 127.0.0.
 > **Application-Side JS Callback Time vs. Full GPU Execution Latency**
 > Measurements captured with `performance.now()` around `drawFrame()` (`lastFrameMs` / `JS cb`) quantify **application-side main-thread CPU processing and WebGL command submission time** — they do **NOT** measure full asynchronous GPU rasterization, fragment shading, or display compositor latency. Observed smoothness during active camera flies or replay is tracked separately via continuous **observed RAF interval cadence (`RAF Δ`)**, measured strictly between consecutive animating frames (excluding idle-sleep pauses).
 
-### Covered E2E Scenarios (`26` Tests Across `3` Files)
+### Covered E2E Scenarios (`34` Tests Across `4` Files)
 
 #### Nano E2E Suite (`tests/e2e/smoke.spec.ts` — `9` Tests, hardened with observable `waitForProjectedOverlaySettled`)
 1. **52-Layer Tower Boot** — Clean initial WebGL2 frame, zero console/page errors, `#webgl-fallback` hidden.
@@ -233,6 +253,16 @@ npx vite preview --outDir dist --base / --port 4173 --strictPort --host 127.0.0.
 4. **Responsive Viewports (`1440×900`, `1024×800`, `390×844`)** — Verifies non-blank WebGL2, accessible controls/nav links, zero horizontal overflow, and `glErrorCount === 0` across all 3 viewports.
 5. **GitHub Pages Subpath `/llm-viz/diffusion/` Parity & Full 3-Way Reciprocal Navigation (`Nano ↔ TwoTower ↔ Diffusion` via Click & `Enter`)** — Verifies `/llm-viz/diffusion/` HTTP `200` assets and full 3-way click + `Enter` navigation cycles on both `/` and `/llm-viz/`.
 
+#### NLD-Uni E2E Suite (`tests/e2e/uni-smoke.spec.ts` — `8` Tests)
+1. **Root `/uni/` Boot, All 7 Spatial Views & Dedicated 2D RGB Canvas Insets** — Verifies non-blank WebGL2, `glErrorCount === 0`, and non-blank 2D RGB canvas insets across `Macro 34L`, `Visual Input`, `Joint / Split`, `Ball-Tree`, `Refinement`, `Output & Edit`, and `OPD (Read-Only)`.
+2. **Live `D5` Elastic Prefill Toggle (`HF-Faithful` vs. `Elastic-Pruned`) & Joint/Split Layer Sweep** — Verifies `L17 | L18` boundary and zero wasted KV in `Elastic-Pruned`.
+3. **Dual-CFG Image Editing (`legacy` / `independent` / `ip2p`), `U18` Border-Lock & 2D Grounding (`<LOC_0..16>`)** — Verifies mode switches, panorama crop-back, and `U27` hazard readout.
+4. **Ball-Tree (`U26` `D = 17` Mismatch) & Refinement Quadtree Timeline Execution / Branching** — Verifies non-destructive scrubbing, auto-forking, and `<= 12.00 MiB` budget meter.
+5. **Read-Only OPD Quarantined Explorer (`U28`) & 3-Tab Inspector (`Inspect | Architecture | Ledger U1–U30`)** — Verifies `READ-ONLY · NO GRADIENTS` banner, searchable ledger, and zero `NaN`/`Infinity`.
+6. **WAI-ARIA Roving `tabindex`, Idle-RAF Gating & Responsive Viewports (`1440×900`, `1024×800`, `390×844`)** — Verifies keyboard nav, `rafActive === false` sleep, and zero horizontal overflow.
+7. **Isolated 5-Act / 28-Beat Guided Tour, Dock/Inspector Locking, Ledger Ref Chips & Free-Explore Restoration** — Verifies tour controls lock, `Escape` deferral inside ledger search, and exact Free-Explore restoration on exit.
+8. **4-Way Reciprocal Navigation on Root `/` and GitHub Pages Subpath `/llm-viz/`** — Verifies `/llm-viz/uni/` HTTP `200` assets and 4-way navigation hops across both `/` and `/llm-viz/`.
+
 ---
 
 ## 5. Static Portable & GitHub Pages Artifact Packaging (`shasum -a 256`)
@@ -243,13 +273,13 @@ To produce verifiable, self-contained static release tarballs for both root (`/`
 # Clean output staging directory (gitignored)
 mkdir -p test-results/release-artifacts
 
-# 1. Portable static archive (serves at root `/`, `/twotower/`, and `/diffusion/`)
+# 1. Portable static archive (serves at root `/`, `/twotower/`, `/diffusion/`, and `/uni/`)
 VITE_BASE_PATH=/ npx vite build --outDir test-results/dist-portable
 node scripts/verify_bundle_isolation.mjs --dir test-results/dist-portable
 tar -czf test-results/release-artifacts/nemotron-viz-static-portable.tar.gz \
   -C test-results/dist-portable .
 
-# 2. GitHub Pages subpath archive (serves at `/llm-viz/`, `/llm-viz/twotower/`, and `/llm-viz/diffusion/`)
+# 2. GitHub Pages subpath archive (serves at `/llm-viz/`, `/llm-viz/twotower/`, `/llm-viz/diffusion/`, and `/llm-viz/uni/`)
 VITE_BASE_PATH=/llm-viz/ npx vite build --outDir test-results/dist-pages
 node scripts/verify_bundle_isolation.mjs --dir test-results/dist-pages
 tar -czf test-results/release-artifacts/nemotron-viz-ghpages-llm-viz.tar.gz \
@@ -271,14 +301,14 @@ Verification and production deployment remain strictly separated under `.github/
 
 | Workflow | Triggers | Permissions | Steps |
 | --- | --- | --- | --- |
-| **PR & Push CI** (`.github/workflows/ci.yml`) | `pull_request` (`main`, `feat/twotower`, `feat/diffusion`), `push` (`main`, `feat/twotower`, `feat/diffusion`), `workflow_dispatch` | Read-only (`contents: read`) — **never deploys** | Node `22` → `npm ci` → `npm run typecheck` → `npm test` → `npm run build` → `npm run verify:isolation` (root `/`) → `VITE_BASE_PATH=/llm-viz/ npx vite build --outDir test-results/dist-pages` + `node scripts/verify_bundle_isolation.mjs --dir test-results/dist-pages` (`/llm-viz/`) → `npx playwright install --with-deps chromium` → `npm run test:e2e` → upload Playwright report on failure. |
-| **GitHub Pages Deploy** (`.github/workflows/deploy.yml`) | `push` (`branches: [main]` **only**) and manual `workflow_dispatch` — **never runs on PRs, `feat/twotower`, or `feat/diffusion`** | `contents: read`, `pages: write`, `id-token: write` | Node `22` → `npm ci` → `npm run typecheck` → `npm test` → `VITE_BASE_PATH=/llm-viz/ npm run build` → `npm run verify:isolation` (3-way Nano / TwoTower / Diffusion) → `actions/configure-pages` → `actions/upload-pages-artifact` (`./dist`) → `actions/deploy-pages`. |
+| **PR & Push CI** (`.github/workflows/ci.yml`) | `pull_request` (`main`), `push` (`main`, `feat/**`), `workflow_dispatch` | Read-only (`contents: read`) — **never deploys** | Node `22` → `npm ci` → `npm run typecheck` → `npm test` → `npm run build` + `npm run verify:isolation` (root `/`) → `VITE_BASE_PATH=/llm-viz/ npx vite build --outDir test-results/dist-pages` + `node scripts/verify_bundle_isolation.mjs --dir test-results/dist-pages` (`/llm-viz/`) → `npx playwright install --with-deps chromium` → `PLAYWRIGHT_SKIP_BUILD=1 npm run test:e2e` → upload Playwright report on failure. |
+| **GitHub Pages Deploy** (`.github/workflows/deploy.yml`) | `push` (`branches: [main]` **only**) and manual `workflow_dispatch` — **never runs on PRs or feature branches** | `contents: read`, `pages: write`, `id-token: write` | Node `22` → `npm ci` → `npm run typecheck` → `npm test` → `VITE_BASE_PATH=/llm-viz/ npm run build` → `npm run verify:isolation` → `actions/configure-pages` → `actions/upload-pages-artifact` (`./dist`) → `actions/deploy-pages`. |
 
 ---
 
 ## 7. Known Limitations & Scope Boundaries
 
-- **Miniature Synthetic Simulators:** Browser execution uses deterministic synthetic Float32/Float64 weights (`d = 8`, `V_mini = 32` for Nano; `V_mini = 34` for TwoTower; `V_mini = 36` for Diffusion). None of the three entries loads NVIDIA checkpoints, runs the `131,072`-token tokenizer, or simulates hardware FP8 E4M3 quantization rounding.
+- **Miniature Synthetic Simulators:** Browser execution uses deterministic synthetic Float32/Float64 weights (`d = 8`, `V_mini = 32` for Nano; `V_mini = 34` for TwoTower; `V_mini = 36` for Diffusion; `V_txt = 64` + `V_vq = 256` for NLD-Uni). None of the four entries loads NVIDIA checkpoints, runs production `131K`/`132K` tokenizers, loads `pca_tree.pt`, or simulates hardware FP8 E4M3 quantization rounding.
 - **Diffusion Projection-Width Reversal (`Mini` vs. `14B`):** Miniature `40L` Diffusion expands `8 → 256` (`qConcat = 256`, `kvConcat = 64`), whereas canonical `14B` contracts `5,120 → 4,096` (`kv = 1,024`); explicitly disclosed in `gqa_rope`, `macro`, and `Architecture` readouts.
 - **Excluded Peak Inference Workspace:** Accounted production weight & KV totals explicitly exclude intermediate layer activations, `[B × 131,072]` logits, CUDA/framework scratchpads, and allocator fragmentation.
 - **VLM-8B Quadratic SS Reference Only (`D10`, `D24`):** Quadratic Self-Speculation is absent from all 6 text checkpoints and shown strictly as a badged read-only reference tab inside the Diffusion Mask Explorer.
