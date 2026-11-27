@@ -1458,6 +1458,147 @@ describe('spatialApp.ts pure Node state machines (idle-RAF, atlas dedup, switche
       vi.unstubAllGlobals();
     }
   });
+
+  it('togglePlayback rewinds immediately to record 0 when starting Play at branch head, replays to head, and preserves non-head cursor', () => {
+    const harness = createMockDomHarness();
+    harness.stubGlobalDocument();
+    const { flushRaf } = harness.stubGlobalWindow();
+
+    try {
+      const host = harness.makeNode('div');
+      const app = createDorySpatialApp({
+        host: host as unknown as HTMLElement,
+        initialViewMode: 'macro',
+        initialKLoops: 1,
+        attachDebugHandle: true,
+      });
+
+      // Add a 2nd decode step so the branch has 3 records [r0, r1, r2] and starts at head r2
+      app.debug.stepSession();
+      const headRecId = app.getState().activeRecordId!;
+      const playBtn = harness.findByTestId(host, 'dory-dock-play-pause')!;
+      const stepBackBtn = harness.findByTestId(host, 'dory-dock-step-back')!;
+      const stepReadout = harness.findByTestId(host, 'dory-dock-step-readout')!;
+
+      expect(stepReadout.textContent).toBe('Step 3 / 3');
+      expect(app.getState().isPlaying).toBe(false);
+      expect(app.debug.rafActive).toBe(false);
+
+      // Helper to advance RAF past one 850 ms playback interval (`dtMs` clamps to 100 ms/tick)
+      let clockMs = 1000;
+      const advancePlaybackInterval = (): void => {
+        for (let i = 0; i < 10; i += 1) {
+          clockMs += 100;
+          flushRaf(clockMs);
+        }
+      };
+
+      // Clicking Play at head MUST rewind immediately to record 0 (Step 1 / 3 · Hist)
+      playBtn.click();
+      const r0Id = app.getState().activeRecordId!;
+      expect(r0Id).not.toBe(headRecId);
+      expect(app.getState().isPlaying).toBe(true);
+      expect(app.debug.rafActive).toBe(true);
+      expect(playBtn.textContent).toBe('⏸ Pause');
+      expect(stepReadout.textContent).toBe('Step 1 / 3 · Hist');
+
+      // First interval advances r0 -> r1
+      advancePlaybackInterval();
+      const r1Id = app.getState().activeRecordId!;
+      expect(r1Id).not.toBe(r0Id);
+      expect(r1Id).not.toBe(headRecId);
+      expect(app.getState().isPlaying).toBe(true);
+      expect(stepReadout.textContent).toBe('Step 2 / 3 · Hist');
+
+      // Second interval advances r1 -> r2 (head)
+      advancePlaybackInterval();
+      expect(app.getState().activeRecordId).toBe(headRecId);
+      expect(stepReadout.textContent).toBe('Step 3 / 3');
+
+      // Next interval detects head and stops playback cleanly (`rafActive === false`)
+      advancePlaybackInterval();
+      expect(app.getState().isPlaying).toBe(false);
+      expect(app.debug.rafActive).toBe(false);
+      expect(app.getState().activeRecordId).toBe(headRecId);
+      expect(playBtn.textContent).toBe('▶ Play');
+
+      // Starting Play from a non-head record (r1) MUST NOT rewind to r0
+      stepBackBtn.click();
+      expect(app.getState().activeRecordId).toBe(r1Id);
+      expect(stepReadout.textContent).toBe('Step 2 / 3 · Hist');
+
+      playBtn.click();
+      expect(app.getState().isPlaying).toBe(true);
+      expect(app.getState().activeRecordId).toBe(r1Id);
+      expect(stepReadout.textContent).toBe('Step 2 / 3 · Hist');
+
+      // Advances from r1 -> head, then stops cleanly
+      advancePlaybackInterval();
+      expect(app.getState().activeRecordId).toBe(headRecId);
+      advancePlaybackInterval();
+      expect(app.getState().isPlaying).toBe(false);
+      expect(app.debug.rafActive).toBe(false);
+
+      app.dispose();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('debug.stepSession checks halt/capacity precondition before forking on temperature change, while still allowing historical fork-on-step', () => {
+    const harness = createMockDomHarness();
+    harness.stubGlobalDocument();
+    harness.stubGlobalWindow();
+
+    try {
+      const host = harness.makeNode('div');
+      const app = createDorySpatialApp({
+        host: host as unknown as HTMLElement,
+        initialViewMode: 'macro',
+        initialPromptPresetId: 'long_eviction_16',
+        initialKLoops: 1,
+        attachDebugHandle: true,
+      });
+
+      const execBtn = harness.findByTestId(host, 'dory-dock-execute-step')!;
+      const tempSlider = harness.findByTestId(host, 'dory-dock-temp-slider')!;
+      const stepBackBtn = harness.findByTestId(host, 'dory-dock-step-back')!;
+
+      // Step to halt (capacity_exhausted at S_max = 32 or eos)
+      for (let i = 0; i < DORY_MINI_CONFIG.maxPositionEmbeddings && !execBtn.disabled; i += 1) {
+        app.debug.stepSession();
+      }
+      expect(execBtn.disabled).toBe(true);
+      expect(execBtn.textContent).toContain('Halted (');
+
+      const branchesAtHalt = app.debug.branchCount;
+      const branchIdAtHalt = app.debug.activeBranchId;
+      const recordIdAtHalt = app.debug.activeRecordId;
+
+      // Change temperature after halt, then call programmatic debug.stepSession()
+      tempSlider.value = '0.75';
+      tempSlider.dispatchEvent('input');
+      expect(app.getState().sampling.temperature).toBeCloseTo(0.75, 6);
+
+      const afterHaltedStep = app.debug.stepSession();
+      expect(afterHaltedStep.branchCount).toBe(branchesAtHalt);
+      expect(afterHaltedStep.activeBranchId).toBe(branchIdAtHalt);
+      expect(afterHaltedStep.activeRecordId).toBe(recordIdAtHalt);
+      expect(app.getState().dr18ForkNotice).toBeNull();
+
+      // Scrubbing back one record to a non-halted historical cursor STILL forks cleanly with T=0.75
+      stepBackBtn.click();
+      expect(execBtn.disabled).toBe(false);
+      const afterHistoricalStep = app.debug.stepSession();
+      expect(afterHistoricalStep.branchCount).toBe(branchesAtHalt + 1);
+      expect(afterHistoricalStep.activeBranchId).not.toBe(branchIdAtHalt);
+      expect(app.getState().dr18ForkNotice).toContain('T=0.75');
+
+      app.dispose();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 // ============================================================================

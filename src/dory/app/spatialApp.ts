@@ -2014,6 +2014,17 @@ export function createDorySpatialApp(
     const curRec = freeSession.getActiveRecord();
     if (!curBranch || !curRec) return;
 
+    // Pre-check halt / capacity before forking on temperature change so programmatic
+    // `debug.stepSession()` on an already-halted record never creates an unstepped fork.
+    if (
+      curRec.haltReason !== null ||
+      curRec.committedLen >= params.config.maxPositionEmbeddings ||
+      (curBranch.config.executionMode === 'self_spec' && curRec.pendingToken === null)
+    ) {
+      refreshDock();
+      return;
+    }
+
     // If user adjusted sampling temperature since branch creation, fork cleanly with updated sampling
     if (!sameSampling(curBranch.config.sampling, sampling)) {
       const forked = freeSession.forkBranch(curRec.recordId, {
@@ -2122,10 +2133,17 @@ export function createDorySpatialApp(
     }
     const branch = freeSession.getActiveBranch();
     if (!branch || branch.recordIds.length <= 1) return;
+    const curRec = freeSession.getActiveRecord();
+    const curIdx = curRec ? branch.recordIds.indexOf(curRec.recordId) : branch.recordIds.length - 1;
     isPlaying = true;
     playbackAccumMs = 0;
+    if (curIdx < 0 || curIdx >= branch.recordIds.length - 1) {
+      freeSession.seekRecord(branch.recordIds[0]!);
+      rebuildSceneAndRefresh({ preserveViewControlsDom: true });
+    } else {
+      refreshDock();
+    }
     scheduler.setContinuousReason('playback', true);
-    refreshDock();
   }
 
   function advancePlaybackStep(): void {
