@@ -133,7 +133,7 @@ The Node regression suite runs `85` test files (`33` Nano files + `13` TwoTower 
 | **Contract A §6.2 Self-Spec (6-Layer Parity)** | `dory-speculative-parity.test.ts` | All 6 verification layers against `pytorch-dory-spec.json`: (1) binary64 algebraic identity `<= 1e-15`, (2) `V = 4` exact analytical enumeration `<= 1e-15`, (3) explicit-variate boundary checks, (4) adversarial edges (`p === q`, disjoint, `q = 1e-40`, `Δ = 4e-13`, one-hot), (5) multi-cycle Contract A `104`-bank `k = 4` verify & `output_shallow` `k = 1` draft parity (`<= 2e-5`) across `S > 8` rollback & greedy `===` AR, and (6) Pearson `χ² < 103.51` (`N = 20,000, α = 0.001, df = 63`) + mandatory failing negative controls. |
 | **Session Immutability, `D10` LRU Pool & Stress** | `dory-session-stress.test.ts` | Non-aliased CoW branch isolation, `DR18` immutable depth/policy fork guard, `DR24` `last_loop` `chunkSizes[]` `0-ULP` lazy trace replay, and 12-branch / 128-record stress strictly `<= 12.00 MiB` at **both `k = 4` and `k = 8`** via `D10` `3.00 MiB` LRU sparse-checkpoint pool. |
 | **Spatial Provenance, Views 1–6 & `DR20`/`DR21`** | `dory-scene-provenance.test.ts`, `dory-scene-macro-hypersphere.test.ts`, `dory-scene-mixers-kv-spec.test.ts` | `0` `NaN`/`Inf`, `0` atlas overlaps, `<= 512 KiB` `RG32F`, `DR20` throw guard on unmasked SWA/Full plates, `DR21` `pick.ts` immutability, Folded/Unrolled shared weights, anti-SLERP / Exploratory 2D PCA (`8D` metrics) / read-only Counterfactual Coda, Dual-RoPE GQA, SwiGLU, `kv_compare`, and Contract A `self_spec`. |
-| **View 7, Readouts & 4-Act / 14-Beat Tour** | `dory-readouts-tour.test.ts` | `0 B` diff 4-checkpoint constants, `$S$-invariant (4 + 5k) / 9` ratio, `READ-ONLY · NO GRADIENTS` TBPTL guard, full 8-tuple `DoryExecutionCoord` validation on all 14 beats, and byte-exact isolation from external Free-Explore `DorySession`. |
+| **View 7, Readouts & 4-Act / 14-Beat Tour** | `dory-readouts-tour.test.ts` | `0 B` diff 4-checkpoint constants, `S`-invariant `(4 + 5k) / 9` ratio, `READ-ONLY · NO GRADIENTS` TBPTL guard, full 8-tuple `DoryExecutionCoord` validation on all 14 beats, and byte-exact isolation from external Free-Explore `DorySession`. |
 | **App Shell, Charts, Overlay & Static `D4` Guard** | `dory-app-contracts.test.ts` | `idle-RAF`, dual-hash atlas dedup, `<= 64` pooled overlay cells, 6 headless `<svg>` charts, in-place slider/dock DOM identity, and recursive static guard banning Gate 4b/4c Nano modules, sibling entries, and `Math.random(`. |
 | **5-Way MPA Navigation & Release Metadata** | `dory-navigation-contract.test.ts` (`6` tests) | 5-entry `MODEL_REGISTRY` (`/` & `/llm-viz/`), clean `dory/index.html` & `vite.config.ts`, `0` forbidden Dory markers across all 4 prior apps & shared switcher, light-theme switcher mount, `verify_bundle_isolation.mjs` registration, and 5-way WAI-ARIA keyboard navigation. |
 
@@ -224,11 +224,12 @@ Software SwiftShader exercises shader compilation and WebGL2 correctness but doe
 VITE_BASE_PATH=/ npm run build
 npx vite preview --outDir dist --base / --port 4173 --strictPort --host 127.0.0.1
 
-# 2. Open http://127.0.0.1:4173/, http://127.0.0.1:4173/twotower/, and http://127.0.0.1:4173/diffusion/
+# 2. Open http://127.0.0.1:4173/, http://127.0.0.1:4173/twotower/, http://127.0.0.1:4173/diffusion/,
+#         http://127.0.0.1:4173/uni/, and http://127.0.0.1:4173/dory/
 #    Verify in DevTools / telemetry:
 #    - WebGL2 renderer reports hardware GPU (not SwiftShader)
 #    - Continuous orbit/fly enters idle RAF sleep cleanly when stationary (rafActive === false)
-#    - High-DPI crispness (devicePixelRatio >= 2) across all Nano, TwoTower & Diffusion views + 3-way links
+#    - High-DPI crispness (devicePixelRatio >= 2) across all 5 apps (Nano, TwoTower, Diffusion, NLD-Uni & Dory1.0-4B) + 5-way switcher links
 #    - Zero console errors, zero WebGL errors, zero layout clipping at 1440×900, 1024×800, and 390×844
 ```
 

@@ -2019,7 +2019,7 @@ export function createDorySpatialApp(
     if (
       curRec.haltReason !== null ||
       curRec.committedLen >= params.config.maxPositionEmbeddings ||
-      (curBranch.config.executionMode === 'self_spec' && curRec.pendingToken === null)
+      curRec.pendingToken === null
     ) {
       refreshDock();
       return;

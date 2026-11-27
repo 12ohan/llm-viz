@@ -1,6 +1,6 @@
 # NVIDIA Nemotron-Labs-Dory1.0-4B — Architecture & Verification Guide
 
-This guide documents the pinned provenance, 5-tier epistemic governance rubric, physical `72`-sublayer looped **Full-Normalized-GPT (nGPT)** topology (`16` Input Prelude + `40` Shared Recurrent Core + `16` Output Coda), `5` learned scaling families (`σ_0 = 0.0177` active divisor), channel-wise NLERP residual contract (`DR7` anti-SLERP), canonical binary32-storage / binary64-accumulation browser numerical contract (`D5`), dual-axis KV cache (`per_loop` vs. `last_loop` × `SWA` vs. `Full`) with `$S$-invariant (4 + 5k) / 9` scaling and `DR17`/`DR24` partition-dependence characterization, reconstructed Paper §6.2 **Contract A** self-speculative decoding (`104` Dual-Coda banks, `DR23`), `0 B` diff 4-checkpoint reconciliation, `D10` `3.00 MiB` LRU sparse-checkpoint pool (`<= 12.00 MiB` bound across `k = 1..8`), `DR1–DR24` discrepancy & browser-guard ledger, and 5-way Topology A bundle-isolation architecture for **NVIDIA Nemotron-Labs-Dory1.0-4B** (`/dory/`).
+This guide documents the pinned provenance, 5-tier epistemic governance rubric, physical `72`-sublayer looped **Full-Normalized-GPT (nGPT)** topology (`16` Input Prelude + `40` Shared Recurrent Core + `16` Output Coda), `5` learned scaling families (`σ_0 = 0.0177` active divisor), channel-wise NLERP residual contract (`DR7` anti-SLERP), canonical binary32-storage / binary64-accumulation browser numerical contract (`D5`), dual-axis KV cache (`per_loop` vs. `last_loop` × `SWA` vs. `Full`) with `S`-invariant `(4 + 5k) / 9` scaling and `DR17`/`DR24` partition-dependence characterization, reconstructed Paper §6.2 **Contract A** self-speculative decoding (`104` Dual-Coda banks, `DR23`), `0 B` diff 4-checkpoint reconciliation, `D10` `3.00 MiB` LRU sparse-checkpoint pool (`<= 12.00 MiB` bound across `k = 1..8`), `DR1–DR24` discrepancy & browser-guard ledger, and 5-way Topology A bundle-isolation architecture for **NVIDIA Nemotron-Labs-Dory1.0-4B** (`/dory/`).
 
 For sibling architecture guides, see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) (Nano `/`), [`docs/TWOTOWER_ARCHITECTURE.md`](TWOTOWER_ARCHITECTURE.md) (TwoTower `/twotower/`), and [`docs/DIFFUSION_ARCHITECTURE.md`](DIFFUSION_ARCHITECTURE.md) (Diffusion-14B `/diffusion/`). For interactive usage instructions, see [`docs/DORY_USER_GUIDE.md`](DORY_USER_GUIDE.md).
 
@@ -99,7 +99,7 @@ View 2 explicitly distinguishes **(a) Exact 2D Spanning-Subspace `span(a, b)`** 
 
 ---
 
-## 4. Dual-Axis KV Cache (`per_loop` vs. `last_loop`) & `$S$-Invariant` Scaling (`DR17`, `DR18`, `DR24`)
+## 4. Dual-Axis KV Cache (`per_loop` vs. `last_loop`) & `S`-Invariant Scaling (`DR17`, `DR18`, `DR24`)
 
 Because every stage maintains the exact **3:1 SWA:Full ratio** (`Input 6:2`, `Recurrent 15:5`, `Output 6:2`), the logical KV ratio between `per_loop` (`16 + 20k` banks) and `last_loop` (`36` frozen banks) is **strictly invariant to sequence length `S`**:
 $$\frac{\text{KV}_{\text{per\_loop}}(S, k)}{\text{KV}_{\text{last\_loop}}(S, k)} = \frac{4 + 5k}{9} \in \{1.000\times, \; 1.556\times, \; 2.111\times, \; 2.667\times, \; 3.778\times, \; 4.889\times\}$$

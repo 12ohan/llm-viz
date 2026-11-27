@@ -329,10 +329,12 @@ test.describe('NVIDIA Nemotron-Labs-Dory1.0-4B · Full Chromium WebGL2 E2E Suite
 
     // Execute an additional live gamma=4 Contract A speculative cycle
     const prevRecordCount = dbg.recordCount;
+    const prevCommittedLen = dbg.committedLen;
     await page.getByTestId('dory-dock-execute-step').click();
     await waitForDorySettled(page);
     dbg = await getDoryDebug(page);
-    expect(dbg.recordCount).toBeGreaterThanOrEqual(prevRecordCount);
+    expect(dbg.recordCount).toBeGreaterThan(prevRecordCount);
+    expect(dbg.committedLen).toBeGreaterThan(prevCommittedLen);
     expect(dbg.glErrorCount).toBe(0);
     await assertCanvasNonBlank(canvas, 'View 6 Self-Spec live Contract A cycle');
 
