@@ -27,7 +27,7 @@
  * cross-app imports.
  */
 
-import type { Vec3 } from '../../model/spec';
+import type { Vec3 } from '../../render/primitives';
 import type { AABB } from '../../render/camera';
 import {
   LINE_STYLE_ACTIVE,
@@ -51,7 +51,7 @@ import {
   RIBBON_KIND_BOX,
   type DimensionCaliper,
   type LandmarkAnchor,
-} from '../../scene/spine';
+} from '../../render/primitives';
 import {
   buildUniElasticD5Comparison,
   buildUniViewArchReadouts,

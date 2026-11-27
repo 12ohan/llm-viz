@@ -1,4 +1,4 @@
-import type { Vec3 } from '../model/spec';
+import type { Vec3 } from './primitives';
 import { linkProgram, PALETTE } from './device';
 import {
   LINE_INSTANCE_ATTRIBS,

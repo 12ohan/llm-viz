@@ -38,7 +38,7 @@ import {
   type CellPopoverSpec,
   type OverlayRect,
   type ProjectedCellSize,
-} from '../../ui/overlay';
+} from '../../shared/overlayLayout';
 import type { TwoTowerSpatialScene } from '../scene/provenance';
 
 export interface TwoTowerOverlayUpdateInput {

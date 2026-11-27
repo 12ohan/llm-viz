@@ -25,7 +25,8 @@
  * Pure headless TypeScript — zero DOM, WebGL, `Math.random()`, or `src/twotower/` imports.
  */
 
-import { fmtSigned, type LayerFormulaReadout, type StepperStepDef } from '../../math/formulaFormat';
+import type { LayerFormulaReadout, StepperStepDef } from '../../math/formulaFormat';
+import { fmtSigned } from '../../shared/format';
 import type { AABB } from '../../render/camera';
 import {
   LINE_STYLE_ACTIVE,
@@ -75,8 +76,8 @@ import {
   CELL_WEIGHT_BLUE,
   type DimensionCaliper,
   type LandmarkAnchor,
-} from '../../scene/spine';
-import type { ActiveSheetCellGrid, CellPopoverSpec } from '../../ui/overlay';
+} from '../../render/primitives';
+import type { ActiveSheetCellGrid, CellPopoverSpec } from '../../shared/overlayLayout';
 import { softmaxRows } from '../attention';
 import {
   DIFFUSION_MINI_BOS_TOKEN_ID,

@@ -10,28 +10,35 @@ The codebase is organized as a strict unidirectional dependency graph with **zer
 
 ```mermaid
 flowchart LR
+  Shared["src/shared/\n(a11y, overlayLayout, format)"]
+  Render["src/render/\n(primitives, camera, device,\npick, 5 passes, linePacking)"]
   Model["src/model/\n(spec, memory, state, rcPlayback)"]
   Math["src/math/\n(pure Float32 sims, hybridFlow,\ncacheContracts, incrementalDecode)"]
-  Scene["src/scene/\n(spine, 5 cutaways, atlases,\naccumulation, sheetInspector)"]
-  Render["src/render/\n(WebGL2 device, 5 passes,\nlinePacking, camera, pick)"]
+  Scene["src/scene/\n(spine, 5 cutaways, atlases,\nhybridPick, accumulation, sheetInspector)"]
   Story["src/story/\n(7 chapters / 22-beat 3-Act tour)"]
   UI["src/ui/\n(controls, overlay, memoryChart, CSS)"]
   Main["src/main.ts\n(composition root & RAF lifecycle)"]
 
+  Render --> Shared
+  Render --> Model
+  Shared --> Model
+  Shared --> Math
   Model --> Math
+  Render --> Scene
   Model --> Scene
   Math --> Scene
-  Model --> Render
-  Scene --> Render
   Model --> Story
+  Shared --> UI
+  Render --> UI
   Model --> UI
   Math --> UI
   Scene --> UI
   Story --> UI
+  Shared --> Main
+  Render --> Main
   Model --> Main
   Math --> Main
   Scene --> Main
-  Render --> Main
   Story --> Main
   UI --> Main
 ```
@@ -40,10 +47,11 @@ flowchart LR
 
 | Directory | Responsibility | Strict Boundary |
 | --- | --- | --- |
+| `src/render/` | Native WebGL2 engine (`primitives.ts`, `device.ts`, `camera.ts`, `pick.ts`, `solids.ts`, `lines.ts`, `linePacking.ts`, `sheets.ts`, `sheetFrame.ts`, `ribbons.ts`). | **Leaf graphics layer:** zero imports from `src/model/`, `src/math/`, `src/scene/`, or `src/ui/`; shared cleanly across all MPA apps without dragging model-specific code. |
+| `src/shared/` | Tiny pure cross-app primitives (`a11y.ts`, `overlayLayout.ts`, `format.ts`, and MPA navigation registry/switcher). | Zero model logic or cross-app state; depends at most on `src/render/`. |
 | `src/model/` | Pinned checkpoint metadata (`spec.ts`), logical 1→1M memory math (`memory.ts`), scene/UI state contracts (`state.ts`), and playback/session clocks (`rcPlayback.ts`, `mambaPlayback.ts`, `moePlayback.ts`). | Pure TypeScript; no WebGL or DOM access. |
-| `src/math/` | Deterministic miniature Float32 simulators (`gqaSim.ts`, `mambaSim.ts`, `moeSim.ts`), unified 52-layer forward pass (`hybridFlow.ts`), AR decode cache contracts (`cacheContracts.ts`), incremental decoding & branching (`incrementalDecode.ts`), and formula formatting (`formulaFormat.ts`). | **Strictly pure CPU math:** zero DOM, WebGL, or `src/scene/` imports (depends only on `src/model/spec.ts`). Executable identically in Node (Vitest & fixture export) and the browser. |
-| `src/scene/` | Pure geometry builders (`spine.ts`, `cutaways.ts`, `embeddingCutaway.ts`, `outputCutaway.ts`, `gqaCutaway.ts`, `gqaSpatial.ts`, `mambaCutaway.ts`, `mambaSpatial.ts`, `moeCutaway.ts`, `moeSpatial.ts`), RG32F value atlas packers (`atlasPacker.ts`, `*Atlas.ts`), focused-cell accumulation (`accumulation.ts`), and sheet inspection (`sheetInspector.ts`). | Emits packed `Float32Array` instance buffers, atlas texels, and CPU ray-pick hitboxes without calling WebGL APIs directly. |
-| `src/render/` | Native WebGL2 engine (`device.ts`, `camera.ts`, `pick.ts`, `solids.ts`, `lines.ts`, `linePacking.ts`, `sheets.ts`, `sheetFrame.ts`, `ribbons.ts`). | Owns GPU shaders, VAOs/VBOs, FBOs, and projection/picking math; unaware of domain copy or walkthrough beats. |
+| `src/math/` | Deterministic miniature Float32 simulators (`gqaSim.ts`, `mambaSim.ts`, `moeSim.ts`), unified 52-layer forward pass (`hybridFlow.ts`), AR decode cache contracts (`cacheContracts.ts`), incremental decoding & branching (`incrementalDecode.ts`), and formula formatting (`formulaFormat.ts`). | **Strictly pure CPU math:** zero DOM, WebGL, or `src/scene/` / `src/render/` imports. Executable identically in Node (Vitest & fixture export) and the browser. |
+| `src/scene/` | Pure geometry builders (`spine.ts`, `cutaways.ts`, `embeddingCutaway.ts`, `outputCutaway.ts`, `gqaCutaway.ts`, `gqaSpatial.ts`, `mambaCutaway.ts`, `mambaSpatial.ts`, `moeCutaway.ts`, `moeSpatial.ts`), RG32F value atlas packers (`atlasPacker.ts`, `*Atlas.ts`), hybrid pick resolvers (`hybridPick.ts`), focused-cell accumulation (`accumulation.ts`), and sheet inspection (`sheetInspector.ts`). | Emits packed `Float32Array` instance buffers, atlas texels, and CPU ray-pick hitboxes without calling WebGL APIs directly. |
 | `src/ui/` | Accessible HTML/SVG UI chrome (`controls.ts`, `overlay.ts`, `memoryChart.ts`, `theme.css`) implementing WAI-ARIA tablists, modal focus traps, screen-space elbow callouts, floating cell popovers, and the 1→1M SVG memory scaling chart. | Pure view/controller components driven by state snapshots and callbacks from `src/main.ts`. |
 | `src/story/` | Canonical 7-chapter / 22-beat, 3-Act guided walkthrough (`walkthrough.ts`) sharing the 8-token prefill prefix (`TOUR_PREFILL_TOKEN_IDS = [0..7]`) across Act I, Act II, and Act III (`8P + 1S = 9`). | Pure declarative beat metadata & dynamic Act III narrative helpers. |
 | `src/main.ts` | Single browser composition root: initializes `RenderDevice`, all 5 GPU passes, `HybridModelParameters`, `DualDecodeSessionStore`, ResizeObserver, pointer/keyboard handlers, WebGL context-loss handlers, and the frame loop. | Sole owner of `requestAnimationFrame` scheduling and live DOM wiring. |

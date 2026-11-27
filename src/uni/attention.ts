@@ -16,7 +16,7 @@
  * Pure headless TypeScript — zero DOM, WebGL, ambient RNG, or forbidden imports.
  */
 
-import { fmtSigned } from '../math/formulaFormat';
+import { fmtSigned } from '../shared/format';
 import {
   applyElasticSplitTowerMask,
   buildBidirectionalMask,

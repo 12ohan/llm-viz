@@ -39,13 +39,10 @@ import {
 } from '../../math/moeSim';
 import { formatBayId } from '../../model/spec';
 import {
+  buildCameraSnapshot,
   CAMERA_FLY_DURATION_MS,
   cloneCameraPose,
   DEFAULT_FOV_DEG,
-  type CameraPose,
-} from '../../model/state';
-import {
-  buildCameraSnapshot,
   fitOpBoundsCamera,
   interpolateCameraPose,
   makeViewportMetrics,
@@ -54,6 +51,7 @@ import {
   projectWorldToClientCss,
   zoomPerspectiveDistance,
   type AABB,
+  type CameraPose,
   type CameraSnapshot,
   type ViewportMetrics,
 } from '../../render/camera';
@@ -61,9 +59,6 @@ import { RenderDevice } from '../../render/device';
 import { LinesPass } from '../../render/lines';
 import {
   clientPointToRay,
-  pickHitToGqaCell,
-  pickHitToMambaCell,
-  pickHitToMoeCell,
   pickMacroBay,
   type PickHit,
 } from '../../render/pick';
@@ -71,7 +66,13 @@ import { FlatFlowRibbonsPass, RibbonsPass } from '../../render/ribbons';
 import { SheetsPass } from '../../render/sheets';
 import { SolidsPass } from '../../render/solids';
 import type { EmbeddingCellRef } from '../../scene/embeddingCutaway';
+import {
+  pickHitToGqaCell,
+  pickHitToMambaCell,
+  pickHitToMoeCell,
+} from '../../scene/hybridPick';
 import type { OutputCellRef } from '../../scene/outputCutaway';
+import { handleTablistKeydown } from '../../shared/a11y';
 import {
   buildAdvancedSamplerInspectorModel,
   buildTwoTowerArchitecturalReadout,
@@ -1250,30 +1251,10 @@ export function mountTwoTowerSpatialApp(root: HTMLElement): TwoTowerAppHandle {
   }
 
   tablist.addEventListener('keydown', (ev) => {
-    if (
-      ev.key !== 'ArrowLeft' &&
-      ev.key !== 'ArrowRight' &&
-      ev.key !== 'Home' &&
-      ev.key !== 'End'
-    ) {
-      return;
-    }
-    const curIdx = tabButtons.findIndex(
-      (t) => t === ev.target || t.getAttribute('aria-selected') === 'true',
-    );
-    const baseIdx = curIdx >= 0 ? curIdx : 0;
-    let nextIdx = baseIdx;
-    if (ev.key === 'ArrowRight') nextIdx = (baseIdx + 1) % tabButtons.length;
-    else if (ev.key === 'ArrowLeft') nextIdx = (baseIdx - 1 + tabButtons.length) % tabButtons.length;
-    else if (ev.key === 'Home') nextIdx = 0;
-    else if (ev.key === 'End') nextIdx = tabButtons.length - 1;
-
-    ev.preventDefault();
-    ev.stopPropagation();
-    const targetTab = tabButtons[nextIdx];
-    const nextMode = targetTab.dataset.viewMode as TwoTowerSpatialViewMode;
-    switchViewMode(nextMode);
-    targetTab.focus();
+    handleTablistKeydown(tabButtons, ev, (targetTab) => {
+      const nextMode = targetTab.dataset.viewMode as TwoTowerSpatialViewMode;
+      switchViewMode(nextMode);
+    });
   });
 
   const topActions = el('div', 'sp-top-actions');

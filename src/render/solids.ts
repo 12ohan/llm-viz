@@ -1,4 +1,4 @@
-import { SOLID_INSTANCE_BYTES } from '../scene/spine';
+import { SOLID_INSTANCE_BYTES } from './primitives';
 import { linkProgram, PALETTE } from './device';
 
 const SOLIDS_VS = `#version 300 es

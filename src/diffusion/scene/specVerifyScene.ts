@@ -31,7 +31,8 @@
  * Pure headless TypeScript — zero DOM, WebGL, `Math.random()`, or `src/twotower/` imports.
  */
 
-import { fmtSigned, type LayerFormulaReadout, type StepperStepDef } from '../../math/formulaFormat';
+import type { LayerFormulaReadout, StepperStepDef } from '../../math/formulaFormat';
+import { fmtSigned } from '../../shared/format';
 import type { AABB } from '../../render/camera';
 import {
   LINE_STYLE_ACTIVE,
@@ -85,8 +86,8 @@ import {
   type DimensionCaliper,
   type KvDepthTickAnchor,
   type LandmarkAnchor,
-} from '../../scene/spine';
-import type { ActiveSheetCellGrid, CellPopoverSpec } from '../../ui/overlay';
+} from '../../render/primitives';
+import type { ActiveSheetCellGrid, CellPopoverSpec } from '../../shared/overlayLayout';
 import { runDiffusionForwardPass } from '../forward';
 import { cropKvSnapshot, materializePastKvs } from '../kvCache';
 import { createXoshiro128ss, mixSeed32 } from '../prng';

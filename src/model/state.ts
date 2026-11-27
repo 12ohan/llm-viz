@@ -1,17 +1,30 @@
 import type { GqaCellRef } from '../math/gqaSim';
 import type { MambaCellRef } from '../math/mambaSim';
 import type { MoeCellRef } from '../math/moeSim';
+import {
+  CAMERA_FLY_DURATION_MS,
+  cloneCameraPose,
+  DEFAULT_FOV_DEG,
+  MAX_CAMERA_DISTANCE,
+  MAX_ELEVATION_DEG,
+  MIN_CAMERA_DISTANCE,
+  MIN_ELEVATION_DEG,
+  type CameraPose,
+} from '../render/camera';
 import type { EmbeddingCellRef } from '../scene/embeddingCutaway';
 import type { OutputCellRef } from '../scene/outputCutaway';
 import type { PrecisionMode, Vec3 } from './spec';
 
-export interface CameraPose {
-  target: Vec3;
-  azimuthDeg: number;
-  elevationDeg: number;
-  distance: number;
-  fovDeg: number;
-}
+export {
+  CAMERA_FLY_DURATION_MS,
+  cloneCameraPose,
+  DEFAULT_FOV_DEG,
+  MAX_CAMERA_DISTANCE,
+  MAX_ELEVATION_DEG,
+  MIN_CAMERA_DISTANCE,
+  MIN_ELEVATION_DEG,
+  type CameraPose,
+};
 
 export type ViewMode =
   | 'tower'
@@ -114,26 +127,10 @@ export interface SceneState {
 
 export const MACRO_DEFAULT_AZIMUTH_DEG = 30;
 export const MACRO_DEFAULT_ELEVATION_DEG = 14;
-export const DEFAULT_FOV_DEG = 34;
-export const MIN_CAMERA_DISTANCE = 3.2;
-export const MAX_CAMERA_DISTANCE = 260;
-export const MIN_ELEVATION_DEG = -85;
-export const MAX_ELEVATION_DEG = 85;
-export const CAMERA_FLY_DURATION_MS = 650;
 
 export const DEFAULT_TOKENS = 8;
 export const MIN_TOKENS = 1;
 export const MAX_TOKENS = 16;
-
-export function cloneCameraPose(pose: CameraPose): CameraPose {
-  return {
-    target: [pose.target[0], pose.target[1], pose.target[2]],
-    azimuthDeg: pose.azimuthDeg,
-    elevationDeg: pose.elevationDeg,
-    distance: pose.distance,
-    fovDeg: pose.fovDeg,
-  };
-}
 
 export function createPerspectivePose(
   target: Vec3,

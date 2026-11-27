@@ -10,7 +10,7 @@
  * Pure headless TypeScript — zero DOM, WebGL, `Math.random()`, or `src/twotower/` imports.
  */
 
-import type { CameraPose } from '../../model/state';
+import type { CameraPose } from '../../render/camera';
 import type {
   DiffusionBadgeTone,
   DiffusionFocusState,

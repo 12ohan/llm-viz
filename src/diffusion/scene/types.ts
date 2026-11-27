@@ -13,8 +13,8 @@ import type { PickBox } from '../../render/pick';
 import type { Rg32fValueAtlas } from '../../scene/atlasPacker';
 import type { CutawayPartInfo } from '../../scene/cutaways';
 import type { LayerFormulaReadout, StepperStepDef } from '../../scene/sheetInspector';
-import type { DimensionCaliper, KvDepthTickAnchor, LandmarkAnchor } from '../../scene/spine';
-import type { ActiveSheetCellGrid, CellPopoverSpec } from '../../ui/overlay';
+import type { DimensionCaliper, KvDepthTickAnchor, LandmarkAnchor } from '../../render/primitives';
+import type { ActiveSheetCellGrid, CellPopoverSpec } from '../../shared/overlayLayout';
 import type { DiffusionSession } from '../session';
 import type {
   DiffusionExecutionMode,

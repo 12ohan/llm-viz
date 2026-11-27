@@ -69,180 +69,26 @@ import {
   type LiveDecodeBeatSummary,
 } from '../story/walkthrough';
 
+import {
+  FOCUSABLE_SELECTOR,
+  getFocusableElements,
+  handleModalTabTrap,
+  handleTablistKeydown,
+  INTERACTIVE_ACTIVATION_SELECTOR,
+  restoreFocusIfConnected,
+  shouldDeferActivationKey as shouldDeferGlobalShortcut,
+} from '../shared/a11y';
+export {
+  FOCUSABLE_SELECTOR,
+  getFocusableElements,
+  handleModalTabTrap,
+  handleTablistKeydown,
+  INTERACTIVE_ACTIVATION_SELECTOR,
+  restoreFocusIfConnected,
+  shouldDeferGlobalShortcut,
+};
+
 export type CrossBayNodeKind = 'embedding' | 'output' | BayKind;
-
-/**
- * Interactive controls that must retain native Space/Enter activation instead of being
- * intercepted by global canvas/tour shortcuts (RB-3).
- */
-export const INTERACTIVE_ACTIVATION_SELECTOR =
-  'button, a[href], [role="button"], [role="tab"], summary, [tabindex]:not([tabindex="-1"]):not(#gl-canvas)';
-
-/**
- * Returns true when the global `keydown` handler should defer without calling `preventDefault()`
- * so native keyboard activation (`Space` / `Enter`) operates on focused interactive controls.
- * `Escape` and `?` always remain global (return false).
- */
-export function shouldDeferGlobalShortcut(
-  key: string,
-  target: EventTarget | null,
-): boolean {
-  if (key !== ' ' && key !== 'Enter') return false;
-  if (!target || typeof target !== 'object') return false;
-  const el = target as Partial<HTMLElement>;
-  if (typeof el.closest === 'function') {
-    return el.closest(INTERACTIVE_ACTIVATION_SELECTOR) !== null;
-  }
-  let cur: Partial<HTMLElement> | null = el;
-  while (cur) {
-    const tag = (cur.tagName ?? '').toUpperCase();
-    const role = typeof cur.getAttribute === 'function' ? cur.getAttribute('role') : null;
-    const href = typeof cur.getAttribute === 'function' ? cur.getAttribute('href') : null;
-    const tabindex = typeof cur.getAttribute === 'function' ? cur.getAttribute('tabindex') : null;
-    const id = cur.id ?? '';
-    if (
-      tag === 'BUTTON' ||
-      tag === 'SUMMARY' ||
-      (tag === 'A' && href !== null) ||
-      role === 'button' ||
-      role === 'tab' ||
-      (tabindex !== null && tabindex !== '-1' && id !== 'gl-canvas')
-    ) {
-      return true;
-    }
-    cur = (cur.parentNode as Partial<HTMLElement> | null) ?? null;
-  }
-  return false;
-}
-
-export const FOCUSABLE_SELECTOR =
-  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-export function getFocusableElements(container: HTMLElement): HTMLElement[] {
-  if (typeof container.querySelectorAll !== 'function') return [];
-  const nodes = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
-  return nodes.filter((el) => {
-    if (el.hidden) return false;
-    if ('disabled' in el && (el as HTMLButtonElement).disabled) return false;
-    let cur: HTMLElement | null =
-      (el.parentElement ?? (el.parentNode as HTMLElement | null)) ?? null;
-    while (cur && cur !== container) {
-      if (cur.hidden) return false;
-      cur = (cur.parentElement ?? (cur.parentNode as HTMLElement | null)) ?? null;
-    }
-    return true;
-  });
-}
-
-/**
- * Trap `Tab` / `Shift+Tab` inside an open modal dialog (`aria-modal="true"`),
- * cycling cleanly between the first and last visible focusable descendants.
- */
-export function handleModalTabTrap(
-  container: HTMLElement,
-  ev: Pick<KeyboardEvent, 'key' | 'shiftKey' | 'preventDefault'>,
-  activeElement: Element | null = typeof document !== 'undefined' ? document.activeElement : null,
-): boolean {
-  if (ev.key !== 'Tab') return false;
-  const focusables = getFocusableElements(container);
-  if (focusables.length === 0) {
-    ev.preventDefault();
-    if (typeof container.focus === 'function') container.focus();
-    return true;
-  }
-  const first = focusables[0];
-  const last = focusables[focusables.length - 1];
-  const activeIdx = activeElement ? focusables.indexOf(activeElement as HTMLElement) : -1;
-
-  if (ev.shiftKey) {
-    if (activeIdx <= 0) {
-      ev.preventDefault();
-      if (typeof last.focus === 'function') last.focus();
-      return true;
-    }
-  } else {
-    if (activeIdx === -1 || activeIdx >= focusables.length - 1) {
-      ev.preventDefault();
-      if (typeof first.focus === 'function') first.focus();
-      return true;
-    }
-  }
-  return false;
-}
-
-/** Restore focus to a previously focused element when closing a modal (if still connected). */
-export function restoreFocusIfConnected(el: HTMLElement | null): boolean {
-  if (!el) return false;
-  const connected = typeof el.isConnected === 'boolean' ? el.isConnected : true;
-  if (!connected || el.hidden) return false;
-  if ('disabled' in el && (el as HTMLButtonElement).disabled) return false;
-  if (typeof el.focus === 'function') {
-    el.focus();
-    return true;
-  }
-  return false;
-}
-
-/**
- * Full WAI-ARIA Tabs keyboard navigation (`ArrowLeft` / `ArrowRight` / `Home` / `End`)
- * with roving `tabindex` and automatic focus + selection movement across visible enabled tabs.
- */
-export function handleTablistKeydown(
-  tabs: readonly HTMLButtonElement[],
-  ev: Pick<KeyboardEvent, 'key' | 'target' | 'preventDefault' | 'stopPropagation'>,
-  onSelect: (tab: HTMLButtonElement, tabIndexInAll: number) => void,
-): boolean {
-  if (
-    ev.key !== 'ArrowLeft' &&
-    ev.key !== 'ArrowRight' &&
-    ev.key !== 'Home' &&
-    ev.key !== 'End'
-  ) {
-    return false;
-  }
-  const enabledEntries: { tab: HTMLButtonElement; idx: number }[] = [];
-  for (let i = 0; i < tabs.length; i++) {
-    const t = tabs[i];
-    if (!t.hidden && !t.disabled) {
-      enabledEntries.push({ tab: t, idx: i });
-    }
-  }
-  if (enabledEntries.length === 0) return false;
-
-  let curPos = enabledEntries.findIndex(
-    (e) =>
-      e.tab === ev.target ||
-      (typeof e.tab.contains === 'function' && ev.target != null && e.tab.contains(ev.target as Node)),
-  );
-  if (curPos < 0) {
-    curPos = enabledEntries.findIndex((e) => e.tab.getAttribute('aria-selected') === 'true');
-  }
-  if (curPos < 0) curPos = 0;
-
-  let nextPos = curPos;
-  if (ev.key === 'ArrowRight') {
-    nextPos = (curPos + 1) % enabledEntries.length;
-  } else if (ev.key === 'ArrowLeft') {
-    nextPos = (curPos - 1 + enabledEntries.length) % enabledEntries.length;
-  } else if (ev.key === 'Home') {
-    nextPos = 0;
-  } else if (ev.key === 'End') {
-    nextPos = enabledEntries.length - 1;
-  }
-
-  const target = enabledEntries[nextPos];
-  ev.preventDefault();
-  ev.stopPropagation();
-
-  for (let i = 0; i < tabs.length; i++) {
-    tabs[i].setAttribute('tabindex', i === target.idx ? '0' : '-1');
-  }
-  if (typeof target.tab.focus === 'function') {
-    target.tab.focus();
-  }
-  onSelect(target.tab, target.idx);
-  return true;
-}
 
 export interface CrossBayNeighbor {
   readonly kind: CrossBayNodeKind;

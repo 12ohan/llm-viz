@@ -15,7 +15,8 @@ import {
   makeViewportMetrics,
   projectWorldToInnerCss,
 } from '../src/render/camera';
-import { pickHitToMoeCell, pickMacroBay, type PickBox, type Ray } from '../src/render/pick';
+import { pickMacroBay, type PickBox, type Ray } from '../src/render/pick';
+import { pickHitToMoeCell } from '../src/scene/hybridPick';
 import {
   SHEET_BASIS_FLOATS,
   SHEET_HL_ACTIVE,

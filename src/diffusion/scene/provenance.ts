@@ -46,7 +46,7 @@ import {
   FACE_POS_Z,
   RIBBON_INSTANCE_FLOATS,
   SOLID_INSTANCE_FLOATS,
-} from '../../scene/spine';
+} from '../../render/primitives';
 import { verifyKvSnapshotIntegrity } from '../kvCache';
 import type { DiffusionSession } from '../session';
 import {

@@ -2,8 +2,8 @@
  * Shared thin-sheet inspection types, palette constants, and dependency-thread
  * geometry helpers reused across GQA and Mamba-2 live cutaways (Stage A+1 · Increment 3).
  */
-import type { Vec3 } from '../model/spec';
 import { add3, dot3, scale3, sub3, type AABB } from '../render/camera';
+import type { Vec3 } from '../render/primitives';
 import type { FlowRibbonBuilder, FlowRibbonColor } from '../render/ribbons';
 import {
   localToWorldOnFrame,

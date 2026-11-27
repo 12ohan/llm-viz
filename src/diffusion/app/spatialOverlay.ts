@@ -10,7 +10,7 @@
  * primitives from `src/render/camera.ts`, `src/render/sheetFrame.ts`, and `src/ui/overlay.ts`.
  */
 
-import type { Vec3 } from '../../model/spec';
+import type { Vec3 } from '../../render/primitives';
 import {
   dot3,
   projectWorldToHostCss,
@@ -18,7 +18,7 @@ import {
   type CameraSnapshot,
 } from '../../render/camera';
 import { localToWorldOnFrame, makeSheetFrame3D } from '../../render/sheetFrame';
-import type { LandmarkAnchor } from '../../scene/spine';
+import type { LandmarkAnchor } from '../../render/primitives';
 import {
   buildElbowLeaderPath,
   buildQuadraticPointerPath,
@@ -38,7 +38,7 @@ import {
   type CellPopoverSpec,
   type OverlayRect,
   type ProjectedCellSize,
-} from '../../ui/overlay';
+} from '../../shared/overlayLayout';
 import type { DiffusionSpatialScene } from '../scene/types';
 
 export interface DiffusionOverlayUpdateInput {

@@ -39,7 +39,7 @@
  * `src/diffusion/`, or `src/ui/controls.ts` imports.
  */
 
-import type { Vec3 } from '../../model/spec';
+import type { Vec3 } from '../../render/primitives';
 import type { AABB } from '../../render/camera';
 import {
   LINE_STYLE_ACTIVE,
@@ -81,7 +81,7 @@ import {
   CELL_WEIGHT_BLUE,
   type DimensionCaliper,
   type LandmarkAnchor,
-} from '../../scene/spine';
+} from '../../render/primitives';
 import { buildDualStreamBlockDiffusionMask } from '../masks';
 import {
   createDefaultOpdDemoInputs,

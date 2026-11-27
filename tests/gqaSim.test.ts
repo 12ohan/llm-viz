@@ -6,7 +6,8 @@ import {
   runGqaSim,
   stepperCellForState,
 } from '../src/math/gqaSim';
-import { pickHitToGqaCell, pickMacroBay } from '../src/render/pick';
+import { pickMacroBay } from '../src/render/pick';
+import { pickHitToGqaCell } from '../src/scene/hybridPick';
 import { buildGqaValueAtlas } from '../src/scene/gqaAtlas';
 import { buildGqaCutaway } from '../src/scene/gqaCutaway';
 

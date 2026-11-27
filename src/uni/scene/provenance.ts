@@ -17,7 +17,7 @@
  * `src/diffusion/`, or `src/ui/controls.ts` imports.
  */
 
-import type { Vec3 } from '../../model/spec';
+import type { Vec3 } from '../../render/primitives';
 import type { AABB } from '../../render/camera';
 import {
   LINE_INSTANCE_FLOATS,
@@ -59,7 +59,7 @@ import {
   FACE_POS_Z,
   RIBBON_INSTANCE_FLOATS,
   SOLID_INSTANCE_FLOATS,
-} from '../../scene/spine';
+} from '../../render/primitives';
 import {
   buildUniElasticD5Comparison,
   buildUniViewArchReadouts,

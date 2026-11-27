@@ -72,7 +72,7 @@ import {
   type DimensionCaliper,
   type KvDepthTickAnchor,
   type LandmarkAnchor,
-} from '../../scene/spine';
+} from '../../render/primitives';
 import { runUniElasticLayer } from '../forward';
 import { canonicalizeTokenRouting } from '../masks';
 import {

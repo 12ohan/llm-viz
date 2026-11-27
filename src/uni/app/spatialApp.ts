@@ -19,7 +19,7 @@
  * Strictly ZERO `Math.random()`.
  */
 
-import type { CameraPose } from '../../model/state';
+import type { CameraPose } from '../../render/camera';
 import {
   buildCameraSnapshot,
   fitOpBoundsCamera,

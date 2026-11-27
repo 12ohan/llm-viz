@@ -16,8 +16,9 @@
  * or `src/twotower/` / `src/math/gqaSim` / `src/math/moeSim` imports.
  */
 
-import { fmtSigned, type LayerFormulaReadout, type StepperStepDef } from '../../math/formulaFormat';
-import type { Vec3 } from '../../model/spec';
+import type { LayerFormulaReadout, StepperStepDef } from '../../math/formulaFormat';
+import { fmtSigned } from '../../shared/format';
+import type { Vec3 } from '../../render/primitives';
 import type { AABB } from '../../render/camera';
 import {
   LINE_STYLE_BF16_GOLD,
@@ -65,8 +66,8 @@ import {
   RIBBON_RESIDUAL_ACTIVE,
   RIBBON_SSM_LOOP,
 } from '../../scene/sheetInspector';
-import type { DimensionCaliper, LandmarkAnchor } from '../../scene/spine';
-import type { ActiveSheetCellGrid, CellPopoverSpec } from '../../ui/overlay';
+import type { DimensionCaliper, LandmarkAnchor } from '../../render/primitives';
+import type { ActiveSheetCellGrid, CellPopoverSpec } from '../../shared/overlayLayout';
 import { formatDiffusionAttentionCellFormula, linearProject } from '../attention';
 import {
   computeLlama4AttnScale,

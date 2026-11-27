@@ -16,7 +16,7 @@
  * Deterministic, sibling-isolated implementation with strictly finite UI strings.
  */
 
-import { shouldDeferGlobalShortcut } from '../../ui/controls';
+import { shouldDeferActivationKey as shouldDeferGlobalShortcut } from '../../shared/a11y';
 import type { DiffusionSession } from '../session';
 import type {
   DiffusionTimelineBranchViewModel,

@@ -23,15 +23,17 @@
  * Pure deterministic implementation with zero sibling-visualizer dependencies.
  */
 
-import { CAMERA_FLY_DURATION_MS, DEFAULT_FOV_DEG, type CameraPose } from '../../model/state';
 import {
   buildCameraSnapshot,
+  CAMERA_FLY_DURATION_MS,
+  DEFAULT_FOV_DEG,
   fitPerspectiveToBounds,
   interpolateCameraPose,
   makeViewportMetrics,
   orbitCameraByCssDelta,
   panCameraByCssDelta,
   zoomPerspectiveDistance,
+  type CameraPose,
   type CameraSnapshot,
   type ViewportMetrics,
 } from '../../render/camera';
@@ -41,8 +43,8 @@ import { clientPointToRay, pickMacroBay } from '../../render/pick';
 import { FlatFlowRibbonsPass, RibbonsPass } from '../../render/ribbons';
 import { SheetsPass } from '../../render/sheets';
 import { SolidsPass } from '../../render/solids';
-import { handleTablistKeydown } from '../../ui/controls';
-import type { OverlayRect } from '../../ui/overlay';
+import { handleTablistKeydown } from '../../shared/a11y';
+import type { OverlayRect } from '../../shared/overlayLayout';
 import {
   buildDiffusionArchReadouts,
   buildDiffusionNfeTpfReadout,

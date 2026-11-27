@@ -1,7 +1,6 @@
-import type { Vec3 } from '../model/spec';
-import { RIBBON_INSTANCE_BYTES } from '../scene/spine';
 import { add3, cross3, dot3, normalize3, scale3, sub3 } from './camera';
 import { linkProgram, PALETTE } from './device';
+import { RIBBON_INSTANCE_BYTES, type Vec3 } from './primitives';
 import { localToWorldOnFrame, type SheetFrame3D } from './sheetFrame';
 
 const RIBBONS_VS = `#version 300 es

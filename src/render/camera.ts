@@ -1,12 +1,29 @@
-import type { Vec3 } from '../model/spec';
-import {
-  DEFAULT_FOV_DEG,
-  MAX_CAMERA_DISTANCE,
-  MAX_ELEVATION_DEG,
-  MIN_CAMERA_DISTANCE,
-  MIN_ELEVATION_DEG,
-  type CameraPose,
-} from '../model/state';
+import type { Vec3 } from './primitives';
+
+export interface CameraPose {
+  target: Vec3;
+  azimuthDeg: number;
+  elevationDeg: number;
+  distance: number;
+  fovDeg: number;
+}
+
+export const DEFAULT_FOV_DEG = 34;
+export const MIN_CAMERA_DISTANCE = 3.2;
+export const MAX_CAMERA_DISTANCE = 260;
+export const MIN_ELEVATION_DEG = -85;
+export const MAX_ELEVATION_DEG = 85;
+export const CAMERA_FLY_DURATION_MS = 650;
+
+export function cloneCameraPose(pose: CameraPose): CameraPose {
+  return {
+    target: [pose.target[0], pose.target[1], pose.target[2]],
+    azimuthDeg: pose.azimuthDeg,
+    elevationDeg: pose.elevationDeg,
+    distance: pose.distance,
+    fovDeg: pose.fovDeg,
+  };
+}
 
 export interface AABB {
   readonly min: Vec3;

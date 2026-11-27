@@ -12,7 +12,7 @@
  * `src/diffusion/`, or `src/ui/controls.ts` imports.
  */
 
-import { formatGiB, formatKiB, formatMiB } from '../model/memory';
+import { formatGiB, formatKiB, formatMiB } from '../shared/format';
 import type {
   UniAtlasBudgetSpec,
   UniAuxiliaryLfsEntry,

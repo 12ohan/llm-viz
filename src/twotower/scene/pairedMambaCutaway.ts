@@ -124,7 +124,7 @@ import {
   type DimensionCaliper,
   type LandmarkAnchor,
 } from '../../scene/spine';
-import type { ActiveSheetCellGrid, CellPopoverSpec } from '../../ui/overlay';
+import type { ActiveSheetCellGrid, CellPopoverSpec } from '../../shared/overlayLayout';
 import type { TwoTowerTraceOrigin } from '../contracts';
 import type { TwoTowerSession } from '../session';
 import {

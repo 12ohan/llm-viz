@@ -14,7 +14,7 @@
  */
 
 import { projectWorldToHostCss, type CameraSnapshot } from '../../render/camera';
-import type { LandmarkAnchor } from '../../scene/spine';
+import type { LandmarkAnchor } from '../../render/primitives';
 import type { UniOverlayAnchor, UniPickIdentity, UniSpatialScene } from '../scene/types';
 import type {
   UniOverlayRect,

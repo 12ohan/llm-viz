@@ -1,6 +1,6 @@
 export type PrecisionMode = 'bf16' | 'fp8_selective';
 export type Kind = 'M' | 'E' | '*';
-export type Vec3 = readonly [number, number, number];
+export type { Vec3 } from '../render/primitives';
 export type Bracket = readonly [first: number, last: number, motif: string, repeats: number];
 export type EffectivePrecision = 'bf16' | 'fp8';
 export type StorageDtype = 'fp32' | 'bf16' | 'fp8';

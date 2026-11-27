@@ -11,7 +11,7 @@
  * Pure headless TypeScript — deterministic, self-contained math kernel.
  */
 
-import { fmtSigned } from '../math/formulaFormat';
+import { fmtSigned } from '../shared/format';
 import type {
   DiffusionRopeCosSin,
   DiffusionYarnInvFreqResult,

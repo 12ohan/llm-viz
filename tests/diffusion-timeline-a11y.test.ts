@@ -15,7 +15,10 @@ import {
   isReducedMotionPreferred,
   resolveDiffusionGlobalKeyAction,
 } from '../src/diffusion/app/timelineDock';
-import { handleTablistKeydown, shouldDeferGlobalShortcut } from '../src/ui/controls';
+import {
+  handleTablistKeydown,
+  shouldDeferActivationKey as shouldDeferGlobalShortcut,
+} from '../src/shared/a11y';
 
 interface DuckTabButton {
   hidden: boolean;

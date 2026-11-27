@@ -23,7 +23,7 @@
  *     and memory reports on the isolated tour session — ZERO fabricated values or speedup claims.
  */
 
-import type { CameraPose } from '../../model/state';
+import type { CameraPose } from '../../render/camera';
 import { createDefaultDiffusionModel } from '../parameters';
 import { computeLlama4AttnScale, computeYarnInvFreq } from '../rope';
 import {

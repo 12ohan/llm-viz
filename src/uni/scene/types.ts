@@ -11,11 +11,11 @@
  * `src/diffusion/`, or `src/ui/controls.ts` imports.
  */
 
-import type { Vec3 } from '../../model/spec';
+import type { Vec3 } from '../../render/primitives';
 import type { AABB } from '../../render/camera';
 import type { PickBox } from '../../render/pick';
 import type { Rg32fValueAtlas } from '../../scene/atlasPacker';
-import type { DimensionCaliper, KvDepthTickAnchor, LandmarkAnchor } from '../../scene/spine';
+import type { DimensionCaliper, KvDepthTickAnchor, LandmarkAnchor } from '../../render/primitives';
 import type { UniFullRuntimeBundle } from '../imageSampler';
 import type { UniReconstructedHeadLogits, UniSession } from '../session';
 import type {

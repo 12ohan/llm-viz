@@ -103,12 +103,14 @@ import { RenderDevice } from './render/device';
 import { LinesPass } from './render/lines';
 import {
   clientPointToRay,
-  pickHitToGqaCell,
-  pickHitToMambaCell,
-  pickHitToMoeCell,
   pickMacroBay,
   type PickHit,
 } from './render/pick';
+import {
+  pickHitToGqaCell,
+  pickHitToMambaCell,
+  pickHitToMoeCell,
+} from './scene/hybridPick';
 import { FlatFlowRibbonsPass, RibbonsPass } from './render/ribbons';
 import { SheetsPass } from './render/sheets';
 import { SolidsPass } from './render/solids';

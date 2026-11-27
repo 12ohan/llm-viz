@@ -1,4 +1,19 @@
+import {
+  formatBytesAdaptive,
+  formatGiB,
+  formatKiB,
+  formatMiB,
+  formatTokenCount,
+} from '../shared/format';
 import type { NemotronSpec, PrecisionMode } from './spec';
+
+export {
+  formatBytesAdaptive,
+  formatGiB,
+  formatKiB,
+  formatMiB,
+  formatTokenCount,
+};
 
 export interface MemoryReadout {
   readonly tokens: number;
@@ -10,9 +25,6 @@ export interface MemoryReadout {
   readonly referenceBytes: number;
   readonly hybridTotalBytes: number;
 }
-
-const BYTES_PER_KIB = 1024;
-const BYTES_PER_MIB = 1048576;
 
 /**
  * Compute exact logical tensor sizes in bytes for one sequence at `tokens` cached positions.
@@ -67,45 +79,7 @@ export function memoryFor(
   };
 }
 
-const BYTES_PER_GIB = 1024 * 1024 * 1024;
 export const MAX_SCALING_TOKENS = 1_048_576; // 1M = 2^20 tokens
-
-export function formatMiB(bytes: number, decimals = 1): string {
-  return `${(bytes / BYTES_PER_MIB).toFixed(decimals)} MiB`;
-}
-
-export function formatGiB(bytes: number, decimals = 2): string {
-  return `${(bytes / BYTES_PER_GIB).toFixed(decimals)} GiB`;
-}
-
-export function formatKiB(bytes: number): string {
-  const kib = bytes / BYTES_PER_KIB;
-  return Number.isInteger(kib) ? `${kib} KiB` : `${kib.toFixed(1)} KiB`;
-}
-
-/** Format any byte quantity adaptively as B, KiB, MiB, or GiB. */
-export function formatBytesAdaptive(bytes: number): string {
-  if (bytes >= BYTES_PER_GIB) {
-    const gib = bytes / BYTES_PER_GIB;
-    return `${gib >= 10 ? gib.toFixed(1) : gib.toFixed(2)} GiB`;
-  }
-  if (bytes >= BYTES_PER_MIB) {
-    const mib = bytes / BYTES_PER_MIB;
-    return `${mib >= 100 ? mib.toFixed(0) : mib.toFixed(1)} MiB`;
-  }
-  if (bytes >= BYTES_PER_KIB) {
-    return formatKiB(bytes);
-  }
-  return `${bytes} B`;
-}
-
-export function formatTokenCount(tokens: number): string {
-  if (tokens === 1_048_576) return '1M (1,048,576)';
-  if (tokens >= 1024 && tokens % 1024 === 0) {
-    return `${tokens / 1024}K (${tokens.toLocaleString('en-US')})`;
-  }
-  return tokens.toLocaleString('en-US');
-}
 
 export interface MemoryCrossovers {
   readonly precision: PrecisionMode;

@@ -15,7 +15,7 @@
  * `src/diffusion/`, or `src/ui/controls.ts` imports.
  */
 
-import { formatTokenCount } from '../model/memory';
+import { formatTokenCount } from '../shared/format';
 import {
   formatSiIecBytes,
   UNI_EXECUTION_VIEWS,

@@ -39,7 +39,7 @@ import {
   type DimensionCaliper,
   type KvDepthTickAnchor,
   type LandmarkAnchor,
-} from '../../scene/spine';
+} from '../../render/primitives';
 import {
   DIFFUSION_EPISTEMIC_NOTE,
   DIFFUSION_LORA_RAIL_BADGE,

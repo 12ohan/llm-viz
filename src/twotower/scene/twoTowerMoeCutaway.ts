@@ -39,7 +39,7 @@ import {
 } from '../../scene/moeCutaway';
 import type { LayerFormulaReadout } from '../../scene/sheetInspector';
 import type { LandmarkAnchor } from '../../scene/spine';
-import type { ActiveSheetCellGrid } from '../../ui/overlay';
+import type { ActiveSheetCellGrid } from '../../shared/overlayLayout';
 import type { TwoTowerTraceOrigin } from '../contracts';
 import type { TwoTowerSession } from '../session';
 import {

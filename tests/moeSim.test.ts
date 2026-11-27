@@ -13,7 +13,8 @@ import {
   type MoeCellFormula,
   type MoeCellRef,
 } from '../src/math/moeSim';
-import { pickHitToMoeCell, type PickHit } from '../src/render/pick';
+import type { PickHit } from '../src/render/pick';
+import { pickHitToMoeCell } from '../src/scene/hybridPick';
 import { buildMoECutaway, MOE_FIT_BOUNDS } from '../src/scene/cutaways';
 import { SOLID_INSTANCE_FLOATS } from '../src/scene/spine';
 

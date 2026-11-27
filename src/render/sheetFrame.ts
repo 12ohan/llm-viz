@@ -1,5 +1,5 @@
-import type { Vec3 } from '../model/spec';
 import { add3, cross3, dot3, normalize3, scale3, sub3, type AABB } from './camera';
+import type { Vec3 } from './primitives';
 
 /**
  * Right-handed orthonormal 3D frame for a thin matrix sheet.

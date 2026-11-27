@@ -13,7 +13,8 @@ import {
   makeViewportMetrics,
   projectWorldToInnerCss,
 } from '../src/render/camera';
-import { pickHitToMambaCell, pickMacroBay, type Ray } from '../src/render/pick';
+import { pickMacroBay, type Ray } from '../src/render/pick';
+import { pickHitToMambaCell } from '../src/scene/hybridPick';
 import {
   SHEET_BASIS_FLOATS,
   SHEET_HL_ACTIVE,

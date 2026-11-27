@@ -13,7 +13,8 @@ import {
   silu,
   stableSoftplus,
 } from '../src/math/mambaSim';
-import { pickHitToMambaCell, pickMacroBay } from '../src/render/pick';
+import { pickMacroBay } from '../src/render/pick';
+import { pickHitToMambaCell } from '../src/scene/hybridPick';
 import { buildMambaValueAtlas } from '../src/scene/mambaAtlas';
 import { buildMambaCutaway, MAMBA_FIT_BOUNDS } from '../src/scene/mambaCutaway';
 

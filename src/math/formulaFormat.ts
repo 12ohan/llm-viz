@@ -6,6 +6,8 @@
  * layer remains strictly headless and free of rendering dependencies.
  */
 
+export { fmtSigned } from '../shared/format';
+
 /** Layer-agnostic readout contract consumed by the docked Formula Inspector bar. */
 export interface LayerFormulaReadout {
   readonly tensorLabel: string;
@@ -24,15 +26,4 @@ export interface StepperStepDef {
   readonly shortLabel: string;
   readonly title: string;
   readonly summary: string;
-}
-
-/**
- * Format a numeric value with an explicit sign prefix (`+` for non-negative
- * values including rounded zero, typographic minus `−` for negative values).
- */
-export function fmtSigned(v: number, digits = 3): string {
-  if (!Number.isFinite(v)) return v < 0 ? '−∞' : '+∞';
-  const r = Math.abs(v) < 0.5 * Math.pow(10, -digits) ? 0 : v;
-  const sign = r < 0 ? '−' : '+';
-  return `${sign}${Math.abs(r).toFixed(digits)}`;
 }

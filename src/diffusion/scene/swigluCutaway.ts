@@ -16,7 +16,8 @@
  * Pure headless TypeScript — zero DOM, WebGL, `Math.random()`, or `src/twotower/` imports.
  */
 
-import { fmtSigned, type LayerFormulaReadout, type StepperStepDef } from '../../math/formulaFormat';
+import type { LayerFormulaReadout, StepperStepDef } from '../../math/formulaFormat';
+import { fmtSigned } from '../../shared/format';
 import type { AABB } from '../../render/camera';
 import { LINE_STYLE_GUIDE, LINE_STYLE_NEUTRAL } from '../../render/linePacking';
 import type { PickBox } from '../../render/pick';
@@ -55,8 +56,8 @@ import {
   spanFromSheetGrid,
   type SheetGeomRecord,
 } from '../../scene/sheetInspector';
-import type { DimensionCaliper, LandmarkAnchor } from '../../scene/spine';
-import type { ActiveSheetCellGrid, CellPopoverSpec } from '../../ui/overlay';
+import type { DimensionCaliper, LandmarkAnchor } from '../../render/primitives';
+import type { ActiveSheetCellGrid, CellPopoverSpec } from '../../shared/overlayLayout';
 import { formatDiffusionSwigluCellFormula } from '../swiglu';
 import {
   DIFFUSION_EPISTEMIC_NOTE,
