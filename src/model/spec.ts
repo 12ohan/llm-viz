@@ -43,18 +43,15 @@ export interface NemotronSpec {
   };
 }
 
-export const CHECKPOINT_REVISION = 'bf77c3174f68ad409e1c2aa60daeb46e32d1c606';
+const CHECKPOINT_REVISION = 'bf77c3174f68ad409e1c2aa60daeb46e32d1c606';
 export const HYBRID_OVERRIDE_PATTERN = 'MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME';
 
-export const REPORT_BRACKETS: readonly Bracket[] = [
+const REPORT_BRACKETS: readonly Bracket[] = [
   [1, 35, 'MEMEM*E', 5],
   [36, 41, 'ME', 3],
   [42, 44, 'M*E', 1],
   [45, 52, 'ME', 4],
 ] as const;
-
-/** Eight mandatory bay IDs displayed statically in full-spine view. */
-export const STATIC_MACRO_BAYS: readonly number[] = [1, 6, 13, 20, 27, 34, 43, 52] as const;
 
 export const PARAMETER_CAPTION =
   '31.6B total · 3.2B active per token excluding embeddings · 3.6B active including embeddings.';
@@ -116,11 +113,6 @@ export const NEMOTRON_SPEC: NemotronSpec = Object.freeze({
     headDim: 128,
   }),
 });
-
-/** Center X coordinate of 1-based bay `id` in drawing units. */
-export function bayCenterX(id: number): number {
-  return id - 26.5;
-}
 
 /** Operating compute/weight precision of a bay's main body. */
 export function bodyPrecision(bay: BayDescriptor, mode: PrecisionMode): EffectivePrecision {

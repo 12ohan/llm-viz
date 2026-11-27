@@ -60,15 +60,15 @@ export const RIBBON_COLOR_AMBER = 3;      // rgba(245, 158, 11, 0.40)
 // Vertical tower geometry constants (top-to-bottom along -Y)
 export const RESIDUAL_X = 4.60;
 export const BAY_PITCH_Y = 1.65;
-export const CYCLE_GAP_Y = 0.35;
-export const SECTION_GAP_Y = 1.45;
+const CYCLE_GAP_Y = 0.35;
+const SECTION_GAP_Y = 1.45;
 
 export const EMBED_Y = 4.60;
 export const KV_TRACK_START_Z = 0.90;
-export const KV_SLICE_PITCH = 0.42;
-export const KV_SLICE_DEPTH = 0.30;
+const KV_SLICE_PITCH = 0.42;
+const KV_SLICE_DEPTH = 0.30;
 export const KV_TRACK_LENGTH = 16 * KV_SLICE_PITCH; // 6.72
-export const KV_RAIL_OFFSETS_X: readonly number[] = [-1.05, -0.45, 0.45, 1.05]; // K1, V1, K2, V2
+const KV_RAIL_OFFSETS_X: readonly number[] = [-1.05, -0.45, 0.45, 1.05]; // K1, V1, K2, V2
 
 /**
  * Compute world center Y for 1-based bay `id` (1..52), descending along -Y,
@@ -100,11 +100,11 @@ export function mambaRegisterFrontWorld(bayId: number): Vec3 {
   return [-1.35, bayCenterY(bayId), 0.55];
 }
 
-export function kvSliceCenterZ(tokenIndex1Based: number): number {
+function kvSliceCenterZ(tokenIndex1Based: number): number {
   return KV_TRACK_START_Z + KV_SLICE_PITCH * (tokenIndex1Based - 1) + KV_SLICE_DEPTH * 0.5;
 }
 
-export function kvSliceFrontZ(tokenIndex1Based: number): number {
+function kvSliceFrontZ(tokenIndex1Based: number): number {
   return KV_TRACK_START_Z + KV_SLICE_PITCH * (tokenIndex1Based - 1) + KV_SLICE_DEPTH;
 }
 

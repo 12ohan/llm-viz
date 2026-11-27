@@ -227,7 +227,7 @@ export interface PackMatrixToRg32fParams {
  * Pack a row-major `[rows, cols]` scalar matrix into an `Rg32fAtlasWriter` at `(x0, y0)`,
  * optionally writing an explicit per-cell `G` channel flag (`0.0` or `1.0`) without zeroing `R`.
  */
-export function packMatrixToRg32f(
+function packMatrixToRg32f(
   writer: Rg32fAtlasWriter,
   params: PackMatrixToRg32fParams,
 ): { readonly region: UniAtlasRegionBox; readonly slice: AtlasSlice } {

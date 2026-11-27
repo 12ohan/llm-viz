@@ -1480,7 +1480,7 @@ def main() -> None:
     }
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(fixture, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    args.out.write_text(json.dumps(fixture, separators=(",", ":"), allow_nan=False) + "\n", encoding="utf-8")
     print(
         f"Generated {args.out} (torch=={torch.__version__}, "
         f"766 tensors / 191,235 floats, sha256={manifest['weightsSha256'][:16]}...)"

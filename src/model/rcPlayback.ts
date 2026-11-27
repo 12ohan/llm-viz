@@ -28,16 +28,16 @@ import type { SpineWaveMode } from './state';
 export const ACCUM_SETTLE_THRESHOLD = 0.999;
 
 /** Target pacing (~400 ms per operand term) during cutaway Math Stepper Play. */
-export const PLAY_MS_PER_ACCUM_TERM = 400;
+const PLAY_MS_PER_ACCUM_TERM = 400;
 
 /** Default stage sweep duration (ms) for non-accumulating cutaway Math Stepper stages. */
-export const PLAY_BASE_STEP_DURATION_MS = 2200;
+const PLAY_BASE_STEP_DURATION_MS = 2200;
 
 /** Fractional split inside MoE Step 4 (`4. Routed ReLU²`): `routed_act` -> `routed_sum`. */
-export const MOE_STEP3_SUM_SPLIT = 0.25;
+const MOE_STEP3_SUM_SPLIT = 0.25;
 
 /** Fractional split inside MoE Step 6 (`6. Merge + Res`): `moe_out` -> `residual`. */
-export const MOE_STEP5_RESIDUAL_SPLIT = 0.60;
+const MOE_STEP5_RESIDUAL_SPLIT = 0.60;
 
 /**
  * Extract the sub-cell fractional progress `∈ [0, 0.998]` within a uniform cell sweep
@@ -316,7 +316,7 @@ export function moeAccumTermBucket(
 // RC2 · ISOLATED TOUR VS. FREE-EXPLORE AR DECODE SESSION STORE
 // ============================================================================
 
-export const FREE_EXPLORE_DEFAULT_PROMPT_IDS: readonly number[] = Object.freeze([0, 1, 2, 3]);
+const FREE_EXPLORE_DEFAULT_PROMPT_IDS: readonly number[] = Object.freeze([0, 1, 2, 3]);
 
 export interface DualDecodeSessionStore {
   readonly freeExplore: HybridDecodeSession;

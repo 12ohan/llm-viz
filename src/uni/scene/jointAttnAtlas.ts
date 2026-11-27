@@ -77,7 +77,7 @@ export interface PackedMatrixRg32fResult {
 /**
  * Pack a 2D slice of `data` into a `Rg32fAtlasWriter` (`R = scalar`, `G = 1.0` where masked else `0.0`).
  */
-export function packMatrixToRg32f(
+function packMatrixToRg32f(
   writer: Rg32fAtlasWriter,
   options: PackMatrixToRg32fOptions,
 ): PackedMatrixRg32fResult {

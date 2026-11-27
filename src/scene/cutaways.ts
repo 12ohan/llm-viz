@@ -14,9 +14,7 @@ import type { DimensionCaliper, KvDepthTickAnchor, LandmarkAnchor } from './spin
 export {
   buildEmbeddingCutaway,
   fitSpatialEmbeddingCamera,
-  describeEmbeddingCellFormula,
   pickHitToEmbeddingCell,
-  EMBEDDING_SPATIAL_FIT_BOUNDS,
   EMBEDDING_STEPPER_STEPS,
   type HybridEmbeddingResult,
   type EmbeddingTensorKey,
@@ -30,10 +28,8 @@ export {
 export {
   buildOutputCutaway,
   fitSpatialOutputCamera,
-  describeOutputCellFormula,
   pickHitToOutputCell,
   parseOutputCandidatePartId,
-  OUTPUT_SPATIAL_FIT_BOUNDS,
   OUTPUT_STEPPER_STEPS,
   type OutputTensorKey,
   type OutputAuxTensorKey,
@@ -50,7 +46,6 @@ export type { FocusedAccumulationResult } from './accumulation';
 export {
   buildGqaCutaway,
   fitSpatialGqaCamera,
-  kvHeadForQueryHead,
   parseQueryHeadPartId,
   formatQueryHeadId,
   GQA_FIT_BOUNDS,
@@ -71,7 +66,7 @@ export {
   MOE_FIT_BOUNDS,
   MOE_SPATIAL_FIT_BOUNDS,
 } from './moeCutaway';
-export { activeRoutedExpertIndices, formatExpertId } from '../math/moeSim';
+export { activeRoutedExpertIndices } from '../math/moeSim';
 
 export interface CutawayPartInfo {
   readonly id: string;

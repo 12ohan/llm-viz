@@ -10,9 +10,6 @@
   --pill-bg: #14181F;
   --pill-fg: #FFFFFF;
   --accent-blue: #4F65E8;
-  --accent-emerald: #16A34A;
-  --accent-cyan: #0284C7;
-  --accent-amber: #D97706;
   --accent-active: #E04F33;
 
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -281,16 +278,6 @@ body {
   display: flex;
   flex-direction: column;
   gap: 1.5px;
-}
-
-.toc-heading {
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: #475569;
-  margin-bottom: 1px;
-  padding-left: 6px;
 }
 
 .toc-btn {
@@ -705,14 +692,12 @@ body {
   overflow: visible;
 }
 
-.ov-leader-path,
 .overlay-leader {
   fill: none;
   stroke: rgba(20, 24, 31, 0.44);
   stroke-width: 1;
 }
 
-.ov-phase-bracket-path,
 .overlay-phase-bracket {
   fill: none;
   stroke: rgba(71, 85, 105, 0.45);
@@ -747,14 +732,6 @@ body {
   white-space: nowrap;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.18);
   will-change: transform;
-}
-
-.ov-pill-gqa {
-  border-left: 3px solid #637BF5;
-}
-
-.ov-pill-bookend {
-  border-left: 3px solid #4ADE80;
 }
 
 .ov-pill-gold {
@@ -1328,18 +1305,6 @@ body {
   border-radius: 4px;
 }
 
-.subbar-chip {
-  pointer-events: auto;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  font-weight: 500;
-  color: #334155;
-  background-color: rgba(255, 255, 255, 0.92);
-  border: 1px solid var(--border-subtle);
-  border-radius: 5px;
-  padding: 3px 8px;
-}
-
 .pill-btn,
 .sub-toggle-btn,
 .cam-btn {
@@ -1490,15 +1455,7 @@ body {
   gap: 8px;
 }
 
-/* TOC Header Row + Tour Toggle */
-.toc-header-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  margin-bottom: 2px;
-}
-
+/* TOC Tour Toggle */
 .toc-tour-btn {
   appearance: none;
   border: 1px solid var(--border-strong);
@@ -1567,21 +1524,6 @@ body {
   font-variant-numeric: tabular-nums;
   color: var(--navy-bar);
   letter-spacing: 0.01em;
-}
-
-.tour-progress-track {
-  width: 100%;
-  height: 3px;
-  border-radius: 2px;
-  background-color: #E2E8F0;
-  overflow: hidden;
-  margin-bottom: 6px;
-}
-
-.tour-progress-fill {
-  height: 100%;
-  background-color: var(--accent-blue);
-  transition: width 180ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .tour-ed-header {
@@ -1964,11 +1906,6 @@ kbd {
 
 .mem-stat-cell.is-navy .mem-stat-value {
   color: var(--navy-bar);
-}
-
-.mem-stat-cell.is-green .mem-stat-sub {
-  color: #15803D;
-  font-weight: 600;
 }
 
 .mem-stat-sub {
@@ -3086,48 +3023,6 @@ input:focus-visible {
   overflow-wrap: anywhere;
 }
 
-.ov-cell-popover-sub {
-  margin-top: 2px;
-  color: #94A3B8;
-  font-size: 9.5px;
-  line-height: 13px;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.ov-cell-popover-dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  border-radius: 2px;
-  vertical-align: middle;
-  flex-shrink: 0;
-}
-
-.ov-cell-popover-dot.is-target {
-  background-color: #DC4C34;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
-}
-
-.ov-cell-popover-dot.is-op-a {
-  background-color: #638BFF;
-}
-
-.ov-cell-popover-dot.is-op-b {
-  background-color: #2DD4BF;
-}
-
-.ov-cell-popover-dot.is-emerald {
-  background-color: #4ADE80;
-}
-
-.ov-popover-leader {
-  fill: none;
-  stroke: rgba(22, 27, 38, 0.84);
-  stroke-width: 1.35;
-  stroke-linecap: round;
-}
-
 /* V3: Zoom-Adaptive On-Cell Tabular Numeric Overlay */
 .ov-cell-num {
   position: absolute;
@@ -3176,13 +3071,6 @@ input:focus-visible {
   background-color: rgba(241, 245, 249, 0.85);
   color: #475569;
   font-weight: 600;
-}
-
-.ov-cell-num.is-dark-cell {
-  background-color: rgba(22, 27, 38, 0.86);
-  color: #F8FAFC;
-  text-shadow: none;
-  box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.2);
 }
 
 /* V3: Subtle Exterior Token / Channel Axis Headers at Close Zoom */
@@ -3508,15 +3396,13 @@ input:focus-visible {
 .spine-wave-hud.is-embedding,
 .spine-wave-hud.is-final-norm,
 .spine-wave-hud.is-output,
-.spine-wave-hud.is-spine,
 .spine-wave-hud[data-stage-kind="embedding"],
 .spine-wave-hud[data-stage-kind="final_norm"],
 .spine-wave-hud[data-stage-kind="output"] {
   border-left-color: #4ADE80;
 }
 
-.spine-wave-hud-head,
-.spine-wave-hud-top {
+.spine-wave-hud-head {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -3553,7 +3439,6 @@ input:focus-visible {
   box-shadow: 0 0 0 2px rgba(99, 123, 245, 0.30);
 }
 
-.spine-wave-hud-dot.is-spine,
 .spine-wave-hud-dot.is-embedding,
 .spine-wave-hud-dot.is-final-norm,
 .spine-wave-hud-dot.is-output {
@@ -3648,8 +3533,7 @@ input:focus-visible {
   text-overflow: ellipsis;
 }
 
-.spine-wave-hud-track,
-.spine-wave-hud-progress {
+.spine-wave-hud-track {
   width: 100%;
   height: 3.5px;
   border-radius: 999px;
@@ -3735,7 +3619,6 @@ input:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   .mini-node,
   .toc-chevron,
-  .tour-progress-fill,
   .tour-progress-rail-fill,
   .tour-beat-fill,
   .memory-chart-trigger,

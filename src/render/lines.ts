@@ -3,16 +3,7 @@ import { linkProgram, PALETTE } from './device';
 import {
   LINE_INSTANCE_ATTRIBS,
   LINE_INSTANCE_BYTES,
-  LINE_INSTANCE_FLOATS,
-  LINE_OFFSETS,
 } from './linePacking';
-
-export {
-  LINE_INSTANCE_ATTRIBS,
-  LINE_INSTANCE_BYTES,
-  LINE_INSTANCE_FLOATS,
-  LINE_OFFSETS,
-};
 
 /**
  * Pass 2: Crisp depth-tested screen-space hairlines for perspective camera (no gl_FragDepth).

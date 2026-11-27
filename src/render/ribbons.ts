@@ -279,7 +279,7 @@ export class RibbonsPass {
  *   [9]    aBorderAlpha float subtle edge stroke intensity (0..1)
  */
 export const FLOW_RIBBON_VERTEX_FLOATS = 10;
-export const FLOW_RIBBON_VERTEX_BYTES = FLOW_RIBBON_VERTEX_FLOATS * 4;
+const FLOW_RIBBON_VERTEX_BYTES = FLOW_RIBBON_VERTEX_FLOATS * 4;
 
 export interface FlowRibbonColor {
   readonly r: number;

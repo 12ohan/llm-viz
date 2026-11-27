@@ -27,10 +27,7 @@ import type {
   UniSessionTaskMode,
 } from '../types';
 
-export {
-  DEFAULT_UNI_SPATIAL_FOCUS_STATE,
-  type UniSpatialFocusState,
-} from '../scene/types';
+export type { UniSpatialFocusState } from '../scene/types';
 
 export type UniInspectorTabId = 'inspect' | 'architecture' | 'ledger';
 

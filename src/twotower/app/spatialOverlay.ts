@@ -41,8 +41,6 @@ import {
 } from '../../ui/overlay';
 import type { TwoTowerSpatialScene } from '../scene/provenance';
 
-export { pickPopoverPlacement as placePopover };
-
 export interface TwoTowerOverlayUpdateInput {
   readonly scene: TwoTowerSpatialScene;
   readonly snapshot: CameraSnapshot;

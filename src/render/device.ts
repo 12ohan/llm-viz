@@ -31,7 +31,7 @@ export interface FramebufferViewport {
   readonly vpHeight: number;
 }
 
-export function compileShader(
+function compileShader(
   gl: WebGL2RenderingContext,
   type: number,
   source: string,
@@ -76,7 +76,7 @@ export function linkProgram(
   return program;
 }
 
-export function computeFramebufferViewport(metrics: ViewportMetrics): FramebufferViewport {
+function computeFramebufferViewport(metrics: ViewportMetrics): FramebufferViewport {
   const backingWidth = Math.max(1, Math.round(metrics.hostWidth * metrics.dpr));
   const backingHeight = Math.max(1, Math.round(metrics.hostHeight * metrics.dpr));
   const topPx = Math.round(metrics.insetTop * metrics.dpr);

@@ -428,7 +428,7 @@ function makePerspectiveMatrix(
   ]);
 }
 
-export function multiplyMat4(a: Float32Array, b: Float32Array): Float32Array {
+function multiplyMat4(a: Float32Array, b: Float32Array): Float32Array {
   const out = new Float32Array(16);
   for (let col = 0; col < 4; col++) {
     const b0 = b[col * 4 + 0];
@@ -446,7 +446,7 @@ export function multiplyMat4(a: Float32Array, b: Float32Array): Float32Array {
   return out;
 }
 
-export function invertMat4(m: Float32Array): Float32Array {
+function invertMat4(m: Float32Array): Float32Array {
   const out = new Float32Array(16);
   const a00 = m[0], a01 = m[1], a02 = m[2], a03 = m[3];
   const a10 = m[4], a11 = m[5], a12 = m[6], a13 = m[7];

@@ -131,7 +131,7 @@ export function clientPointToRay(
  * Axis-aligned slab intersection.
  * Returns smallest nonnegative ray distance t, or null on miss.
  */
-export function intersectRayAabb(ray: Ray, min: Vec3, max: Vec3): number | null {
+function intersectRayAabb(ray: Ray, min: Vec3, max: Vec3): number | null {
   let enter = -Infinity;
   let exit = Infinity;
 

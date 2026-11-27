@@ -12,7 +12,6 @@
   --sp-ink-dim: #64748B;
   --sp-border: #D8DFE8;
   --sp-border-strong: #B8C4D4;
-  --sp-pill-bg: #14181F;
 
   /* Restrained semantic tower & channel palette */
   --sp-ctx: #2563EB;
@@ -26,7 +25,6 @@
   --sp-den-border: #FED7AA;
 
   --sp-time: #B45309;
-  --sp-time-violet: #5B21B6;
   --sp-time-bg: #FFFBEB;
   --sp-time-border: #FDE68A;
 
@@ -1211,8 +1209,7 @@ body {
   color: #2B4C96;
 }
 
-.tt-ov-popover,
-.sp-popover {
+.tt-ov-popover {
   position: absolute;
   top: 0;
   left: 0;
@@ -1429,8 +1426,7 @@ body {
   min-width: 0;
 }
 
-.sp-hist-denoiser-banner,
-.sp-historical-banner {
+.sp-hist-denoiser-banner {
   flex: 0 0 auto;
   min-width: 0;
   max-width: 100%;
@@ -1445,8 +1441,7 @@ body {
   word-break: break-word;
 }
 
-.sp-hist-denoiser-banner.is-mismatch,
-.sp-historical-banner.is-mismatch {
+.sp-hist-denoiser-banner.is-mismatch {
   background: var(--sp-warn-bg);
   border-color: #DC2626;
 }
@@ -2290,8 +2285,7 @@ body {
   color: var(--sp-ink-dim);
 }
 
-.sp-kv-cell dd,
-.sp-kv-value {
+.sp-kv-cell dd {
   margin: 1px 0 0;
   font-family: var(--sp-font-mono);
   font-size: 10.5px;

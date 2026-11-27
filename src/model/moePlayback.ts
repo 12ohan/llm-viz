@@ -6,7 +6,7 @@ import {
 } from '../math/moeSim';
 
 /** Tensors displaying a focused-token routing snapshot rather than a multi-row T-sequence strip. */
-export function isMoeSnapshotTensor(tensor: MoeTensorKey): boolean {
+function isMoeSnapshotTensor(tensor: MoeTensorKey): boolean {
   return (
     tensor === 'router_bank' ||
     tensor === 'topk_weights' ||
@@ -19,7 +19,7 @@ export function isMoeSnapshotTensor(tensor: MoeTensorKey): boolean {
 }
 
 /** Token-independent learned weight matrices in MoE. */
-export function isMoeWeightTensor(tensor: MoeTensorKey): boolean {
+function isMoeWeightTensor(tensor: MoeTensorKey): boolean {
   return tensor === 'w_router' || tensor === 'shared_w_up' || tensor === 'shared_w_down';
 }
 

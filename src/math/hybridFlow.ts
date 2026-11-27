@@ -76,7 +76,6 @@ export const MINI_VOCAB: readonly string[] = Object.freeze([
 
 export const DEFAULT_HYBRID_MODEL_SEED = 0x4e454d33; // "NEM3"
 export const HYBRID_MINI_D = 8 as const;
-export const HYBRID_MINI_VOCAB_SIZE = 32 as const;
 export const HYBRID_UNIFIED_RMS_EPS = 1e-5 as const;
 /** Default retained bay weight capacity (all 52 miniature bays = ~1.14 MiB; eliminates per-step PRNG thrash). */
 export const DEFAULT_MAX_RETAINED_WEIGHT_BAYS = 52 as const;
@@ -908,7 +907,7 @@ export function defaultTokenIdsForLength(tokens: number): number[] {
  * Build canonical deterministic execution ID distinguishing model display ID, complete parameter
  * fingerprint (prevents collisions even when display `modelId` is duplicated), token IDs, and labels.
  */
-export function computeHybridExecutionId(
+function computeHybridExecutionId(
   modelId: string,
   tokenIds: readonly number[] | Int32Array,
   tokenLabels: readonly string[],
@@ -1051,7 +1050,7 @@ function collectTraceUniqueBytes(seen: Set<ArrayBufferLike>, trace: HybridLayerT
   );
 }
 
-export function runSingleBay(
+function runSingleBay(
   model: HybridModelParameters,
   executionId: string,
   bayId: number,

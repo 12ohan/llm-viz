@@ -64,10 +64,10 @@ import type {
   MambaLayerBoundaryState,
 } from './cacheContracts';
 
-export const DEFAULT_DECODE_MAX_TOKENS = 16 as const;
+const DEFAULT_DECODE_MAX_TOKENS = 16 as const;
 /** Maximum number of newly arrived tokens `S` accepted by a single incremental decode step. */
 export const MAX_INCREMENTAL_STEP_TOKENS = 16 as const;
-export const DEFAULT_DECODE_PRECISION_METADATA: PrecisionMode = 'fp8_selective';
+const DEFAULT_DECODE_PRECISION_METADATA: PrecisionMode = 'fp8_selective';
 /** Default conservative cap on retained continuation branches per `HybridDecodeSession`. */
 export const DEFAULT_SESSION_MAX_BRANCHES = 16 as const;
 /** Default conservative cap on unique retained steps across all branches in a `HybridDecodeSession`. */
@@ -252,7 +252,7 @@ export function computeDecodeStateDigest(params: {
   return h.digest();
 }
 
-export function computeIncrementalStepExecutionId(params: {
+function computeIncrementalStepExecutionId(params: {
   readonly modelId: string;
   readonly parameterFingerprint: string;
   readonly branchId: string;

@@ -9,20 +9,13 @@ import {
  * Tensors whose displayed matrix represents the fixed-size in-place state snapshot at `stateTokIdx`
  * (rather than a multi-row sequence strip where row index encodes a specific token).
  */
-export function isMambaFixedStateTensor(tensor: MambaTensorKey): boolean {
+function isMambaFixedStateTensor(tensor: MambaTensorKey): boolean {
   return tensor === 'conv_buf' || tensor === 'h_prev' || tensor === 'h_curr';
 }
 
 /** Token-independent learned weight matrices in Mamba-2. */
-export function isMambaWeightTensor(tensor: MambaTensorKey): boolean {
+function isMambaWeightTensor(tensor: MambaTensorKey): boolean {
   return tensor === 'w_in' || tensor === 'w_out';
-}
-
-/**
- * Sequence activation tensors where grid row index directly represents token `t ∈ [0..T-1]`.
- */
-export function isMambaSequenceRowTensor(tensor: MambaTensorKey): boolean {
-  return !isMambaFixedStateTensor(tensor) && !isMambaWeightTensor(tensor);
 }
 
 /** Clamp the active Mamba recurrence token index to `[0..tokens-1]` (defaults to `tokens - 1`). */

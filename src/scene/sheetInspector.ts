@@ -264,7 +264,7 @@ export function resolveSheetFocusRole(
 }
 
 /** Map a focus role to its SheetsPass highlight code. */
-export function focusRoleToHighlight(role: FocusRole): number {
+function focusRoleToHighlight(role: FocusRole): number {
   if (role === 'target') return SHEET_HL_ACTIVE;
   if (role === 'operand_a') return SHEET_HL_OPERAND_A;
   return SHEET_HL_OPERAND_B;
@@ -288,7 +288,7 @@ export function resolveSheetHighlight(
 }
 
 /** Compute world-space AABB for a SheetGeomRecord (handling both XZ and arbitrary 3D frames). */
-export function sheetRecordWorldAabb(sheet: SheetGeomRecord): AABB {
+function sheetRecordWorldAabb(sheet: SheetGeomRecord): AABB {
   if (sheet.frame) {
     return sheetFrameWorldAabb(sheet.frame);
   }
