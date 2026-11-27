@@ -13,8 +13,8 @@ Development/reference verification script ONLY — NOT a browser runtime depende
 Pinned environment: Python 3.12.x + PyTorch 2.15.0 (enforced via PEP 723 metadata).
 
 Reproduce `tests/fixtures/pytorch-dory-backbone.json` with 0 B diff:
-  node scripts/reference/export_dory_params.mjs
-  uv run scripts/reference/generate_dory_pytorch_fixtures.py
+  node scripts/reference/export_dory_params.mjs [paramsDir]
+  uv run scripts/reference/generate_dory_pytorch_fixtures.py [--params-dir <paramsDir> | --manifest <manifestPath>] [--out <outPath>]
 
 Clean-Room Mathematical Reference (authored directly from DORY0 §5–§7 equations):
   1. Weightless unit-sphere L2Norm N(x) = x / sqrt(sum(x^2) + eps), eps = 1e-6,
@@ -128,6 +128,8 @@ def load_exported_dory_weights(
         )
 
     weights_path = Path(manifest["weightsFile"])
+    if not weights_path.exists():
+        weights_path = manifest_path.parent / weights_path.name
     raw_bytes = weights_path.read_bytes()
     if len(raw_bytes) != EXPECTED_WEIGHT_BYTES:
         raise RuntimeError(
@@ -1587,10 +1589,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate clean-room PyTorch 2.15.0 backbone parity fixtures for Dory1.0-4B."
     )
-    parser.add_argument(
+    input_group = parser.add_mutually_exclusive_group()
+    input_group.add_argument(
+        "--params-dir",
+        type=Path,
+        default=None,
+        help="Directory containing dory_mini_manifest.json and dory_mini_weights.f32 emitted by export_dory_params.mjs",
+    )
+    input_group.add_argument(
         "--manifest",
         type=Path,
-        default=DEFAULT_PARAMS_DIR / "dory_mini_manifest.json",
+        default=None,
         help="Path to dory_mini_manifest.json emitted by export_dory_params.mjs",
     )
     parser.add_argument(
@@ -1601,6 +1610,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.manifest is not None:
+        manifest_path = args.manifest
+    elif args.params_dir is not None:
+        manifest_path = args.params_dir / "dory_mini_manifest.json"
+    else:
+        manifest_path = DEFAULT_PARAMS_DIR / "dory_mini_manifest.json"
+
     if not torch.__version__.startswith(PINNED_TORCH_VERSION):
         raise RuntimeError(
             f"Expected pinned torch=={PINNED_TORCH_VERSION}, got {torch.__version__}"
@@ -1610,7 +1626,7 @@ def main() -> None:
     torch.use_deterministic_algorithms(True)
     torch.set_grad_enabled(False)
 
-    manifest, weights = load_exported_dory_weights(args.manifest)
+    manifest, weights = load_exported_dory_weights(manifest_path)
     cfg = manifest["config"]
 
     rope_tables = {
