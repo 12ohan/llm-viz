@@ -400,13 +400,23 @@ describe('UNI4 View 3 (joint_attn): 256x256 RG32F Atlas & Cutaway Scene', () => 
     expect(badgeText).toContain('1.000');
     expect(badgeText).toContain('1.069');
     expect(badgeText).toContain('2D SinCos');
-    expect(badgeText).toContain('U11');
+    expect(badgeText).toContain('canonicalContentSize=32');
+    expect(badgeText).toContain('scale=0.0018');
+    expect(badgeText).toContain('marker_column = !isSourceEdit');
+    expect(badgeText).not.toContain('contentSize=16');
+    expect(badgeText).not.toContain('scale=0.25');
+    expect(badgeText).not.toContain('U11');
 
     const anchorIds = scene.overlayAnchors.map((a) => a.id);
     expect(anchorIds).toContain('anchor-yarn-rope');
     expect(anchorIds).toContain('anchor-llama4-scale');
     expect(anchorIds).toContain('anchor-2d-sincos-g');
     expect(anchorIds).toContain('anchor-l17-l18-boundary');
+    const sinCosAnchor = scene.overlayAnchors.find((a) => a.id === 'anchor-2d-sincos-g')!;
+    expect(sinCosAnchor.label).toContain('canonicalContentSize=32');
+    expect(sinCosAnchor.label).toContain('scale=0.0018');
+    expect(sinCosAnchor.sublabel).toContain('marker_column = !isSourceEdit');
+    expect(sinCosAnchor.label).not.toContain('U11');
   });
 
   it('round-trips PickBox hits via pickHitToUniCell for layerIndex, isSplitLayer, qHeadIndex, kvHeadIndex, cfgBatchRow, and rotaryPlane', () => {
@@ -420,48 +430,62 @@ describe('UNI4 View 3 (joint_attn): 256x256 RG32F Atlas & Cutaway Scene', () => 
       selectedQHead: 6,
       selectedTokenRow: 1,
       recordId: denoiseRec.recordId,
-      hoveredCell: {
-        viewMode: 'joint_attn',
-        layerIndex: 18,
-        isSplitLayer: true,
-        branch: 'joint',
-        partId: 'q_rot',
-        tensorKey: 'q_rot',
-        qHeadIndex: 6,
-        kvHeadIndex: 1,
-        cfgBatchRow: 2,
-        rotaryPlane: 3,
-        treeDepth: null,
-        tokenIndex: 1,
-        absPosition: 1,
-        row: 1,
-        col: 51,
-        semanticTag: null,
-      },
     });
 
     const qRotBox = scene.pickBoxes.find((pb) => pb.partId === 'q_rot')!;
     expect(qRotBox).toBeDefined();
+    expect(qRotBox.headIndex).toBeUndefined();
+    expect(qRotBox.kvHeadIndex).toBeUndefined();
+    expect(qRotBox.tapIndex).toBeUndefined();
 
-    // Ray-cast straight down onto the center of q_rot
-    const cx = (qRotBox.min[0] + qRotBox.max[0]) * 0.5;
+    // Ray-cast across multiple distinct columns of q_rot (64 cols = 8 Q heads × 8 headDim)
+    // verifying pickHitToUniCell dynamically infers (qHeadIndex, kvHeadIndex, rotaryPlane) from hitCol
     const cz = (qRotBox.min[2] + qRotBox.max[2]) * 0.5;
-    const hit: PickHit | null = pickMacroBay(
-      { origin: [cx, 5, cz], direction: [0, -1, 0] },
-      scene.pickBoxes,
-      [],
-    );
-    expect(hit).not.toBeNull();
-    expect(hit!.partId).toBe('q_rot');
+    const widthX = qRotBox.max[0] - qRotBox.min[0];
+    const probeCols = [
+      { col: 2, expectedQHead: 0, expectedKvHead: 0, expectedPlane: 2 },
+      { col: 29, expectedQHead: 3, expectedKvHead: 0, expectedPlane: 1 },
+      { col: 51, expectedQHead: 6, expectedKvHead: 1, expectedPlane: 3 },
+    ];
+    for (const probe of probeCols) {
+      const x = qRotBox.min[0] + ((probe.col + 0.5) / 64) * widthX;
+      const hit: PickHit | null = pickMacroBay(
+        { origin: [x, 5, cz], direction: [0, -1, 0] },
+        scene.pickBoxes,
+        [],
+      );
+      expect(hit).not.toBeNull();
+      expect(hit!.partId).toBe('q_rot');
+      expect(hit!.hitCol).toBe(probe.col);
 
-    const picked = pickHitToUniCell(hit, 'joint_attn');
-    expect(picked).not.toBeNull();
-    expect(picked!.layerIndex).toBe(18);
-    expect(picked!.isSplitLayer).toBe(true);
-    expect(picked!.qHeadIndex).toBe(6);
-    expect(picked!.kvHeadIndex).toBe(1);
-    expect(picked!.cfgBatchRow).toBe(2);
-    expect(picked!.rotaryPlane).toBe(3);
+      const picked = pickHitToUniCell(hit, 'joint_attn');
+      expect(picked).not.toBeNull();
+      expect(picked!.layerIndex).toBe(18);
+      expect(picked!.isSplitLayer).toBe(true);
+      expect(picked!.qHeadIndex).toBe(probe.expectedQHead);
+      expect(picked!.kvHeadIndex).toBe(probe.expectedKvHead);
+      expect(picked!.cfgBatchRow).toBe(2);
+      expect(picked!.rotaryPlane).toBe(probe.expectedPlane);
+    }
+
+    // Also verify k_rot multi-head column inference (16 cols = 2 KV heads × 8 headDim)
+    const kRotBox = scene.pickBoxes.find((pb) => pb.partId === 'k_rot')!;
+    expect(kRotBox).toBeDefined();
+    expect(kRotBox.kvHeadIndex).toBeUndefined();
+    const kCz = (kRotBox.min[2] + kRotBox.max[2]) * 0.5;
+    const kWidthX = kRotBox.max[0] - kRotBox.min[0];
+    for (const probe of [
+      { col: 1, expectedKvHead: 0, expectedPlane: 1 },
+      { col: 11, expectedKvHead: 1, expectedPlane: 3 },
+    ]) {
+      const x = kRotBox.min[0] + ((probe.col + 0.5) / 16) * kWidthX;
+      const hit = pickMacroBay({ origin: [x, 5, kCz], direction: [0, -1, 0] }, scene.pickBoxes, []);
+      expect(hit?.partId).toBe('k_rot');
+      const picked = pickHitToUniCell(hit, 'joint_attn')!;
+      expect(picked.kvHeadIndex).toBe(probe.expectedKvHead);
+      expect(picked.rotaryPlane).toBe(probe.expectedPlane);
+      expect(picked.cfgBatchRow).toBe(2);
+    }
 
     // Also test picking a layer L17 joint scores sheet and a CFG-tagged layer_out sheet
     const scene17 = buildUniJointAttnScene(session, {

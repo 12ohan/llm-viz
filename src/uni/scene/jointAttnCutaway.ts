@@ -82,6 +82,7 @@ import {
 import type { UniSession } from '../session';
 import { formatSiIecBytes } from '../spec';
 import {
+  UNI_2D_SINCOS_CANONICAL_CONTENT_SIZE,
   UNI_2D_SINCOS_SCALE,
   UNI_DYADIC_YARN_INV_FREQ,
   UNI_ROUTE_G,
@@ -471,7 +472,7 @@ export function buildUniJointAttnScene(
   const uHl = uActive ? SHEET_HL_OPERAND_A : SHEET_HL_DIMMED;
   const gHl = gActive ? SHEET_HL_OPERAND_B : SHEET_HL_DIMMED;
 
-  // U Projection Plates (Indigo, z < 0)
+  // U Projection Plates (Indigo, z < 0) — omit static head/kv stamps so pickHitToUniCell infers from hitCol
   addSheet({
     partId: 'w_q_u',
     tensorKey: 'w_q_u',
@@ -486,11 +487,8 @@ export function buildUniJointAttnScene(
     role: SHEET_ROLE_WEIGHT,
     highlight: uHl,
     slice: atlasPack.slices.wQU,
-    headIndex: selectedQHead,
-    groupIndex: selectedKvHead,
-    kvHeadIndex: selectedKvHead,
     towerRole: 'context',
-    semanticTag: `branch=u;cfg=${batchRow};kv=${selectedKvHead}`,
+    semanticTag: `branch=u;cfg=${batchRow}`,
   });
   addSheet({
     partId: 'w_k_u',
@@ -505,10 +503,8 @@ export function buildUniJointAttnScene(
     role: SHEET_ROLE_KV_K,
     highlight: uHl,
     slice: atlasPack.slices.wKU,
-    groupIndex: selectedKvHead,
-    kvHeadIndex: selectedKvHead,
     towerRole: 'context',
-    semanticTag: `branch=u;cfg=${batchRow};kv=${selectedKvHead}`,
+    semanticTag: `branch=u;cfg=${batchRow}`,
     landmarkTier: 'detail',
   });
   addSheet({
@@ -524,14 +520,12 @@ export function buildUniJointAttnScene(
     role: SHEET_ROLE_KV_V,
     highlight: uHl,
     slice: atlasPack.slices.wVU,
-    groupIndex: selectedKvHead,
-    kvHeadIndex: selectedKvHead,
     towerRole: 'context',
-    semanticTag: `branch=u;cfg=${batchRow};kv=${selectedKvHead}`,
+    semanticTag: `branch=u;cfg=${batchRow}`,
     landmarkTier: 'detail',
   });
 
-  // G Projection Plates (Teal, z > 0)
+  // G Projection Plates (Teal, z > 0) — omit static head/kv stamps so pickHitToUniCell infers from hitCol
   addSheet({
     partId: 'w_v_g',
     tensorKey: 'w_v_g',
@@ -545,10 +539,8 @@ export function buildUniJointAttnScene(
     role: SHEET_ROLE_KV_V,
     highlight: gHl,
     slice: atlasPack.slices.wVG,
-    groupIndex: selectedKvHead,
-    kvHeadIndex: selectedKvHead,
     towerRole: 'denoiser',
-    semanticTag: `branch=g;cfg=${batchRow};kv=${selectedKvHead}`,
+    semanticTag: `branch=g;cfg=${batchRow}`,
     landmarkTier: 'detail',
   });
   addSheet({
@@ -564,10 +556,8 @@ export function buildUniJointAttnScene(
     role: SHEET_ROLE_KV_K,
     highlight: gHl,
     slice: atlasPack.slices.wKG,
-    groupIndex: selectedKvHead,
-    kvHeadIndex: selectedKvHead,
     towerRole: 'denoiser',
-    semanticTag: `branch=g;cfg=${batchRow};kv=${selectedKvHead}`,
+    semanticTag: `branch=g;cfg=${batchRow}`,
     landmarkTier: 'detail',
   });
   addSheet({
@@ -584,11 +574,8 @@ export function buildUniJointAttnScene(
     role: SHEET_ROLE_WEIGHT,
     highlight: gHl,
     slice: atlasPack.slices.wQG,
-    headIndex: selectedQHead,
-    groupIndex: selectedKvHead,
-    kvHeadIndex: selectedKvHead,
     towerRole: 'denoiser',
-    semanticTag: `branch=g;cfg=${batchRow};kv=${selectedKvHead}`,
+    semanticTag: `branch=g;cfg=${batchRow}`,
   });
 
   // Flow ribbons: hidden_in -> normed_attn_in -> U/G projection banks
@@ -639,12 +626,8 @@ export function buildUniJointAttnScene(
     role: SHEET_ROLE_ACTIVATION,
     highlight: SHEET_HL_NORMAL,
     slice: atlasPack.slices.qPre,
-    headIndex: selectedQHead,
-    groupIndex: selectedKvHead,
-    kvHeadIndex: selectedKvHead,
-    tapIndex: hoveredPlane,
     towerRole: 'shared',
-    semanticTag: `branch=joint;cfg=${batchRow};kv=${selectedKvHead};plane=${hoveredPlane}`,
+    semanticTag: `branch=joint;cfg=${batchRow}`,
   });
 
   const qRotFrame = addSheet({
@@ -661,12 +644,8 @@ export function buildUniJointAttnScene(
     role: SHEET_ROLE_ACTIVATION,
     highlight: SHEET_HL_PATHWAY,
     slice: atlasPack.slices.qRot,
-    headIndex: selectedQHead,
-    groupIndex: selectedKvHead,
-    kvHeadIndex: selectedKvHead,
-    tapIndex: hoveredPlane,
     towerRole: 'shared',
-    semanticTag: `branch=joint;cfg=${batchRow};kv=${selectedKvHead};plane=${hoveredPlane}`,
+    semanticTag: `branch=joint;cfg=${batchRow}`,
   });
 
   const qScaledFrame = addSheet({
@@ -683,12 +662,8 @@ export function buildUniJointAttnScene(
     role: SHEET_ROLE_ACTIVATION,
     highlight: llama4HighActive ? SHEET_HL_BF16_GOLD : SHEET_HL_PATHWAY,
     slice: atlasPack.slices.qScaled,
-    headIndex: selectedQHead,
-    groupIndex: selectedKvHead,
-    kvHeadIndex: selectedKvHead,
-    tapIndex: hoveredPlane,
     towerRole: 'shared',
-    semanticTag: `branch=joint;cfg=${batchRow};kv=${selectedKvHead};plane=${hoveredPlane}`,
+    semanticTag: `branch=joint;cfg=${batchRow}`,
     landmarkTone: llama4HighActive ? 'gold' : 'default',
   });
 
@@ -706,11 +681,8 @@ export function buildUniJointAttnScene(
     role: SHEET_ROLE_KV_K,
     highlight: SHEET_HL_NORMAL,
     slice: atlasPack.slices.kRot,
-    groupIndex: selectedKvHead,
-    kvHeadIndex: selectedKvHead,
-    tapIndex: hoveredPlane,
     towerRole: 'shared',
-    semanticTag: `branch=joint;cfg=${batchRow};kv=${selectedKvHead};plane=${hoveredPlane}`,
+    semanticTag: `branch=joint;cfg=${batchRow}`,
   });
 
   addSheet({
@@ -727,10 +699,8 @@ export function buildUniJointAttnScene(
     role: SHEET_ROLE_KV_V,
     highlight: SHEET_HL_NORMAL,
     slice: atlasPack.slices.vNew,
-    groupIndex: selectedKvHead,
-    kvHeadIndex: selectedKvHead,
     towerRole: 'shared',
-    semanticTag: `branch=joint;cfg=${batchRow};kv=${selectedKvHead}`,
+    semanticTag: `branch=joint;cfg=${batchRow}`,
   });
 
   addSheet({
@@ -1171,11 +1141,8 @@ export function buildUniJointAttnScene(
     role: SHEET_ROLE_ACTIVATION,
     highlight: SHEET_HL_PATHWAY,
     slice: atlasPack.slices.attnOut,
-    headIndex: selectedQHead,
-    groupIndex: selectedKvHead,
-    kvHeadIndex: selectedKvHead,
     towerRole: 'shared',
-    semanticTag: `branch=joint;cfg=${batchRow};kv=${selectedKvHead}`,
+    semanticTag: `branch=joint;cfg=${batchRow}`,
   });
 
   addSheet({
@@ -1191,11 +1158,8 @@ export function buildUniJointAttnScene(
     role: SHEET_ROLE_WEIGHT,
     highlight: uHl,
     slice: atlasPack.slices.wOU,
-    headIndex: selectedQHead,
-    groupIndex: selectedKvHead,
-    kvHeadIndex: selectedKvHead,
     towerRole: 'context',
-    semanticTag: `branch=u;cfg=${batchRow};kv=${selectedKvHead}`,
+    semanticTag: `branch=u;cfg=${batchRow}`,
   });
 
   addSheet({
@@ -1211,11 +1175,8 @@ export function buildUniJointAttnScene(
     role: SHEET_ROLE_WEIGHT,
     highlight: gHl,
     slice: atlasPack.slices.wOG,
-    headIndex: selectedQHead,
-    groupIndex: selectedKvHead,
-    kvHeadIndex: selectedKvHead,
     towerRole: 'denoiser',
-    semanticTag: `branch=g;cfg=${batchRow};kv=${selectedKvHead}`,
+    semanticTag: `branch=g;cfg=${batchRow}`,
   });
 
   addSheet({
@@ -1585,11 +1546,11 @@ export function buildUniJointAttnScene(
     },
     {
       id: 'anchor-2d-sincos-g',
-      label: `2D SinCos Spatial Embed on G Visual Tokens (scale=${UNI_2D_SINCOS_SCALE} · mini contentSize=16 / prod 32 · U11 N=${ctx.branch.refinementSteps})`,
-      sublabel: `Additive at G input embedding (D3 mini scale=0.25/0.5); markerColumn alignment; 1D YaRN RoPE still applied at every layer`,
+      label: `2D SinCos Spatial Embed on G Visual Tokens (canonicalContentSize=${UNI_2D_SINCOS_CANONICAL_CONTENT_SIZE}, scale=${UNI_2D_SINCOS_SCALE})`,
+      sublabel: `Additive at G input embedding · marker_column = !isSourceEdit · 1D YaRN RoPE still applied at every layer`,
       worldPos: [-14.4, 0.55, 4.4],
       tone: 'g_teal',
-      badge: `2D SinCos · G (U11)`,
+      badge: `2D SinCos · scale=${UNI_2D_SINCOS_SCALE}`,
     },
     {
       id: 'anchor-l17-l18-boundary',
@@ -1620,7 +1581,7 @@ export function buildUniJointAttnScene(
       tone: llama4HighActive ? 'gold' : 'muted',
     },
     {
-      label: `2D SinCos on G Visual Tokens (scale=0.25 D3 / ${UNI_2D_SINCOS_SCALE}, contentSize=16 mini, U11 N=${ctx.branch.refinementSteps})`,
+      label: `2D SinCos on G Visual Tokens (canonicalContentSize=${UNI_2D_SINCOS_CANONICAL_CONTENT_SIZE}, scale=${UNI_2D_SINCOS_SCALE}, marker_column = !isSourceEdit)`,
       tone: 'g_teal',
     },
     {

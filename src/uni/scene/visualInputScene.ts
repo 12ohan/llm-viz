@@ -21,8 +21,9 @@
  *       9. `PackedLinearImageCodec` `2×2` compression (`4×8` with `D3` generation scale
  *          + additive `2D_SinCos`)
  *   - Center convergence (`U + G` Joint):
- *      10. Assembled `[S, 8]` multimodal sequence plate (`R = token embedding`,
- *          `G = 0.0` for `U` / `1.0` for `G` routing flag) feeding the `L0` backbone rail.
+ *      10. Assembled `[S, 8]` multimodal sequence plate (`R = token embedding`, `G = 0.0` active
+ *          so `SheetsPass` renders live Float32 values for both `U` and `G`; `G` rows framed in
+ *          teal via `flow.addCellHighlightOnFrame`) feeding the `L0` backbone rail.
  *
  * Strict `D4` discipline: ZERO 3-channel RGB pixels are packed into `RG32F`; typed
  * `UniRgbPreviewDescriptor`s (`source` + `letterboxed` with `U18` lock mask) are emitted
@@ -590,16 +591,10 @@ export function packVisualInputAtlas(
     codeGridG[i] = run.paddingLockMask.lockMask[i] === 1 ? 1.0 : 0.0;
   }
 
-  // Assembled multimodal sequence `[S, 8]`: `R = token embedding`, `G = 0.0 (U) | 1.0 (G)`
+  // Assembled multimodal sequence `[S, 8]`: keep G = 0.0 on all active rows so SheetsPass
+  // renders live Float32 embeddings for both U and G tokens (G = 1.0 would hatch cells as masked).
+  // G-token rows are instead framed with a teal `flow.addCellHighlightOnFrame(...)` overlay.
   const d = UNI_MINI_CONFIG.hiddenSize;
-  const seqGFlags = new Float32Array(run.assembledSeqLen * d);
-  for (let r = 0; r < run.assembledSeqLen; r++) {
-    const flag = run.assembledRouting[r] === UNI_ROUTE_G ? 1.0 : 0.0;
-    const base = r * d;
-    for (let c = 0; c < d; c++) {
-      seqGFlags[base + c] = flag;
-    }
-  }
 
   // Fixed non-overlapping 3-band shelf layout inside 128 × 128:
   //   Band 0 (y =  0..20): u_patches (0,0), u_vit_attn (50,0), u_patch_strip (72,0), g_vq_latents (90,0)
@@ -721,7 +716,7 @@ export function packVisualInputAtlas(
     isMaskOrScore: false,
   });
 
-  // 10. Unified Multimodal Sequence Assembly (`[S, 8]`, R = embedding, G = 0 U / 1 G)
+  // 10. Unified Multimodal Sequence Assembly (`[S, 8]`, R = live L0 embedding, G = 0.0 active)
   pushSlice('joint_multimodal_seq', {
     x0: 82,
     y0: 30,
@@ -730,7 +725,6 @@ export function packVisualInputAtlas(
     values: run.assembledEmbeddings,
     mode: 0,
     isMaskOrScore: false,
-    gChannelFlags: seqGFlags,
   });
 
   const regions = Object.freeze(packedEntries.map((e) => e.region));
@@ -1120,7 +1114,10 @@ export function buildUniVisualInputScene(
       baseHighlight: SHEET_HL_PATHWAY,
       semanticTag: `branch=joint;stream=unified;stage=multimodal_assembly;u=${run.assembledUCount};g=${run.assembledGCount}`,
       label: `Unified Multimodal Sequence (${run.assembledSeqLen}×8)`,
-      sublabel: `R = L0 Embedding · G = Routing (${run.assembledUCount} U + ${run.assembledGCount} G)`,
+      sublabel:
+        run.assembledGCount > 0
+          ? `R = Live L0 Embedding (${run.assembledUCount} U + ${run.assembledGCount} G · G band framed in teal)`
+          : `R = Live L0 Embedding (${run.assembledUCount} U-only)`,
       badge: run.assembledGCount > 0 ? 'Mixed U + G -> L0' : 'U-Only -> L0',
     },
   ];
@@ -1166,6 +1163,38 @@ export function buildUniVisualInputScene(
       slice: sliceEntry.slice,
       frame,
     });
+
+    // Teal framing band over contiguous G-routed rows on `joint_multimodal_seq` (keeping G = 0.0
+    // in RG32F so SheetsPass renders live Float32 embeddings without cross-hatching them as masked)
+    if (spec.id === 'joint_multimodal_seq' && run.assembledGCount > 0) {
+      let row = 0;
+      while (row < run.assembledSeqLen) {
+        if (run.assembledRouting[row] === UNI_ROUTE_G) {
+          const runStart = row;
+          while (
+            row + 1 < run.assembledSeqLen &&
+            run.assembledRouting[row + 1] === UNI_ROUTE_G
+          ) {
+            row += 1;
+          }
+          flow.addCellHighlightOnFrame(
+            frame,
+            runStart,
+            row,
+            0,
+            gridCols - 1,
+            gridRows,
+            gridCols,
+            SHEET_EY * 0.5 + 0.012,
+            { r: 0.102, g: 0.541, b: 0.478, a: 0.16, borderAlpha: 0.9 },
+            UNI_FLOW_COLORS.gTeal,
+            0.024,
+            true,
+          );
+        }
+        row += 1;
+      }
+    }
 
     // Cell hover highlight overlay when a valid cell is hovered on this plate
     if (

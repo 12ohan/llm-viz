@@ -20,17 +20,22 @@ import type { UniFullRuntimeBundle } from '../imageSampler';
 import type { UniReconstructedHeadLogits, UniSession } from '../session';
 import type {
   UniCfgBatchSize,
+  UniEditGuidanceMode,
   UniElasticD5ComparisonReadout,
   UniElasticPrefillMode,
   UniExecutionViewId,
+  UniFlowEditingOpdResult,
   UniGainPresetId,
   UniGroundingBox,
   UniLayerTrace,
+  UniPrimeDepthFloorMismatchReport,
   UniRgbImage,
   UniScenePresetId,
   UniSessionBranch,
   UniSessionRecord,
   UniSourcePaddingVqMask,
+  UniTrainerBugDiagnosticU28,
+  UniUnderstandingOpdResult,
   UniViewArchReadout,
 } from '../types';
 
@@ -278,6 +283,20 @@ export interface UniSpatialScene {
   readonly calipers: readonly DimensionCaliper[];
   readonly d5Comparison: UniElasticD5ComparisonReadout | null;
   readonly viewReadout: UniViewArchReadout | null;
+  /** Optional View 4 (`ball_tree`) U26 production D=17 vs miniature D=8 floor-mismatch diagnostic. */
+  readonly u26Mismatch?: UniPrimeDepthFloorMismatchReport | null;
+  /** Optional View 7 (`opd_readonly`) strictly forward-only, zero-gradient OPD reference summary. */
+  readonly opdReadOnly?: UniOpdReadOnlyMetadata | null;
+}
+
+/** Strictly forward-only, zero-gradient diagnostic metadata exposed by View 7 (`opd_readonly`). */
+export interface UniOpdReadOnlyMetadata {
+  readonly readOnly: true;
+  readonly hasGradients: false;
+  readonly badgeLabel: 'READ-ONLY · NO GRADIENTS';
+  readonly understandingOpd: UniUnderstandingOpdResult;
+  readonly flowEditingOpd: UniFlowEditingOpdResult;
+  readonly u28Diagnostics: UniTrainerBugDiagnosticU28;
 }
 
 export interface UniResolvedSessionContext {
@@ -344,5 +363,65 @@ export interface UniVisualInputSceneOptions {
   readonly includeDiscreteStream?: boolean;
   /** Optional explicit historical record ID. */
   readonly recordId?: string;
+  readonly hoveredCell?: UniPickIdentity | null;
+}
+
+// ============================================================================
+// VIEW-SPECIFIC BUILD OPTIONS (UNI5 VIEWS 4–7)
+// ============================================================================
+
+export type UniRefinementStepPreset = 1 | 2 | 4 | 8;
+
+export interface UniBallTreeSceneOptions {
+  /** Target VQ codebook entry (`0..255`) whose nested candidate balls are highlighted. */
+  readonly selectedCodeId?: number;
+  /** Progressive self-refinement step count `N ∈ {1, 2, 4, 8}` (`N = 1` reduces to binary MDM). */
+  readonly refinementSteps?: UniRefinementStepPreset;
+  /** Active code stage (`-1` masked, `0..N` progressively refined; `N` = finalized leaf). */
+  readonly stageIndex?: number;
+  /** Emphasize the interactive `U26` production `D = 17` train-vs-inference floor-rounding callout. */
+  readonly showProductionD17Comparison?: boolean;
+  /** Optional explicit historical record ID (used when resolving defaults from a live `UniSession`). */
+  readonly recordId?: string;
+  readonly hoveredCell?: UniPickIdentity | null;
+}
+
+export interface UniRefinementSceneOptions {
+  /** Optional explicit historical record ID for full trajectory scrubbing (`step 0 .. N_steps`). */
+  readonly recordId?: string;
+  /** Highlighted cell index inside the `4×6` marked VQ child grid (`0..23`), or `null`. */
+  readonly selectedGridCell?: number | null;
+  /** Toggle `stratified_random(4, seed=42)` quadtree unmasking-order overlay. */
+  readonly showStratifiedOrder?: boolean;
+  /** Focused CFG branch row (`0..cfgBatchSize-1`) for top-32 logit comparison emphasis. */
+  readonly cfgBranchRow?: number;
+  readonly hoveredCell?: UniPickIdentity | null;
+}
+
+export interface UniOutputEditSceneOptions {
+  /** Optional explicit historical record ID. */
+  readonly recordId?: string;
+  /** Dual-CFG editing mixer override (`'legacy' | 'independent' | 'ip2p'`) for comparison slices. */
+  readonly editGuidanceMode?: UniEditGuidanceMode;
+  /** Whether to emit the center-cropped native-aspect RGB preview (e.g., `16×8` on panorama edits). */
+  readonly cropToSource?: boolean;
+  /** Toggle explicit `U18` `lock_source_padding_vq` border-lock visual overlay. */
+  readonly showPaddingLockOverlay?: boolean;
+  readonly hoveredCell?: UniPickIdentity | null;
+}
+
+export type UniOpdBayFocus = 'both' | 'understanding' | 'editing';
+
+export interface UniOpdSceneOptions {
+  /** Deterministic PRNG seed for `createDefaultOpdDemoInputs(seed)` (defaults to `0x4f504431`). */
+  readonly seed?: number;
+  /** Continuous-flow editing noising ratio `r ∈ (0, 1)` (default `0.9`). */
+  readonly r?: number;
+  /** Continuous-flow editing ODE schedule step count for `matched_sigmas` (default `40`). */
+  readonly steps?: number;
+  /** Sequence length for Qwen-Image dynamic time-shift `mu(seqLen)` (default `1024`). */
+  readonly seqLen?: number;
+  /** Optional focus emphasis on left bay (`understanding`), right bay (`editing`), or `both`. */
+  readonly selectedBay?: UniOpdBayFocus;
   readonly hoveredCell?: UniPickIdentity | null;
 }

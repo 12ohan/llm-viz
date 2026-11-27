@@ -202,30 +202,27 @@ describe('UNI4 View 2 (visual_input) — Dual Visual Input Pipeline Scene & 128x
     );
 
     // Assembled sequence is [2 prefix U + 6 RADIO-H/nl U + 4 packed VQ G + 3 edit text U] = 15 x 8
+    // Strict SheetsPass RG32F discipline: keep G = 0.0 on all active rows so SheetsPass renders
+    // live Float32 embeddings for both U and G tokens (G rows are framed in teal via flow overlay)
     const seq = readRegionTexels(scene, 'joint_multimodal_seq');
     expect(seq.region).toMatchObject({ rows: 15, cols: 8 });
-    let uRows = 0;
-    let gRows = 0;
+    expect(Array.from(seq.gValues).every((g) => g === 0)).toBe(true);
+    let nonZeroURValues = 0;
     let nonZeroGRValues = 0;
     for (let r = 0; r < 15; r++) {
-      const gFlag = seq.gValues[r * 8]!;
+      const isGRow = r >= 8 && r <= 11;
       for (let c = 0; c < 8; c++) {
-        expect(seq.gValues[r * 8 + c]).toBe(gFlag);
-      }
-      if (gFlag === 1) {
-        gRows += 1;
-        for (let c = 0; c < 8; c++) {
-          if (Math.abs(seq.rValues[r * 8 + c]!) > 1e-7) nonZeroGRValues += 1;
+        if (Math.abs(seq.rValues[r * 8 + c]!) > 1e-7) {
+          if (isGRow) nonZeroGRValues += 1;
+          else nonZeroURValues += 1;
         }
-      } else {
-        expect(gFlag).toBe(0);
-        uRows += 1;
       }
     }
-    expect(uRows).toBe(11);
-    expect(gRows).toBe(4);
-    // Crucial check: R embeddings on G-flagged rows are preserved (not zeroed by setTexel)
+    expect(nonZeroURValues).toBeGreaterThan(0);
     expect(nonZeroGRValues).toBeGreaterThan(0);
+    const seqAnchor = scene.overlayAnchors.find((a) => a.id === 'anchor_joint_multimodal_seq');
+    expect(seqAnchor?.sublabel).toContain('11 U + 4 G');
+    expect(seqAnchor?.badge).toBe('Mixed U + G -> L0');
   });
 
   it('emits 16x8 source + 16x16 letterboxed RGB preview with non-zero U18 paddingLockMask on harbor_panorama_16x8', () => {
@@ -298,11 +295,16 @@ describe('UNI4 View 2 (visual_input) — Dual Visual Input Pipeline Scene & 128x
       ),
     ).toBe(true);
 
-    // Enabling includeDiscreteStream explicitly illuminates G stream even on text-only session
+    // Enabling includeDiscreteStream explicitly illuminates G stream and frames G rows in teal
+    // (while keeping G = 0.0 in RG32F so live embeddings remain unmasked)
     const withDiscrete = buildUniVisualInputScene(session, { includeDiscreteStream: true });
     expect(validateSceneGeometryFinite(withDiscrete).valid).toBe(true);
     const seqWithG = readRegionTexels(withDiscrete, 'joint_multimodal_seq');
-    expect(Array.from(seqWithG.gValues).some((g) => g === 1.0)).toBe(true);
+    expect(seqWithG.region.rows).toBeGreaterThan(
+      readRegionTexels(scene, 'joint_multimodal_seq').region.rows,
+    );
+    expect(Array.from(seqWithG.gValues).every((g) => g === 0.0)).toBe(true);
+    expect(withDiscrete.flowIndices.length).toBeGreaterThan(scene.flowIndices.length);
   });
 
   it('produces distinct live RG32F values on both RadioHProjector and PackedLinearImageCodec slices across D3 gain presets', () => {
