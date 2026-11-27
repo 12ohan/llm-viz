@@ -53,8 +53,11 @@ import {
   cloneDoryKvCache,
   computeDoryWeightDigestHex,
   computeExecutedDepth,
+  computeMiniKvCacheBytes,
+  computeProductionKvBytesBf16,
   countDoryParameterStats,
   createDoryKvCache,
+  createDoryPrng,
   effectiveLogitScale,
   effectiveResidualAlpha,
   effectiveSGateSquared,
@@ -68,12 +71,14 @@ import {
   listDoryCanonicalTensors,
   loopEntryAnchorInject,
   loopExitNormalize,
+  measureDoryKvCacheBytes,
   ngptNlerpResidualRows,
   ngptNlerpResidualRowsDetailed,
   rewindDoryKvCache,
   runDoryAttentionSublayer,
   runDoryForwardChunk,
   runDoryMlpSublayer,
+  runDoryOutputCoda,
   type DoryAttentionSublayerWeights,
   type DoryKvCacheMode,
   type DoryMlpSublayerWeights,
@@ -1230,5 +1235,161 @@ describe('Dory1.0-4B Backbone — Independent PyTorch 2.15.0 Parity & DORY1 Gate
     expect(tsVsVllmFp32Err).toBeLessThan(
       diff.dr9Fp32VsTransformersBf16.full72LK2TransformersBf16VsVllmFp32MaxAbsDiff / 100,
     );
+  });
+
+  it('Category 7 — DORY1 helper contracts: antipodal Jacobian Infinity, runDoryOutputCoda kLoops guard, production BF16 KV scaling, 104-bank Contract A accounting, mid-Box-Muller PRNG clone, and SWA eviction rewind guard', () => {
+    // 7A. Antipodal anchorMapJacobianNorm(Math.PI) snaps cosHalf -> 0 so idealJacobianNorm === Infinity
+    const antipodal = anchorMapJacobianNorm(Math.PI, params.config.l2NormEps);
+    expect(antipodal.angleRadians).toBe(Math.PI);
+    expect(antipodal.angleDegrees).toBe(180);
+    expect(antipodal.sumNormIdeal).toBe(0);
+    expect(antipodal.idealJacobianNorm).toBe(Infinity);
+    expect(antipodal.epsStabilizedJacobianNorm).toBe(1000);
+    expect(antipodal.isLocalContractiveRegime).toBe(false);
+
+    const beyondPi = anchorMapJacobianNorm(Math.PI + 0.25, params.config.l2NormEps);
+    expect(beyondPi.idealJacobianNorm).toBe(Infinity);
+    expect(beyondPi.epsStabilizedJacobianNorm).toBe(1000);
+
+    // 7B. runDoryOutputCoda validates kLoops unconditionally even when captureTrace === false
+    const codaCache = createDoryKvCache({ mode: 'per_loop', kLoops: 1, config: params.config });
+    const dummyState = new Float32Array(params.config.hiddenSize);
+    dummyState[0] = 1;
+    for (const badK of [0, -2, 1.5, Number.NaN]) {
+      expect(() =>
+        runDoryOutputCoda({
+          state: dummyState,
+          seqLen: 1,
+          startPos: 0,
+          kLoops: badK,
+          params,
+          kvCache: codaCache,
+          ropeTables,
+          captureTrace: false,
+        }),
+      ).toThrow(RangeError);
+    }
+
+    // 7C. computeProductionKvBytesBf16 S-invariant (4 + 5k) / 9 ratio & exact 1,024 / 262,144 checkpoints
+    const MiB = 1024 * 1024;
+    for (const k of [1, 2, 3, 4, 6, 8] as const) {
+      const expectedRatio = (4 + 5 * k) / 9;
+      for (const seqLen of [1, 512, 1024, 2048, 8192, 32768, 131072, 262144]) {
+        const pl = computeProductionKvBytesBf16(seqLen, k, 'per_loop');
+        const ll = computeProductionKvBytesBf16(seqLen, k, 'last_loop');
+        expect(pl.perLoopToLastLoopRatio).toBeCloseTo(expectedRatio, 12);
+        expect(ll.perLoopToLastLoopRatio).toBeCloseTo(expectedRatio, 12);
+        expect(pl.totalBytes / ll.totalBytes).toBeCloseTo(expectedRatio, 12);
+      }
+    }
+
+    // Exact S = 1,024 SWA knee checkpoints (Audit §7.2)
+    const kneeLl = computeProductionKvBytesBf16(1024, 4, 'last_loop');
+    const kneeK2 = computeProductionKvBytesBf16(1024, 2, 'per_loop');
+    const kneeK4 = computeProductionKvBytesBf16(1024, 4, 'per_loop');
+    expect(kneeLl.totalBytes).toBe(144 * MiB);
+    expect(kneeK2.totalBytes).toBe(224 * MiB);
+    expect(kneeK4.totalBytes).toBe(384 * MiB);
+    expect(kneeLl.swaShare).toBeCloseTo(0.75, 12);
+    expect(kneeK4.swaShare).toBeCloseTo(0.75, 12);
+
+    // Exact 4x marginal slope drop across S = 1,024 knee
+    const slopeBeforeKnee =
+      computeProductionKvBytesBf16(1024, 4, 'per_loop').totalBytes -
+      computeProductionKvBytesBf16(1023, 4, 'per_loop').totalBytes;
+    const slopeAfterKnee =
+      computeProductionKvBytesBf16(1025, 4, 'per_loop').totalBytes -
+      computeProductionKvBytesBf16(1024, 4, 'per_loop').totalBytes;
+    expect(slopeBeforeKnee).toBe(384 * 1024);
+    expect(slopeAfterKnee).toBe(96 * 1024);
+    expect(slopeBeforeKnee / slopeAfterKnee).toBe(4);
+
+    // Exact S = 262,144 (256K) checkpoints (Audit §7.2)
+    const maxLl = computeProductionKvBytesBf16(262144, 4, 'last_loop');
+    const maxK2 = computeProductionKvBytesBf16(262144, 2, 'per_loop');
+    const maxK4 = computeProductionKvBytesBf16(262144, 4, 'per_loop');
+    expect(maxLl.totalBytes).toBe(9324 * MiB);
+    expect(maxK2.totalBytes).toBe(14504 * MiB);
+    expect(maxK4.totalBytes).toBe(24864 * MiB);
+    expect(maxK4.swaShare).toBeCloseTo((3 * 1024) / (3 * 1024 + 262144), 12);
+
+    // 7D. computeMiniKvCacheBytes vs measureDoryKvCacheBytes on 104-bank Contract A & standard caches
+    const spec104Summary = computeMiniKvCacheBytes(4, 'per_loop', true, params.config);
+    const spec104Cache = createDoryKvCache({
+      mode: 'per_loop',
+      kLoops: 4,
+      includeShallowCoda: true,
+      config: params.config,
+    });
+    const spec104Measured = measureDoryKvCacheBytes(spec104Cache);
+    expect(spec104Summary.banks.totalBanks).toBe(104);
+    expect(spec104Summary.banks.totalSwaBanks).toBe(78);
+    expect(spec104Summary.banks.totalFullBanks).toBe(26);
+    expect(spec104Summary.banks.outputShallowSwaBanks).toBe(6);
+    expect(spec104Summary.banks.outputShallowFullBanks).toBe(2);
+    expect(spec104Summary.kvPayloadBytes).toBe(266_240);
+    expect(spec104Summary.absPosTagBytes + spec104Summary.writerLoopTagBytes).toBe(16_640);
+    expect(spec104Summary.totalAllocatedBytes).toBe(282_880);
+    expect(spec104Measured.bankCount).toBe(spec104Summary.banks.totalBanks);
+    expect(spec104Measured.kvPayloadBytes).toBe(spec104Summary.kvPayloadBytes);
+    expect(spec104Measured.tagMetadataBytes).toBe(
+      spec104Summary.absPosTagBytes + spec104Summary.writerLoopTagBytes,
+    );
+    expect(spec104Measured.totalUniqueBufferBytes).toBe(spec104Summary.totalAllocatedBytes);
+
+    // Also verify k=8 per_loop (176 banks) exact analytical vs measured match
+    const k8Summary = computeMiniKvCacheBytes(8, 'per_loop', false, params.config);
+    const k8Measured = measureDoryKvCacheBytes(
+      createDoryKvCache({ mode: 'per_loop', kLoops: 8, includeShallowCoda: false, config: params.config }),
+    );
+    expect(k8Summary.banks.totalBanks).toBe(176);
+    expect(k8Measured.bankCount).toBe(176);
+    expect(k8Measured.kvPayloadBytes).toBe(k8Summary.kvPayloadBytes);
+    expect(k8Measured.totalUniqueBufferBytes).toBe(k8Summary.totalAllocatedBytes);
+
+    // 7E. createDoryPrng().clone() mid-Box-Muller state fidelity
+    const prngA = createDoryPrng(DORY_BACKBONE_SEED);
+    const firstGauss = prngA.nextGaussian(); // Populates internal Box-Muller spare
+    expect(Number.isFinite(firstGauss)).toBe(true);
+    const prngB = prngA.clone();
+    expect(prngB.getState()).toBe(prngA.getState());
+
+    // Advance clone first to prove non-aliasing of spare & state
+    const cloneSeq = [
+      prngB.nextGaussian(), // Must consume cached Box-Muller spare!
+      prngB.nextGaussian(),
+      prngB.nextFloat64(),
+      prngB.nextOpenUnitFloat64(),
+      prngB.nextUint32(),
+      prngB.nextRange(-2.5, 3.5),
+      prngB.nextGaussian(),
+    ];
+    const origSeq = [
+      prngA.nextGaussian(),
+      prngA.nextGaussian(),
+      prngA.nextFloat64(),
+      prngA.nextOpenUnitFloat64(),
+      prngA.nextUint32(),
+      prngA.nextRange(-2.5, 3.5),
+      prngA.nextGaussian(),
+    ];
+    expect(origSeq).toEqual(cloneSeq);
+    expect(prngA.getState()).toBe(prngB.getState());
+
+    // 7F. rewindDoryKvCache throws atomically when history past cap_swa=16 was evicted
+    const evictCache = createDoryKvCache({ mode: 'per_loop', kLoops: 1, config: params.config });
+    const tokens24 = Array.from({ length: 24 }, (_, idx) => (idx % 40) + 18);
+    runDoryForwardChunk({ tokens: tokens24, params, kvCache: evictCache, kLoops: 1, ropeTables });
+    expect(evictCache.committedLen).toBe(24);
+    // SWA cap_swa=16 retains [8..23]; rewinding to 12 needs past-visible [5..11] -> evicted!
+    expect(() => rewindDoryKvCache(evictCache, 12)).toThrow(/evicted/i);
+    // Atomic failure guard: cache remains completely unchanged after failed rewind
+    expect(evictCache.committedLen).toBe(24);
+    expect(getDoryInputBank(evictCache, 0).logicalLen).toBe(24);
+    // Rewinding to 15 only requires past-visible [8..14], all intact in [8..23] -> succeeds
+    rewindDoryKvCache(evictCache, 15);
+    expect(evictCache.committedLen).toBe(15);
+    expect(getDoryInputBank(evictCache, 0).logicalLen).toBe(15);
+    expect(getDoryInputBank(evictCache, 0).absPosTag[15]).toBe(-1);
   });
 });

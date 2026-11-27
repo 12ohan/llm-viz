@@ -1,12 +1,16 @@
 /**
  * Shared Headless TypeScript Contracts for NVIDIA Nemotron-Labs-Dory1.0-4B (`src/dory/types.ts`)
  *
- * Frozen Step-0 contract for Milestone `DORY1` (and forward-compatible KV/trace hooks for
- * `DORY2`–`DORY5`) enabling strictly disjoint parallel implementation across:
- *   - Slice 1A: `spec.ts`, `ledger.ts`, `prng.ts`, `parameters.ts`, `ngptMath.ts`, `rope.ts`
- *   - Slice 1B: `kvCache.ts`, `attention.ts`, `swiglu.ts`, `forward.ts`, `index.ts`
- *   - Slice 1C: `scripts/reference/{export_dory_params.mjs,generate_dory_pytorch_fixtures.py}`,
- *               `tests/fixtures/pytorch-dory-backbone.json`, `tests/dory-math-parity.test.ts`
+ * Frozen Step-0 contracts for Milestones `DORY1` & `DORY2` (with forward-compatible hooks for
+ * `DORY3`–`DORY5`) enabling strictly disjoint parallel implementation across:
+ *   - DORY1 Slice 1A: `spec.ts`, `ledger.ts`, `prng.ts`, `parameters.ts`, `ngptMath.ts`, `rope.ts`
+ *   - DORY1 Slice 1B: `kvCache.ts`, `attention.ts`, `swiglu.ts`, `forward.ts`, `index.ts`
+ *   - DORY1 Slice 1C: `scripts/reference/{export_dory_params.mjs,generate_dory_pytorch_fixtures.py}`,
+ *                     `tests/fixtures/pytorch-dory-backbone.json`, `tests/dory-math-parity.test.ts`
+ *   - DORY2 Slice 2A: `speculative.ts` (Contract A §6.2 self-speculation, 104 banks, division-free binary64)
+ *   - DORY2 Slice 2B: `session.ts` (immutable non-aliased CoW branches, DR18 guard, D10 3.00 MiB LRU pool, DR24 replay)
+ *   - DORY2 Slice 2C: `scripts/reference/generate_dory_spec_fixtures.py`, `tests/fixtures/pytorch-dory-spec.json`,
+ *                     `tests/dory-speculative-parity.test.ts`, `tests/dory-session-stress.test.ts`
  *
  * Locked Design Decisions (`D1–D10`) & Discrepancy Guards (`DR1–DR24`):
  *   - `D1` Physical `0..71` single-sublayer indexing (`16` Input + `40` Recurrent + `16` Output),
@@ -1637,4 +1641,835 @@ export interface DoryForwardModuleContract {
     params: DoryModelParameters,
   ): DoryLmHeadResult;
   runDoryForwardChunk(input: DoryForwardChunkInput): DoryForwardChunkResult;
+}
+
+// ============================================================================
+// DORY2 CONSTANTS, INVARIANT ERRORS & SAMPLING CONTRACTS (D3, D6, D10, DR18/23/24)
+// ============================================================================
+
+/**
+ * Mandatory provenance disclosure badge for Contract A Paper §6.2 self-speculation (`D3`, `DR23`).
+ * Paper §6.2 is absent from upstream `transformers`, `vLLM`, and `llama.cpp`, and omits Output/Coda
+ * KV management across cycles; Contract A allocates `8` dedicated persistent `output_shallow` banks
+ * alongside the `96` deep `per_loop` banks (`104` banks total).
+ */
+export const DORY_SPEC_CONTRACT_A_BADGE =
+  'Reconstructed from Paper §6.2 (Contract A) · Not in Upstream Runtimes · per_loop Only' as const;
+
+/** Exact Contract A persistent bank count (`8` Input + `80` Loops 1–4 + `8` Deep Coda + `8` Shallow Coda). */
+export const DORY_SPEC_CONTRACT_A_BANK_COUNT = 104 as const;
+export const DORY_SPEC_DRAFT_LOOPS = 1 as const;
+export const DORY_SPEC_VERIFY_LOOPS = 4 as const;
+export const DORY_SPEC_DEFAULT_GAMMA = 4 as const;
+
+/** Gate 2 Layer 6 Pearson chi-squared critical value (`df = 63`, `alpha = 0.001`). */
+export const DORY_SPEC_PEARSON_CHI2_DF63_ALPHA_001 = 103.51 as const;
+
+/** View 2 read-only intermediate-loop logit-lens disclosure badge (Audit §12.1, Finding 9). */
+export const DORY_COUNTERFACTUAL_CODA_BADGE =
+  'DIAGNOSTIC COUNTERFACTUAL · CODA NOT RUN AT INTERMEDIATE LOOPS' as const;
+
+/** Default deterministic session PRNG seed (distinct from backbone weight seed). */
+export const DORY_DEFAULT_SESSION_SEED = 0xd0412002 as const;
+
+/**
+ * Default non-EOS 8-token miniature session prompt:
+ * `['<s>', '<|im_start|>', 'user', '\n', 'solve', 'loop', 'depth', '4']`.
+ */
+export const DORY_DEFAULT_SESSION_PROMPT: readonly number[] = Object.freeze([
+  1, 10, 4, 18, 40, 25, 26, 57,
+]);
+
+export type DoryExecutionMode = 'standard' | 'self_spec';
+
+export type DoryHaltReason = 'eos' | 'capacity_exhausted' | 'max_new_tokens';
+
+export type DorySpecOutcomeKind =
+  | 'zero_accept_reject'
+  | 'partial_accept_reject'
+  | 'full_accept_bonus'
+  | 'full_accept_eos'
+  | 'final_slot_deep_decode';
+
+export type DoryRejectionReason =
+  | 'greedy_match'
+  | 'greedy_mismatch'
+  | 'unconditional_p_ge_q'
+  | 'stochastic_accept'
+  | 'stochastic_reject';
+
+export type DorySessionRecordKind =
+  | 'prefill'
+  | 'chunk'
+  | 'decode_step'
+  | 'spec_prefill'
+  | 'spec_cycle';
+
+export type DorySessionForkReason = 'initial' | 'cursor_fork' | 'dr18_re_prefill';
+
+/**
+ * Shared binary64 sampling configuration (`Audit §5.6 & §8.2`).
+ * Transform consistency invariant: the identical `(temperature, topK, topP)` filtering MUST be
+ * applied both when sampling draft token `d` from `q` and when computing `(q, p)` passed to
+ * division-free rejection sampling and residual correction.
+ */
+export interface DorySamplingConfig {
+  /** Sampling temperature (`>= 0`; `0` = deterministic greedy argmax). */
+  readonly temperature: number;
+  /** Top-k cutoff (`0` = disabled, matching production `top_k = 0`; positive integer `1..V`). */
+  readonly topK: number;
+  /** Nucleus cumulative probability threshold in `(0, 1]` (`1.0` = disabled). */
+  readonly topP: number;
+}
+
+export const DORY_DEFAULT_GREEDY_SAMPLING: DorySamplingConfig = Object.freeze({
+  temperature: 0,
+  topK: 0,
+  topP: 1.0,
+});
+
+export const DORY_DEFAULT_STOCHASTIC_SAMPLING: DorySamplingConfig = Object.freeze({
+  temperature: 1.0,
+  topK: 0,
+  topP: 0.95,
+});
+
+/**
+ * Hard invariant error thrown by binary64 rejection sampling when `q[d] <= 0` or when residual
+ * mass `Z = sum_v max(0, p[v] - q[v]) <= 0` under malformed distributions (`Audit §8.2`, Finding 3).
+ * Never silently clamp tiny denominators (`1e-38`) or fall back to `p` (`1e-12`).
+ */
+export class DorySpecSupportInvariantError extends Error {
+  readonly code: 'NON_POSITIVE_PROPOSAL_PROB' | 'ZERO_RESIDUAL_MASS' | 'INVALID_DISTRIBUTION';
+
+  constructor(
+    code: 'NON_POSITIVE_PROPOSAL_PROB' | 'ZERO_RESIDUAL_MASS' | 'INVALID_DISTRIBUTION',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'DorySpecSupportInvariantError';
+    this.code = code;
+  }
+}
+
+/**
+ * Hard `DR18` / `D6` / `DR23` guard error thrown when a caller attempts to mutate `kLoops`,
+ * `kvCacheMode`, or `executionMode` in place on a populated branch without an explicit clean
+ * fork/re-prefill transition, or requests Contract A `self_spec` under `last_loop` / `kLoops !== 4`.
+ */
+export class DorySessionImmutableConfigError extends Error {
+  readonly code:
+    | 'DR18_INCOMPATIBLE_BRANCH_CONFIG'
+    | 'DR18_REPREFILL_REQUIRED'
+    | 'DR23_SPEC_REQUIRES_PER_LOOP_K4';
+
+  constructor(
+    code:
+      | 'DR18_INCOMPATIBLE_BRANCH_CONFIG'
+      | 'DR18_REPREFILL_REQUIRED'
+      | 'DR23_SPEC_REQUIRES_PER_LOOP_K4',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'DorySessionImmutableConfigError';
+    this.code = code;
+  }
+}
+
+// ============================================================================
+// CONTRACT A §6.2 SELF-SPECULATIVE DECODING INTERFACES (Slice 2A: `speculative.ts`)
+// ============================================================================
+
+/** Result of one division-free binary64 acceptance decision (`Audit §8.2`). */
+export interface DoryRejectionSampleResult {
+  readonly draftTokenId: number;
+  /** `q[draftTokenId]` in binary64 (asserted strictly `> 0` in stochastic mode). */
+  readonly draftProb: number;
+  /** `p[draftTokenId]` in binary64. */
+  readonly targetProb: number;
+  /** Uniform variate `r in [0, 1)` used when `p[d] < q[d]`, or `null` on unconditional accept / greedy. */
+  readonly uniformVariate: number | null;
+  /** True iff accepted (`p[d] >= q[d]` unconditionally, `r * q[d] < p[d]` division-free, or greedy match). */
+  readonly accepted: boolean;
+  readonly reason: DoryRejectionReason;
+}
+
+/** Exact binary64 residual correction distribution `p_res[v] = max(0, p[v] - q[v]) / Z` (`Audit §8.2`). */
+export interface DoryResidualDistributionResult {
+  /** Normalized residual distribution (`[V]`). */
+  readonly probs: Float64Array;
+  /** Strictly positive binary64 normalization sum `Z = sum_v max(0, p[v] - q[v]) > 0`. */
+  readonly massZ: number;
+}
+
+/** Result of a standalone single-position rejection + residual draw (Gate 2 Layers 3, 4, 6). */
+export interface DorySpecSingleStepSampleResult {
+  readonly draftTokenId: number;
+  readonly emittedTokenId: number;
+  readonly decision: DoryRejectionSampleResult;
+  readonly residual: DoryResidualDistributionResult | null;
+}
+
+/** Exact analytical 1-step marginal verification result (Gate 2 Layers 1 & 2, `<= 1e-15`). */
+export interface DorySpecAnalyticalMarginalResult {
+  /** Exact marginal probability `P_spec(v)` over all draft outcomes (`[V]`). */
+  readonly marginalProbs: Float64Array;
+  /** Exact total acceptance probability `alpha = sum_v min(p[v], q[v])`. */
+  readonly acceptanceRate: number;
+  /** Exact `max_v |P_spec(v) - p(v)|` in binary64 (must be `<= 1e-15`). */
+  readonly maxAbsError: number;
+}
+
+/** Exact analytical 2-step joint speculative marginal result (`V = 4`, Gate 2 Layer 2, `<= 1e-15`). */
+export interface DorySpecTwoStepAnalyticalResult {
+  readonly vocabSize: number;
+  /** Row-major `[V * V]` exact speculative joint distribution `P_spec(v1, v2)`. */
+  readonly jointProbs: Float64Array;
+  /** Row-major `[V * V]` exact target joint distribution `p_1(v1) * p_2(v2 | v1)`. */
+  readonly targetJointProbs: Float64Array;
+  /** Exact `max_{v1,v2} |P_spec(v1, v2) - P_target(v1, v2)|` in binary64 (must be `<= 1e-15`). */
+  readonly maxAbsError: number;
+}
+
+/** Pearson chi-squared goodness-of-fit summary (Gate 2 Layer 6). */
+export interface DoryPearsonChiSquaredResult {
+  readonly statistic: number;
+  readonly degreesOfFreedom: number;
+  readonly sampleCount: number;
+  readonly minExpectedCount: number;
+  readonly totalVariationDistance: number;
+}
+
+/** Explicit uniform variates for deterministic Gate 2 Layer 3 & 4 boundary tests. */
+export interface DorySpecExplicitVariates {
+  /** Optional explicit draft sampling uniforms `[j]` in `[0, 1)` for `j = 0 .. gammaEff - 1`. */
+  readonly draftSampleUniforms?: readonly number[];
+  /** Optional explicit rejection-test uniforms `[j]` in `[0, 1)` for `j = 0 .. gammaPrime - 1`. */
+  readonly acceptUniforms?: readonly number[];
+  /** Optional explicit uniform in `[0, 1)` for residual correction (`y*`) or bonus (`y_bonus`) sampling. */
+  readonly correctionOrBonusUniform?: number;
+}
+
+/** Per-step shallow (`k = 1`, `output_shallow` Coda) draft record inside one Contract A cycle. */
+export interface DorySpecDraftStepRecord {
+  /** Draft step offset `j in 0 .. draftCount - 1`. */
+  readonly draftOffset: number;
+  /** Absolute KV position `L + j` consumed in this draft step. */
+  readonly absPos: number;
+  /** Input token `d_j` consumed at `absPos`. */
+  readonly inputTokenId: number;
+  /** Proposed next token `d_{j+1}` sampled from `q_{j+1}`. */
+  readonly proposedTokenId: number;
+  /** True iff `proposedTokenId` is in `DORY_EOS_TOKEN_IDS`. */
+  readonly proposedIsEos: boolean;
+  /** Shallow `k = 1` scaled logits (`[V]`). */
+  readonly shallowScaledLogits: Float32Array;
+  /** Shallow `k = 1` filtered binary64 proposal distribution `q_{j+1}` (`[V]`). */
+  readonly proposalProbs: Float64Array;
+  /** Uniform variate used to sample `proposedTokenId` (`null` in greedy mode). */
+  readonly sampleUniform: number | null;
+}
+
+/** Per-position deep (`k = 4`, `output_deep` Coda) batched verify record inside one Contract A cycle. */
+export interface DorySpecVerifyPositionRecord {
+  /** Verify offset `j in 0 .. verifiedPositions - 1`. */
+  readonly verifyOffset: number;
+  /** Absolute KV position `L + j`. */
+  readonly absPos: number;
+  /** Token `d_j` verified at `absPos`. */
+  readonly inputTokenId: number;
+  /** True for `[L .. L + draftCount - 1]` (reused Prelude + Loop-1 KV & `(x, s_1)`); false for bonus slot `L + draftCount`. */
+  readonly reusedPreludeAndLoop1: boolean;
+  /** Deep `k = 4` scaled logits (`[V]`). */
+  readonly deepScaledLogits: Float32Array;
+  /** Deep `k = 4` filtered binary64 target distribution `p_{j+1}` (`[V]`). */
+  readonly targetProbs: Float64Array;
+  /** Rejection decision for `d_{j+1}` (`null` for the extra bonus slot `j === draftCount` or final-slot decode). */
+  readonly rejection: DoryRejectionSampleResult | null;
+}
+
+export interface DorySpecCyclePrefillInput {
+  readonly promptTokens: ArrayLike<number>;
+  readonly params: DoryModelParameters;
+  readonly sampling?: Partial<DorySamplingConfig>;
+  readonly prng?: DoryPrng;
+  /** Optional explicit uniform in `[0, 1)` for sampling initial `pendingToken = d_0`. */
+  readonly initialSampleUniform?: number;
+  readonly ropeTables?: DoryDualRopeTables;
+  readonly sessionBranchId?: string;
+  readonly forwardStepId?: number;
+  readonly captureTrace?: boolean;
+}
+
+/**
+ * Contract A initial prefill output (`Audit §8.1.1` Transition 1):
+ * Commits all `104` banks (`8` Input + `80` Loops 1–4 + `8` Deep Coda + `8` Shallow Coda on cached
+ * `s_1`) to `committedLen = P`, and samples initial unconsumed `pendingToken = d_0` from Deep Coda
+ * at position `P - 1`.
+ */
+export interface DorySpecCyclePrefillResult {
+  readonly contractBadge: typeof DORY_SPEC_CONTRACT_A_BADGE;
+  readonly kvCache: DoryKvCache;
+  readonly promptTokens: Int32Array;
+  readonly committedLen: number;
+  /** Initial emitted token `d_0` sampled from Deep Coda at pos `P - 1` (unconsumed). */
+  readonly pendingToken: number;
+  /** Full emitted sequence `[...promptTokens, pendingToken]`. */
+  readonly emittedTokens: Int32Array;
+  /** `[P, d]` Prelude anchor `x`. */
+  readonly xAnchor: Float32Array;
+  /** Length `4`: `[u_1, u_2, u_3, u_4]`, each `[P, d]`. */
+  readonly loopEntryStates: readonly Float32Array[];
+  /** Length `4`: `[s_1, s_2, s_3, s_4]`, each `[P, d]`. */
+  readonly loopExitStates: readonly Float32Array[];
+  /** Length `4`: exact 8D loop metrics for final prompt token `P - 1`. */
+  readonly lastTokenLoopMetrics: readonly DoryLoopTrajectoryMetrics[];
+  /** Deep `k = 4` scaled logits at pos `P - 1` (`[V]`). */
+  readonly lastDeepScaledLogits: Float32Array;
+  /** Deep `k = 4` filtered binary64 probabilities at pos `P - 1` (`[V]`). */
+  readonly lastDeepProbs: Float64Array;
+  /** Shallow `k = 1` scaled logits at pos `P - 1` (`[V]`). */
+  readonly lastShallowScaledLogits: Float32Array;
+  /** Shallow `k = 1` filtered binary64 probabilities at pos `P - 1` (`[V]`). */
+  readonly lastShallowProbs: Float64Array;
+  readonly haltReason: DoryHaltReason | null;
+  readonly deepTrace: DoryForwardTrace | null;
+  readonly shallowCodaTrace: readonly DoryExecutedSublayerRecord[] | null;
+}
+
+export interface DorySelfSpecCycleInput {
+  /** Contract A `per_loop`, `kLoops = 4`, `includeShallowCoda = true` (`104` banks) cache at `committedLen = L`. */
+  readonly kvCache: DoryKvCache;
+  /** Unconsumed emitted token `d_0` entering at position `L = kvCache.committedLen`. */
+  readonly pendingToken: number;
+  readonly params: DoryModelParameters;
+  /** Draft horizon `gamma` (defaults to `config.speculativeGamma = 4`). */
+  readonly gamma?: number;
+  readonly sampling?: Partial<DorySamplingConfig>;
+  /** Dedicated deterministic PRNG stream for draft/accept/residual/bonus sampling (zero ambient RNG). */
+  readonly prng?: DoryPrng;
+  /** Optional explicit uniform variates for Gate 2 Layer 3 & 4 deterministic testing. */
+  readonly explicitVariates?: DorySpecExplicitVariates;
+  readonly ropeTables?: DoryDualRopeTables;
+  readonly sessionBranchId?: string;
+  readonly forwardStepId?: number;
+  readonly captureTrace?: boolean;
+}
+
+/**
+ * Full execution result of one Contract A §6.2 self-speculative cycle (`Audit §8.1.1` Transitions 2–9).
+ * Preserves the cycle-boundary invariant: all `104` banks end committed strictly through
+ * `[0 .. endCommittedLen - 1]`, with `nextPendingToken` unconsumed (or `null` on accepted draft EOS).
+ */
+export interface DorySelfSpecCycleResult {
+  readonly contractBadge: typeof DORY_SPEC_CONTRACT_A_BADGE;
+  readonly startCommittedLen: number;
+  readonly endCommittedLen: number;
+  readonly inputPendingToken: number;
+  /** Next unconsumed emitted token `d_0'` for the following cycle (or `null` on `full_accept_eos`). */
+  readonly nextPendingToken: number | null;
+  /** Effective draft budget `min(gamma, S_max - 1 - L)`. */
+  readonly gammaEffective: number;
+  /** Actual drafts proposed `gamma' <= gammaEffective` (may stop early on draft EOS). */
+  readonly draftCount: number;
+  readonly draftEndedWithEos: boolean;
+  /** Number of consecutive draft tokens accepted (`0 <= a <= draftCount`). */
+  readonly acceptedDraftCount: number;
+  /** Tokens newly emitted in this cycle (`[d_1..d_a, y*]`, `[d_1..d_{gamma'}, y_bonus]`, `[d_1..d_{gamma'}]`, or `[y_final]`). */
+  readonly emittedTokens: Int32Array;
+  readonly outcome: DorySpecOutcomeKind;
+  readonly haltReason: DoryHaltReason | null;
+  /** Count of positions `[L .. L + draftCount - 1]` whose Prelude + Loop-1 KV & `(x, s_1)` were reused. */
+  readonly reusedActivationPositions: number;
+  /** Total positions evaluated in the batched `k = 4` verify pass (`draftCount`, `draftCount + 1`, or `1` on final slot). */
+  readonly verifiedPositions: number;
+  /** True iff 1-token Shallow Coda catch-up ran on cached `s_1^{(L + draftCount)}` (full non-EOS accept or final slot). */
+  readonly shallowCodaCatchupExecuted: boolean;
+  /** Speculative KV positions rewound atomically across all `104` banks via `cap_swa = 16` + `absPosTag`. */
+  readonly rolledBackPositions: number;
+  /** Per-step shallow `k = 1` draft records (`length === draftCount`). */
+  readonly draftSteps: readonly DorySpecDraftStepRecord[];
+  /** Per-position deep `k = 4` verify records (`length === verifiedPositions`). */
+  readonly verifyPositions: readonly DorySpecVerifyPositionRecord[];
+  /** Exact binary64 residual correction distribution `p_res` on rejection (`null` on full accept or final slot). */
+  readonly residualDistribution: DoryResidualDistributionResult | null;
+  /** Correction token `y*` (rejection), bonus token `y_bonus` (full non-EOS accept), or final-slot token (`null` on `full_accept_eos`). */
+  readonly correctionOrBonusToken: number | null;
+  /** Uniform variate used to sample `correctionOrBonusToken` (`null` in greedy mode or when none sampled). */
+  readonly correctionOrBonusUniform: number | null;
+  /** `[d]` Prelude anchor `x` for the final committed position `endCommittedLen - 1`. */
+  readonly lastCommittedXAnchor: Float32Array;
+  /** Length `4`: `[u_1..u_4]` (`[d]` each) for `endCommittedLen - 1`. */
+  readonly lastCommittedLoopEntryStates: readonly Float32Array[];
+  /** Length `4`: `[s_1..s_4]` (`[d]` each) for `endCommittedLen - 1`. */
+  readonly lastCommittedLoopExitStates: readonly Float32Array[];
+  /** Length `4`: exact 8D trajectory metrics for `endCommittedLen - 1`. */
+  readonly lastCommittedLoopMetrics: readonly DoryLoopTrajectoryMetrics[];
+  /** Deep `k = 4` scaled logits (`[V]`) at `endCommittedLen - 1`. */
+  readonly lastCommittedDeepScaledLogits: Float32Array;
+  /** Deep `k = 4` filtered binary64 probabilities (`[V]`) at `endCommittedLen - 1`. */
+  readonly lastCommittedDeepProbs: Float64Array;
+  /** Optional batched verify trace (`captureTrace === true`) for View 6 & lazy reconstruction. */
+  readonly verifyTrace: DoryForwardTrace | null;
+}
+
+/** Lightweight scalar-only draft summary retained in `DorySessionRecord` (zero `[V]` array retention). */
+export interface DorySpecDraftStepSummary {
+  readonly draftOffset: number;
+  readonly absPos: number;
+  readonly inputTokenId: number;
+  readonly proposedTokenId: number;
+  readonly proposedIsEos: boolean;
+  readonly proposedProb: number;
+}
+
+/** Lightweight scalar-only verify summary retained in `DorySessionRecord` (zero `[V]` array retention). */
+export interface DorySpecVerifyPositionSummary {
+  readonly verifyOffset: number;
+  readonly absPos: number;
+  readonly inputTokenId: number;
+  readonly reusedPreludeAndLoop1: boolean;
+  readonly targetProbForProposed: number | null;
+  readonly rejection: DoryRejectionSampleResult | null;
+}
+
+/** Compact Contract A cycle summary retained in historical `DorySessionRecord`s. */
+export interface DorySpecCycleSummary {
+  readonly contractBadge: typeof DORY_SPEC_CONTRACT_A_BADGE;
+  readonly startCommittedLen: number;
+  readonly endCommittedLen: number;
+  readonly inputPendingToken: number;
+  readonly nextPendingToken: number | null;
+  readonly gammaEffective: number;
+  readonly draftCount: number;
+  readonly draftEndedWithEos: boolean;
+  readonly acceptedDraftCount: number;
+  readonly emittedTokens: Int32Array;
+  readonly outcome: DorySpecOutcomeKind;
+  readonly haltReason: DoryHaltReason | null;
+  readonly reusedActivationPositions: number;
+  readonly verifiedPositions: number;
+  readonly shallowCodaCatchupExecuted: boolean;
+  readonly rolledBackPositions: number;
+  readonly residualMassZ: number | null;
+  readonly correctionOrBonusToken: number | null;
+  readonly draftSteps: readonly DorySpecDraftStepSummary[];
+  readonly verifyPositions: readonly DorySpecVerifyPositionSummary[];
+}
+
+// ============================================================================
+// BOUNDED <= 12.00 MiB DORY SESSION & D10 LRU POOL INTERFACES (Slice 2B: `session.ts`)
+// ============================================================================
+
+export interface DorySessionBounds {
+  /** Hard cap on live retained branches (default `12`). */
+  readonly maxBranches: number;
+  /** Hard cap on retained lightweight history records (default `128`). */
+  readonly maxRecords: number;
+  /** Hard `D10` byte budget for the LRU sparse-checkpoint pool (default `3,145,728 B` = `3.00 MiB`). */
+  readonly maxCheckpointPoolBytes: number;
+  /** Hard ceiling on total session retained `Set<ArrayBufferLike>` bytes (default `12,582,912 B` = `12.00 MiB`). */
+  readonly maxSessionRetainedBytes: number;
+  /** Sparse checkpoint stride in steps per branch (default `4`). */
+  readonly checkpointStride: number;
+}
+
+export const DORY_DEFAULT_SESSION_BOUNDS: DorySessionBounds = Object.freeze({
+  maxBranches: 12,
+  maxRecords: 128,
+  maxCheckpointPoolBytes: DORY_CHECKPOINT_LRU_POOL_BYTES,
+  maxSessionRetainedBytes: DORY_MAX_SESSION_RETAINED_BYTES,
+  checkpointStride: 4,
+});
+
+export interface DoryCheckpointLruEntryMeta {
+  readonly checkpointKey: string;
+  readonly branchId: string;
+  readonly recordId: string;
+  readonly committedLen: number;
+  readonly chunkSizes: readonly number[];
+  /** Exact `measureDoryKvCacheBytes(kvCache).totalUniqueBufferBytes` (payload + tag metadata). */
+  readonly bytes: number;
+  readonly lastUsedSeq: number;
+}
+
+export interface DoryCheckpointLruStats {
+  readonly maxPoolBytes: number;
+  readonly usedBytes: number;
+  readonly entryCount: number;
+  readonly hitCount: number;
+  readonly missCount: number;
+  readonly evictionCount: number;
+  readonly entries: readonly DoryCheckpointLruEntryMeta[];
+}
+
+/**
+ * Deduplicated `Set<ArrayBufferLike>` session memory audit (`D10`, `DR18`, `DR19`).
+ * Accounts for ALL unique underlying `ArrayBuffer`s across live branch head KV caches (including
+ * `absPosTag` & `writerLoopTag`), `D10` LRU sparse-checkpoint pool entries, and compact records.
+ */
+export interface DorySessionMemoryAudit {
+  readonly branchCount: number;
+  readonly recordCount: number;
+  readonly checkpointCount: number;
+  readonly branchKvBytes: number;
+  readonly checkpointPoolBytes: number;
+  readonly recordBytes: number;
+  /** Total unique `ArrayBuffer` bytes retained by `DorySession` (excluding singleton model weights). */
+  readonly totalSessionRetainedBytes: number;
+  /** Singleton model weight bytes (`372,992 B`, never cloned). */
+  readonly singletonWeightBytes: number;
+  /** Deduplicated sum of `totalSessionRetainedBytes` and `singletonWeightBytes`. */
+  readonly totalWithWeightsBytes: number;
+  readonly maxCheckpointPoolBytes: number;
+  readonly maxSessionRetainedBytes: number;
+  readonly withinCheckpointPoolBudget: boolean;
+  readonly withinSessionBudget: boolean;
+  readonly withinTotalBudgetWithWeights: boolean;
+  /** True iff zero `ArrayBuffer`s are aliased across any two branches or pooled checkpoints (`DR18`/`DR19`). */
+  readonly nonAliasedSlabsVerified: boolean;
+}
+
+export interface DorySessionBranchConfig {
+  readonly kLoops: number;
+  readonly kvCacheMode: DoryKvCacheMode;
+  readonly executionMode: DoryExecutionMode;
+  readonly includeShallowCoda: boolean;
+  readonly speculativeGamma: number;
+  readonly sampling: DorySamplingConfig;
+  readonly seed: number;
+}
+
+/** Immutable public view of a session branch (never exposes mutable `DoryKvCache` handles). */
+export interface DorySessionBranchSnapshot {
+  readonly branchId: string;
+  readonly label: string;
+  readonly parentBranchId: string | null;
+  readonly forkRecordId: string | null;
+  readonly forkReason: DorySessionForkReason;
+  readonly config: DorySessionBranchConfig;
+  readonly promptTokens: Int32Array;
+  /** Exact recorded cumulative forward chunk-size partition schedule (`DR24`). */
+  readonly chunkSizes: readonly number[];
+  /** Consumed & committed tokens residing in KV `[0 .. committedLen - 1]`. */
+  readonly committedTokens: Int32Array;
+  readonly committedLen: number;
+  /** Next unconsumed emitted token `d_0`, or `null` when halted without pending token. */
+  readonly pendingToken: number | null;
+  /** Full emitted sequence (`committedTokens` + `pendingToken` if non-null). */
+  readonly emittedTokens: Int32Array;
+  readonly recordIds: readonly string[];
+  readonly headRecordId: string;
+  readonly haltReason: DoryHaltReason | null;
+  readonly kvBankCount: number;
+  /** Exact `measureDoryKvCacheBytes(branchKv).totalUniqueBufferBytes` (payload + tag metadata). */
+  readonly kvBytes: number;
+  readonly createdAtSeq: number;
+  readonly lastActiveSeq: number;
+}
+
+/**
+ * Compact immutable history record retained in `DorySession` (`<= 128` records).
+ * NEVER retains full sublayer traces or aliased `DoryKvCache` slabs; full step traces are
+ * reconstructed on demand at 0-ULP via `reconstructStepTrace(recordId)` replaying exact `chunkSizes[]`.
+ */
+export interface DorySessionRecord {
+  readonly recordId: string;
+  readonly branchId: string;
+  readonly parentRecordId: string | null;
+  readonly stepIndex: number;
+  readonly forwardStepId: number;
+  readonly kind: DorySessionRecordKind;
+  readonly kLoops: number;
+  readonly kvCacheMode: DoryKvCacheMode;
+  readonly executionMode: DoryExecutionMode;
+  readonly sampling: DorySamplingConfig;
+  readonly startPos: number;
+  readonly endPos: number;
+  readonly committedLen: number;
+  readonly pendingToken: number | null;
+  /** Tokens consumed during this step / cycle (`[startPos .. endPos - 1]` or `[L .. L + a]`). */
+  readonly inputTokens: Int32Array;
+  /** Tokens newly emitted by this step / cycle. */
+  readonly emittedTokens: Int32Array;
+  /** Cumulative committed tokens `[0 .. committedLen - 1]` immediately after this record. */
+  readonly committedSequence: Int32Array;
+  /** Exact cumulative chunk-size partition schedule immediately BEFORE this record (`DR24`). */
+  readonly chunkSizesBefore: readonly number[];
+  /** Exact cumulative chunk-size partition schedule immediately AFTER this record (`DR24`). */
+  readonly chunkSizesAfter: readonly number[];
+  /** Compact `[V]` scaled logits of the final committed position (`256 B`). */
+  readonly lastTokenScaledLogits: Float32Array;
+  /** Compact `[V]` binary64 probabilities of the final committed position (`512 B`). */
+  readonly lastTokenProbs: Float64Array;
+  /** Compact `[d]` Prelude anchor `x` for the final committed position (`32 B`). */
+  readonly lastTokenXAnchor: Float32Array;
+  /** Compact `k` `[d]` loop-entry states `u_1..u_k` for the final committed position (`32*k B`). */
+  readonly lastTokenLoopEntryStates: readonly Float32Array[];
+  /** Compact `k` `[d]` loop-exit states `s_1..s_k` for the final committed position (`32*k B`). */
+  readonly lastTokenLoopExitStates: readonly Float32Array[];
+  /** Exact 8D loop trajectory metrics (`k` entries) for the final committed position. */
+  readonly lastTokenLoopMetrics: readonly DoryLoopTrajectoryMetrics[];
+  /** Compact Contract A cycle summary (`non-null` iff `kind === 'spec_cycle'`). */
+  readonly specSummary: DorySpecCycleSummary | null;
+  readonly haltReason: DoryHaltReason | null;
+  readonly createdAtSeq: number;
+}
+
+/** On-demand 0-ULP lazy step-trace reconstruction result (not permanently retained by `DorySession`). */
+export interface DoryReconstructedStepResult {
+  readonly recordId: string;
+  readonly branchId: string;
+  readonly kind: DorySessionRecordKind;
+  /** True iff reconstruction started from a pooled `D10` LRU checkpoint; false if replayed from branch root. */
+  readonly usedCheckpoint: boolean;
+  /** Record ID of the checkpoint hit (or `null` on cold replay from empty cache). */
+  readonly checkpointHitRecordId: string | null;
+  /** Exact chunk sizes replayed prior to executing the target step (`DR24`). */
+  readonly replayedChunkSizes: readonly number[];
+  /** Full traced forward chunk result (`non-null` for `'prefill' | 'chunk' | 'decode_step'`). */
+  readonly forwardResult: DoryForwardChunkResult | null;
+  /** Full traced Contract A prefill result (`non-null` for `'spec_prefill'`). */
+  readonly specPrefillResult: DorySpecCyclePrefillResult | null;
+  /** Full traced Contract A speculative cycle result (`non-null` for `'spec_cycle'`). */
+  readonly specCycleResult: DorySelfSpecCycleResult | null;
+  /** Non-aliased post-step `DoryKvCache` snapshot (`committedLen === record.committedLen`). */
+  readonly postStepKvCache: DoryKvCache;
+}
+
+/**
+ * View 2 read-only `Diagnostic Counterfactual` Coda evaluation at intermediate loop `t in 1..k`
+ * evaluated strictly against committed historical Deep Coda KV (`writeKv: false`, zero KV mutation).
+ */
+export interface DoryCounterfactualCodaResult {
+  readonly badge: typeof DORY_COUNTERFACTUAL_CODA_BADGE;
+  readonly recordId: string;
+  readonly loopIteration: number;
+  readonly kLoops: number;
+  readonly absTokenPos: number;
+  readonly codaHidden: Float32Array;
+  readonly rawLogits: Float32Array;
+  readonly scaledLogits: Float32Array;
+  readonly probs: Float64Array;
+}
+
+export interface DorySessionStartBranchOptions {
+  readonly label?: string;
+  readonly promptTokens?: ArrayLike<number>;
+  /**
+   * Optional explicit prefill chunk partition summing to `promptTokens.length`
+   * (e.g. `[4, 8]` for `DR17`/`DR24` `last_loop` partition divergence & lazy replay).
+   * Valid only when `executionMode === 'standard'`.
+   */
+  readonly prefillChunkSizes?: readonly number[];
+  readonly kLoops?: number;
+  readonly kvCacheMode?: DoryKvCacheMode;
+  readonly executionMode?: DoryExecutionMode;
+  readonly speculativeGamma?: number;
+  readonly sampling?: Partial<DorySamplingConfig>;
+  readonly seed?: number;
+  /** Optional explicit uniform in `[0, 1)` for sampling the initial `pendingToken = d_0`. */
+  readonly initialSampleUniform?: number;
+}
+
+export interface DorySessionCreateOptions {
+  readonly params?: DoryModelParameters;
+  readonly ropeTables?: DoryDualRopeTables;
+  readonly bounds?: Partial<DorySessionBounds>;
+  readonly initialBranch?: DorySessionStartBranchOptions;
+  /** Defaults to `true` (starts an initial branch immediately); set `false` for empty session. */
+  readonly autoStartInitialBranch?: boolean;
+}
+
+export interface DorySessionStepOptions {
+  /** Optional explicit branch ID to step from its tip; defaults to `activeBranchId` (copy-on-step if rewound). */
+  readonly branchId?: string;
+  /** Optional explicit uniform in `[0, 1)` for standard decode token sampling. */
+  readonly sampleUniform?: number;
+  /** Optional explicit uniform variates for Contract A speculative cycle testing. */
+  readonly specExplicitVariates?: DorySpecExplicitVariates;
+}
+
+export interface DorySessionAppendChunkOptions {
+  readonly branchId?: string;
+  readonly sampleUniform?: number;
+}
+
+export interface DorySessionForkOptions {
+  readonly label?: string;
+  readonly kLoops?: number;
+  readonly kvCacheMode?: DoryKvCacheMode;
+  readonly executionMode?: DoryExecutionMode;
+  readonly speculativeGamma?: number;
+  readonly sampling?: Partial<DorySamplingConfig>;
+  readonly seed?: number;
+  /**
+   * Required (`true`) whenever `(kLoops, kvCacheMode, executionMode)` differs from the source
+   * branch (`DR18` / `D6`): spawns a fresh re-prefilled branch from prompt tokens & seed with
+   * non-aliased KV slabs without ever mutating the source branch.
+   */
+  readonly allowRePrefill?: boolean;
+  /** Optional prefill chunk schedule when `allowRePrefill === true` and `executionMode === 'standard'`. */
+  readonly prefillChunkSizes?: readonly number[];
+}
+
+export interface DorySessionSwitchConfigOptions {
+  readonly branchId?: string;
+  readonly label?: string;
+  readonly kLoops?: number;
+  readonly kvCacheMode?: DoryKvCacheMode;
+  readonly executionMode?: DoryExecutionMode;
+  readonly speculativeGamma?: number;
+  readonly sampling?: Partial<DorySamplingConfig>;
+  readonly seed?: number;
+  readonly prefillChunkSizes?: readonly number[];
+}
+
+export interface DorySessionSnapshot {
+  readonly modelWeightId: string;
+  readonly activeBranchId: string | null;
+  readonly activeRecordId: string | null;
+  readonly bounds: DorySessionBounds;
+  readonly branches: readonly DorySessionBranchSnapshot[];
+  readonly recordCount: number;
+  readonly checkpointStats: DoryCheckpointLruStats;
+}
+
+export interface DorySession {
+  readonly params: DoryModelParameters;
+  readonly ropeTables: DoryDualRopeTables;
+  readonly bounds: DorySessionBounds;
+  getSnapshot(): DorySessionSnapshot;
+  getActiveBranch(): DorySessionBranchSnapshot | null;
+  getActiveRecord(): DorySessionRecord | null;
+  getBranch(branchId: string): DorySessionBranchSnapshot | null;
+  getRecord(recordId: string): DorySessionRecord | null;
+  listBranches(): readonly DorySessionBranchSnapshot[];
+  listBranchRecords(branchId: string): readonly DorySessionRecord[];
+  setActiveBranch(branchId: string): DorySessionBranchSnapshot;
+  seekRecord(recordId: string): DorySessionRecord;
+  /** Starts a fresh root branch with non-aliased KV slabs (`DR18`/`DR19`). */
+  startBranch(options?: DorySessionStartBranchOptions): DorySessionRecord;
+  /**
+   * Appends an explicit token chunk to a `'standard'` branch (recording exact chunk size in
+   * `chunkSizes[]` for `DR24` replay). Throws if `executionMode !== 'standard'` or capacity exceeded.
+   */
+  appendChunk(
+    chunkTokens: ArrayLike<number>,
+    options?: DorySessionAppendChunkOptions,
+  ): DorySessionRecord;
+  /**
+   * Advances the target branch by one decode step (`'standard'`) or one Contract A cycle (`'self_spec'`).
+   * Stepping the active branch while `activeRecordId` is rewound before its tip automatically performs
+   * a non-aliased copy-on-step fork (`forkReason: 'cursor_fork'`), leaving the source branch immutable.
+   * Throws `RangeError` if the target branch is already halted (`eos` / `capacity_exhausted`).
+   */
+  step(options?: DorySessionStepOptions): DorySessionRecord;
+  /**
+   * Forks an immutable branch from `fromRecordId`:
+   *   - Compatible `(kLoops, kvCacheMode, executionMode)`: clones the reconstructed KV cache at
+   *     `fromRecordId` via `cloneDoryKvCache` (strictly non-aliased `ArrayBuffer`s — `DR18`/`DR19`).
+   *   - Incompatible `(kLoops, kvCacheMode, executionMode)`: throws `DorySessionImmutableConfigError`
+   *     unless `allowRePrefill === true`, in which case spawns a clean re-prefilled branch from
+   *     prompt tokens & seed without mutating the source branch (`D6`).
+   */
+  forkBranch(fromRecordId: string, options?: DorySessionForkOptions): DorySessionRecord;
+  /**
+   * Explicit `DR18` / `D6` mid-session depth/policy transition: NEVER mutates the source branch's
+   * KV slabs; always forks/re-prefills a clean branch with non-aliased slabs from prompt tokens & seed.
+   */
+  switchDepthOrPolicy(options: DorySessionSwitchConfigOptions): DorySessionRecord;
+  /**
+   * Enforces `DR18`: throws `DorySessionImmutableConfigError` if `requested` conflicts with the
+   * branch's immutable `(kLoops, kvCacheMode, executionMode)`.
+   */
+  assertCompatibleBranchConfig(
+    branchId: string,
+    requested: Partial<Pick<DorySessionBranchConfig, 'kLoops' | 'kvCacheMode' | 'executionMode'>>,
+  ): void;
+  /**
+   * Reconstructs a strictly non-aliased 0-ULP post-step `DoryKvCache` at any historical `recordId`,
+   * consulting the `D10` `3.00 MiB` LRU pool first and replaying exact recorded `chunkSizes[]` (`DR24`).
+   */
+  reconstructKvCacheAtRecord(recordId: string): DoryKvCache;
+  /**
+   * Lazily reconstructs the exact 0-ULP full traced forward pass or Contract A speculative cycle for
+   * any historical `recordId`, replaying exact `chunkSizes[]` under `last_loop` (`DR24`).
+   */
+  reconstructStepTrace(recordId: string): DoryReconstructedStepResult;
+  /**
+   * View 2 read-only `Diagnostic Counterfactual` Coda evaluation at intermediate loop `t in 1..k`
+   * against committed historical Deep Coda KV (`writeKv: false`, zero KV/session mutation).
+   */
+  evaluateCounterfactualIntermediateCoda(
+    recordId: string,
+    loopIteration: number,
+  ): DoryCounterfactualCodaResult;
+  getCheckpointLruStats(): DoryCheckpointLruStats;
+  measureMemory(): DorySessionMemoryAudit;
+  reset(options?: DorySessionStartBranchOptions): DorySessionRecord | null;
+}
+
+// ============================================================================
+// FROZEN DORY2 SLICE 2A & SLICE 2B MODULE EXPORT CONTRACTS
+// ============================================================================
+//
+// Slice 2A (`src/dory/speculative.ts`) MUST implement `DorySpeculativeModuleContract`.
+// Slice 2B (`src/dory/session.ts`)     MUST implement `DorySessionModuleContract`.
+// Once merged, `src/dory/index.ts` re-exports both modules cleanly.
+
+export interface DorySpeculativeModuleContract {
+  normalizeSamplingConfig(partial?: Partial<DorySamplingConfig>): DorySamplingConfig;
+  logitsToSamplingProbsFloat64(
+    scaledLogits: ArrayLike<number>,
+    offset?: number,
+    length?: number,
+    sampling?: Partial<DorySamplingConfig>,
+  ): Float64Array;
+  sampleCategoricalFloat64(probs: Float64Array, uniformVariate: number): number;
+  evaluateRejectionAcceptance(
+    draftTokenId: number,
+    targetProbs: Float64Array,
+    proposalProbs: Float64Array,
+    uniformVariate: number | null,
+    isGreedy?: boolean,
+  ): DoryRejectionSampleResult;
+  computeRejectionResidualFloat64(
+    targetProbs: Float64Array,
+    proposalProbs: Float64Array,
+  ): DoryResidualDistributionResult;
+  sampleSpecSingleStep(
+    targetProbs: Float64Array,
+    proposalProbs: Float64Array,
+    prng?: DoryPrng,
+    explicitUniforms?: {
+      readonly draftUniform?: number;
+      readonly acceptUniform?: number;
+      readonly residualUniform?: number;
+    },
+    isGreedy?: boolean,
+  ): DorySpecSingleStepSampleResult;
+  enumerateSpecSingleStepExact(
+    targetProbs: Float64Array,
+    proposalProbs: Float64Array,
+  ): DorySpecAnalyticalMarginalResult;
+  enumerateSpecTwoStepExact(
+    targetP1: Float64Array,
+    proposalQ1: Float64Array,
+    targetP2ByToken1: readonly Float64Array[],
+    proposalQ2ByToken1: readonly Float64Array[],
+  ): DorySpecTwoStepAnalyticalResult;
+  computePearsonChiSquared(
+    observedCounts: ArrayLike<number>,
+    expectedProbs: ArrayLike<number>,
+    sampleCount: number,
+  ): DoryPearsonChiSquaredResult;
+  prefillDorySelfSpec(input: DorySpecCyclePrefillInput): DorySpecCyclePrefillResult;
+  runDorySelfSpecCycle(input: DorySelfSpecCycleInput): DorySelfSpecCycleResult;
+  summarizeSelfSpecCycle(result: DorySelfSpecCycleResult): DorySpecCycleSummary;
+}
+
+export interface DorySessionModuleContract {
+  createDorySession(options?: DorySessionCreateOptions): DorySession;
+  measureDorySessionMemory(session: DorySession): DorySessionMemoryAudit;
 }

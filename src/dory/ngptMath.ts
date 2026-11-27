@@ -571,7 +571,7 @@ export function anchorMapJacobianNorm(
 ): DoryAnchorJacobianMetrics {
   const clampedAngle = Math.max(0, Math.min(Math.PI, Math.abs(angleRadians)));
   const angleDegrees = (clampedAngle * 180) / Math.PI;
-  const cosHalf = Math.max(0, Math.cos(clampedAngle * 0.5));
+  const cosHalf = clampedAngle >= Math.PI ? 0 : Math.max(0, Math.cos(clampedAngle * 0.5));
   const sumNormIdeal = 2 * cosHalf;
   const idealJacobianNorm = sumNormIdeal === 0 ? Infinity : 1 / sumNormIdeal;
   const epsStabilizedJacobianNorm = 1 / Math.sqrt(4 * cosHalf * cosHalf + eps);

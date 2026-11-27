@@ -488,6 +488,7 @@ export function runDoryLmHead(
  */
 export function runDoryOutputCoda(input: DoryStageCodaInput): DoryStageCodaResult {
   const { state, seqLen, startPos, kLoops, params, kvCache } = input;
+  validateDoryRecurrentLoops(kLoops);
   const config = params.config;
   const d = config.hiddenSize;
 
