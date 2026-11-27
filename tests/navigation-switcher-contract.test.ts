@@ -31,6 +31,14 @@ const ALL_FORBIDDEN_APP_MARKERS = [
   'PackedLinearImageCodec',
   'UNI_DYADIC_YARN_INV_FREQ',
   'buildUniOpdExplorerScene',
+  'DORY_MINI_CONFIG',
+  'DorySession',
+  'buildDorySpatialScene',
+  'DORY_DISCREPANCY_LEDGER',
+  'runDorySelfSpecCycle',
+  'dory-nlerp-residual',
+  '__dorySpatialDebug',
+  'output_shallow',
 ] as const;
 
 type Listener = (ev: unknown) => void;
@@ -136,25 +144,34 @@ class MockElement {
 
 describe('Shared Multi-Model Top-Bar Switcher Contract', () => {
   it('resolves canonical model hrefs cleanly for both root / and GitHub Pages /llm-viz/', () => {
-    expect(MODEL_REGISTRY.map((e) => e.id)).toEqual(['nano', 'twotower', 'diffusion', 'uni']);
+    expect(MODEL_REGISTRY.map((e) => e.id)).toEqual([
+      'nano',
+      'twotower',
+      'diffusion',
+      'uni',
+      'dory',
+    ]);
 
     expect(MODEL_REGISTRY.map((e) => resolveModelHref('/', e))).toEqual([
       '/',
       '/twotower/',
       '/diffusion/',
       '/uni/',
+      '/dory/',
     ]);
     expect(MODEL_REGISTRY.map((e) => resolveModelHref('/llm-viz/', e))).toEqual([
       '/llm-viz/',
       '/llm-viz/twotower/',
       '/llm-viz/diffusion/',
       '/llm-viz/uni/',
+      '/llm-viz/dory/',
     ]);
     expect(MODEL_REGISTRY.map((e) => resolveModelHref('/llm-viz', e))).toEqual([
       '/llm-viz/',
       '/llm-viz/twotower/',
       '/llm-viz/diffusion/',
       '/llm-viz/uni/',
+      '/llm-viz/dory/',
     ]);
   });
 
@@ -169,7 +186,9 @@ describe('Shared Multi-Model Top-Bar Switcher Contract', () => {
       for (const marker of ALL_FORBIDDEN_APP_MARKERS) {
         expect(src, `${rel} must not contain forbidden marker "${marker}"`).not.toContain(marker);
       }
-      expect(src).not.toMatch(/from\s+['"][^'"]*(?:twotower|diffusion|uni|ui\/controls|ui\/overlay)/);
+      expect(src).not.toMatch(
+        /from\s+['"][^'"]*(?:twotower|diffusion|uni|dory|ui\/controls|ui\/overlay)/,
+      );
     }
   });
 
@@ -210,6 +229,7 @@ describe('Shared Multi-Model Top-Bar Switcher Contract', () => {
         '/llm-viz/twotower/',
         '/llm-viz/diffusion/',
         '/llm-viz/uni/',
+        '/llm-viz/dory/',
       ]);
       expect(handle.links[2]!.getAttribute('aria-current')).toBe('page');
       expect(handle.links[0]!.getAttribute('aria-current')).toBeNull();
@@ -238,17 +258,18 @@ describe('Shared Multi-Model Top-Bar Switcher Contract', () => {
       });
       expect(mockDoc.activeElement).toBe(handle.links[1]);
 
+      const lastIdx = handle.links.length - 1;
       (handle.menu as unknown as MockElement).dispatch('keydown', {
         key: 'End',
         target: handle.links[1],
         preventDefault: () => {},
         stopPropagation: () => {},
       });
-      expect(mockDoc.activeElement).toBe(handle.links[3]);
+      expect(mockDoc.activeElement).toBe(handle.links[lastIdx]);
 
       (handle.menu as unknown as MockElement).dispatch('keydown', {
         key: 'Home',
-        target: handle.links[3],
+        target: handle.links[lastIdx],
         preventDefault: () => {},
         stopPropagation: () => {},
       });
