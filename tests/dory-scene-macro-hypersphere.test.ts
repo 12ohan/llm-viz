@@ -43,6 +43,7 @@ import { normalize3, sub3 } from '../src/render/camera';
 import { pickMacroBay, type PickBox, type Ray } from '../src/render/pick';
 import type { Vec3 } from '../src/render/primitives';
 import { localToWorldOnFrame } from '../src/render/sheetFrame';
+import { computeSheetCellWorldPos } from '../src/shared/overlayLayout';
 import {
   SHEET_INSTANCE_FLOATS,
   SHEET_KIND_CAUSAL_SCORES,
@@ -1222,20 +1223,50 @@ describe('Gate 3 Provenance Guards — DR20 Hard Throw, DR21 Raycast Picking, Un
     expect(shallowBank96.cacheRole).toBe('spec_draft');
     expect(shallowBank96.kvPolicy).toBe('per_loop');
 
-    // Live XY-oriented 8-channel sheet cell picking + hover popover round-trip on View 1
-    const macroAnchorCell = pickByPartId(macroUnrolled, 'anchor_x_s0', 0, 5);
-    expect(macroAnchorCell.row).toBe(0);
-    expect(macroAnchorCell.col).toBe(5);
-    expect(macroAnchorCell.tensorKey).toBe('x_anchor');
-    const macroWithHover = buildDoryMacroScene(specSession, {
+    // Live XY-oriented 8-channel sheet cell picking + exact per-cell world anchor popover on View 1
+    const macroAnchorCell0 = pickByPartId(macroUnrolled, 'anchor_x_s0', 0, 0);
+    const macroAnchorCell5 = pickByPartId(macroUnrolled, 'anchor_x_s0', 0, 5);
+    expect(macroAnchorCell5.row).toBe(0);
+    expect(macroAnchorCell5.col).toBe(5);
+    expect(macroAnchorCell5.tensorKey).toBe('x_anchor');
+    const macroWithHover0 = buildDoryMacroScene(specSession, {
       displayMode: 'unrolled',
       recordId: specRec.recordId,
-      hoveredCell: macroAnchorCell,
+      hoveredCell: macroAnchorCell0,
     });
-    expect(macroWithHover.activeCellPopover).not.toBeNull();
-    expect(macroWithHover.activeCellPopover!.coordLabel).toContain('ch 5');
+    const macroWithHover5 = buildDoryMacroScene(specSession, {
+      displayMode: 'unrolled',
+      recordId: specRec.recordId,
+      hoveredCell: macroAnchorCell5,
+    });
+    expect(macroWithHover0.activeCellPopover).not.toBeNull();
+    expect(macroWithHover5.activeCellPopover).not.toBeNull();
+    expect(macroWithHover5.activeCellPopover!.coordLabel).toContain('ch 5');
+    // Popover world MUST anchor to exact hovered cell via computeSheetCellWorldPos (not frame.center!)
+    const anchorBox = macroUnrolled.pickBoxes.find((pb) => pb.partId === 'anchor_x_s0')!;
+    const expectedAnchorWorld5 = computeSheetCellWorldPos(
+      {
+        originWorld: anchorBox.frame!.center,
+        extent: anchorBox.frame!.extent,
+        axisU: anchorBox.frame!.axisU,
+        axisN: anchorBox.frame!.axisN,
+        cols: 8,
+        rows: 1,
+      },
+      5,
+      0,
+      0.5,
+    );
+    expect(macroWithHover5.activeCellPopover!.world[0]).toBeCloseTo(expectedAnchorWorld5[0], 5);
+    expect(macroWithHover5.activeCellPopover!.world[1]).toBeCloseTo(expectedAnchorWorld5[1], 5);
+    expect(macroWithHover5.activeCellPopover!.world[2]).toBeCloseTo(expectedAnchorWorld5[2], 5);
+    expect(macroWithHover5.activeCellPopover!.world[0]).not.toBeCloseTo(
+      macroWithHover0.activeCellPopover!.world[0],
+      3,
+    );
+    expect(macroWithHover5.activeCellPopover!.world[0]).not.toBeCloseTo(anchorBox.frame!.center[0], 3);
 
-    // Folded trajectory multi-row sheet cell picking
+    // Folded trajectory multi-row sheet cell picking + per-cell popover anchor check
     const macroFolded = buildDoryMacroScene(specSession, {
       displayMode: 'folded',
       recordId: specRec.recordId,
@@ -1243,6 +1274,29 @@ describe('Gate 3 Provenance Guards — DR20 Hard Throw, DR21 Raycast Picking, Un
     const trajCell = pickByPartId(macroFolded, 'folded_latent_trajectory', 3, 6);
     expect(trajCell.row).toBe(3);
     expect(trajCell.col).toBe(6);
+    const macroFoldedHover = buildDoryMacroScene(specSession, {
+      displayMode: 'folded',
+      recordId: specRec.recordId,
+      hoveredCell: trajCell,
+    });
+    const trajBox = macroFolded.pickBoxes.find((pb) => pb.partId === 'folded_latent_trajectory')!;
+    const expectedTrajWorld = computeSheetCellWorldPos(
+      {
+        originWorld: trajBox.frame!.center,
+        extent: trajBox.frame!.extent,
+        axisU: trajBox.frame!.axisU,
+        axisN: trajBox.frame!.axisN,
+        cols: 8,
+        rows: 5,
+      },
+      6,
+      3,
+      0.5,
+    );
+    expect(macroFoldedHover.activeCellPopover).not.toBeNull();
+    expect(macroFoldedHover.activeCellPopover!.world[0]).toBeCloseTo(expectedTrajWorld[0], 5);
+    expect(macroFoldedHover.activeCellPopover!.world[1]).toBeCloseTo(expectedTrajWorld[1], 5);
+    expect(macroFoldedHover.activeCellPopover!.world[2]).toBeCloseTo(expectedTrajWorld[2], 5);
 
     // 2. View 2 (hypersphere) real raycast across all 3D sheets, PCA nodes, span nodes & popovers
     const stdSession = createDorySession({
@@ -1309,6 +1363,30 @@ describe('Gate 3 Provenance Guards — DR20 Hard Throw, DR21 Raycast Picking, Un
       expect(withPopover.activeCellPopover, `Missing popover for '${target.partId}'`).not.toBeNull();
       expect(withPopover.activeCellPopover!.badge).toContain(target.expectedBadgeSubstr);
       for (const coord of withPopover.activeCellPopover!.world) {
+        expect(Number.isFinite(coord)).toBe(true);
+      }
+    }
+
+    // Hovering raised 3D extrapolation bars (`nlerp_extrap_ch_6` & `nlerp_extrap_ch_7`) via full-scene
+    // raycast MUST return the DR7 unclamped extrapolation popover instead of null!
+    for (const ch of DORY_PLANTED_EXTRAPOLATION_SPEC.channelIndices) {
+      const barPartId = `nlerp_extrap_ch_${ch}`;
+      const barCell = pickByPartId(sphereScene, barPartId);
+      expect(barCell.partId).toBe(barPartId);
+      expect(barCell.tensorKey).toBe('nlerp_effective_alpha');
+      const withBarPopover = buildDoryHypersphereScene(stdSession, {
+        physicalLayerIdx: 16,
+        loopIteration: 2,
+        includeCounterfactualCoda: true,
+        counterfactualLoop: 1,
+        hoveredCell: barCell,
+      });
+      expect(withBarPopover.activeCellPopover, `Missing DR7 popover for '${barPartId}'`).not.toBeNull();
+      expect(withBarPopover.activeCellPopover!.badge).toContain('DR7 UNCLAMPED EXTRAPOLATION');
+      expect(withBarPopover.activeCellPopover!.tensorLabel).toContain(`alpha_hat[${ch}]`);
+      expect(withBarPopover.activeCellPopover!.coordLabel).toContain(`ch c=${ch}`);
+      expect(withBarPopover.activeCellPopover!.world[1]).toBeGreaterThan(0.2);
+      for (const coord of withBarPopover.activeCellPopover!.world) {
         expect(Number.isFinite(coord)).toBe(true);
       }
     }

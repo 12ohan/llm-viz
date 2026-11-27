@@ -21,6 +21,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import type { PickHit } from '../src/render/pick';
+import { makeSheetFrame3D } from '../src/render/sheetFrame';
 import {
   SHEET_KIND_CAUSAL_SCORES,
   SHEET_KIND_CAUSAL_SOFTMAX,
@@ -55,7 +56,9 @@ import {
   auditAtlasRegions,
   computeDoryAtlasContentKey,
   encodeDoryPickMetadata,
+  ensureDorySessionContext,
   packPickBoxFromAabb,
+  packPickBoxFromFrame,
   pickHitToDoryCell,
   resolveDorySessionContext,
   validateSceneGeometryFinite,
@@ -180,6 +183,10 @@ describe('DORY3 Step 0 — Frozen Spatial Types & Provenance Guards (DR20, DR21,
       expect(desc.atlasBudgetBytes).toBeLessThanOrEqual(DORY_MAX_ATLAS_BYTES);
     }
     expect(DEFAULT_DORY_SPATIAL_FOCUS_STATE.selectedPhysicalLayerIdx).toBe(16);
+    expect(DEFAULT_DORY_SPATIAL_FOCUS_STATE.selectedKeyCol).toBeNull();
+    expect(DEFAULT_DORY_SPATIAL_FOCUS_STATE.selectedRotaryPlane).toBe(0);
+    expect(DEFAULT_DORY_SPATIAL_FOCUS_STATE.swigluOutputDim).toBe(0);
+    expect(DEFAULT_DORY_SPATIAL_FOCUS_STATE.kvCompareLayerIdx).toBe(16);
     expect(DORY_ANTI_SLERP_PLAQUE).toContain('NOT Trigonometric SLERP');
     expect(DORY_NLERP_MARKER).toBe('dory-nlerp-residual');
     expect(DORY_EXPLORATORY_PCA_BADGE).toContain('8D');
@@ -263,6 +270,170 @@ describe('DORY3 Step 0 — Frozen Spatial Types & Provenance Guards (DR20, DR21,
     );
     expect(nanValidation.valid).toBe(false);
     expect(nanValidation.errors.some((e) => e.includes('Non-finite'))).toBe(true);
+  });
+
+  it('validates finiteness of pickBoxes[i].frame, activeCellGrids[i], activeCellPopover, and callouts[i].worldPos', () => {
+    // 1. Valid oriented PickBox frame + masked causal score grid (-Infinity only where masked=1) + valid popover
+    const goodFrame = makeSheetFrame3D([0, 0.2, 0], [1, 0.06, 1]);
+    const validRichScene = makeMinimalValidScene({
+      pickBoxes: [
+        packPickBoxFromFrame(
+          goodFrame,
+          encodeDoryPickMetadata({ physicalLayerIdx: 16, loopIteration: 1, kvHeadIndex: 0 }),
+        ),
+      ],
+      activeCellGrids: [
+        {
+          originWorld: goodFrame.center,
+          extent: goodFrame.extent,
+          axisU: goodFrame.axisU,
+          axisN: goodFrame.axisN,
+          cols: 2,
+          rows: 2,
+          values: new Float32Array([1.0, -Infinity, 0.5, 0.8]),
+          masked: new Uint8Array([0, 1, 0, 0]),
+          format: 'signed',
+          activeCol: 0,
+          activeRow: 0,
+        },
+      ],
+      activeCellPopover: {
+        world: [0.1, 0.25, 0.1],
+        tensorLabel: 'Scores',
+        coordLabel: 'q=0 · k=0',
+        equation: 'q·k / sqrt(d_h)',
+        valueText: '= +1.000',
+        sourceWorlds: [{ world: [-0.2, 0.2, 0.0], role: 'indigo' }],
+      },
+      callouts: [
+        {
+          id: 'c0',
+          title: 'Causal Plate',
+          body: 'Live G-channel mask',
+          tone: 'swa_cyan',
+          worldPos: [0, 0.5, 0],
+        },
+      ],
+    });
+    expect(validateSceneGeometryFinite(validRichScene)).toEqual({ valid: true, errors: [] });
+
+    // 2. Non-finite PickBox frame vector is rejected
+    const badFrameRes = validateSceneGeometryFinite(
+      makeMinimalValidScene({
+        pickBoxes: [
+          {
+            ...packPickBoxFromFrame(
+              goodFrame,
+              encodeDoryPickMetadata({ physicalLayerIdx: 16, loopIteration: 1 }),
+            ),
+            frame: { ...goodFrame, axisN: [0, Number.NaN, 0] },
+          },
+        ],
+      }),
+    );
+    expect(badFrameRes.valid).toBe(false);
+    expect(badFrameRes.errors.some((e) => e.includes('pickBoxes[0].frame.axisN'))).toBe(true);
+
+    // 3. Unmasked -Infinity, masked NaN, masked +Infinity, and non-finite grid coordinates are rejected
+    const unmaskedNegInf = validateSceneGeometryFinite(
+      makeMinimalValidScene({
+        activeCellGrids: [
+          {
+            originWorld: [0, 0, 0],
+            extent: [1, 0.06, 1],
+            axisU: [1, 0, 0],
+            axisN: [0, 1, 0],
+            cols: 2,
+            rows: 1,
+            values: new Float32Array([1.0, -Infinity]),
+          },
+        ],
+      }),
+    );
+    expect(unmaskedNegInf.valid).toBe(false);
+    expect(unmaskedNegInf.errors.some((e) => e.includes('activeCellGrids[0].values[1]'))).toBe(true);
+
+    const maskedNan = validateSceneGeometryFinite(
+      makeMinimalValidScene({
+        activeCellGrids: [
+          {
+            originWorld: [0, 0, 0],
+            extent: [1, 0.06, 1],
+            axisU: [1, 0, 0],
+            axisN: [0, 1, 0],
+            cols: 2,
+            rows: 1,
+            values: new Float32Array([1.0, Number.NaN]),
+            masked: new Uint8Array([0, 1]),
+          },
+        ],
+      }),
+    );
+    expect(maskedNan.valid).toBe(false);
+
+    const badGridCoord = validateSceneGeometryFinite(
+      makeMinimalValidScene({
+        activeCellGrids: [
+          {
+            originWorld: [Number.POSITIVE_INFINITY, 0, 0],
+            extent: [1, 0.06, 1],
+            axisU: [1, 0, 0],
+            axisN: [0, 1, 0],
+            cols: 1,
+            rows: 1,
+            values: new Float32Array([0.5]),
+          },
+        ],
+      }),
+    );
+    expect(badGridCoord.valid).toBe(false);
+    expect(badGridCoord.errors.some((e) => e.includes('activeCellGrids[0].originWorld'))).toBe(true);
+
+    // 4. Non-finite activeCellPopover.world, sourceWorlds, and callout.worldPos are rejected
+    const badPopoverWorld = validateSceneGeometryFinite(
+      makeMinimalValidScene({
+        activeCellPopover: {
+          world: [0, Number.NaN, 0],
+          tensorLabel: 'Bad',
+          coordLabel: 'r0',
+          equation: 'x',
+          valueText: '0',
+        },
+      }),
+    );
+    expect(badPopoverWorld.valid).toBe(false);
+    expect(badPopoverWorld.errors.some((e) => e.includes('activeCellPopover.world'))).toBe(true);
+
+    const badPopoverSource = validateSceneGeometryFinite(
+      makeMinimalValidScene({
+        activeCellPopover: {
+          world: [0, 0, 0],
+          tensorLabel: 'BadSource',
+          coordLabel: 'r0',
+          equation: 'x',
+          valueText: '0',
+          sourceWorlds: [{ world: [0, Number.NEGATIVE_INFINITY, 0], role: 'teal' }],
+        },
+      }),
+    );
+    expect(badPopoverSource.valid).toBe(false);
+    expect(badPopoverSource.errors.some((e) => e.includes('sourceWorlds[0]'))).toBe(true);
+
+    const badCalloutWorld = validateSceneGeometryFinite(
+      makeMinimalValidScene({
+        callouts: [
+          {
+            id: 'bad_co',
+            title: 'Bad',
+            body: 'Bad',
+            tone: 'warn',
+            worldPos: [Number.NaN, 0, 0],
+          },
+        ],
+      }),
+    );
+    expect(badCalloutWorld.valid).toBe(false);
+    expect(badCalloutWorld.errors.some((e) => e.includes('callouts[0].worldPos'))).toBe(true);
   });
 
   it('round-trips DR21 metadata via groupIndex/tapIndex/semanticTag without touching src/render/pick.ts', () => {
@@ -405,6 +576,10 @@ describe('DORY3 Step 0 — Frozen Spatial Types & Provenance Guards (DR20, DR21,
     const memBefore = session.measureMemory();
 
     const ctx = resolveDorySessionContext(session, cycRec.recordId);
+    expect(ensureDorySessionContext(ctx, cycRec.recordId)).toBe(ctx);
+    expect(ensureDorySessionContext(session, cycRec.recordId).record.recordId).toBe(cycRec.recordId);
+    const firstRecId = session.getActiveBranch()!.recordIds[0]!;
+    expect(ensureDorySessionContext(ctx, firstRecId).record.recordId).toBe(firstRecId);
     expect(ctx.executionMode).toBe('self_spec');
     expect(ctx.kLoops).toBe(4);
     expect(ctx.provenanceBadges.some((b) => b.label === DORY_SPEC_CONTRACT_A_BADGE)).toBe(true);

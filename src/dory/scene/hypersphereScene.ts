@@ -977,6 +977,10 @@ interface PlacedSheetRecord {
   readonly grid: ActiveSheetCellGrid;
 }
 
+function computeExtrapBarHeight(effVal: number): number {
+  return Math.min(1.1, Math.max(0.24, effVal * 0.42));
+}
+
 function buildHoveredCellPopover(
   hovered: DoryPickIdentity | null | undefined,
   sheetsByPartId: ReadonlyMap<string, PlacedSheetRecord>,
@@ -988,6 +992,30 @@ function buildHoveredCellPopover(
   finalProbsT1: Float64Array,
 ): CellPopoverSpec | null {
   if (!hovered || !hovered.partId) return null;
+
+  // Handle hovering the raised 3D extrapolation bars sitting above `nlerp_effective_alpha`
+  // channels with unclamped `|alpha_hat| > 1` (e.g. planted channels [6, 7] on Phys L16, DR7).
+  const extrapMatch = /^nlerp_extrap_ch_(\d+)$/.exec(hovered.partId);
+  if (extrapMatch !== null) {
+    const effRec = sheetsByPartId.get('nlerp_effective_alpha');
+    if (!effRec) return null;
+    const ch = clampInt(Number.parseInt(extrapMatch[1]!, 10), 0, effRec.gridCols - 1);
+    const val = effRec.values[ch] ?? spanning.effectiveAlpha[ch] ?? 0;
+    const raw = spanning.rawAlpha[ch] ?? 0;
+    const isExtrap = val > 1.0;
+    const barPos = computeSheetCellWorldPos(effRec.grid, ch, 0, 0.5);
+    const barHeight = computeExtrapBarHeight(val);
+    const world: Vec3 = [barPos[0], barPos[1] + barHeight + 0.04, barPos[2]];
+    return Object.freeze({
+      world,
+      tensorLabel: `Effective |alpha_hat[${ch}]|`,
+      coordLabel: `ch c=${ch} · ${isExtrap ? 'EXTRAPOLATION > 1' : 'INTERPOLATION [0, 1]'}`,
+      badge: isExtrap ? 'DR7 UNCLAMPED EXTRAPOLATION' : DORY_NLERP_MARKER,
+      equation: `|${fmtSigned(raw, 4)} * (0.05 / 0.0177)| (unclamped >= 0)`,
+      valueText: `= ${val.toFixed(4)}`,
+    });
+  }
+
   const rec = sheetsByPartId.get(hovered.partId);
   if (!rec) return null;
 
@@ -1703,7 +1731,7 @@ export function buildDoryHypersphereScene(
       true,
     );
     const barPos = computeSheetCellWorldPos(sheetEffAlpha.grid, ch, 0, 0.5);
-    const barHeight = Math.min(1.1, Math.max(0.24, effVal * 0.42));
+    const barHeight = computeExtrapBarHeight(effVal);
     const barCenterY = barPos[1] + barHeight * 0.5 + 0.04;
     solids.push({
       cx: barPos[0],

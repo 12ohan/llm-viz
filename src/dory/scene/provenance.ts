@@ -435,6 +435,23 @@ export function resolveDorySessionContext(
   };
 }
 
+/**
+ * Normalizes either a `DorySession` or an already-resolved `DoryResolvedSessionContext`
+ * into a context aligned with optional `recordId` (re-resolving cleanly if `recordId` differs).
+ */
+export function ensureDorySessionContext(
+  sessionOrCtx: DorySession | DoryResolvedSessionContext,
+  recordId?: string,
+): DoryResolvedSessionContext {
+  if ('resolveForwardTrace' in sessionOrCtx) {
+    if (recordId !== undefined && recordId !== sessionOrCtx.record.recordId) {
+      return resolveDorySessionContext(sessionOrCtx.session, recordId);
+    }
+    return sessionOrCtx;
+  }
+  return resolveDorySessionContext(sessionOrCtx, recordId);
+}
+
 // ============================================================================
 // DR21 PICK ADAPTER (ZERO EDITS TO `src/render/pick.ts`)
 // ============================================================================
@@ -1975,6 +1992,19 @@ export function validateSceneGeometryFinite(
   for (let i = 0; i < scene.pickBoxes.length; i += 1) {
     const pb = scene.pickBoxes[i]!;
     checkFiniteAabb({ min: pb.min, max: pb.max }, `${scene.viewMode}.pickBoxes[${i}]`, errors);
+    if (pb.frame !== undefined) {
+      checkFiniteVec3(pb.frame.center, `${scene.viewMode}.pickBoxes[${i}].frame.center`, errors);
+      checkFiniteVec3(pb.frame.extent, `${scene.viewMode}.pickBoxes[${i}].frame.extent`, errors);
+      checkFiniteVec3(pb.frame.axisU, `${scene.viewMode}.pickBoxes[${i}].frame.axisU`, errors);
+      checkFiniteVec3(pb.frame.axisN, `${scene.viewMode}.pickBoxes[${i}].frame.axisN`, errors);
+      checkFiniteVec3(pb.frame.axisV, `${scene.viewMode}.pickBoxes[${i}].frame.axisV`, errors);
+    }
+  }
+  for (let i = 0; i < scene.callouts.length; i += 1) {
+    const co = scene.callouts[i]!;
+    if (co.worldPos !== undefined) {
+      checkFiniteVec3(co.worldPos, `${scene.viewMode}.callouts[${i}].worldPos`, errors);
+    }
   }
   for (let i = 0; i < scene.overlayAnchors.length; i += 1) {
     checkFiniteVec3(scene.overlayAnchors[i]!.worldPos, `${scene.viewMode}.overlayAnchors[${i}]`, errors);
@@ -1989,6 +2019,72 @@ export function validateSceneGeometryFinite(
   }
   for (let i = 0; i < scene.kvDepthTicks.length; i += 1) {
     checkFiniteVec3(scene.kvDepthTicks[i]!.world, `${scene.viewMode}.kvDepthTicks[${i}]`, errors);
+  }
+  for (let i = 0; i < scene.activeCellGrids.length; i += 1) {
+    const grid = scene.activeCellGrids[i]!;
+    const gridLabel = `${scene.viewMode}.activeCellGrids[${i}]`;
+    checkFiniteVec3(grid.originWorld, `${gridLabel}.originWorld`, errors);
+    checkFiniteVec3(grid.extent, `${gridLabel}.extent`, errors);
+    checkFiniteVec3(grid.axisU, `${gridLabel}.axisU`, errors);
+    checkFiniteVec3(grid.axisN, `${gridLabel}.axisN`, errors);
+    if (!Number.isInteger(grid.cols) || grid.cols <= 0) {
+      errors.push(`Invalid cols (${String(grid.cols)}) in ${gridLabel}`);
+    }
+    if (!Number.isInteger(grid.rows) || grid.rows <= 0) {
+      errors.push(`Invalid rows (${String(grid.rows)}) in ${gridLabel}`);
+    }
+    if (grid.activeCol !== undefined && !Number.isFinite(grid.activeCol)) {
+      errors.push(`Non-finite activeCol in ${gridLabel}`);
+    }
+    if (grid.activeRow !== undefined && !Number.isFinite(grid.activeRow)) {
+      errors.push(`Non-finite activeRow in ${gridLabel}`);
+    }
+    if (grid.revealMode !== undefined && !Number.isFinite(grid.revealMode)) {
+      errors.push(`Non-finite revealMode in ${gridLabel}`);
+    }
+    if (grid.revealColFrontier !== undefined && !Number.isFinite(grid.revealColFrontier)) {
+      errors.push(`Non-finite revealColFrontier in ${gridLabel}`);
+    }
+    if (grid.revealRowFrontier !== undefined && !Number.isFinite(grid.revealRowFrontier)) {
+      errors.push(`Non-finite revealRowFrontier in ${gridLabel}`);
+    }
+    if (
+      grid.activeValueOverride !== undefined &&
+      grid.activeValueOverride !== null &&
+      !Number.isFinite(grid.activeValueOverride)
+    ) {
+      errors.push(`Non-finite activeValueOverride in ${gridLabel}`);
+    }
+    for (let j = 0; j < grid.values.length; j += 1) {
+      const v = grid.values[j]!;
+      if (!Number.isFinite(v)) {
+        const isExplicitMaskedNegInf =
+          v === -Infinity &&
+          grid.masked !== undefined &&
+          j < grid.masked.length &&
+          grid.masked[j]! > 0.5;
+        if (!isExplicitMaskedNegInf) {
+          errors.push(`Non-finite value ${String(v)} in ${gridLabel}.values[${j}]`);
+          break;
+        }
+      }
+    }
+  }
+  if (scene.activeCellPopover !== null) {
+    checkFiniteVec3(
+      scene.activeCellPopover.world,
+      `${scene.viewMode}.activeCellPopover.world`,
+      errors,
+    );
+    if (scene.activeCellPopover.sourceWorlds !== undefined) {
+      for (let i = 0; i < scene.activeCellPopover.sourceWorlds.length; i += 1) {
+        checkFiniteVec3(
+          scene.activeCellPopover.sourceWorlds[i]!.world,
+          `${scene.viewMode}.activeCellPopover.sourceWorlds[${i}].world`,
+          errors,
+        );
+      }
+    }
   }
 
   return Object.freeze({

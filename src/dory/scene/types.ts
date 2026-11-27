@@ -59,6 +59,7 @@ import type {
   DoryProductionKvPoint,
   DoryReconstructedStepResult,
   DoryRopeRegime,
+  DorySamplingConfig,
   DoryScalingRatioEntry,
   DorySession,
   DorySessionBranchSnapshot,
@@ -574,11 +575,39 @@ export interface DoryGqaRopeViewMetadata {
   readonly selectedQHead: number;
   readonly selectedKvHead: number;
   readonly selectedQueryRow: number;
+  readonly selectedKeyCol: number;
+  readonly selectedQueryAbsPos: number;
+  readonly selectedKeyAbsPos: number;
+  readonly selectedRotaryPlane: number;
   readonly seqLen: number;
   readonly startPos: number;
   readonly pastLen: number;
   readonly kvLen: number;
+  readonly bankSlotId: number;
+  readonly bankKind: DoryKvBankKind;
+  /** False on non-final `last_loop` passes (`t < k`, `DoryPastReader` read-only semantics). */
+  readonly writeKv: boolean;
+  readonly visibleCellCount: number;
+  readonly maskedCellCount: number;
   readonly qExpansionDisclosure: string;
+  /** Miniature `q_dim / d` (`64 / 8 = 8.0`) vs. production `4096 / 2560 = 1.6`. */
+  readonly qExpansionRatioMini: number;
+  readonly qExpansionRatioProd: number;
+  /** Miniature `kv_dim / d` (`16 / 8 = 2.0`) vs. production `1024 / 2560 = 0.4`. */
+  readonly kvDimRatioMini: number;
+  readonly kvDimRatioProd: number;
+  /** `[min, max]` of effective Q-only squared scale `sqk^2 = (raw * sqrt(d_h) / sigma_0)^2`. */
+  readonly sqkScaleRange: readonly [number, number];
+  /** `[min, max]` of effective output-gate squared scale `s_gate^2 = (raw * sqrt(g_0) / sigma_0)^2`. */
+  readonly sGateScaleRange: readonly [number, number];
+  /** Axis width of `attn_sub_norm`: full concatenated `h_q * d_h = 64` (NOT per-head `d_h = 8`). */
+  readonly attnSubNormAxisDim: number;
+  /** Verified L2 norm (`~1.0`) of `attn_sub_norm` on `selectedQueryRow` across all `q_dim` channels. */
+  readonly attnSubNormL2Norm: number;
+  /** Canonical `DR6` order: NeoX dual-RoPE applied BEFORE per-head Q/K L2Norm. */
+  readonly ropeBeforeQkNorm: true;
+  /** Count of channels with unclamped `|alpha_hat_c| > 1` on this attention layer's NLERP (`DR7`). */
+  readonly extrapolatedAlphaCount: number;
   readonly ropePhasors: readonly DoryRopePhasorPlane[];
   readonly kvAbsPositions: readonly number[];
   readonly kvWriterLoops: readonly number[];
@@ -591,15 +620,34 @@ export interface DorySwigluViewMetadata {
   readonly pairedLayerIdx: number;
   readonly stage: DoryLayerStage;
   readonly loopIteration: number;
+  readonly seqLen: number;
+  readonly startPos: number;
   readonly selectedTokenRow: number;
+  readonly selectedAbsTokenPos: number;
+  readonly selectedTokenId: number;
+  readonly selectedTokenText: string;
   readonly selectedChannel: number;
+  readonly selectedOutputDim: number;
   readonly accumReveal: number;
+  /** Number of intermediate channels (`0..d_ff`) revealed in progressive `down_proj` accumulation. */
+  readonly revealedIntermediateCount: number;
   readonly mlpExpansionDisclosure: string;
+  /** Miniature `d_ff / d` (`24 / 8 = 3.0`) vs. production `7168 / 2560 = 2.8`. */
+  readonly mlpExpansionRatioMini: number;
+  readonly mlpExpansionRatioProd: number;
+  /** Family 4 runtime multiplier `sqrt(d)` (NO `sigma_0` divisor, NO `.abs()`). */
+  readonly suvMultiplierMini: number;
+  readonly suvMultiplierProd: number;
+  /** Axis width of `ffn_sub_norm` (`d_ff = 24`) applied strictly BEFORE `down_proj`. */
+  readonly ffnSubNormAxisDim: number;
+  /** Verified L2 norm (`~1.0`) of `ffn_sub_norm` on `selectedTokenRow` across all `d_ff` channels. */
+  readonly ffnSubNormL2Norm: number;
   readonly hasSignedNegativeSuv: boolean;
   readonly negativeSuvGateCount: number;
   readonly negativeSuvUpCount: number;
   readonly extrapolatedAlphaCount: number;
   readonly maxEffectiveAlpha: number;
+  readonly antiSlerpMarker: typeof DORY_NLERP_MARKER;
 }
 
 /** View 5 (`kv_compare`) Dual-Axis KV & `last_loop` prefill-partition divergence descriptor. */
@@ -609,6 +657,7 @@ export interface DoryKvPositionDivergencePoint {
   readonly absPos: number;
   readonly tokenId: number;
   readonly tokenText: string;
+  readonly chunkIndex: number;
   readonly maxAbsLogitDiff: number;
   readonly beyondSwaWindow: boolean;
 }
@@ -618,18 +667,56 @@ export interface DoryKvCompareViewMetadata {
   readonly promptLen: number;
   readonly partitionMode: DoryKvComparePartitionMode;
   readonly chunkPartition: readonly number[];
+  readonly selectedPhysicalLayerIdx: number;
+  readonly selectedPairedLayerIdx: number;
+  readonly selectedAttentionKind: DoryAttentionKind;
+  readonly selectedLoopIteration: number;
   readonly perLoopBankCount: number;
+  readonly perLoopSwaBanks: number;
+  readonly perLoopFullBanks: number;
   readonly lastLoopBankCount: number;
+  readonly lastLoopSwaBanks: number;
+  readonly lastLoopFullBanks: number;
+  readonly perLoopMiniBytes: number;
+  readonly lastLoopMiniBytes: number;
+  readonly swaWindowMini: number;
+  readonly swaRingCapacityMini: number;
+  readonly swaWindowProd: number;
+  /** Exact `4x` marginal bytes/token slope drop once `S > W_prod = 1,024` (`Audit §7.2`). */
+  readonly swaKneeSlopeDropFactor: 4;
   /** Exact `S`-invariant ratio `(4 + 5k) / 9` (`Audit §7.2`). */
   readonly sInvariantRatio: number;
+  /** True iff `kLoops === 1` (`Theorem 2`: universal `last_loop === per_loop` equivalence). */
+  readonly theorem2K1Equivalence: boolean;
   readonly theorem1SingleShotMaxAbsDiff: number;
   readonly theorem3ChunkedVsPerLoopMaxAbsDiff: number;
   readonly theorem3ChunkedVsOneByOneMaxAbsDiff: number;
+  /** Max abs logit diff vs. `per_loop` for the currently active `partitionMode`. */
+  readonly activePartitionVsPerLoopMaxAbsDiff: number;
+  /** Confirms `per_loop` and `last_loop` ran in isolated sessions with zero caller mutation (`D6`/`DR18`). */
+  readonly isolatedDualSessionVerified: true;
+  readonly hasLiveCausalMaskGChannel: true;
   readonly perPositionDivergence: readonly DoryKvPositionDivergencePoint[];
+  /** Production `1 -> 256K` BF16 `per_loop` scaling curve at `kLoops`. */
   readonly productionScalingCurve: readonly DoryProductionKvPoint[];
+  /** Production `1 -> 256K` BF16 `last_loop` scaling curve (`36` banks, `k`-invariant). */
+  readonly productionLastLoopCurve: readonly DoryProductionKvPoint[];
 }
 
-/** View 6 (`self_spec`) Contract A §6.2 self-speculation position & residual descriptors. */
+/** View 6 (`self_spec`) Contract A §6.2 self-speculation position, SWA ring & residual descriptors. */
+export type DorySpecSwaRingSlotStatus =
+  | 'empty'
+  | 'committed_past'
+  | 'committed_new'
+  | 'rolled_back'
+  | 'evicted_from_window';
+
+export interface DorySpecSwaRingSlotState {
+  readonly slotIndex: number;
+  readonly absPos: number | null;
+  readonly status: DorySpecSwaRingSlotStatus;
+}
+
 export interface DorySpecPositionBarDescriptor {
   readonly verifyOffset: number;
   readonly absPos: number;
@@ -637,9 +724,11 @@ export interface DorySpecPositionBarDescriptor {
   readonly inputTokenText: string;
   readonly proposedTokenId: number | null;
   readonly proposedTokenText: string | null;
+  readonly isBonusSlot: boolean;
   readonly reusedPreludeAndLoop1: boolean;
   readonly proposalProb: number | null;
   readonly targetProb: number | null;
+  readonly uniformVariate: number | null;
   readonly accepted: boolean | null;
   readonly rejectionReason: string | null;
   readonly rolledBack: boolean;
@@ -656,11 +745,29 @@ export interface DorySpecResidualTopToken {
 export interface DorySelfSpecViewMetadata {
   readonly contractBadge: typeof DORY_SPEC_CONTRACT_A_BADGE;
   readonly totalBankCount: typeof DORY_SPEC_CONTRACT_A_BANK_COUNT;
+  /** Exact Contract A 104-bank partition: `8 + 20 + 60 + 8 + 8 = 104` (`D3`, `DR23`). */
+  readonly inputBankCount: 8;
+  readonly loop1SharedBankCount: 20;
+  readonly loops2To4VerifierBankCount: 60;
+  readonly outputDeepBankCount: 8;
+  readonly outputShallowBankCount: 8;
+  /** Extra persistent KV payload bytes for Contract A's `8` `output_shallow` Coda banks (`20,480 B` = `+20 KiB`). */
+  readonly shallowCodaExtraBytes: number;
+  /** Total persistent KV payload bytes across all `104` banks (`266,240 B` = `260 KiB`). */
+  readonly totalKvPayloadBytes: number;
   /** True when View 6 synthesized an isolated read-only preview cycle from a standard session. */
   readonly isSynthesizedPreview: boolean;
+  readonly selectedVerifyOffset: number;
+  readonly selectedAttentionLayerIdx: number;
+  /** True iff 1-token Shallow Coda catch-up ran on `s_1^{(L+gamma')}` (`false` on rejection `a < gamma'`). */
+  readonly shallowCodaCatchupExecuted: boolean;
+  /** Division-free binary64 acceptance rule (`Audit §8.2`, Finding 3 — zero `1e-38` clamp). */
+  readonly divisionFreeBinary64Rule: 'p[d] >= q[d] || r * q[d] < p[d]';
+  readonly hasLiveCausalMaskGChannel: true;
   readonly cycleSummary: DorySpecCycleSummary;
   readonly positionBars: readonly DorySpecPositionBarDescriptor[];
   readonly residualTopTokens: readonly DorySpecResidualTopToken[];
+  readonly swaRingSlots: readonly DorySpecSwaRingSlotState[];
   readonly swaRingCapacity: number;
   readonly slidingWindow: number;
   readonly rolledBackPositions: number;
@@ -827,6 +934,10 @@ export interface DoryGqaRopeSceneOptions {
   readonly selectedQHead?: number;
   /** Focused query row offset inside the reconstructed chunk trace. */
   readonly selectedQueryRow?: number;
+  /** Focused key column index `0..kvLen-1` for dual-RoPE delta phasor & score inspection. */
+  readonly selectedKeyCol?: number;
+  /** Focused NeoX rotary plane `0..3` highlighted on the 4-plane dual-RoPE inset. */
+  readonly selectedRotaryPlane?: number;
   readonly hoveredCell?: DoryPickIdentity | null;
   readonly recordId?: string;
 }
@@ -837,7 +948,10 @@ export interface DorySwigluSceneOptions {
   /** Recurrent loop iteration `1..k` (or `0` for Prelude/Coda). */
   readonly loopIteration?: number;
   readonly selectedTokenRow?: number;
+  /** Focused intermediate channel `0..23`. */
   readonly selectedChannel?: number;
+  /** Focused `down_proj` output channel `0..7` for progressive accumulation reveal. */
+  readonly selectedOutputDim?: number;
   /** Progressive accumulation reveal in `[0, 1]` (default `1.0` = fully revealed). */
   readonly accumReveal?: number;
   readonly hoveredCell?: DoryPickIdentity | null;
@@ -849,8 +963,14 @@ export interface DoryKvCompareSceneOptions {
   readonly partitionMode?: DoryKvComparePartitionMode;
   /** Optional explicit prompt partition for `'chunked'` comparison (defaults to `[4, remaining]`). */
   readonly chunkPartition?: readonly number[];
-  /** Focused physical attention layer `even 0..70` for KV bank inspection (default `16`). */
+  /** Focused physical attention layer `even 0..70` for KV bank & causal plate inspection (default `16`). */
   readonly physicalLayerIdx?: number;
+  /** Focused recurrent loop pass `1..k` for `per_loop` vs. `last_loop` plate inspection (default `1`). */
+  readonly loopIteration?: number;
+  /** Optional loop-budget override for isolated dual-session comparison (defaults to active session `kLoops`). */
+  readonly kLoopsOverride?: number;
+  /** Optional explicit token sequence for isolated dual-session comparison (defaults to session committed tokens). */
+  readonly comparisonTokens?: readonly number[];
   readonly hoveredCell?: DoryPickIdentity | null;
   readonly recordId?: string;
 }
@@ -858,6 +978,10 @@ export interface DoryKvCompareSceneOptions {
 export interface DorySelfSpecSceneOptions {
   /** Focused verify position offset `0..verifiedPositions-1`. */
   readonly selectedVerifyOffset?: number;
+  /** Focused even physical attention layer `0..70` for live `DR20` verify attention plate (default `16`). */
+  readonly selectedAttentionLayerIdx?: number;
+  /** Optional sampling override when synthesizing an isolated preview cycle from a standard session. */
+  readonly previewSampling?: Partial<DorySamplingConfig>;
   readonly hoveredCell?: DoryPickIdentity | null;
   readonly recordId?: string;
 }
@@ -871,6 +995,31 @@ export interface DoryBookendsSceneOptions {
   readonly recordId?: string;
 }
 
+// ============================================================================
+// FROZEN SCENE BUILDER SIGNATURES (DORY3 / DORY4 / DORY5 DISJOINT SLICES)
+// ============================================================================
+// Canonical module exports:
+//   - View 1 (`src/dory/scene/macroScene.ts`):       `buildDoryMacroScene`
+//   - View 2 (`src/dory/scene/hypersphereScene.ts`): `buildDoryHypersphereScene`
+//   - View 3 (`src/dory/scene/gqaRopeScene.ts`):     `buildDoryGqaRopeScene`
+//   - View 4 (`src/dory/scene/swigluScene.ts`):      `buildDorySwigluScene`
+//   - View 5 (`src/dory/scene/kvCompareScene.ts`):   `buildDoryKvCompareScene`
+//   - View 6 (`src/dory/scene/selfSpecScene.ts`):    `buildDorySelfSpecScene`
+//   - View 7 (`src/dory/scene/bookendsScene.ts`):    `buildDoryBookendsScene`
+
+export type DorySceneBuilder<TOptions> = (
+  sessionOrCtx: DorySession | DoryResolvedSessionContext,
+  options?: TOptions,
+) => DorySpatialScene;
+
+export type DoryMacroSceneBuilder = DorySceneBuilder<DoryMacroSceneOptions>;
+export type DoryHypersphereSceneBuilder = DorySceneBuilder<DoryHypersphereSceneOptions>;
+export type DoryGqaRopeSceneBuilder = DorySceneBuilder<DoryGqaRopeSceneOptions>;
+export type DorySwigluSceneBuilder = DorySceneBuilder<DorySwigluSceneOptions>;
+export type DoryKvCompareSceneBuilder = DorySceneBuilder<DoryKvCompareSceneOptions>;
+export type DorySelfSpecSceneBuilder = DorySceneBuilder<DorySelfSpecSceneOptions>;
+export type DoryBookendsSceneBuilder = DorySceneBuilder<DoryBookendsSceneOptions>;
+
 /** Unified focus state passed to `buildDorySpatialScene` across all 7 Dory spatial views. */
 export interface DorySpatialFocusState {
   readonly macroDisplayMode: DoryMacroDisplayMode;
@@ -882,10 +1031,14 @@ export interface DorySpatialFocusState {
   readonly gqaLayerIdx: number;
   readonly selectedQHead: number;
   readonly selectedQueryRow: number | null;
+  readonly selectedKeyCol: number | null;
+  readonly selectedRotaryPlane: number;
   readonly swigluLayerIdx: number;
   readonly swigluChannel: number;
+  readonly swigluOutputDim: number;
   readonly swigluAccumReveal: number;
   readonly kvComparePartitionMode: DoryKvComparePartitionMode;
+  readonly kvCompareLayerIdx: number;
   readonly selectedVerifyOffset: number;
   readonly selectedCheckpointFormat: 'bf16' | 'mxfp8' | 'nvfp4' | 'q5_k_m';
   readonly recordId?: string;
@@ -903,10 +1056,14 @@ export const DEFAULT_DORY_SPATIAL_FOCUS_STATE: DorySpatialFocusState = Object.fr
   gqaLayerIdx: 16,
   selectedQHead: 0,
   selectedQueryRow: null,
+  selectedKeyCol: null,
+  selectedRotaryPlane: 0,
   swigluLayerIdx: 17,
   swigluChannel: 0,
+  swigluOutputDim: 0,
   swigluAccumReveal: 1.0,
   kvComparePartitionMode: 'chunked',
+  kvCompareLayerIdx: 16,
   selectedVerifyOffset: 0,
   selectedCheckpointFormat: 'bf16',
   hoveredPartId: null,

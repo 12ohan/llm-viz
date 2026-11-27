@@ -76,7 +76,11 @@ import {
   SHEET_ROLE_ACTIVATION,
   SHEET_ROLE_RESIDUAL,
 } from '../../render/sheets';
-import type { ActiveSheetCellGrid, CellPopoverSpec } from '../../shared/overlayLayout';
+import {
+  computeSheetCellWorldPos,
+  type ActiveSheetCellGrid,
+  type CellPopoverSpec,
+} from '../../shared/overlayLayout';
 import {
   DORY_PHYSICAL_LAYERS,
   computeEffectivePairedDepth,
@@ -114,6 +118,7 @@ import {
   packPickBoxFromAabb,
   packPickBoxFromFrame,
   resolveDorySessionContext,
+  validateSceneGeometryFinite,
 } from './provenance';
 import {
   DORY_SPATIAL_VIEW_MODES,
@@ -2336,14 +2341,27 @@ export function buildDoryMacroScene(
       const row = Math.max(0, Math.min(matched.rows - 1, hoveredCell.row));
       const val = matched.values[row * matched.cols + col] ?? 0;
       const rowTag = matched.rowLabels[row] ?? `r${row}`;
-      activeCellPopover = {
-        world: matched.frame.center,
+      const cellWorld = computeSheetCellWorldPos(
+        {
+          originWorld: matched.frame.center,
+          extent: matched.frame.extent,
+          axisU: matched.frame.axisU,
+          axisN: matched.frame.axisN,
+          cols: matched.cols,
+          rows: matched.rows,
+        },
+        col,
+        row,
+        0.5,
+      );
+      activeCellPopover = Object.freeze({
+        world: cellWorld,
         tensorLabel: matched.label,
         coordLabel: `${rowTag} · ch ${col} (pos ${lastCommittedPos})`,
         badge: `ID ${shortWeightId}`,
         equation: matched.formula,
         valueText: `= ${formatFloatSigned(val)}`,
-      };
+      });
     }
   }
 
@@ -2384,7 +2402,7 @@ export function buildDoryMacroScene(
     `Weight ID ${shortWeightId} · ` +
     `${kvRail.totalBanks} KV banks (${kvCacheMode}${includeShallowCoda ? ' + 8 Shallow Coda Contract A' : ''})`;
 
-  return Object.freeze({
+  const scene: DorySpatialScene = Object.freeze({
     viewMode: 'macro',
     title,
     subtitle,
@@ -2429,4 +2447,12 @@ export function buildDoryMacroScene(
     activeCellPopover,
     macroMetadata,
   });
+
+  // Self-audit geometry finiteness, atlas budget/non-overlap, and DR20 compliance before returning
+  const validation = validateSceneGeometryFinite(scene);
+  if (!validation.valid) {
+    throw new Error(`View 1 macroScene validation failed: ${validation.errors.join('; ')}`);
+  }
+
+  return scene;
 }
